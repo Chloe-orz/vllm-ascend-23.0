@@ -315,7 +315,26 @@ class NPUWorker(WorkerBase):
 
             self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
-            self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+            # 边云协同推理：根据 additional_config.edge_cloud_config.role
+            # 选择对应的 ModelRunner（EdgeModelRunner 或 CloudModelRunner）
+            ascend_config = get_ascend_config()
+            if getattr(ascend_config, "edge_cloud_config", None) is not None and ascend_config.edge_cloud_config.enabled:
+                role = ascend_config.edge_cloud_config.role
+                if role == "edge":
+                    # Edge 节点：加载首尾层 + 分段 Graph 执行
+                    from vllm_ascend.worker.edge_cloud_model_runner import EdgeModelRunner
+                    self.model_runner = EdgeModelRunner(self.vllm_config, self.device)
+                    logger.info("[EdgeCloud] Using EdgeModelRunner")
+                elif role == "cloud":
+                    # Cloud 节点：加载中间层 + 分段 Graph 执行
+                    from vllm_ascend.worker.edge_cloud_model_runner import CloudModelRunner
+                    self.model_runner = CloudModelRunner(self.vllm_config, self.device)
+                    logger.info("[EdgeCloud] Using CloudModelRunner")
+                else:
+                    raise ValueError(f"Unknown edge_cloud role: {role}")
+            else:
+                # 非边云场景：使用默认 NPUModelRunner
+                self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

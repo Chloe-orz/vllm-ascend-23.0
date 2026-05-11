@@ -50,6 +50,10 @@ class AscendConfig:
         weight_prefetch_config = additional_config.get("weight_prefetch_config", {})
         self.weight_prefetch_config = WeightPrefetchConfig(weight_prefetch_config)
 
+        # 边云协同配置：控制 Edge/Cloud 角色、层分片策略、通信参数等
+        edge_cloud_config = additional_config.get("edge_cloud_config", {})
+        self.edge_cloud_config = EdgeCloudConfig(edge_cloud_config)
+
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
         if self.profiling_chunk_config.enabled and vllm_config.parallel_config.pipeline_parallel_size <= 1:
@@ -468,6 +472,71 @@ class ProfilingChunkConfig:
             raise ValueError(f"profiling_chunk_config.smooth_factor must be in (0, 1], got {self.smooth_factor}")
         if self.min_chunk <= 0:
             raise ValueError(f"profiling_chunk_config.min_chunk must be positive, got {self.min_chunk}")
+
+
+class EdgeCloudConfig:
+    """
+    边云协同配置对象，从 additional_config 的 edge_cloud_config 字段解析。
+
+    关键参数：
+    - enabled: 是否启用边云协同
+    - role: "edge" 或 "cloud"
+    - edge_head_tail_layers (K): Edge 侧保留的首尾层数
+    - transfer_config: HCCL/TCP 通信配置（对端地址、端口等）
+    """
+
+    # 默认值：未启用边云协同时所有参数无效
+
+    _defaults = {
+        "enabled": False,
+        "role": "edge",  # "edge" or "cloud"
+        "total_layers": 0,
+        "edge_head_tail_layers": 1,  # K: layers kept at head and tail on Edge
+        "enable_decode_graph": True,
+        "decode_graph_min_tokens": 1,
+        "hidden_dtype": "bfloat16",
+        "batch_p_num": 1,
+        "transfer_config": {
+            "backend": "hccl",
+            "peer_addrs": [],
+            "server_ip": "0.0.0.0",
+            "server_port": 9010,
+            "peer_rank": 1,
+        },
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        self.config = self._defaults.copy()
+        if user_config and isinstance(user_config, dict):
+            for key, value in user_config.items():
+                if key in self.config:
+                    self.config[key] = value
+                else:
+                    raise ValueError(f"EdgeCloudConfig has no attribute '{key}'")
+
+        self._validate_config()
+
+    def __getattr__(self, key):
+        if key in self.config:
+            return self.config[key]
+        raise AttributeError(f"EdgeCloudConfig has no attribute '{key}'")
+
+    def _validate_config(self):
+        if self.enabled:
+            if self.role not in ("edge", "cloud"):
+                raise ValueError(f"edge_cloud_config.role must be 'edge' or 'cloud', got {self.role}")
+            if self.total_layers <= 0:
+                raise ValueError(f"edge_cloud_config.total_layers must be positive, got {self.total_layers}")
+            if self.edge_head_tail_layers < 1:
+                raise ValueError(f"edge_cloud_config.edge_head_tail_layers must be >= 1, got {self.edge_head_tail_layers}")
+            if 2 * self.edge_head_tail_layers >= self.total_layers:
+                raise ValueError(
+                    f"edge_cloud_config.edge_head_tail_layers ({self.edge_head_tail_layers}) "
+                    f"must be < total_layers/2 ({self.total_layers / 2})"
+                )
+        logger.info(f"EdgeCloudConfig enabled={self.enabled}, role={self.role}, k={self.edge_head_tail_layers}")
 
 
 class EplbConfig:
