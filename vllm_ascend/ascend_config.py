@@ -170,6 +170,17 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
+        edge_cloud_config = additional_config.get("edge_cloud_config", {})
+        self.edge_cloud_config = EdgeCloudConfig(edge_cloud_config)
+
+        self.mix_placement = additional_config.get("mix_placement", False)
+        self._check_mix_placement()
+
+    def _check_mix_placement(self):
+        if self.mix_placement:
+            if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
+                raise ValueError("Mix placement is not supported with shared expert DP or multistream overlap.")
+
     @staticmethod
     def _get_compile_ranges(compilation_config):
         return compilation_config.compile_ranges_endpoints or []
@@ -441,6 +452,64 @@ class EplbConfig:
 
         logger.info(f"Dynamic EPLB is {self.config['dynamic_eplb']}")
         logger.info(f"The number of redundant experts is {self.config['num_redundant_experts']}")
+
+
+class EdgeCloudConfig:
+    """
+    Configuration Object for edge_cloud_config from additional_config.
+
+    Controls the edge-cloud collaborative inference scenario.
+    注意：total_layers 不再由用户配置，而是在 _load_model_edge_cloud 中
+    根据实际模型自动检测（方案 A），避免配置与真实模型层数不一致导致静默错误。
+    """
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        self.enabled: bool = user_config.get("enabled", False)
+        self.role: str = user_config.get("role", "edge")
+        # total_layers 已从配置中移除，改为运行时自动检测
+        self.edge_head_tail_layers = user_config.get("edge_head_tail_layers", 1)
+        self.enable_decode_graph: bool = user_config.get("enable_decode_graph", False)
+        self.decode_graph_min_tokens: int = user_config.get("decode_graph_min_tokens", 1)
+        self.transfer_config: dict = user_config.get("transfer_config", {})
+        self.hidden_dtype: str = user_config.get("hidden_dtype", "bf16")
+
+        if self.enabled:
+            self._validate()
+
+    def _validate(self):
+        """校验配置有效性。total_layers 的校验已下放到 _load_model_edge_cloud
+        中使用真实模型层数进行，避免用户填写错误值。"""
+        if self.role not in ("edge", "cloud"):
+            raise ValueError(f"edge_cloud_config.role must be 'edge' or 'cloud', got {self.role}")
+
+        head_k, tail_k = self.head_tail_k
+        if head_k < 0 or tail_k < 0:
+            raise ValueError(
+                f"edge_cloud_config.edge_head_tail_layers must be non-negative, "
+                f"got head_k={head_k}, tail_k={tail_k}"
+            )
+        # total_layers 的层数覆盖校验延迟到 _load_model_edge_cloud 中进行
+
+    @property
+    def head_tail_k(self) -> tuple[int, int]:
+        """Parse edge_head_tail_layers into (head_k, tail_k).
+
+        Supports symmetric (int) and asymmetric (list/tuple of 2) formats.
+        """
+        cfg = self.edge_head_tail_layers
+        if isinstance(cfg, (list, tuple)) and len(cfg) == 2:
+            return int(cfg[0]), int(cfg[1])
+        k = int(cfg)
+        return k, k
+
+    def __repr__(self) -> str:
+        return (
+            f"EdgeCloudConfig(enabled={self.enabled}, role={self.role}, "
+            f"edge_head_tail_layers={self.edge_head_tail_layers}, "
+            f"enable_decode_graph={self.enable_decode_graph})"
+        )
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
