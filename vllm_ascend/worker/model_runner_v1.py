@@ -42,6 +42,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import set_default_torch_dtype
 from vllm.utils.import_utils import LazyLoader
@@ -699,7 +700,6 @@ class NPUModelRunner(GPUModelRunner):
             import vllm_ascend.patch.models.llama_edge_cloud  # noqa: F401
 
         # 打印每层最终状态（加载 / 跳过），便于诊断层裁剪是否正确。
-        from vllm.model_executor.models.utils import PPMissingLayer
         layer_states = []
         for idx, layer in enumerate(self.model.model.layers):
             layer_states.append(
