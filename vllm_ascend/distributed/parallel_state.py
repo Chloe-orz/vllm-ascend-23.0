@@ -1,6 +1,7 @@
 import torch
+from typing import Any, Callable
 from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group, get_world_group, init_model_parallel_group
+from vllm.distributed.parallel_state import GroupCoordinator, get_pp_group, get_tp_group, get_world_group, init_model_parallel_group, _split_tensor_dict, TensorMetadata, Handle
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
@@ -35,7 +36,7 @@ def init_ascend_model_parallel(
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-    global_tp_size = parallel_config.tensor_parallel_size
+    global_tp_size = 1
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size

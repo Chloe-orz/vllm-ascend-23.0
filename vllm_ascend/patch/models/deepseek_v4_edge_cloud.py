@@ -17,15 +17,25 @@
 """Edge-cloud collaborative inference patch for DeepSeek-V4.
 
 This module monkey-patches ``forward_edge_cloud_segment`` onto
-``DeepseekV4Model`` and ``DeepseekV4ForCausalLM`` so that the edge-cloud
+``DeepseekV4Model`` and ``AscendDeepseekV4ForCausalLM`` so that the edge-cloud
 ModelRunner can execute arbitrary layer ranges without modifying upstream vLLM.
 
+Scheme: "head-3 / tail-1"
+  - Edge side holds the first 3 layers (segment A) and the last 1 layer
+    (segment E).
+  - Cloud side holds the middle layers (segment C).
+  - All Hash MoE layers (layer_idx < config.num_hash_layers) reside on the
+    edge side (segment A), so the cloud side never encounters hash routing.
+
 Key differences from standard Llama-style models:
-  - DecoderLayer signature: ``layer(x, positions, input_ids)``
-  - Residual managed internally via ``hc_pre`` / ``hc_post``
-  - Embedding needs ``unsqueeze(-2).repeat(1, hc_mult, 1)``
-  - Tail segment needs ``hc_head()`` + ``norm()``
-  - Intermediate tensors carry ``input_ids`` for Hash MoE routing
+  - DecoderLayer signature: ``layer(positions, hidden_states, residual,
+    llama_4_scaling)`` returns ``(hidden_states, residual)``.
+  - Residual is managed internally via ``hc_pre`` / ``hc_post`` and must be
+    passed across segments through ``IntermediateTensors``.
+  - Embedding needs ``unsqueeze(-2).repeat(1, hc_mult, 1)``.
+  - Tail segment needs ``hc_head()`` + ``norm()``.
+  - Only ``hidden_states`` and ``residual`` are transmitted across the
+    edge-cloud network; ``input_ids`` is kept locally on the edge side.
 """
 
 from itertools import islice
@@ -34,28 +44,12 @@ from typing import Any
 import torch
 import torch.nn as nn
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.model_executor.models.deepseek_v4 import (
-    DeepseekV4ForCausalLM,
-    DeepseekV4Model,
-    hc_head,
-)
 from vllm.sequence import IntermediateTensors
 
-
-class DeepSeekV4MissingLayer(nn.Module):
-    """Placeholder layer for non-local layers in DeepSeek-V4 edge-cloud inference.
-
-    ``PPMissingLayer.forward(*args)`` returns ``args[0]``, which happens to be
-    safe for V4's ``layer(x, positions, input_ids)`` call (returns ``x``).
-    This class is provided for explicit semantic clarity.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-
-    def forward(self, x: torch.Tensor, positions: torch.Tensor,
-                input_ids: torch.Tensor | None, **kwargs) -> torch.Tensor:
-        return x
+from vllm_ascend.models.deepseek_v4 import (
+    AscendDeepseekV4ForCausalLM,
+    DeepseekV4Model,
+)
 
 
 def _forward_edge_cloud_segment_v4(
@@ -73,10 +67,10 @@ def _forward_edge_cloud_segment_v4(
     Args:
         start_layer: First layer index to execute (inclusive).
         end_layer: Last layer index to execute (exclusive).
-        input_ids: Token IDs for embedding (first segment) or Hash MoE routing.
+        input_ids: Token IDs for embedding (first segment only).
         positions: Position IDs.
-        intermediate_tensors: Carries ``hidden_states`` and optionally
-            ``input_ids`` from the previous segment.
+        intermediate_tensors: Carries ``hidden_states`` and ``residual`` from
+            the previous segment.
         inputs_embeds: Optional pre-computed embeddings.
 
     Returns:
@@ -94,64 +88,70 @@ def _forward_edge_cloud_segment_v4(
 
     # ----- Embedding or restore intermediate state -----
     if is_first_segment:
+        # Ensure int64 before embedding lookup (align with standard pipeline)
+        if input_ids is not None:
+            input_ids = input_ids.to(torch.int64)
+
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
             hidden_states = self.embed_input_ids(input_ids)
-        hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
-
-        if self.use_mega_moe and input_ids is not None:
-            input_ids = input_ids.to(torch.int64)
+        residual = None
     else:
         assert intermediate_tensors is not None, (
             "intermediate_tensors required for non-first segment in V4"
         )
         hidden_states = intermediate_tensors["hidden_states"]
-        # input_ids is optional: non-first segment may not need Hash MoE routing
-        input_ids = intermediate_tensors.get("input_ids")
+        residual = intermediate_tensors["residual"]
 
+    hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
     # ----- Execute layers in [start_layer, end_layer) -----
+    # llama_4_scaling is currently None because scaling config is not enabled.
+    # When enabled, compute it from config (see DeepseekV4Model.forward).
+    llama_4_scaling = None
     for idx, layer in enumerate(islice(self.layers, start_layer, end_layer)):
-        hidden_states = layer(
-            hidden_states,
+        hidden_states, residual = layer(
             positions,
-            input_ids,
+            hidden_states,
+            residual,
+            llama_4_scaling,
         )
 
     # ----- Return intermediate state or final hidden_states -----
     # In the "head-3 / tail-1" edge-cloud scheme, all Hash MoE layers reside
     # on the edge side (segment A).  The cloud side (segment C) and the edge
-    # tail (segment E) do not need ``input_ids``.  Therefore we only pass
-    # ``hidden_states`` across the network to avoid leaking token IDs.
-    if not is_last_segment:
-        return IntermediateTensors({"hidden_states": hidden_states})
+    # tail (segment E) do not need ``input_ids``.  We only pass
+    # ``hidden_states`` and ``residual`` across the network.
 
-    # Last segment: stash pre-hc_head residual for MTP, then hc_head + norm
-    num_tokens = hidden_states.shape[0]
-    self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
-
-    hidden_states = hc_head(
+    # Last segment: hc_head + norm
+    hidden_states = self.hc_head(
         hidden_states,
         self.hc_head_fn,
         self.hc_head_scale,
         self.hc_head_base,
-        self.rms_norm_eps,
-        self.hc_eps,
     )
+
+    if not is_last_segment:
+        return IntermediateTensors({
+            "hidden_states": hidden_states,
+            "residual": residual,
+        })
+
     hidden_states = self.norm(hidden_states)
     return hidden_states
 
 
 def _deepseek_v4_forward_edge_cloud_segment_wrapper(
-    self: DeepseekV4ForCausalLM,
+    self: AscendDeepseekV4ForCausalLM,
     start_layer: int,
     end_layer: int,
     input_ids: torch.Tensor | None,
     positions: torch.Tensor,
     intermediate_tensors: IntermediateTensors | None = None,
     inputs_embeds: torch.Tensor | None = None,
+    **extra_layer_kwargs: Any,
 ) -> torch.Tensor | IntermediateTensors:
-    """LlamaForCausalLM-style wrapper that delegates to DeepseekV4Model."""
+    """Wrapper that delegates to DeepseekV4Model.forward_edge_cloud_segment."""
     return self.model.forward_edge_cloud_segment(
         start_layer,
         end_layer,
@@ -159,11 +159,12 @@ def _deepseek_v4_forward_edge_cloud_segment_wrapper(
         positions,
         intermediate_tensors,
         inputs_embeds,
+        **extra_layer_kwargs,
     )
 
 
 # ── Monkey Patch: runtime binding ──
 DeepseekV4Model.forward_edge_cloud_segment = _forward_edge_cloud_segment_v4
-DeepseekV4ForCausalLM.forward_edge_cloud_segment = (
+AscendDeepseekV4ForCausalLM.forward_edge_cloud_segment = (
     _deepseek_v4_forward_edge_cloud_segment_wrapper
 )

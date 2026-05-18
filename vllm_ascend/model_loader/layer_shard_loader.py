@@ -107,7 +107,12 @@ class LayerShardLoader:
                 buf.data = torch.empty(0, device=buf.device, dtype=buf.dtype)
 
     @classmethod
-    def apply_sharding(cls, model: nn.Module, layer_plan: EdgeCloudLayerPlan) -> None:
+    def apply_sharding(
+        cls,
+        model: nn.Module,
+        layer_plan: EdgeCloudLayerPlan,
+        compilation_config: Any = None,
+    ) -> None:
         """Apply layer sharding to the model (call before load_weights).
 
         Steps:
@@ -116,6 +121,8 @@ class LayerShardLoader:
           2. On Cloud side, additionally replace embed_tokens / norm / lm_head
              with PPMissingLayer so their weights are also skipped.
           3. On Edge side, keep these modules for Embedding and Norm/LM Head computation.
+          4. Clean up stale entries in compilation_config to prevent MoE custom
+             ops from resolving replaced layers via static_forward_context.
         """
         if not hasattr(model, "model") or not hasattr(model.model, "layers"):
             raise ValueError(
@@ -150,6 +157,10 @@ class LayerShardLoader:
             ):
                 model.lm_head = PPMissingLayer()
 
+        # 3. Clean up compilation_config stale references
+        if compilation_config is not None:
+            cls._clean_compilation_config(model, compilation_config)
+
         logger.info(
             "[LayerShardLoader] Role=%s, head_k=%d, tail_k=%d, "
             "kept_layers=%s, skipped_layers=%s, converted=%d",
@@ -160,5 +171,127 @@ class LayerShardLoader:
             sorted(layer_plan.get_released_layers()),
             converted,
         )
+        cls.validate_sharding(model, layer_plan)
+
+    @classmethod
+    def _clean_compilation_config(
+        cls, model: nn.Module, compilation_config: Any
+    ) -> None:
+        """Remove stale MoE layer entries from compilation_config after sharding.
+
+        FusedMoE.__init__ registers itself to ``static_forward_context`` and
+        ``static_all_moe_layers``.  After apply_sharding replaces non-local
+        layers with ``PPMissingLayer``, those cached module instances become
+        stale.  The MoE custom op (when ``_USE_LAYERNAME=False``) resolves
+        layers by indexing ``static_all_moe_layers`` and can accidentally pick
+        up a stale instance, causing ``AttributeError`` on missing post-load
+        attributes such as ``w13_weight_scale_fp32``.
+        """
+        # Build a set of module ids currently present in the model tree.
+        # apply_sharding replaces non-local layers with PPMissingLayer, so
+        # stale instances (old layers) are no longer referenced by the model.
+        # We use id() instead of path matching because some modules register
+        # themselves to static_forward_context with a key that does not match
+        # their path in named_modules() (e.g. DSAAttention).
+        model_module_ids = {id(m) for _, m in model.named_modules()}
+
+        removed_prefixes: list[str] = []
+        for prefix in list(compilation_config.static_forward_context.keys()):
+            module = compilation_config.static_forward_context[prefix]
+            current_type = module.__class__.__name__
+            # Remove only if the instance is no longer in the model tree.
+            should_remove = id(module) not in model_module_ids
+            # Guard: never remove attention modules because some custom
+            # attentions (e.g. DSAAttention) register with a key that does
+            # not match their path in named_modules(), so id() comparison
+            # can accidentally remove local attention layers.  Stale attention
+            # entries do not cause AttributeError (only MoE does), so keeping
+            # them is harmless -- get_kv_cache_spec() will filter local layers
+            # by checking the real model anyway.
+            if should_remove:
+                from vllm.model_executor.layers.attention_layer_base import (
+                    AttentionLayerBase,
+                )
+
+                if isinstance(module, AttentionLayerBase):
+                    should_remove = False
+                else:
+                    try:
+                        from vllm_ascend.ops.dsa import DSAAttention
+
+                        if isinstance(module, DSAAttention):
+                            should_remove = False
+                    except ImportError:
+                        pass
+            logger.info(
+                "[LayerShardLoader][Clean] prefix=%s, current_type=%s, "
+                "in_model=%s, remove=%s",
+                prefix,
+                current_type,
+                not should_remove,
+                should_remove,
+            )
+            if should_remove:
+                del compilation_config.static_forward_context[prefix]
+                removed_prefixes.append(prefix)
+
+        if removed_prefixes:
+            logger.info(
+                "[LayerShardLoader] Removed %d stale entries from "
+                "static_forward_context: %s",
+                len(removed_prefixes),
+                removed_prefixes,
+            )
+        else:
+            logger.info(
+                "[LayerShardLoader] No stale entries removed from static_forward_context."
+            )
+
+        # static_all_moe_layers is a plain list; modify in-place so that
+        # existing references (e.g. in ForwardContext) see the update.
+        original_all_moe = list(compilation_config.static_all_moe_layers)
+        compilation_config.static_all_moe_layers[:] = [
+            p for p in original_all_moe if p not in removed_prefixes
+        ]
+        removed_moe = len(original_all_moe) - len(
+            compilation_config.static_all_moe_layers
+        )
+        if removed_moe:
+            logger.info(
+                "[LayerShardLoader] Removed %d stale entries from "
+                "static_all_moe_layers. Remaining: %d",
+                removed_moe,
+                len(compilation_config.static_all_moe_layers),
+            )
+
+    @classmethod
+    def validate_sharding(cls, model: nn.Module, layer_plan: EdgeCloudLayerPlan) -> None:
+        """验证层裁剪是否正确应用，检测 make_layers() 遗留的 PPMissingLayer 冲突。"""
+        num_layers = len(model.model.layers)
+        local_layers = layer_plan.get_local_layers()
+        conflict = False
+        for i in range(num_layers):
+            is_missing = isinstance(model.model.layers[i], PPMissingLayer)
+            should_be_local = i in local_layers
+            if is_missing and should_be_local:
+                logger.critical(
+                    "[LayerShardLoader] CONFLICT: Layer %d is PPMissingLayer but should be "
+                    "LOCAL on %s side. This usually means make_layers() created placeholders "
+                    "before apply_sharding due to pipeline_parallel_size > 1. "
+                    "Runtime forward WILL FAIL.",
+                    i, layer_plan.role,
+                )
+                conflict = True
+            elif not is_missing and not should_be_local:
+                logger.warning(
+                    "[LayerShardLoader] Layer %d is REAL but should be MISSING on %s side. "
+                    "Weights for this layer will still be loaded.",
+                    i, layer_plan.role,
+                )
+                conflict = True
+        if not conflict:
+            logger.info(
+                "[LayerShardLoader] Sharding validation PASSED for %s side.", layer_plan.role
+            )
 
 

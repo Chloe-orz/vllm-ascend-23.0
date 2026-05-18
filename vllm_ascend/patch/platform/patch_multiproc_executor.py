@@ -37,12 +37,15 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self.failure_callback: FailureCallback | None = None
 
         tensor_parallel_size, pp_parallel_size, pcp_parallel_size = self._get_parallel_sizes()
-        assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
-            f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f"_parallel_size ({pp_parallel_size}) x prefill_context"
-            f"_parallel_size ({pcp_parallel_size}). "
-        )
+        # In edge-cloud collaboration mode, world_size is edge_npu_count + cloud_npu_count,
+        # which does not equal tp_size * pp_size * pcp_size (which are all 1).
+        if not self.parallel_config.enable_edge_cloud:
+            assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
+                f"world_size ({self.world_size}) must be equal to the "
+                f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
+                f"_parallel_size ({pp_parallel_size}) x prefill_context"
+                f"_parallel_size ({pcp_parallel_size}). "
+            )
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()

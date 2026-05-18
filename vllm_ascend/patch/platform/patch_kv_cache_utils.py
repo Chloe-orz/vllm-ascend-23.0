@@ -157,10 +157,16 @@ def create_kv_cache_group_specs_with_multi_groups(
                 skip = True
         if skip:
             continue
-        # TODO(cmq): REFACTOR ME: `layer_specs_list` should be initialized with the length of groups
-        layer_specs_list:list[list[KVCacheSpec]] = [[],[]]
+        # Determine the number of specs per layer dynamically.
+        first_layer_name = layer_names_one_group[0]
+        num_specs = len(kv_cache_spec_list[first_layer_name])
+        layer_specs_list: list[list[KVCacheSpec]] = [[] for _ in range(num_specs)]
         for layer_name in layer_names_one_group:
             layer_spec_list = kv_cache_spec_list[layer_name]
+            assert len(layer_spec_list) == num_specs, (
+                f"Layer {layer_name} has {len(layer_spec_list)} specs, "
+                f"expected {num_specs}"
+            )
             for idx, layer_spec in enumerate(layer_spec_list):
                 layer_specs_list[idx].append(layer_spec)
         for layer_specs in layer_specs_list:
@@ -595,8 +601,12 @@ def _project_kv_cache_groups_to_worker(
         worker_layer_names = [
             layer_name for layer_name in group.layer_names if layer_name in worker_spec_list
         ]
+        if not worker_layer_names:
+            # Skip groups that have no layers on this worker (e.g. edge-cloud
+            # sharding where non-local layers are replaced by PPMissingLayer).
+            continue
         group_spec = group.kv_cache_spec
-        if worker_layer_names and isinstance(group_spec, UniformTypeKVCacheSpecs):
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
             group_spec = UniformTypeKVCacheSpecs(
                 block_size=group_spec.block_size,
                 kv_cache_specs={

@@ -123,9 +123,9 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             else:
                 attention_groups.append((spec, [i], manager_cls))
 
-        assert len(attention_groups) > 1, (
-            "HybridKVCacheCoordinator requires at least two attention groups."
-        )
+        # Edge-cloud sharding may leave only one attention type (e.g., all
+        # kept layers are FullAttentionSpec).  Removing the >1 assertion so
+        # that find_longest_cache_hit degrades gracefully to unitary logic.
 
         # Put full attention first: its efficient left-to-right scan provides
         # a tighter initial bound, reducing work for subsequent groups.
@@ -150,8 +150,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # NOTE: use 16k as the alinment tokens for model with compress ratio
         block_sizes = [
             spec.block_size * getattr(spec, "compress_ratio", 1) for spec, _, _ in self.attention_groups
-            ]
-        self.lcm_block_size = lcm(*block_sizes)
+        ]
+        if block_sizes:
+            self.lcm_block_size = lcm(*block_sizes)
+        else:
+            self.lcm_block_size = self.hash_block_size
 
     def find_longest_cache_hit(
         self,
@@ -273,6 +276,29 @@ def get_kv_cache_coordinator(
     hash_block_size: int,
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
+    if not enable_caching or len(kv_cache_config.kv_cache_groups) == 0:
+        return KVCacheCoordinatorNoPrefixCache(
+            kv_cache_config,
+            max_model_len,
+            use_eagle,
+            enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
+        )
+    if len(kv_cache_config.kv_cache_groups) == 1:
+        return UnitaryKVCacheCoordinator(
+            kv_cache_config,
+            max_model_len,
+            use_eagle,
+            enable_caching,
+            enable_kv_cache_events,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            hash_block_size=hash_block_size,
+            metrics_collector=metrics_collector,
+        )
     return AscendHybridKVCacheCoordinator(
         kv_cache_config,
         max_model_len,
