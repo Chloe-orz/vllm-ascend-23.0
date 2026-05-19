@@ -1662,7 +1662,7 @@ class NPUModelRunner(GPUModelRunner):
             # 边云场景：当 hidden_states 为 IntermediateTensors 时，说明当前段计算已完成，
             # 需要把结果返回给 NPUWorker 进行跨节点通信（isend_tensor_dict）。
             # 此处提前 return，跳过标准 PP 的 logits/sampling 流程。
-            if is_edge_cloud_pp_mode() and isinstance(hidden_states, IntermediateTensors):
+            if is_edge_cloud_pp_mode() and isinstance(hidden_states, IntermediateTensors) and not is_edge_device():
                 hidden_states.kv_connector_output = kv_connector_output
                 self.kv_connector_output = kv_connector_output
                 if self.debugger is not None:
@@ -1746,7 +1746,7 @@ class NPUModelRunner(GPUModelRunner):
             # receive sampled token ids from the last PP rank when using
             # async scheduling + pipeline parallelism so downstream code
             # (e.g., PCP input preparation) can access them.
-            if self.use_async_scheduling and get_pp_group().world_size > 1:
+            if self.use_async_scheduling and get_pp_group().world_size > 1 and not is_edge_cloud_pp_mode():
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
@@ -1892,7 +1892,7 @@ class NPUModelRunner(GPUModelRunner):
         # through the scheduler/engine IPC path.
         if self.use_async_scheduling:
             pp = get_pp_group()
-            if pp.world_size > 1 and pp.is_last_rank:
+            if pp.world_size > 1 and pp.is_last_rank and not is_edge_cloud_pp_mode():
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
         if not self.use_async_scheduling:

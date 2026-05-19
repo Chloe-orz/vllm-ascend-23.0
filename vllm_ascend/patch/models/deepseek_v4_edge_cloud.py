@@ -132,6 +132,12 @@ def _forward_edge_cloud_segment_v4(
     )
 
     if not is_last_segment:
+        residual = self.hc_head(
+            residual,
+            self.hc_head_fn,
+            self.hc_head_scale,
+            self.hc_head_base,
+        )
         return IntermediateTensors({
             "hidden_states": hidden_states,
             "residual": residual,
