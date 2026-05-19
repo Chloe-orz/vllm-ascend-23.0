@@ -56,7 +56,27 @@ def _initialize_kv_caches_with_multi_groups(self, vllm_config: VllmConfig) -> KV
     if max_model_len_after != max_model_len_before:
         self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
 
-    scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+    # Edge-cloud: the scheduler config must be based on the worker with the
+    # most kv_cache_groups so that generated block_ids cover all workers.
+    # Otherwise, if the first worker is edge (few groups) but cloud has more
+    # groups, cloud-side block_table.add_row will IndexError.
+    # NOTE: We must NOT swap elements in kv_cache_configs because workers
+    # pick their config by rank (kv_cache_configs[global_rank]). Swapping
+    # would cause edge workers to initialize with cloud config and vice versa.
+    max_group_idx = max(
+        range(len(kv_cache_configs)),
+        key=lambda i: len(kv_cache_configs[i].kv_cache_groups),
+    )
+    logger.info(
+        "[EdgeCloud] Using worker %d config for scheduler "
+        "(has %d kv_cache_groups, max among all workers)",
+        max_group_idx,
+        len(kv_cache_configs[max_group_idx].kv_cache_groups),
+    )
+
+    scheduler_kv_cache_config = generate_scheduler_kv_cache_config(
+        [kv_cache_configs[max_group_idx]]
+    )
     vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
     kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
     if kv_cache_groups:
