@@ -275,6 +275,8 @@ class AscendConfig:
 
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+        edge_cloud_config = additional_config.get("edge_cloud_config", {})
+        self.edge_cloud_config = EdgeCloudConfig(edge_cloud_config)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
@@ -774,6 +776,51 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class EdgeCloudConfig:
+    """Configuration for edge-cloud collaborative inference."""
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        self.enabled: bool = user_config.get("enabled", False)
+        self.role: str = user_config.get("role", "edge")
+        self.edge_head_tail_layers = user_config.get("edge_head_tail_layers", 1)
+        self.enable_decode_graph: bool = user_config.get("enable_decode_graph", False)
+        self.decode_graph_min_tokens: int = user_config.get("decode_graph_min_tokens", 1)
+        self.transfer_config: dict = user_config.get("transfer_config", {})
+        self.hidden_dtype: str = user_config.get("hidden_dtype", "bf16")
+
+        if self.enabled:
+            self._validate()
+
+    def _validate(self):
+        if self.role not in ("edge", "cloud"):
+            raise ValueError(
+                f"edge_cloud_config.role must be 'edge' or 'cloud', got {self.role}"
+            )
+        head_k, tail_k = self.head_tail_k
+        if head_k <= 0 or tail_k <= 0:
+            raise ValueError(
+                "edge_cloud_config.edge_head_tail_layers must be positive, "
+                f"got head_k={head_k}, tail_k={tail_k}"
+            )
+
+    @property
+    def head_tail_k(self) -> tuple[int, int]:
+        cfg = self.edge_head_tail_layers
+        if isinstance(cfg, (list, tuple)) and len(cfg) == 2:
+            return int(cfg[0]), int(cfg[1])
+        k = int(cfg)
+        return k, k
+
+    def __repr__(self) -> str:
+        return (
+            f"EdgeCloudConfig(enabled={self.enabled}, role={self.role}, "
+            f"edge_head_tail_layers={self.edge_head_tail_layers}, "
+            f"enable_decode_graph={self.enable_decode_graph})"
+        )
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
