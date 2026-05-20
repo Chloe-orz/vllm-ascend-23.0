@@ -30,12 +30,13 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self.failure_callback: FailureCallback | None = None
 
         tensor_parallel_size, pp_parallel_size, pcp_parallel_size = self._get_parallel_sizes()
-        assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
-            f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f"_parallel_size ({pp_parallel_size}) x prefill_context"
-            f"_parallel_size ({pcp_parallel_size}). "
-        )
+        if not self.parallel_config.enable_edge_cloud:
+            assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
+                f"world_size ({self.world_size}) must be equal to the "
+                f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
+                f"_parallel_size ({pp_parallel_size}) x prefill_context"
+                f"_parallel_size ({pcp_parallel_size}). "
+            )
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
@@ -65,7 +66,14 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
-            global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
+            if self.parallel_config.enable_edge_cloud:
+                global_start_rank = (
+                    0
+                    if self.parallel_config.is_edge_node
+                    else self.parallel_config.edge_npu_count
+                )
+            else:
+                global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
 
             # When using fork, keep track of socket file descriptors that are
             # inherited by the worker, so that we can close them in subsequent
@@ -102,10 +110,14 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
             self.response_mqs = []
             # Only leader node have remote response mqs
-            if self.parallel_config.node_rank_within_dp == 0:
+            if self.parallel_config.node_rank_within_dp == 0 and (
+                not self.parallel_config.enable_edge_cloud
+                or self.parallel_config.is_edge_node
+            ):
                 for rank in range(self.world_size):
-                    if rank < self.local_world_size:
-                        local_message_queue = self.workers[rank].worker_response_mq
+                    local_idx = rank - global_start_rank
+                    if 0 <= local_idx < self.local_world_size:
+                        local_message_queue = self.workers[local_idx].worker_response_mq
                         assert local_message_queue is not None
                         self.response_mqs.append(local_message_queue)
                     else:
@@ -155,7 +167,18 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         pass
 
     def _is_driver_worker(self, rank: int) -> bool:
+        if self.parallel_config.enable_edge_cloud:
+            return rank == (
+                0
+                if self.parallel_config.is_edge_node
+                else self.parallel_config.edge_npu_count
+            )
         return rank % self.parallel_config.tensor_parallel_size == 0
+
+    def _get_output_rank(self) -> int:
+        if self.parallel_config.enable_edge_cloud:
+            return 0
+        return super()._get_output_rank()
 
 
 class AscendWorkerProc(WorkerProc):

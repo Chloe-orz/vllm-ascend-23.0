@@ -40,23 +40,30 @@ from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_f
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_dp_group,
+    get_pcp_group,
+    get_pp_group,
+    get_tp_group,
+)
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import get_model, get_model_loader
+from vllm.model_executor.model_loader.utils import (
+    initialize_model,
+    process_weights_after_loading,
+)
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import PIN_MEMORY, get_dtype_size
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionCGSupport,
-    AttentionMetadata,
-)
+from vllm.utils.torch_utils import get_dtype_size, set_default_torch_dtype
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
@@ -168,8 +175,11 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
-from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_snapshot_to_gpu
+from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.model_loader.layer_shard_loader import (
+    EdgeCloudLayerPlan,
+    LayerShardLoader,
+)
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -603,6 +613,42 @@ class NPUModelRunner(GPUModelRunner):
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
 
+        self.edge_cloud_cfg = self.ascend_config.edge_cloud_config
+        self._edge_cloud_enabled = self.edge_cloud_cfg.enabled
+        if self._edge_cloud_enabled:
+            if not self.parallel_config.enable_edge_cloud:
+                raise ValueError(
+                    "additional_config.edge_cloud_config.enabled requires "
+                    "--enable-edge-cloud."
+                )
+            expected_role = "edge" if self.parallel_config.is_edge_node else "cloud"
+            if self.edge_cloud_cfg.role != expected_role:
+                raise ValueError(
+                    "additional_config.edge_cloud_config.role must match the "
+                    f"process role inferred from --headless. Expected "
+                    f"{expected_role!r}, got {self.edge_cloud_cfg.role!r}."
+                )
+            self.head_k, self.tail_k = self.edge_cloud_cfg.head_tail_k
+            hf_config = getattr(self.model_config, "hf_text_config", None)
+            model_type = getattr(hf_config, "model_type", "")
+            self._is_qwen3_5 = "qwen3_5" in model_type
+            self.num_layers = 0
+            self.segment_a: Any = None
+            self.segment_e: Any = None
+            self.segment_c: Any = None
+            self.segment_a_wrapper: Any = None
+            self.segment_e_wrapper: Any = None
+            self.segment_c_wrapper: Any = None
+        else:
+            self.head_k = 0
+            self.tail_k = 0
+            self._is_qwen3_5 = False
+            if self.parallel_config.enable_edge_cloud:
+                raise ValueError(
+                    "--enable-edge-cloud requires "
+                    "additional_config.edge_cloud_config.enabled=true."
+                )
+
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -666,6 +712,149 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not self.model_config.enforce_eager
+        )
+
+    def _is_dummy_or_profile_run(self) -> bool:
+        try:
+            forward_context = get_forward_context()
+        except AssertionError:
+            return False
+        return bool(getattr(forward_context, "in_profile_run", False))
+
+    def _create_segment_callable(
+        self,
+        model: torch.nn.Module,
+        start_layer: int,
+        end_layer: int,
+    ) -> Any:
+        def _segment_forward(
+            input_ids: torch.Tensor | None = None,
+            positions: torch.Tensor | None = None,
+            intermediate_tensors: IntermediateTensors | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            **extra_layer_kwargs: Any,
+        ) -> torch.Tensor | IntermediateTensors:
+            return model.forward_edge_cloud_segment(
+                start_layer,
+                end_layer,
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                **extra_layer_kwargs,
+            )
+
+        return _segment_forward
+
+    def _wrap_segment_if_needed(
+        self,
+        segment: Any,
+        runtime_mode: CUDAGraphMode = CUDAGraphMode.FULL,
+    ) -> Any:
+        if not self.edge_cloud_cfg.enable_decode_graph:
+            return segment
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            return segment
+        if self._is_dummy_or_profile_run():
+            return segment
+        return ACLGraphWrapper(
+            segment,
+            self.vllm_config,
+            runtime_mode=runtime_mode,
+            cudagraph_options=None,
+        )
+
+    def _initialize_edge_cloud_model_structure(self) -> nn.Module:
+        """Build the full model tree before edge-cloud layer sharding.
+
+        Edge-cloud mode uses PP groups for runtime communication, but model
+        construction must not apply normal PP layer slicing. The layer sharder
+        below decides which layers are local on edge/cloud.
+        """
+        import vllm.distributed.utils as dist_utils
+
+        orig_get_pp_indices = dist_utils.get_pp_indices
+
+        def _full_layer_range(num_hidden_layers: int, pp_rank: int, pp_size: int):
+            return 0, num_hidden_layers
+
+        dist_utils.get_pp_indices = _full_layer_range
+        try:
+            with set_default_torch_dtype(self.vllm_config.model_config.dtype):
+                return initialize_model(self.vllm_config)
+        finally:
+            dist_utils.get_pp_indices = orig_get_pp_indices
+
+    def _load_model_edge_cloud(self) -> None:
+        if not self._is_qwen3_5:
+            raise NotImplementedError(
+                "edge-cloud mode in this migration only supports Qwen3.5/Qwen3.5-MoE"
+            )
+
+        logger.info(
+            "Starting to load model in edge-cloud mode: role=%s, head_k=%d, tail_k=%d",
+            self.edge_cloud_cfg.role,
+            self.head_k,
+            self.tail_k,
+        )
+        import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
+
+        device_config = self.vllm_config.device_config
+        load_config = self.vllm_config.load_config
+        load_device = (
+            device_config.device if load_config.device is None else load_config.device
+        )
+        target_device = torch.device(load_device)
+
+        self.model = self._initialize_edge_cloud_model_structure()
+
+        transformer_model = LayerShardLoader._get_transformer_model(self.model)
+        self.num_layers = len(transformer_model.layers)
+
+        layer_plan = EdgeCloudLayerPlan(
+            role=self.edge_cloud_cfg.role,
+            total_layers=self.num_layers,
+            k=[self.head_k, self.tail_k],
+        )
+        LayerShardLoader.apply_sharding(
+            self.model, layer_plan, self.vllm_config.compilation_config
+        )
+
+        if hasattr(self.model, "set_moe_parameters"):
+            self.model.set_moe_parameters()
+
+        model_loader = get_model_loader(self.vllm_config.load_config)
+        model_loader.load_weights(self.model, self.vllm_config.model_config)
+        self.model.to(target_device)
+        with torch.device(target_device):
+            process_weights_after_loading(
+                self.model, self.vllm_config.model_config, target_device
+            )
+        self.model = self.model.eval()
+
+        layer_states = [
+            f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
+            for idx, layer in enumerate(transformer_model.layers)
+        ]
+        logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
+
+        if self.edge_cloud_cfg.role == "edge":
+            self.segment_a = self._create_segment_callable(self.model, 0, self.head_k)
+            self.segment_e = self._create_segment_callable(
+                self.model, self.num_layers - self.tail_k, self.num_layers
+            )
+            self.segment_a_wrapper = self._wrap_segment_if_needed(self.segment_a)
+            self.segment_e_wrapper = self._wrap_segment_if_needed(self.segment_e)
+        else:
+            self.segment_c = self._create_segment_callable(
+                self.model, self.head_k, self.num_layers - self.tail_k
+            )
+            self.segment_c_wrapper = self._wrap_segment_if_needed(self.segment_c)
+
+        logger.info(
+            "[EdgeCloud] Model loaded. num_layers=%d role=%s",
+            self.num_layers,
+            self.edge_cloud_cfg.role,
         )
 
     def _sync_metadata_across_dp(
@@ -2797,7 +2986,18 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        run_model = partial(self.model, **model_inputs)
+        if self._edge_cloud_enabled:
+            if self.edge_cloud_cfg.role == "edge":
+                segment = (
+                    self.segment_a_wrapper
+                    if intermediate_tensors is None
+                    else self.segment_e_wrapper
+                )
+            else:
+                segment = self.segment_c_wrapper
+            run_model = partial(segment, **model_inputs)
+        else:
+            run_model = partial(self.model, **model_inputs)
 
         if self.enable_enpu:
             # The soft segmentation scenario requires event.record first, then event.wait
@@ -3576,6 +3776,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
+            elif isinstance(outputs, IntermediateTensors):
+                hidden_states = outputs["hidden_states"]
             else:
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
@@ -3656,7 +3858,13 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_heat_collection_status =  True
 
     def load_model(self) -> None:
-        load_model_start_time = time.perf_counter()
+        if self._edge_cloud_enabled:
+            with DeviceMemoryProfiler() as m:
+                self._load_model_edge_cloud()
+            self.model_memory_usage = m.consumed_memory
+            logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
+            return
+
         logger.info("Starting to load model %s...", self.model_config.model)
 
         if self.ascend_config.mix_placement:
@@ -4813,7 +5021,11 @@ class NPUModelRunner(GPUModelRunner):
             format. Layers that do not need KV cache are not included.
         """
 
-        if has_ec_transfer() and get_ec_transfer().is_producer:
+        if (
+            has_ec_transfer()
+            and get_ec_transfer().is_producer
+            and not self._edge_cloud_enabled
+        ):
             return {}
 
         kv_cache_spec: dict[str, list[KVCacheSpec]] = defaultdict(list)
@@ -4936,6 +5148,23 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
+        if self._edge_cloud_enabled and hasattr(self, "model") and self.model is not None:
+            import re
+
+            local_layer_indices = {
+                idx
+                for idx, layer in enumerate(
+                    LayerShardLoader._get_transformer_model(self.model).layers
+                )
+                if not isinstance(layer, PPMissingLayer)
+            }
+            filtered_spec: dict[str, KVCacheSpec] = {}
+            for layer_name, spec in kv_cache_spec.items():
+                match = re.search(r"layers\.(\d+)", layer_name)
+                if match is None or int(match.group(1)) in local_layer_indices:
+                    filtered_spec[layer_name] = spec
+            kv_cache_spec = filtered_spec
+
         return kv_cache_spec
 
     def _check_and_update_cudagraph_mode(
@@ -5001,6 +5230,8 @@ class NPUModelRunner(GPUModelRunner):
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        if self._edge_cloud_enabled:
+            return 0
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)

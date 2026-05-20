@@ -1,6 +1,17 @@
+from typing import Any, Callable
+
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group, get_world_group, init_model_parallel_group
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    Handle,
+    TensorMetadata,
+    _split_tensor_dict,
+    get_pp_group,
+    get_tp_group,
+    get_world_group,
+    init_model_parallel_group,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
@@ -35,7 +46,7 @@ def init_ascend_model_parallel(
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-    global_tp_size = parallel_config.tensor_parallel_size
+    global_tp_size = 1 if parallel_config.enable_edge_cloud else parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size
@@ -106,6 +117,9 @@ def init_ascend_model_parallel(
         _FC3_QUANT_X = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="fc3_quant_x"
         )
+
+    if parallel_config.enable_edge_cloud:
+        return
 
     # Initialize fine-grained TP process groups on Ascend for four components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
@@ -341,34 +355,57 @@ def destroy_ascend_model_parallel():
     _DYNAMIC_EPLB = None
 
 
-def get_global_rank(parallel_config: ParallelConfig | None = None) -> int:
-    """Return a globally unique rank for the current worker across all parallel
-     dimensions (TP/PP/CP/DP), compatible with both dense and MoE models.
+def edge_cloud_broadcast_recv() -> tuple[
+    dict[str, torch.Tensor | Any] | None,
+    list[Handle],
+    list[Callable[[], None]],
+]:
+    """Receive PP tensors and broadcast them within the local edge/cloud TP group."""
+    pp_group = get_pp_group()
+    tp_group = get_tp_group()
+    is_pp_npu0 = pp_group.world_size == 2
 
-     vLLM does not expose a single ready-to-use cross-DP global rank:
-       - For dense models each DP rank is launched as an independent DP=1 engine,
-         so ``data_parallel_rank`` is reset to 0 and ``get_world_group()`` only
-         spans one replica (``rank_in_group`` is the local rank in the replica).
-       - For MoE DP / external_launcher the world group spans all DP ranks, so
-         ``rank_in_group`` already encodes the DP offset.
+    if is_pp_npu0:
+        tensor_dict, comm_handles, comm_postprocess = pp_group.irecv_tensor_dict()
+        assert tensor_dict is not None
 
-     ``data_parallel_index`` always keeps the true DP rank (it is never reset),
-     and ``rank_in_group % replica_size`` yields the local rank within a replica
-     in both cases, so the formula below is correct everywhere. It mirrors vLLM's
-     own ``data_parallel_rank * world_size + rank`` (see
-     vllm/distributed/parallel_state.py).
+        metadata_list, _ = _split_tensor_dict(tensor_dict)
+        tp_group.broadcast_object(metadata_list, src=0)
 
-    Note: DCP (decode context parallel) reuses the TP NPUs and EP overlays
-    TP/DP, so neither adds new ranks and they are intentionally excluded from
-    ``replica_size``.
-    """
-    if parallel_config is None:
-        parallel_config = get_current_vllm_config().parallel_config
-    # Number of NPUs in a single DP replica (TP * PP * prefill-CP).
-    replica_size = (
-        parallel_config.tensor_parallel_size
-        * parallel_config.pipeline_parallel_size
-        * parallel_config.prefill_context_parallel_size
-    )
-    rank_in_replica = get_world_group().rank_in_group % replica_size
-    return parallel_config.data_parallel_index * replica_size + rank_in_replica
+        def broadcast_postprocess():
+            _, tensor_list = _split_tensor_dict(tensor_dict) if tensor_dict else (None, [])
+            handles = []
+            for tensor in tensor_list:
+                if tensor.numel() == 0:
+                    continue
+                group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
+                handles.append(
+                    torch.distributed.broadcast(
+                        tensor, src=tp_group.ranks[0], group=group, async_op=True
+                    )
+                )
+            for handle in handles:
+                handle.wait()
+
+        comm_postprocess.append(broadcast_postprocess)
+        return tensor_dict, comm_handles, comm_postprocess
+
+    metadata_list = tp_group.broadcast_object(None, src=0)
+    recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
+    handles: list[Handle] = []
+
+    for key, value in metadata_list:
+        if isinstance(value, TensorMetadata):
+            tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
+            recv_tensor_dict[key] = tensor
+            if tensor.numel() == 0:
+                continue
+            group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
+            handles.append(
+                torch.distributed.broadcast(
+                    tensor, src=tp_group.ranks[0], group=group, async_op=True
+                )
+            )
+        else:
+            recv_tensor_dict[key] = value
+    return recv_tensor_dict, handles, []
