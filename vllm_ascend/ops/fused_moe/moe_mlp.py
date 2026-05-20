@@ -107,9 +107,7 @@ def quant_apply_mlp(
     scale_type: torch.dtype | None = None,
     per_token_scale_type: torch.dtype | None = None,
     use_bf16: bool = True,
-    activation: str | None = None,
-    swiglu_limit: float = 0.0,
-    use_w4a8_per_channel_gmm_swiglu: bool = False,
+    swiglu_limit: int = 0,
 ) -> torch.Tensor:
     input_hidden_dtype = hidden_states.dtype
     use_gmm_swiglu_quant_fusion = use_mxfp_quant or (fusion and not dynamic_eplb)
@@ -165,18 +163,14 @@ def quant_apply_mlp(
             )
         elif use_gmm_swiglu_quant_fusion:
             # gmm1: gate_up_proj & act_fn: swiglu
-            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
+            hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
                 weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
                 x_scale=pertoken_scale,
                 bias=None,
-                use_mxfp_quant=use_mxfp_quant,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
                 swiglu_limit=swiglu_limit,
-                mxfp_quant_dtype=mxfp_quant_dtype,
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
@@ -242,10 +236,7 @@ def quant_apply_mlp(
         )[0]
         dispose_tensor(unquantized_hidden_states)
         # act_fn: swiglu
-        if activation == MoEActivation.SWIGLUSTEP:
-            hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
-        else:
-            hidden_states = torch_npu.npu_swiglu(hidden_states)
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
@@ -292,19 +283,15 @@ def quant_apply_mlp(
                 bias=bias1,
                 swiglu_limit=swiglu_limit,
             )
-        elif use_gmm_swiglu_quant_fusion and activation != MoEActivation.SWIGLUSTEP:
-            hidden_states, swiglu_out_scale, _ = DeviceOperator.npu_grouped_matmul_swiglu_quant(
+        elif use_gmm_swiglu_quant_fusion:
+            hidden_states, swiglu_out_scale, _ = torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz(
                 x=hidden_states,
                 weight=_require_single_tensor_for_swiglu_quant(w1, name="w1"),
                 group_list=cumsum_group_list(group_list, group_list_type, 0),
                 weight_scale=_require_single_tensor_for_swiglu_quant(w1_scale, name="w1_scale"),
                 x_scale=pertoken_scale,
                 bias=bias1,
-                use_mxfp_quant=use_mxfp_quant,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
                 swiglu_limit=swiglu_limit,
-                mxfp_quant_dtype=mxfp_quant_dtype,
             )
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
@@ -445,16 +432,6 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
-
-    # LoRA w2 delta: applied to the down-proj output, with the activation output
-    # as the lora_a input. Reuses the per-row routing computed for w13.
-    if lora_routing is not None:
-        moe_lora_apply_w2(
-            lora_context,
-            down_out=hidden_states,
-            silu_out=gate_up_out,
-            lora_routing=lora_routing,
-        )
     return hidden_states, None
 
 
@@ -546,7 +523,5 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         scale_type=scale_type,
         per_token_scale_type=per_token_scale_type,
         use_bf16=use_bf16,
-        activation=activation,
         swiglu_limit=swiglu_limit,
-        use_w4a8_per_channel_gmm_swiglu=mlp_compute_input.quant.use_w4a8_per_channel_gmm_swiglu,
     )

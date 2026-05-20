@@ -332,6 +332,28 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
 }
 
 
+QUANT_MODEL_PREFIX_MAPPINGS = {
+    "deepseek_v4": {
+        "layers.": "model.layers.",
+        "embed.": "model.embed_tokens.",
+        "head.": "lm_head.",
+    },
+}
+
+
+QUANT_MODEL_SUBSTR_MAPPINGS = {
+    "deepseek_v4": {
+        ".attn.": ".sefl_attn.",
+        ".w1.": ".gate_proj.",
+        ".w2.": ".down_proj.",
+        ".w3.": ".up_proj.",
+        ".ffn.": ".mlp.",
+        ".ffn_norm.": ".post_attention_layernorm.",
+        ".attn_norm.": ".input_layernorm.",
+    },
+}
+
+
 def get_packed_modules_mapping(model_type: str) -> dict[str, list[str]]:
     """Get packed modules mapping for a model type.
 
@@ -557,37 +579,11 @@ class AscendModelSlimConfig(QuantizationConfig):
 
     def quant_prefix_mapper(self, model_type: str, prefix: str) -> str:
         self.model_type = model_type
-        # Some model paths, e.g. qwen3-vl and qwen3_5_moe MTP drafter,
-        # initialize lm_head with prefix="lm_head", while the quant description
-        # key is mapped to "language_model.lm_head.weight".
-        if (
-            prefix == "lm_head"
-            and "lm_head.weight" not in self.quant_description
-            and "language_model.lm_head.weight" in self.quant_description
-        ):
-            prefix = "language_model.lm_head"
         prefix_mapping = QUANT_MODEL_PREFIX_MAPPINGS.get(model_type)
         substr_mapping = QUANT_MODEL_SUBSTR_MAPPINGS.get(model_type)
-        if prefix_mapping or substr_mapping:
-            hf_to_vllm_mapper = WeightsMapper(
-                orig_to_new_prefix=prefix_mapping or {},
-                orig_to_new_substr=substr_mapping or {},
-            )
-            prefix = hf_to_vllm_mapper._map_name(prefix)
-
-        if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
-            # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
-            # ``model.layers.*``.  The Step3P7 vLLM wrapper mapper rewrites
-            # current ``model.layers.*`` quant descriptions to
-            # ``language_model.model.layers.*``.  The MTP draft module itself
-            # is still Step3P5-shaped and queries ``model.layers.*``, so try
-            # the Step3P7 wrapper alias only when the direct Step3P5/new-key
-            # lookup misses.
-            packed_modules_mapping = get_packed_modules_mapping(model_type)
-            if not self._has_quant_weight(prefix, packed_modules_mapping):
-                for candidate in (prefix.replace("model.layers.", "language_model.model.layers.", 1),):
-                    if self._has_quant_weight(candidate, packed_modules_mapping):
-                        return candidate
+        if prefix_mapping:
+            hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix=prefix_mapping, orig_to_new_substr=substr_mapping)
+            return hf_to_vllm_mapper._map_name(prefix)
         return prefix
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
@@ -649,7 +645,6 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
-            logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):

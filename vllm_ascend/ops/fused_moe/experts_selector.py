@@ -110,6 +110,7 @@ def select_experts(
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
+            num_experts=num_experts,
             tid2eid=None,
             input_ids=None,
         )
@@ -252,14 +253,7 @@ def _select_experts_with_fusion_ops(
     if scoring_func == "sqrtsoftplus":
         if tid2eid is not None:
             forward_context = get_forward_context()
-            input_ids = forward_context.input_ids
-            if input_ids is None:
-                # dummy_run / profile_run 等场景下 input_ids 可能为 None
-                input_ids = torch.zeros(
-                    router_logits.shape[0], dtype=torch.int64, device=router_logits.device
-                )
-            else:
-                input_ids = input_ids.to(torch.int64)
+            input_ids = forward_context.input_ids.to(torch.int64)
             # tid2eid_ones = torch.ones(tid2eid.shape[0],tid2eid.shape[1],device=router_logits.device,dtype=torch.int32)
             tid2eid_ones = tid2eid.to(torch.int32)
             if forward_context.moe_comm_type == MoECommType.ALLGATHER:
@@ -286,7 +280,7 @@ def _select_experts_with_fusion_ops(
             tid2eid=tid2eid_ones,
             k_group=topk_group,
             group_count=num_expert_group,
-            routed_scaling_factor=routed_scaling_factor,
+            routed_scaling_factor=1.0,
             eps=1e-20,
             group_select_mode=1,
             # The hash custom op currently rejects renorm != 0. Apply
@@ -295,6 +289,11 @@ def _select_experts_with_fusion_ops(
             norm_type=2,
             out_flag=False,
         )
+        # Match DeepSeek V4 routing: normalize sqrtsoftplus top-k weights
+        # before applying the routed scale. DSV4 non-AITER callers pass 1.0
+        # here and scale the routed output later with muls_add_triton.
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        topk_weights = topk_weights * routed_scaling_factor
         return topk_weights, topk_ids
     norm_type = 0 if scoring_func == "softmax" else 1
     if e_score_correction_bias is not None and e_score_correction_bias.dtype != router_logits.dtype:
@@ -328,6 +327,7 @@ def _native_select_experts(
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
+    num_experts: torch.Tensor | None = None,
     use_hash: bool = False,
     tid2eid: dict[int, int] | None = None,
     input_ids: torch.Tensor | None = None,

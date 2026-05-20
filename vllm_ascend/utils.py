@@ -111,40 +111,6 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
-def model_uses_sfa_sparse(model_config: Any | None) -> bool:
-    hf_text_config = getattr(model_config, "hf_text_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    return (
-        hf_text_config is not None
-        and hasattr(hf_text_config, "index_topk")
-        and not hasattr(hf_text_config, "compress_ratios")
-        and not hasattr(hf_config, "compress_ratios")
-    )
-
-
-def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
-    if vllm_config is None:
-        from vllm.config import get_current_vllm_config
-
-        vllm_config = get_current_vllm_config()
-
-    parallel_config = vllm_config.parallel_config
-    return (
-        model_uses_sfa_sparse(vllm_config.model_config)
-        and parallel_config.decode_context_parallel_size > 1
-        and parallel_config.prefill_context_parallel_size == 1
-    )
-
-
-def clear_enable_sp():
-    global _ENABLE_SP
-    _ENABLE_SP = None
-    enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_layer_shard.cache_clear()
-    enable_dsa_cp_with_o_proj_tp.cache_clear()
-    _libc_getenv.cache_clear()
-
-
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
@@ -1517,6 +1483,10 @@ def refresh_block_size(vllm_config):
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
+    if model_config.hf_config.model_type == "deepseek_v4":
+        # TODO(qcs): generalize the block_size
+        cache_config.block_size = 128
+
     if not scheduler_config or not model_config:
         return
 
@@ -1791,6 +1761,67 @@ def get_compressed_pos_and_indices(
     """
     Batch generate compressed position ids for multi-requests on DSv4.
     Calculate compressed position ids independently for each single request.
+
+    Args:
+        num_computed_tokens: Historical processed token counts of multiple requests, shape=[num_reqs,]
+        num_scheduled_tokens: New scheduled token counts of multiple requests in current step, shape=[num_reqs,]
+
+    Returns:
+        tuple(np.ndarray, np.ndarray):
+            1. Flattened compressed position id array for all requests
+            2. Length of compressed position ids for each individual request
+    """
+    if not use_compress:
+        return None, None, None  # type: ignore[return-value]
+    # Assert input validity
+    assert num_computed_tokens.shape == num_scheduled_tokens.shape, (
+        "num_computed_tokens and num_scheduled_tokens must have the same shape"
+    )
+    assert np.all(num_computed_tokens >= 0) and np.all(num_scheduled_tokens >= 0), (
+        "Token count cannot be negative value"
+    )
+
+    positions_compressed_list = []
+    req_indices_compressed_list = []
+    num_scheduled_tokens_compressed_list = []
+
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
+        # Calculate compressed length of historical & total tokens
+        if isinstance(kv_cache_group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
+            kv_cache_spec = next(iter(kv_cache_group_spec.kv_cache_spec.kv_cache_specs.values()))
+        else:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+        compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1)
+
+        # Note(qcs): some models use compress_ratio=0 as non-compression tag.
+        if compress_ratio > 1:
+            compressed_historical_len = num_computed_tokens // compress_ratio
+            compressed_total_len = (num_computed_tokens + num_scheduled_tokens) // compress_ratio
+        else:
+            compressed_historical_len = num_computed_tokens
+            compressed_total_len = num_computed_tokens + num_scheduled_tokens
+
+        # The number of new compressed position ids for each request
+        num_new_compressed_pos = compressed_total_len - compressed_historical_len
+
+        # Core vectorized calculation (no for-loop)
+        pos_starts = compressed_historical_len
+        prefix_offsets = np.concatenate([[0], np.cumsum(num_new_compressed_pos[:-1])])
+        compressed_pos_ids = np.arange(np.sum(num_new_compressed_pos)) + np.repeat(
+            pos_starts - prefix_offsets, num_new_compressed_pos
+        )
+
+        req_indices_compressed = np.repeat(arrange_np, num_new_compressed_pos)
+        req_indices_compressed_list.append(req_indices_compressed)
+        positions_compressed_list.append(compressed_pos_ids)
+        num_scheduled_tokens_compressed_list.append(num_new_compressed_pos)
+    return positions_compressed_list, req_indices_compressed_list, num_scheduled_tokens_compressed_list
+
+
+def kv_cache_spec_uses_sparse_c8(kv_cache_spec) -> bool:
+    from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
     Args:
         num_computed_tokens: Historical processed token counts of multiple requests, shape=[num_reqs,]

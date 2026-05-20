@@ -3,7 +3,7 @@ import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
@@ -24,26 +24,13 @@ class BlockTable:
         kv_cache_group: KVCacheGroupSpec = None,
     ):
         self.max_num_reqs = max_num_reqs
-        self.pcp_world_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
-        self.dcp_world_size = get_dcp_group().world_size
-        self.dcp_rank = get_dcp_group().rank_in_group
         compress_ratio = 1
         if (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
-            and isinstance(kv_cache_group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            and hasattr(kv_cache_group.kv_cache_spec, "compress_ratio")
         ):
-            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()), None)
-            if kv_cache_spec is not None and hasattr(kv_cache_spec, "compress_ratio"):
-                compress_ratio = kv_cache_spec.compress_ratio
-        if (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and (self.pcp_world_size * self.dcp_world_size > 1)
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        ):
-            max_num_blocks_per_req = max_num_blocks_per_req * self.pcp_world_size * self.dcp_world_size
+            compress_ratio = kv_cache_group.kv_cache_spec.compress_ratio
         max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -274,9 +261,24 @@ class BlockTable:
             slot_mapping = block_numbers * self.block_size + block_offsets
             self.slot_mapping.gpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
         else:
-            block_numbers = self.block_table.cpu.flatten()[block_table_indices]
-            slot_mapping = block_numbers * self.block_size + block_offsets
-            self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
+            assert self.kernel_sizes is not None
+            assert self.block_size == self.kernel_sizes[0]
+            # IMPORTANT: In hybrid mode, positions are in logical block space,
+            # but we need to map them to the correct logical block table indices
+            logical_block_idx = positions // self.block_size
+
+            # Account for the expanded logical table
+            # (always needed with unified tensor)
+            # Each physical block is split into multiple logical blocks
+            # The logical table has been expanded to accommodate this
+            block_table_indices = (
+                req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
+            )
+
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            block_offsets = positions % self.block_size
+            np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
+            self.slot_mapping.copy_to_gpu(req_indices.shape[0])
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.gpu[:num_reqs].copy_(
@@ -429,8 +431,6 @@ class MultiGroupBlockTable:
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
-            if block_table.is_mamba_group:
-                continue
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:
@@ -438,14 +438,12 @@ class MultiGroupBlockTable:
 
     def compute_slot_mapping_draft(
         self,
-        req_indices: np.ndarray | torch.Tensor,
-        positions: np.ndarray | torch.Tensor,
+        req_indices: np.ndarray,
+        positions: np.ndarray,
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:
         for i, block_table in enumerate(self.block_tables):
-            if block_table.is_mamba_group:
-                continue
             if positions_compressed_list and req_indices_compressed_list:
                 block_table.compute_slot_mapping_draft(req_indices_compressed_list[i], positions_compressed_list[i])
             else:

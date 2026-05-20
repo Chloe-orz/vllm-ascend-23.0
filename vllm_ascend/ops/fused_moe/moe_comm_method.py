@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ascend_config import get_ascend_config
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -81,7 +81,7 @@ class FusedExpertsResult:
     # For dynamic_eplb
     group_list_type: int = 1
     expert_tokens: torch.Tensor | None = None
-    swiglu_limit: float = 0.0
+    swiglu_limit: int = 0
 
 
 class MoECommMethod(ABC):
@@ -130,8 +130,7 @@ class MoECommMethod(ABC):
             torch.bfloat16,
             torch.int8,
             torch.float8_e4m3fn,
-            torch.uint8,
-        ], f"Unsupported hidden_states dtype: {fused_experts_input.hidden_states.dtype}"
+        ]
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
@@ -269,7 +268,7 @@ class FusedMC2CommImpl(MoECommMethod):
 
     def __init__(self, moe_config):
         super().__init__(moe_config)
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -291,6 +290,10 @@ class FusedMC2CommImpl(MoECommMethod):
             "w1_scale and w2_scale cannot be None for FusedMC2CommImpl."
         )
 
+        assert not (
+            fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
+        ), "w1_scale_bias and w2_scale_bias cannot be None for FusedMC2CommImpl."
+
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
@@ -301,11 +304,7 @@ class FusedMC2CommImpl(MoECommMethod):
             topk_ids = fused_experts_input.routing.log2phy[topk_ids]
 
         expert_tokens = None
-        if get_ascend_config().enable_fused_mc2 == 1:
-            assert not (
-                fused_experts_input.weights.w1_scale_bias is None or fused_experts_input.weights.w2_scale_bias is None
-            ), "w1_scale_bias and w2_scale_bias cannot be None when enable_fused_mc2=1."
-
+        if envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 1:
             out = torch.empty_like(fused_experts_input.hidden_states)
             torch.ops._C_ascend.dispatch_ffn_combine(  # type: ignore
                 x=fused_experts_input.hidden_states,
@@ -318,14 +317,13 @@ class FusedMC2CommImpl(MoECommMethod):
                 bias2=fused_experts_input.weights.w2_scale_bias,
                 probs=fused_experts_input.topk_weights.to(torch.float32),
                 group=self.token_dispatcher.moe_all_to_all_group_name,
-                max_output_size=get_ascend_config().mega_moe_max_tokens,
-                swiglu_limit=fused_experts_input.swiglu_limit,
+                max_output_size=65536,
                 x_active_mask=fused_experts_input.routing.mc2_mask,
                 out=out,
                 expert_token_nums=self.expert_token_nums,
             )
             expert_tokens = self.expert_token_nums
-        elif get_ascend_config().enable_fused_mc2 == 2:
+        elif envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2 == 2:
             assert fused_experts_input.routing.expert_map is not None, "expert_map cannot be None."
             out, expert_tokens = torch.ops._C_ascend.dispatch_gmm_combine_decode(  # type: ignore
                 x=fused_experts_input.hidden_states,
@@ -343,7 +341,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 global_bs=self.token_dispatcher.global_bs,
             )
         else:
-            raise ValueError(f"Wrong value of {get_ascend_config().enable_fused_mc2=}")
+            raise ValueError(f"Wrong value of {envs_ascend.VLLM_ASCEND_ENABLE_FUSED_MC2=}")
         return FusedExpertsResult(
             routed_out=out, expert_tokens=expert_tokens, swiglu_limit=fused_experts_input.swiglu_limit
         )

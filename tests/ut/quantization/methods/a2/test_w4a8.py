@@ -370,7 +370,6 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         top_k = 2
 
         layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
-        self.quant_method.is_per_channel_weight = True
         layer.swiglu_limit = 1000000
         x = torch.randn(tokens, hidden_size, dtype=torch.bfloat16)
         router_logits = torch.randn(tokens, num_experts, dtype=torch.float32)
