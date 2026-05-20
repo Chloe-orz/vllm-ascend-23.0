@@ -175,10 +175,6 @@ class MooncakeBackend(Backend):
                 logger.error("If this is the first DSV4(compress) request, this failure is expected.")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
-        if self._lazy_init and not self._store_initialized:
-            logger.error("MooncakeBackend.get called before store initialization, keys=%s", keys)
-            return
-        assert self.store is not None
         logger.debug(
             "MooncakeBackend.get enter keys=%d sample_keys=%s",
             len(keys),
@@ -187,21 +183,15 @@ class MooncakeBackend(Backend):
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             res_list = list(res)
-            failed_codes = [int(value) for value in res_list if value < 0]
-            failed_count = len(failed_codes)
-            error_codes = sorted(set(failed_codes))
-            if failed_count:
-                logger.error(
-                    "Failed to get %d keys out of %d. error_codes=%s. Check key existence and memory state.",
-                    failed_count,
-                    len(keys),
-                    error_codes,
-                )
-                logger.debug("Failed to get key details. keys=%s, result=%s", keys, res_list)
-            for i, value in enumerate(res_list):
-                if value > 0:
-                    res_list[i] = 0
-            return res_list
+            logger.debug(
+                "MooncakeBackend.get result keys=%d result_sample=%s negative_count=%d",
+                len(keys),
+                res_list[:12],
+                sum(1 for value in res_list if value < 0),
+            )
+            for value in res_list:
+                if value < 0:
+                    logger.error("Failed to get key %s, res:%s", keys, res_list)
         except Exception as e:
             logger.error(
                 "Failed to get %d keys out of %d. Check store state and network.",

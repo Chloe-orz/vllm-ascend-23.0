@@ -105,11 +105,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._current_step_has_real_forward = False
 
         if role == KVConnectorRole.SCHEDULER:
-            assert kv_cache_config is not None
-            page_size_bytes = kv_cache_config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
-            self.connector_scheduler = KVPoolScheduler(
-                vllm_config, self.use_layerwise, kv_cache_config, page_size_bytes=page_size_bytes
-            )
+            self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
         else:
             self.connector_worker = KVPoolWorker(
                 vllm_config,
@@ -201,7 +197,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
-        self._current_step_has_real_forward = forward_context is not None
         logger.debug(
             "KV pool connector start_load_kv metadata_requests=%d specs=%s",
             len(metadata.requests),
@@ -311,7 +306,7 @@ class LookupKeyServer:
                     token_len,
                     hashes_str,
                     kv_group_ids,
-                    use_layerwise=False,
+                    self.use_layerwise,
                 )
                 logger.debug(
                     "KV pool lookup response token_len=%d groups=%s hit_tokens=%d",
