@@ -1,0 +1,125 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+#
+
+from itertools import islice
+from typing import Any
+
+import torch
+from vllm.distributed.parallel_state import get_pp_group
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5ForCausalLM,
+    Qwen3_5ForCausalLMBase,
+    Qwen3_5ForConditionalGeneration,
+    Qwen3_5Model,
+    Qwen3_5MoeForCausalLM,
+    Qwen3_5MoeForConditionalGeneration,
+)
+from vllm.sequence import IntermediateTensors
+
+
+def _forward_edge_cloud_segment_qwen3_5(
+    self: Qwen3_5Model,
+    start_layer: int,
+    end_layer: int,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+    **extra_layer_kwargs: Any,
+) -> torch.Tensor | IntermediateTensors:
+    num_layers = len(self.layers)
+    assert 0 <= start_layer < end_layer <= num_layers, (
+        f"Invalid segment range [{start_layer}, {end_layer}) for {num_layers} layers"
+    )
+
+    is_first_segment = start_layer == 0 and get_pp_group().is_first_rank
+    is_last_segment = end_layer == num_layers and get_pp_group().is_last_rank
+
+    if is_first_segment:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.embed_input_ids(input_ids)
+        residual = None
+    else:
+        assert intermediate_tensors is not None
+        hidden_states = intermediate_tensors["hidden_states"]
+        residual = intermediate_tensors["residual"]
+
+    for layer in islice(self.layers, start_layer, end_layer):
+        hidden_states, residual = layer(
+            hidden_states=hidden_states,
+            residual=residual,
+            positions=positions,
+            **extra_layer_kwargs,
+        )
+
+    if not is_last_segment:
+        return IntermediateTensors(
+            {"hidden_states": hidden_states, "residual": residual}
+        )
+
+    hidden_states, _ = self.norm(hidden_states, residual)
+    return hidden_states
+
+
+def _qwen3_5_lm_forward_edge_cloud_segment(
+    self: Qwen3_5ForCausalLMBase,
+    start_layer: int,
+    end_layer: int,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+    **extra_layer_kwargs: Any,
+) -> torch.Tensor | IntermediateTensors:
+    return self.model.forward_edge_cloud_segment(
+        start_layer,
+        end_layer,
+        input_ids,
+        positions,
+        intermediate_tensors,
+        inputs_embeds,
+        **extra_layer_kwargs,
+    )
+
+
+def _qwen3_5_cond_forward_edge_cloud_segment(
+    self: Qwen3_5ForConditionalGeneration,
+    start_layer: int,
+    end_layer: int,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+    **extra_layer_kwargs: Any,
+) -> torch.Tensor | IntermediateTensors:
+    return self.language_model.forward_edge_cloud_segment(
+        start_layer,
+        end_layer,
+        input_ids,
+        positions,
+        intermediate_tensors,
+        inputs_embeds,
+        **extra_layer_kwargs,
+    )
+
+
+Qwen3_5Model.forward_edge_cloud_segment = _forward_edge_cloud_segment_qwen3_5
+Qwen3_5ForCausalLMBase.forward_edge_cloud_segment = (
+    _qwen3_5_lm_forward_edge_cloud_segment
+)
+Qwen3_5ForCausalLM.forward_edge_cloud_segment = _qwen3_5_lm_forward_edge_cloud_segment
+Qwen3_5MoeForCausalLM.forward_edge_cloud_segment = (
+    _qwen3_5_lm_forward_edge_cloud_segment
+)
+Qwen3_5ForConditionalGeneration.forward_edge_cloud_segment = (
+    _qwen3_5_cond_forward_edge_cloud_segment
+)
+Qwen3_5MoeForConditionalGeneration.forward_edge_cloud_segment = (
+    _qwen3_5_cond_forward_edge_cloud_segment
+)
