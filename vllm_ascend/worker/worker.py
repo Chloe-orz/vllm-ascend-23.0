@@ -796,15 +796,30 @@ class NPUWorker(WorkerBase):
             layer_slice_info is None or layer_slice_info.is_first_slice
         )
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and is_first_slice:
-            print("Received intermediate tensors from edge before", flush=True)
-            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
-            print("Received intermediate tensors from edge after", flush=True)
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
+        if forward_pass:
+            if is_cloud_device():
+                tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
+            elif not get_pp_group().is_first_rank:
+                # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
+                # it will conflict with the all-gather operation in flashcomm1.
+                if enable_sp():
+                    all_gather_group = None
+                else:
+                    all_gather_group = get_tp_group()
+                tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
+                    all_gather_group=all_gather_group
+                )
+                assert tensor_dict is not None
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
 
         if self.profiler is not None:
             self.profiler.step()
@@ -894,8 +909,27 @@ class NPUWorker(WorkerBase):
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
-        if not get_pp_group().is_last_rank:
-            assert parallel_config.distributed_executor_backend != "external_launcher"
+        if is_edge_device():
+            if get_pp_group().world_size == 2:
+                self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+            intermediate_tensors = AsyncIntermediateTensors(
+                tensor_dict,
+                comm_handles=comm_handles,
+                comm_postprocess=comm_postprocess,
+            )
+            output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+                return output
+            return output
+
+        if is_cloud_device():
+            if get_pp_group().world_size == 2:
+                self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+        else:
+            assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
+            # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
+            # it will conflict with the all-gather operation in flashcomm1.
             if enable_sp():
                 all_gather_group = None
             else:
@@ -903,7 +937,6 @@ class NPUWorker(WorkerBase):
             self._pp_send_work = get_pp_group().isend_tensor_dict(
                 output.tensors,
                 all_gather_group=all_gather_group,
-                use_alt_group=use_alt_group,
             )
 
         kv_connector_output = output.kv_connector_output

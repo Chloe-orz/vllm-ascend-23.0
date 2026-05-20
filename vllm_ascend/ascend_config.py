@@ -293,6 +293,8 @@ class AscendConfig:
         # Enable dispatch/combine op inter-node communication by ROCE
         self.enable_mc2_hierarchy_comm = additional_config.get("enable_mc2_hierarchy_comm", False)
 
+        # Enable optimized reduce sampling scheme
+        self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
         edge_cloud_config = additional_config.get("edge_cloud_config", {})
         self.edge_cloud_config = EdgeCloudConfig(edge_cloud_config)
 
@@ -848,7 +850,6 @@ class EdgeCloudConfig:
             user_config = {}
         self.enabled: bool = user_config.get("enabled", False)
         self.role: str = user_config.get("role", "edge")
-        self.mode: str = user_config.get("mode", "head_tail")
         self.edge_head_tail_layers = user_config.get("edge_head_tail_layers", 1)
         self.enable_decode_graph: bool = user_config.get("enable_decode_graph", False)
         self.decode_graph_min_tokens: int = user_config.get("decode_graph_min_tokens", 1)
@@ -863,35 +864,15 @@ class EdgeCloudConfig:
             raise ValueError(
                 f"edge_cloud_config.role must be 'edge' or 'cloud', got {self.role}"
             )
-        if self.mode not in ("head_tail", "embedding_only"):
-            raise ValueError(
-                f"edge_cloud_config.mode must be 'head_tail' or 'embedding_only', "
-                f"got {self.mode}"
-            )
-        if self.mode == "embedding_only":
-            if self.edge_head_tail_layers != 0:
-                logger.warning(
-                    "edge_cloud_config.mode is 'embedding_only', ignoring "
-                    "edge_head_tail_layers=%s and forcing it to 0.",
-                    self.edge_head_tail_layers,
-                )
-                self.edge_head_tail_layers = 0
         head_k, tail_k = self.head_tail_k
-        if head_k < 0 or tail_k < 0:
+        if head_k <= 0 or tail_k <= 0:
             raise ValueError(
-                "edge_cloud_config.edge_head_tail_layers must be non-negative, "
+                "edge_cloud_config.edge_head_tail_layers must be positive, "
                 f"got head_k={head_k}, tail_k={tail_k}"
-            )
-        if self.mode == "head_tail" and (head_k <= 0 or tail_k <= 0):
-            raise ValueError(
-                "edge_cloud_config.edge_head_tail_layers must be positive in "
-                f"'head_tail' mode, got head_k={head_k}, tail_k={tail_k}"
             )
 
     @property
     def head_tail_k(self) -> tuple[int, int]:
-        if self.mode == "embedding_only":
-            return 0, 0
         cfg = self.edge_head_tail_layers
         if isinstance(cfg, (list, tuple)) and len(cfg) == 2:
             return int(cfg[0]), int(cfg[1])
@@ -901,7 +882,7 @@ class EdgeCloudConfig:
     def __repr__(self) -> str:
         return (
             f"EdgeCloudConfig(enabled={self.enabled}, role={self.role}, "
-            f"mode={self.mode}, edge_head_tail_layers={self.edge_head_tail_layers}, "
+            f"edge_head_tail_layers={self.edge_head_tail_layers}, "
             f"enable_decode_graph={self.enable_decode_graph})"
         )
 

@@ -720,20 +720,9 @@ class NPUModelRunner(GPUModelRunner):
                     f"{expected_role!r}, got {self.edge_cloud_cfg.role!r}."
                 )
             self.head_k, self.tail_k = self.edge_cloud_cfg.head_tail_k
-            if self.edge_cloud_cfg.mode == "embedding_only":
-                self.head_k = 0
-                self.tail_k = 0
-                logger.info(
-                    "Edge-cloud mode is 'embedding_only', forcing head_k=0, tail_k=0"
-                )
             hf_config = getattr(self.model_config, "hf_text_config", None)
             model_type = getattr(hf_config, "model_type", "")
-            outer_model_type = getattr(
-                getattr(self.model_config, "hf_config", None), "model_type", ""
-            )
             self._is_qwen3_5 = "qwen3_5" in model_type
-            self._is_deepseek_v2 = "deepseek" in model_type
-            self._is_kimi_k25 = "kimi_k25" in outer_model_type or "kimi_k25" in model_type
             self.num_layers = 0
             self.segment_a: Any = None
             self.segment_e: Any = None
@@ -745,8 +734,6 @@ class NPUModelRunner(GPUModelRunner):
             self.head_k = 0
             self.tail_k = 0
             self._is_qwen3_5 = False
-            self._is_deepseek_v2 = False
-            self._is_kimi_k25 = False
             if self.parallel_config.enable_edge_cloud:
                 raise ValueError(
                     "--enable-edge-cloud requires "
@@ -830,19 +817,25 @@ class NPUModelRunner(GPUModelRunner):
         model: torch.nn.Module,
         start_layer: int,
         end_layer: int,
-        is_first_segment: bool | None = None,
-        is_last_segment: bool | None = None,
     ) -> Any:
-        """创建一个仅执行指定层区间 [start_layer, end_layer) 的 nn.Module。
+        def _segment_forward(
+            input_ids: torch.Tensor | None = None,
+            positions: torch.Tensor | None = None,
+            intermediate_tensors: IntermediateTensors | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            **extra_layer_kwargs: Any,
+        ) -> torch.Tensor | IntermediateTensors:
+            return model.forward_edge_cloud_segment(
+                start_layer,
+                end_layer,
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                **extra_layer_kwargs,
+            )
 
-        返回 EdgeCloudSegment（nn.Module 子类）而非函数闭包，
-        确保 ACLGraphWrapper 包裹的是标准 nn.Module，与标准流程的
-        图捕获方式对齐（torch.npu.graph 捕获 nn.Module.forward()）。
-
-        边云场景下所有模型均已在加载阶段通过对应 patch 文件注入
-        forward_edge_cloud_segment，因此直接委托即可，无需额外 fallback。
-        """
-        return EdgeCloudSegment(model, start_layer, end_layer, is_first_segment, is_last_segment)
+        return _segment_forward
 
     def _wrap_segment_if_needed(
         self,
@@ -884,25 +877,18 @@ class NPUModelRunner(GPUModelRunner):
             dist_utils.get_pp_indices = orig_get_pp_indices
 
     def _load_model_edge_cloud(self) -> None:
-        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25):
+        if not self._is_qwen3_5:
             raise NotImplementedError(
-                "edge-cloud mode currently supports Qwen3.5, DeepseekV2/V3, "
-                "and Kimi-K2.5/K2.6 models."
+                "edge-cloud mode in this migration only supports Qwen3.5/Qwen3.5-MoE"
             )
 
         logger.info(
-            "Starting to load model in edge-cloud mode: role=%s, mode=%s, head_k=%d, tail_k=%d",
+            "Starting to load model in edge-cloud mode: role=%s, head_k=%d, tail_k=%d",
             self.edge_cloud_cfg.role,
-            self.edge_cloud_cfg.mode,
             self.head_k,
             self.tail_k,
         )
-        if self._is_qwen3_5:
-            import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
-        if self._is_deepseek_v2:
-            import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
-        if self._is_kimi_k25:
-            import vllm_ascend.patch.models.kimi_k25_edge_cloud  # noqa: F401
+        import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
 
         device_config = self.vllm_config.device_config
         load_config = self.vllm_config.load_config
@@ -920,7 +906,6 @@ class NPUModelRunner(GPUModelRunner):
             role=self.edge_cloud_cfg.role,
             total_layers=self.num_layers,
             k=[self.head_k, self.tail_k],
-            mode=self.edge_cloud_cfg.mode,
         )
         LayerShardLoader.apply_sharding(
             self.model, layer_plan, self.vllm_config.compilation_config
@@ -944,30 +929,16 @@ class NPUModelRunner(GPUModelRunner):
         ]
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
 
-        # 创建分段 callable 并按需包装 ACLGraphWrapper
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            self.update_stream = torch.npu.Stream()
-
         if self.edge_cloud_cfg.role == "edge":
-            self.segment_a = self._create_segment_callable(
-                self.model, 0, self.head_k, is_first_segment=True, is_last_segment=False
-            )
+            self.segment_a = self._create_segment_callable(self.model, 0, self.head_k)
             self.segment_e = self._create_segment_callable(
-                self.model,
-                self.num_layers - self.tail_k,
-                self.num_layers,
-                is_first_segment=False,
-                is_last_segment=True,
+                self.model, self.num_layers - self.tail_k, self.num_layers
             )
             self.segment_a_wrapper = self._wrap_segment_if_needed(self.segment_a)
             self.segment_e_wrapper = self._wrap_segment_if_needed(self.segment_e)
         else:
             self.segment_c = self._create_segment_callable(
-                self.model,
-                self.head_k,
-                self.num_layers - self.tail_k,
-                is_first_segment=False,
-                is_last_segment=False,
+                self.model, self.head_k, self.num_layers - self.tail_k
             )
             self.segment_c_wrapper = self._wrap_segment_if_needed(self.segment_c)
 
@@ -3353,14 +3324,25 @@ class NPUModelRunner(GPUModelRunner):
         forward_context = get_forward_context()
         assert forward_context is not None
 
-        # 判断当前是否应使用 ACL Graph（Decode 阶段且配置允许时）
-        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
-        if hasattr(cudagraph_runtime_mode, "decode_mode"):
-            cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
-        use_graph = (
-            cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and self.edge_cloud_cfg.enable_decode_graph
-        )
+        model_inputs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "intermediate_tensors": intermediate_tensors,
+            "inputs_embeds": inputs_embeds,
+            **model_kwargs,
+        }
+        if self._edge_cloud_enabled:
+            if self.edge_cloud_cfg.role == "edge":
+                segment = (
+                    self.segment_a_wrapper
+                    if intermediate_tensors is None
+                    else self.segment_e_wrapper
+                )
+            else:
+                segment = self.segment_c_wrapper
+            run_model = partial(segment, **model_inputs)
+        else:
+            run_model = partial(self.model, **model_inputs)
 
         if self.edge_cloud_cfg.role == "edge":
             return self._edge_cloud_forward_edge(
@@ -4518,73 +4500,6 @@ class NPUModelRunner(GPUModelRunner):
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
-            ):
-                outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
-                )
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
-            elif isinstance(outputs, IntermediateTensors):
-                hidden_states = outputs["hidden_states"]
-            else:
-                hidden_states = outputs
-            dummy_compute_logits(hidden_states)
-
-            if self.drafter and not profile_cpp:
-                self.drafter.dummy_run(
-                    num_tokens=num_tokens_padded,
-                    with_prefill=with_prefill,
-                    num_reqs=num_reqs_padded,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    aclgraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_desc,
-                    dummy_compute_logits=dummy_drafter_compute_logits,
-                    in_graph_capturing=not force_attention,
-                    is_profile=is_profile,
-                )
-            if is_profile and self.dynamic_eplb:
-                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
-                target.clear_all_moe_loads()
-            if self.dynamic_eplb:
-                self.eplb_updator.forward_end()
-
-            # ========== Edge 设备特殊处理：Edge 首阶段需要执行最后一层 ==========
-            if is_edge_device():
-                # 断言：边设备输出必须是 IntermediateTensors 类型
-                assert isinstance(outputs, IntermediateTensors)
-
-                # 重新准备 intermediate_tensors（与上文逻辑相同）
-                intermediate_tokens = num_tokens_padded
-                if enable_sp():
-                    tp_size = get_tensor_model_parallel_world_size()
-                    intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
-                if self.intermediate_tensors is None:
-                    max_actual_tokens = self.max_num_tokens
-                    if enable_sp():
-                        max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
-                        # 调用模型方法创建空的中间张量
-                    self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                        batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
-                    )
-                # 切片
-                intermediate_tensors = IntermediateTensors(
-                    {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
-                )
-
-            need_dummy_logits = not is_profile and lmhead_tp_enable()
-            max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-            dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
-
-            with set_ascend_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens_padded,
-                num_tokens_across_dp=num_tokens_across_dp,
-                in_profile_run=is_profile,
-                num_actual_tokens=num_tokens_padded,
-                aclgraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_desc,
-                model_instance=self.model,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
@@ -6080,29 +5995,21 @@ class NPUModelRunner(GPUModelRunner):
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
         if self._edge_cloud_enabled and hasattr(self, "model") and self.model is not None:
-            # In embedding_only mode, edge side has no transformer layers but
-            # still needs kv_cache_spec to be non-empty so the scheduler can
-            # allocate KV cache and schedule requests. Cloud side manages the
-            # actual KV cache usage; edge side keeps the spec for scheduling.
-            if not (
-                self.edge_cloud_cfg.mode == "embedding_only"
-                and self.edge_cloud_cfg.role == "edge"
-            ):
-                import re
+            import re
 
-                local_layer_indices = {
-                    idx
-                    for idx, layer in enumerate(
-                        LayerShardLoader._get_transformer_model(self.model).layers
-                    )
-                    if not isinstance(layer, PPMissingLayer)
-                }
-                filtered_spec: dict[str, KVCacheSpec] = {}
-                for layer_name, spec in kv_cache_spec.items():
-                    match = re.search(r"layers\.(\d+)", layer_name)
-                    if match is None or int(match.group(1)) in local_layer_indices:
-                        filtered_spec[layer_name] = spec
-                kv_cache_spec = filtered_spec
+            local_layer_indices = {
+                idx
+                for idx, layer in enumerate(
+                    LayerShardLoader._get_transformer_model(self.model).layers
+                )
+                if not isinstance(layer, PPMissingLayer)
+            }
+            filtered_spec: dict[str, KVCacheSpec] = {}
+            for layer_name, spec in kv_cache_spec.items():
+                match = re.search(r"layers\.(\d+)", layer_name)
+                if match is None or int(match.group(1)) in local_layer_indices:
+                    filtered_spec[layer_name] = spec
+            kv_cache_spec = filtered_spec
 
         return kv_cache_spec
 
@@ -6190,24 +6097,10 @@ class NPUModelRunner(GPUModelRunner):
         return wrappers
 
     def capture_model(self) -> int:
-        # 边云模式的 ACL Graph 仍依赖父类 capture 循环触发 _dummy_run。
-        # 实际捕获发生在 segment 级 ACLGraphWrapper 内，通信保持在图外。
-        if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
+        """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        if self._edge_cloud_enabled:
             return 0
-
-        gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)
-        if gpu_model_runner_cls is None:
-            raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
-        parent_module_name = gpu_model_runner_cls.__module__
-        # profile_cudagraph_memory 阶段 ACLGraphWrapper 已捕获过图，
-        # 但 CUDAGraphWrapper.clear_all_graphs() 不清除 ACLGraphWrapper
-        # 的 concrete_aclgraph_entries。保留的 entry 会导致 capture_model
-        # 中 _warmup_and_capture 走 REPLAY 而非 CAPTURE 路径，
-        # REPLAY 时 forward_context.capturing 保持 False，
-        # 使得 _update_full_graph_params_if_needed 错误执行 → 挂死。
-        # 因此这里手动清空，强制重新 capture。
-        for wrapper in self._get_aclgraph_wrappers():
-            wrapper.concrete_aclgraph_entries.clear()
+        parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
         return result

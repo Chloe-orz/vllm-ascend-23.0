@@ -21,7 +21,6 @@ class EdgeCloudLayerPlan:
     role: str
     total_layers: int
     k: int | list[int] | tuple[int, int] = 1
-    mode: str = "head_tail"
 
     def __post_init__(self):
         if isinstance(self.k, (list, tuple)) and len(self.k) == 2:
@@ -30,29 +29,18 @@ class EdgeCloudLayerPlan:
         else:
             self.head_k = self.tail_k = int(self.k)
 
-        if self.mode not in ("head_tail", "embedding_only"):
-            raise ValueError(f"mode must be 'head_tail' or 'embedding_only', got {self.mode}")
-        if self.mode == "embedding_only":
-            self.head_k = 0
-            self.tail_k = 0
-
         if self.role not in ("edge", "cloud"):
             raise ValueError(f"role must be edge or cloud, got {self.role}")
-        if self.mode == "head_tail":
-            if self.head_k <= 0 or self.tail_k <= 0:
-                raise ValueError("head/tail layer counts must be positive in 'head_tail' mode")
-            if self.head_k + self.tail_k >= self.total_layers:
-                raise ValueError(
-                    "edge head/tail layers must leave at least one cloud layer: "
-                    f"head_k={self.head_k}, tail_k={self.tail_k}, "
-                    f"total_layers={self.total_layers}"
-                )
+        if self.head_k <= 0 or self.tail_k <= 0:
+            raise ValueError("head/tail layer counts must be positive")
+        if self.head_k + self.tail_k >= self.total_layers:
+            raise ValueError(
+                "edge head/tail layers must leave at least one cloud layer: "
+                f"head_k={self.head_k}, tail_k={self.tail_k}, "
+                f"total_layers={self.total_layers}"
+            )
 
     def get_local_layers(self) -> set[int]:
-        if self.mode == "embedding_only":
-            if self.role == "edge":
-                return set()
-            return set(range(self.total_layers))
         if self.role == "edge":
             return set(range(self.head_k)) | set(
                 range(self.total_layers - self.tail_k, self.total_layers)
@@ -113,15 +101,6 @@ class LayerShardLoader:
             lm_head = getattr(language_model, "lm_head", None)
             if lm_head is not None and not isinstance(lm_head, PPMissingLayer):
                 language_model.lm_head = PPMissingLayer()
-            # Cloud side does not need vision components for VL models.
-            for attr in ("vision_tower", "multi_modal_projector", "mm_projector"):
-                module = getattr(model, attr, None)
-                if module is not None and not isinstance(module, PPMissingLayer):
-                    setattr(model, attr, PPMissingLayer())
-                    logger.info(
-                        "[LayerShardLoader] Replaced %s with PPMissingLayer on cloud",
-                        attr,
-                    )
 
         if compilation_config is not None:
             cls._clean_compilation_config(model, compilation_config)

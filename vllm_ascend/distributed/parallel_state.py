@@ -74,7 +74,7 @@ def init_ascend_model_parallel(
         return
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-    global_tp_size = parallel_config.tensor_parallel_size
+    global_tp_size = 1 if parallel_config.enable_edge_cloud else parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size
@@ -407,10 +407,7 @@ def edge_cloud_broadcast_recv() -> tuple[
 
     if is_pp_npu0:
         tensor_dict, comm_handles, comm_postprocess = pp_group.irecv_tensor_dict()
-        assert tensor_dict is not None, (
-            "edge_cloud_broadcast_recv: PP tensor_dict is None, "
-            "sender may have failed."
-        )
+        assert tensor_dict is not None
 
         metadata_list, _ = _split_tensor_dict(tensor_dict)
         tp_group.broadcast_object(metadata_list, src=0)
@@ -434,21 +431,14 @@ def edge_cloud_broadcast_recv() -> tuple[
         return tensor_dict, comm_handles, comm_postprocess
 
     metadata_list = tp_group.broadcast_object(None, src=0)
-    if metadata_list is None:
-        metadata_list = []
     recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
+    handles: list[Handle] = []
 
     for key, value in metadata_list:
         if isinstance(value, TensorMetadata):
             tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
             recv_tensor_dict[key] = tensor
-        else:
-            recv_tensor_dict[key] = value
-
-    def broadcast_postprocess():
-        handles = []
-        for tensor in recv_tensor_dict.values():
-            if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
+            if tensor.numel() == 0:
                 continue
             group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
             handles.append(
@@ -456,7 +446,6 @@ def edge_cloud_broadcast_recv() -> tuple[
                     tensor, src=tp_group.ranks[0], group=group, async_op=True
                 )
             )
-        for handle in handles:
-            handle.wait()
-
-    return recv_tensor_dict, [], [broadcast_postprocess]
+        else:
+            recv_tensor_dict[key] = value
+    return recv_tensor_dict, handles, []
