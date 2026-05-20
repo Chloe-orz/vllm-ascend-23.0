@@ -120,7 +120,6 @@ docker run ...
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
 - Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK).
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
 
 **Example:**
@@ -148,9 +147,9 @@ Expected Result: Omitted (fill in according to actual output).
 **Content Writing Requirements:**
 
 - Describe the principles of PD separation architecture and applicable scenarios.
-- Provide startup procedures, key configurations, and **deployment verification instructions**, and indicate performance metrics.
+- Provide startup procedures, key configurations, and **deployment verification instructions**.
+- Indicate performance metrics.
 - Below the startup command, provide guidance on common issues; if already described in the public FAQ, a direct link may be provided.
-- When content involves multiple hardware series (e.g., A3/A2), the `tab-set` markup syntax must be used to present them in separate tabs,and the tabs should be arranged with the newest models first.
 
 **Example:** Omitted
 
@@ -287,9 +286,26 @@ The following optimizations are enabled by default and require no additional con
 | Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
 | Weight Prefetch | MLP-intensive scenarios (Dense models) | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | Requires coordination with prefetch buffer size adjustment |
 
-## 10 FAQ
+| Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
+| --------------------- | -------------------- | ----------------- | ------------------- | ----------- |
+| FlashComm_v1 | High-concurrency, Tensor Parallelism (TP) scenarios | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather, reducing RMSNorm computation dimensions | Threshold protection: Only takes effect when the actual number of tokens exceeds the threshold to avoid performance degradation in low-concurrency scenarios |
+| Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling FlashComm_v1 | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as FlashComm_v1, has threshold protection |
+| Weight Prefetch | MLP-intensive scenarios (Dense models) | `export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` | Utilizes vector computation time to prefetch MLP weights into L2 cache in advance | Requires coordination with prefetch buffer size adjustment |
+| Asynchronous Scheduling | Large-scale models, high-concurrency scenarios | `--async-scheduling` | Non-blocking task scheduling to improve concurrent processing capability | Should be used in coordination with FullGraph optimization |
+
+### 10.2 Optimization Highlights
 
 **Content Writing Requirements:**
 
-- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+Summarize the most noteworthy optimization points during the actual tuning process, distill core experiences, and provide readers with tuning ideas for getting started quickly.
+
+**Example:**
+
+During the actual tuning process, the following points are most critical for performance improvement: The prefetch buffer size needs to be determined through empirical measurement to find the optimal overlap between computation and prefetching; the setting of `max-num-batched-tokens` needs to balance throughput and video memory to avoid excessive chunking or OOM risk; `cudagraph_capture_sizes` must be manually specified and cover the target concurrency; when FlashComm_v1 is enabled, it is also necessary to ensure that the values are multiples of TP; `pa_shape_list` is a temporary tuning parameter that only takes effect for specific batch sizes, requiring attention to version evolution for timely adjustments. The coordinated configuration of the above parameters and environment variables is key to achieving extreme performance.
+
+## 11 FAQ
+
+**Content Writing Requirements:**
+
+- Add a note at the beginning of the section: For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
 - For **model-specific issues**, provide the following elements: problem phenomenon description, cause analysis, and solution measures.
