@@ -45,26 +45,26 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_dp_group,
-    get_edge_cloud_layer_range,
     get_pcp_group,
     get_pp_group,
     get_tp_group,
-    is_edge_cloud_pp_mode,
-    is_edge_device,
-    set_edge_cloud_layer_range,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import get_model, get_model_loader
+from vllm.model_executor.model_loader.utils import (
+    initialize_model,
+    process_weights_after_loading,
+)
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import get_dtype_size, set_default_torch_dtype
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -197,11 +197,10 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
-from vllm_ascend.worker.edge_cloud.execute_model_bundle import (
-    _ExecuteModelBundle,
-    _MergedAttnContext,
+from vllm_ascend.model_loader.layer_shard_loader import (
+    EdgeCloudLayerPlan,
+    LayerShardLoader,
 )
-
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -901,6 +900,42 @@ class NPUModelRunner(GPUModelRunner):
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
 
+        self.edge_cloud_cfg = self.ascend_config.edge_cloud_config
+        self._edge_cloud_enabled = self.edge_cloud_cfg.enabled
+        if self._edge_cloud_enabled:
+            if not self.parallel_config.enable_edge_cloud:
+                raise ValueError(
+                    "additional_config.edge_cloud_config.enabled requires "
+                    "--enable-edge-cloud."
+                )
+            expected_role = "edge" if self.parallel_config.is_edge_node else "cloud"
+            if self.edge_cloud_cfg.role != expected_role:
+                raise ValueError(
+                    "additional_config.edge_cloud_config.role must match the "
+                    f"process role inferred from --headless. Expected "
+                    f"{expected_role!r}, got {self.edge_cloud_cfg.role!r}."
+                )
+            self.head_k, self.tail_k = self.edge_cloud_cfg.head_tail_k
+            hf_config = getattr(self.model_config, "hf_text_config", None)
+            model_type = getattr(hf_config, "model_type", "")
+            self._is_qwen3_5 = "qwen3_5" in model_type
+            self.num_layers = 0
+            self.segment_a: Any = None
+            self.segment_e: Any = None
+            self.segment_c: Any = None
+            self.segment_a_wrapper: Any = None
+            self.segment_e_wrapper: Any = None
+            self.segment_c_wrapper: Any = None
+        else:
+            self.head_k = 0
+            self.tail_k = 0
+            self._is_qwen3_5 = False
+            if self.parallel_config.enable_edge_cloud:
+                raise ValueError(
+                    "--enable-edge-cloud requires "
+                    "additional_config.edge_cloud_config.enabled=true."
+                )
+
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -980,78 +1015,35 @@ class NPUModelRunner(GPUModelRunner):
             return False
         return bool(getattr(forward_context, "in_profile_run", False))
 
-    def _create_raw_segment_callable(
-        self,
-        model: torch.nn.Module,
-        start_layer: int,
-        end_layer: int,
-        is_first_segment: bool | None = None,
-        is_last_segment: bool | None = None,
-    ) -> EdgeCloudSegment:
-        return EdgeCloudSegment(
-            model, start_layer, end_layer, is_first_segment, is_last_segment
-        )
-
-    def _maybe_compile_segment_callable(
-        self,
-        segment: Any,
-        start_layer: int,
-        end_layer: int,
-    ) -> Any:
-        # 若全局 enable_npugraph_ex 开启且当前处于全图模式，
-        # 对 segment 应用 npugraph_ex 编译时优化（第1层）。
-        # 第2层（ACLGraphWrapper 运行时捕获）由 _wrap_segment_if_needed 负责。
-        ascend_compilation_config = get_ascend_config().ascend_compilation_config
-        if (
-            ascend_compilation_config.enable_npugraph_ex
-            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            logger.info(
-                "EdgeCloudCompiledSegment wrapping segment [%d, %d) "
-                "with npugraph_ex compile-time optimization.",
-                start_layer,
-                end_layer,
-            )
-            return EdgeCloudCompiledSegment(
-                segment,
-                self.vllm_config,
-                ascend_compilation_config,
-            )
-
-        return segment
-
     def _create_segment_callable(
         self,
         model: torch.nn.Module,
         start_layer: int,
         end_layer: int,
-        is_first_segment: bool | None = None,
-        is_last_segment: bool | None = None,
     ) -> Any:
-        """创建一个仅执行指定层区间 [start_layer, end_layer) 的 nn.Module。
+        def _segment_forward(
+            input_ids: torch.Tensor | None = None,
+            positions: torch.Tensor | None = None,
+            intermediate_tensors: IntermediateTensors | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+            **extra_layer_kwargs: Any,
+        ) -> torch.Tensor | IntermediateTensors:
+            return model.forward_edge_cloud_segment(
+                start_layer,
+                end_layer,
+                input_ids,
+                positions,
+                intermediate_tensors,
+                inputs_embeds,
+                **extra_layer_kwargs,
+            )
 
-        返回 EdgeCloudSegment（nn.Module 子类）而非函数闭包，
-        确保 ACLGraphWrapper 包裹的是标准 nn.Module，与标准流程的
-        图捕获方式对齐（torch.npu.graph 捕获 nn.Module.forward()）。
-
-        当 enable_npugraph_ex 开启且 cudagraph_mode 支持全图编译时，
-        额外包裹 EdgeCloudCompiledSegment，使 segment 先经过
-        torch.compile → npugraph_ex_compile 编译时优化，
-        再由 ACLGraphWrapper 进行运行时图捕获，对齐标准流程的两层图优化。
-
-        边云场景下所有模型均已在加载阶段通过对应 patch 文件注入
-        forward_edge_cloud_segment，因此直接委托即可，无需额外 fallback。
-        """
-        segment = self._create_raw_segment_callable(
-            model, start_layer, end_layer, is_first_segment, is_last_segment
-        )
-        return self._maybe_compile_segment_callable(segment, start_layer, end_layer)
+        return _segment_forward
 
     def _wrap_segment_if_needed(
         self,
         segment: Any,
         runtime_mode: CUDAGraphMode = CUDAGraphMode.FULL,
-        is_draft: bool = False,
     ) -> Any:
         if not self.edge_cloud_cfg.enable_decode_graph:
             return segment
@@ -1059,208 +1051,97 @@ class NPUModelRunner(GPUModelRunner):
             return segment
         if self._is_dummy_or_profile_run():
             return segment
-        # 与标准（非边云）流程对齐：draft/proposer 仅在
-        # `_use_aclgraph() and not speculative_config.enforce_eager` 时才用图
-        # （见 llm_base_proposer.py:166 —— eagle3 enforce_eager=True 即代表 draft
-        # 跑 eager）。注意：target 模型段的图开关由 model_config.enforce_eager /
-        # cudagraph_mode 决定，与 speculative_config.enforce_eager 无关，因此该
-        # 分支只对 draft 段（_edge_cloud_draft_segments）生效。
-        if (
-            is_draft
-            and self.speculative_config is not None
-            and self.speculative_config.enforce_eager
-        ):
-            return segment
-        return EdgeCloudACLGraphWrapper(
+        return ACLGraphWrapper(
             segment,
             self.vllm_config,
             runtime_mode=runtime_mode,
             cudagraph_options=None,
-            # 与标准（非边云）流程的 ACLGraphWrapper 构造保持一致（model_runner_v1.py:5298），
-            # 否则边云 wrapper 的 use_eagle 恒为 False：
-            #  - target 验证路径（is_draft_model=False）不受影响（need_sync 恒为 True），
-            #  - 但 draft 段（is_draft_model=True）回放前的 synchronize 屏障决策会与非边云分叉。
-            use_eagle=self.use_eagle,
-            enable_enpu=self.enable_enpu,
         )
 
-    def _get_edge_cloud_segment_model(self, segment: Any) -> torch.nn.Module:
-        """Unwrap ACLGraph / compiled wrappers to reach the EdgeCloudSegment.
+    def _initialize_edge_cloud_model_structure(self) -> nn.Module:
+        """Build the full model tree before edge-cloud layer sharding.
 
-        Edge-cloud draft segments may be wrapped by ``EdgeCloudCompiledSegment``
-        (torch.compile) and/or ``EdgeCloudACLGraphWrapper`` (runtime graph
-        capture).  Both wrappers hide the original ``EdgeCloudSegment`` and its
-        ``_edge_model`` attribute.  This helper peels off the wrappers so that
-        callers can access the underlying draft model for configuration lookups
-        such as ``model.fc.input_size``.
+        Edge-cloud mode uses PP groups for runtime communication, but model
+        construction must not apply normal PP layer slicing. The layer sharder
+        below decides which layers are local on edge/cloud.
         """
-        while isinstance(segment, (EdgeCloudCompiledSegment, EdgeCloudACLGraphWrapper)):
-            if isinstance(segment, EdgeCloudCompiledSegment):
-                segment = segment._segment
-            else:
-                segment = segment.unwrap()
-        return segment._edge_model
+        import vllm.distributed.utils as dist_utils
 
-    def _prepare_eagle3_cloud_hidden_states(
-        self,
-        segment: Any,
-        intermediate_tensors: IntermediateTensors,
-        aux_hidden_states: torch.Tensor | None,
-        num_tokens: int,
-        is_first_step: bool,
-    ) -> None:
-        """Prepare the draft input outside the captured cloud segment.
+        orig_get_pp_indices = dist_utils.get_pp_indices
 
-        ``spec_step_idx`` selects this preparation at the caller.  The segment
-        itself must have one static execution path so that ACL graph replay does
-        not reuse the first-step fusion branch for later speculative steps.
-        """
-        if aux_hidden_states is None:
-            if is_first_step:
-                raise RuntimeError(
-                    "EAGLE3 cloud segment received empty aux_hidden_states "
-                    "on the first speculative step."
-                )
-            return
+        def _full_layer_range(num_hidden_layers: int, pp_rank: int, pp_size: int):
+            return 0, num_hidden_layers
 
-        draft_model = self._get_edge_cloud_segment_model(segment)
-        if not draft_model.model.use_aux_hidden_state:
-            return
-        if aux_hidden_states.shape[0] != num_tokens:
-            assert aux_hidden_states.shape[0] > num_tokens, (
-                f"aux_hidden_states batch size {aux_hidden_states.shape[0]} "
-                f"is smaller than draft num_tokens {num_tokens}"
-            )
-            aux_hidden_states = aux_hidden_states[:num_tokens]
-
-        hidden_states = intermediate_tensors["hidden_states"]
-        fused_hidden_states = draft_model.combine_hidden_states(aux_hidden_states)
-        if hidden_states.numel() == 0:
-            # Warmup or edge-cloud broadcast may send an empty placeholder
-            # hidden_states tensor (shape [0] or [0, hidden_size]). Replace it
-            # with the fused result so the cloud segment sees valid input.
-            intermediate_tensors["hidden_states"] = fused_hidden_states
-        else:
-            assert hidden_states.shape == fused_hidden_states.shape, (
-                "EAGLE3 cloud hidden_states buffer shape does not match the "
-                f"fusion result: {hidden_states.shape} vs {fused_hidden_states.shape}"
-            )
-            hidden_states.copy_(fused_hidden_states)
+        dist_utils.get_pp_indices = _full_layer_range
+        try:
+            with set_default_torch_dtype(self.vllm_config.model_config.dtype):
+                return initialize_model(self.vllm_config)
+        finally:
+            dist_utils.get_pp_indices = orig_get_pp_indices
 
     def _load_model_edge_cloud(self) -> None:
-        """边云场景的模型加载流程（复用 vLLM 标准 PP 初始化，直接加载到 NPU）。
-
-        核心思路：
-          通过 set_edge_cloud_layer_range() 存储 head_k/tail_k 到全局变量，
-          在模型 __init__ 阶段 make_layers() → get_edge_cloud_layer_range()
-          读取后直接按边云非连续层范围创建 PPMissingLayer 占位，
-          使非本地层在初始化时就是占位层，权重加载阶段自动跳过。
-
-        流程：
-          1. set_edge_cloud_layer_range(head_k, tail_k) 存储层范围
-          2. get_model → BaseModelLoader.load_model（标准 NPU 上初始化+加载）
-          3. 创建分段 callable 并按需包装 ACLGraphWrapper
-        """
-        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25 
-                or self._is_glm4_moe or self._is_minimax_m2):
+        if not self._is_qwen3_5:
             raise NotImplementedError(
-                "edge-cloud mode currently supports Qwen3.5, DeepseekV2/V3, "
-                "Kimi-K2.5/K2.6, GLM-4/GLM-5 models, and MiniMax-M2 models."
+                "edge-cloud mode in this migration only supports Qwen3.5/Qwen3.5-MoE"
             )
 
         logger.info(
-            "Starting to load model in edge-cloud mode: role=%s, mode=%s, head_k=%d, tail_k=%d",
+            "Starting to load model in edge-cloud mode: role=%s, head_k=%d, tail_k=%d",
             self.edge_cloud_cfg.role,
-            self.edge_cloud_cfg.mode,
             self.head_k,
             self.tail_k,
         )
-        if self._is_deepseek_v4:
-            import vllm_ascend.patch.models.deepseek_v4_edge_cloud
-        if self._is_qwen3_5:
-            import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
-        if self._is_deepseek_v2:
-            import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
-        if self._is_kimi_k25:
-            import vllm_ascend.patch.models.kimi_k25_edge_cloud  # noqa: F401
-        if self._is_glm4_moe:
-            hf_text_config = getattr(self.model_config, "hf_text_config", None)
-            text_model_type = getattr(hf_text_config, "model_type", "")
-            if "glm_moe_dsa" in text_model_type:
-                import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
-        if self._is_minimax_m2:
-            import vllm_ascend.patch.models.minimax_m2_edge_cloud  # noqa: F401
+        import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
 
-        # 1. 存储 head_k / tail_k 到 parallel_state 全局变量，
-        #    使 make_layers() 在模型 __init__ 中能直接读取并创建正确的
-        #    PPMissingLayer 占位（非本地层）和真实层（本地层）。
-        set_edge_cloud_layer_range(self.head_k, self.tail_k)
+        device_config = self.vllm_config.device_config
+        load_config = self.vllm_config.load_config
+        load_device = (
+            device_config.device if load_config.device is None else load_config.device
+        )
+        target_device = torch.device(load_device)
 
-        # 2. 复用标准 vLLM 加载流程：init on device + load_weights on device
-        #    BaseModelLoader.load_model 内部：
-        #      with target_device: initialize_model()  → 模型创建在 NPU
-        #      load_weights()                          → 权重直接到 NPU（跳过占位层）
-        #      process_weights_after_loading()        → 量化/格式调整在 NPU
-        #      return model.eval()
-        #
-        #    make_layers() → _get_edge_cloud_local_indices()
-        #    → get_edge_cloud_layer_range() 读取 head_k/tail_k
-        #    → 根据 is_edge_device() 计算本侧本地层索引
-        #    → 非本地层初始化为 PPMissingLayer（无参数，不占显存）。
-        self.model = get_model(vllm_config=self.vllm_config)
+        self.model = self._initialize_edge_cloud_model_structure()
 
-        # Locate the transformer layers — the model may be wrapped in a
-        # multimodal ConditionalGeneration (language_model.model.layers)
-        # or be a plain CausalLM (model.layers).
-        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
-            transformer_layers = self.model.model.layers
-        else:
-            transformer_layers = self.model.language_model.model.layers
-        self.num_layers = len(transformer_layers)
+        transformer_model = LayerShardLoader._get_transformer_model(self.model)
+        self.num_layers = len(transformer_model.layers)
 
-        # set_moe_parameters() 在 __init__ 中只遍历到本地层，因此不存在
-        # 非本地层 stale 引用问题。但为确保 moe_layers/moe_mlp_layers
-        # 引用正确，重新收集一次（与标准 PP 行为对齐）。
-        if hasattr(self.model, 'set_moe_parameters'):
+        layer_plan = EdgeCloudLayerPlan(
+            role=self.edge_cloud_cfg.role,
+            total_layers=self.num_layers,
+            k=[self.head_k, self.tail_k],
+        )
+        LayerShardLoader.apply_sharding(
+            self.model, layer_plan, self.vllm_config.compilation_config
+        )
+
+        if hasattr(self.model, "set_moe_parameters"):
             self.model.set_moe_parameters()
 
-        # 打印每层最终状态（诊断用）
-        layer_states = []
-        for idx, layer in enumerate(transformer_layers):
-            layer_states.append(
-                f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
+        model_loader = get_model_loader(self.vllm_config.load_config)
+        model_loader.load_weights(self.model, self.vllm_config.model_config)
+        self.model.to(target_device)
+        with torch.device(target_device):
+            process_weights_after_loading(
+                self.model, self.vllm_config.model_config, target_device
             )
+        self.model = self.model.eval()
+
+        layer_states = [
+            f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
+            for idx, layer in enumerate(transformer_model.layers)
+        ]
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
 
-        # 3. 创建分段 callable 并按需包装 ACLGraphWrapper
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            self.update_stream = torch.npu.Stream()
-
         if self.edge_cloud_cfg.role == "edge":
-            self.segment_a = self._create_segment_callable(
-                self.model, 0, self.head_k, is_first_segment=True, is_last_segment=False
-            )
+            self.segment_a = self._create_segment_callable(self.model, 0, self.head_k)
             self.segment_e = self._create_segment_callable(
-                self.model,
-                self.num_layers - self.tail_k,
-                self.num_layers,
-                is_first_segment=False,
-                is_last_segment=True,
+                self.model, self.num_layers - self.tail_k, self.num_layers
             )
             self.segment_a_wrapper = self._wrap_segment_if_needed(self.segment_a)
             self.segment_e_wrapper = self._wrap_segment_if_needed(self.segment_e)
         else:
-            self.segment_c_raw = self._create_raw_segment_callable(
-                self.model,
-                self.head_k,
-                self.num_layers - self.tail_k,
-                is_first_segment=False,
-                is_last_segment=False,
-            )
-            self.segment_c = self._maybe_compile_segment_callable(
-                self.segment_c_raw,
-                self.head_k,
-                self.num_layers - self.tail_k,
+            self.segment_c = self._create_segment_callable(
+                self.model, self.head_k, self.num_layers - self.tail_k
             )
             self.segment_c_wrapper = self._wrap_segment_if_needed(self.segment_c)
 
@@ -1269,294 +1150,6 @@ class NPUModelRunner(GPUModelRunner):
             self.num_layers,
             self.edge_cloud_cfg.role,
         )
-
-        if self.drafter is not None:
-            logger.info("[EdgeCloud] Loading drafter model...")
-            if self.vllm_config.quant_config is not None:
-                patch_load_weights(self.vllm_config)
-
-            is_edge_cloud_draft_drafter = (
-                self.speculative_config is not None
-                and self.speculative_config.method in ("mtp", "eagle3")
-            )
-            if is_edge_cloud_draft_drafter:
-                # Draft models (MTP/Eagle3) use the same edge-cloud layer range
-                # mechanism as the main model. In both embedding_only and
-                # head_tail modes all draft decoder layers run on the cloud, so
-                # temporarily use head_k=tail_k=0 while loading the drafter.
-                set_edge_cloud_layer_range(0, 0)
-                if self.speculative_config.method == "eagle3":
-                    import vllm_ascend.patch.models.eagle3_edge_cloud  # noqa: F401
-
-            with get_tp_context(self.drafter):
-                self.drafter.load_model(self.model)
-
-            if (
-                is_edge_cloud_draft_drafter
-                and hasattr(self.drafter, "model")
-                and self.drafter.model is not None
-            ):
-                self._setup_edge_cloud_draft(
-                    self.drafter.model, self.speculative_config.method
-                )
-
-            if is_edge_cloud_draft_drafter:
-                # Do not leak the drafter's cloud-only range into later
-                # main-model initialization or cache setup.
-                set_edge_cloud_layer_range(self.head_k, self.tail_k)
-
-            # In edge-cloud EAGLE3 mode the target model also needs its
-            # auxiliary hidden-state layers configured, just like the standard
-            # (non-edge-cloud) load path. The cloud segment reads these layers
-            # in forward_edge_cloud_segment to produce aux_hidden_states for the
-            # draft model. Without this the aux_hidden_states key is missing
-            # from the cloud segment output, which causes KeyError or makes the
-            # draft model fall back to dummy zero states.
-            if self.use_aux_hidden_state_outputs:
-                from vllm.model_executor.models.interfaces import supports_eagle3
-                if not supports_eagle3(self.model):
-                    raise RuntimeError(
-                        "Model does not support EAGLE3 interface but "
-                        "aux_hidden_state_outputs was requested"
-                    )
-                aux_layers = self._get_eagle3_aux_layers_from_config()
-                if not aux_layers:
-                    aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
-                self.model.set_aux_hidden_state_layers(aux_layers)
-
-    def _get_mtp_predictor(self, mtp_model: nn.Module) -> nn.Module | None:
-        """Locate the MTP predictor module inside the draft model.
-
-        Supports both upstream ``DeepSeekMTP`` style models (predictor exposes
-        ``fc``/``norm``/``embed_tokens``/``layers``) and the vLLM-Ascend
-        ``DeepSeekV4MTP`` style (predictor inside ``mtp_model.model``).
-        """
-        if hasattr(mtp_model, "model"):
-            inner = mtp_model.model
-            if hasattr(inner, "layers") and hasattr(inner, "embed_tokens"):
-                return inner
-        if hasattr(mtp_model, "layers") and hasattr(mtp_model, "embed_tokens"):
-            return mtp_model
-        return None
-
-    def _clean_mtp_compilation_config(
-        self,
-        mtp_model: nn.Module,
-        mtp_module_ids: set[int],
-    ) -> None:
-        """Remove stale static_forward_context entries pointing to MTP layers
-        that were replaced by ``PPMissingLayer`` during edge-cloud sharding."""
-        compilation_config = self.vllm_config.compilation_config
-        if compilation_config is None:
-            return
-
-        current_mtp_module_ids = {
-            id(module) for _, module in mtp_model.named_modules()
-        }
-        removed_prefixes: list[str] = []
-        for prefix in list(compilation_config.static_forward_context.keys()):
-            module = compilation_config.static_forward_context[prefix]
-            if id(module) in mtp_module_ids and id(module) not in current_mtp_module_ids:
-                del compilation_config.static_forward_context[prefix]
-                removed_prefixes.append(prefix)
-
-        if removed_prefixes:
-            logger.info(
-                "[EdgeCloud] MTP removed %d stale static_forward_context "
-                "entries: %s",
-                len(removed_prefixes),
-                removed_prefixes,
-            )
-
-        if hasattr(compilation_config, "static_all_moe_layers"):
-            compilation_config.static_all_moe_layers[:] = [
-                prefix
-                for prefix in compilation_config.static_all_moe_layers
-                if prefix not in removed_prefixes
-            ]
-
-    def _setup_edge_cloud_draft(
-        self, draft_model: nn.Module, method: str
-    ) -> None:
-        """Shard the draft model into edge/cloud segments for edge-cloud mode.
-
-        Supports both MTP (``Qwen3_5MTP``/``DeepSeekMTP`` style) and Eagle3
-        (``Eagle3LlamaForCausalLM`` style) draft models.  The embedding/preprocessing
-        and the output head live on the edge; all decoder layers + final norm live
-        on the cloud.
-        """
-        if method == "mtp":
-            predictor = self._get_mtp_predictor(draft_model)
-            if predictor is None:
-                logger.warning("[EdgeCloud] Cannot find MTP predictor for sharding")
-                return
-            edge_only_modules = (
-                "embed_tokens",
-                "fc",
-                "norm",
-                "pre_fc_norm_hidden",
-                "pre_fc_norm_embedding",
-            )
-        elif method == "eagle3":
-            # Eagle3 draft: draft_model.model is the LlamaModel (embed/layers/norm).
-            if not hasattr(draft_model, "model"):
-                logger.warning(
-                    "[EdgeCloud] Eagle3 draft model has no .model attribute"
-                )
-                return
-            predictor = draft_model.model
-            # In cloud-fusion mode the fc projection (combine_hidden_states) and
-            # its optional input_norm run on the cloud together with the target
-            # model's aux hidden states. The edge side only embeds input_ids.
-            edge_only_modules = (
-                "embed_tokens",
-            )
-        else:
-            logger.warning(
-                "[EdgeCloud] Unsupported edge-cloud draft method: %s", method
-            )
-            return
-
-        num_draft_layers = len(predictor.layers)
-
-        # Capture module ids before sharding so we can clean stale
-        # static_forward_context entries that point to removed layers.
-        draft_module_ids = {id(module) for _, module in draft_model.named_modules()}
-
-        # Use the same edge-cloud layer range mechanism as the main model.
-        # For draft models this was set to head_k=tail_k=0 before the drafter
-        # was loaded, so all decoder layers run on the cloud.
-        head_k, tail_k = get_edge_cloud_layer_range()
-
-        local_layers: set[int] = set()
-        if is_edge_device():
-            if head_k > 0:
-                local_layers.update(range(head_k))
-            if tail_k > 0:
-                local_layers.update(
-                    range(num_draft_layers - tail_k, num_draft_layers)
-                )
-        else:
-            local_layers.update(range(head_k, num_draft_layers - tail_k))
-
-        layer_keys = (
-            list(predictor.layers.keys())
-            if isinstance(predictor.layers, nn.ModuleDict)
-            else list(range(num_draft_layers))
-        )
-        for idx, key in enumerate(layer_keys):
-            if idx not in local_layers and not isinstance(
-                predictor.layers[key], PPMissingLayer
-            ):
-                predictor.layers[key] = PPMissingLayer()
-
-        # Cloud side does not need embedding/preprocessing/output modules;
-        # edge keeps them.
-        if not is_edge_device():
-            for module_name in edge_only_modules:
-                module = getattr(predictor, module_name, None)
-                if module is not None and not isinstance(module, PPMissingLayer):
-                    setattr(predictor, module_name, PPMissingLayer())
-            if (
-                hasattr(draft_model, "lm_head")
-                and not isinstance(draft_model.lm_head, PPMissingLayer)
-            ):
-                draft_model.lm_head = PPMissingLayer()
-
-        # Re-collect MoE parameters now that some layers may be placeholders.
-        if hasattr(draft_model, "set_moe_parameters"):
-            draft_model.set_moe_parameters()
-
-        self._clean_mtp_compilation_config(draft_model, draft_module_ids)
-
-        if hasattr(self, "_edge_cloud_draft_segments"):
-            delattr(self, "_edge_cloud_draft_segments")
-        self._edge_cloud_draft_segments = {}
-
-        # Pre-allocate persistent intermediate buffers for edge-cloud draft
-        # segments. ACLGraphWrapper requires stable input tensor addresses
-        # across graph replay, but edge_cloud_broadcast_recv_draft() allocates
-        # fresh tensors every iteration. Copying received tensors into these
-        # buffers before calling graph-wrapped segments avoids stale-address
-        # crashes such as ACL error 507011.
-        if hasattr(self, "_edge_cloud_draft_intermediate_buffers"):
-            delattr(self, "_edge_cloud_draft_intermediate_buffers")
-        # Eagle3LlamaForCausalLM patches make_empty_intermediate_tensors on the
-        # model class, but predictor here is draft_model.model (LlamaModel).
-        # Fall back to draft_model so the cloud side can allocate persistent
-        # intermediate buffers for the draft segment.
-        make_empty_fn = getattr(
-            predictor, "make_empty_intermediate_tensors", None
-        ) or getattr(draft_model, "make_empty_intermediate_tensors", None)
-        if make_empty_fn is not None:
-            max_draft_tokens = self.max_num_tokens
-            if enable_sp():
-                tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-                max_draft_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
-            self._edge_cloud_draft_intermediate_buffers = make_empty_fn(
-                batch_size=max_draft_tokens,
-                dtype=self.dtype,
-                device=self.device,
-            )
-        else:
-            self._edge_cloud_draft_intermediate_buffers = None
-
-        if self.edge_cloud_cfg.role == "edge":
-            seg_a = self._create_segment_callable(
-                draft_model, 0, 0, is_first_segment=True, is_last_segment=False
-            )
-            seg_e = self._create_segment_callable(
-                draft_model, 0, 0, is_first_segment=False, is_last_segment=True
-            )
-            self._edge_cloud_draft_segments["a"] = self._wrap_segment_if_needed(
-                seg_a, is_draft=True)
-            self._edge_cloud_draft_segments["e"] = self._wrap_segment_if_needed(
-                seg_e, is_draft=True)
-        else:
-            seg_c = self._create_segment_callable(
-                draft_model, 0, 0, is_first_segment=False, is_last_segment=False
-            )
-            self._edge_cloud_draft_segments["c"] = self._wrap_segment_if_needed(
-                seg_c, is_draft=True)
-
-    def _sync_edge_cloud_draft_intermediate_tensors(
-        self,
-        num_tokens: int,
-        intermediate_tensors: IntermediateTensors,
-    ) -> IntermediateTensors:
-        """Copy received draft intermediate tensors into persistent buffers.
-
-        ACLGraphWrapper captures and replays graphs against fixed input
-        addresses. edge_cloud_broadcast_recv_draft() returns freshly-allocated
-        tensors each iteration, so we copy them into pre-allocated buffers
-        (sized to max_num_tokens) and return sliced views with stable
-        addresses for the current num_tokens.
-        """
-        buffers = self._edge_cloud_draft_intermediate_buffers
-        if buffers is None:
-            return intermediate_tensors
-
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        copy_len = (num_tokens + tp_size - 1) // tp_size if enable_sp() else num_tokens
-
-        synced: dict[str, torch.Tensor | Any] = {}
-        for key, value in intermediate_tensors.items():
-            if key not in buffers.tensors or not isinstance(value, torch.Tensor):
-                # positions/spec_step_idx or any non-tensor metadata pass through
-                synced[key] = value
-                continue
-            dst = buffers[key][:copy_len]
-            recv_len = min(value.shape[0], copy_len)
-            if recv_len:
-                # Use synchronous copy on the NPU to avoid async hangs that
-                # have been observed on the cloud side when non_blocking=True
-                # is combined with ACL graph replay.
-                dst[:recv_len].copy_(value[:recv_len])
-            if recv_len < copy_len:
-                dst[recv_len:].zero_()
-            synced[key] = dst
-
-        return IntermediateTensors(synced)
 
     def _sync_metadata_across_dp(
         self,
@@ -5637,6 +5230,18 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
+        if self._edge_cloud_enabled:
+            if self.edge_cloud_cfg.role == "edge":
+                segment = (
+                    self.segment_a_wrapper
+                    if intermediate_tensors is None
+                    else self.segment_e_wrapper
+                )
+            else:
+                segment = self.segment_c_wrapper
+            run_model = partial(segment, **model_inputs)
+        else:
+            run_model = partial(self.model, **model_inputs)
 
         # Layer-sliced execution: inject the layer range for the current
         # slice so the model forward only runs those layers.
@@ -7041,10 +6646,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
             if self.use_aux_hidden_state_outputs:
-                if isinstance(outputs, IntermediateTensors):
-                    hidden_states = outputs["hidden_states"]
-                else:
-                    hidden_states, _ = outputs
+                hidden_states, _ = outputs
             elif isinstance(outputs, IntermediateTensors):
                 hidden_states = outputs["hidden_states"]
             else:
@@ -7139,17 +6741,6 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_heat_collection_status =  True
 
     def load_model(self) -> None:
-        # When the layer-slice runtime is enabled, install the qwen
-        # forward-method patches before the model is constructed so the
-        # rebound forward is what the loaded modules actually expose.
-        # Loaded on demand to keep upstream vLLM unmodified for users that
-        # don't enable this feature.
-        self._layer_slice_enabled = os.path.exists(
-            os.environ.get("VLLM_LAYER_SLICE_CONFIG", "layer_slice_config.yaml")
-        )
-        if self._layer_slice_enabled:
-            import vllm_ascend.patch.models.qwen_layer_slice  # noqa: F401
-
         if self._edge_cloud_enabled:
             with DeviceMemoryProfiler() as m:
                 self._load_model_edge_cloud()
@@ -8515,15 +8106,11 @@ class NPUModelRunner(GPUModelRunner):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        # embedding_only: edge has no local attention layers, so its
-        # static_forward_context is empty and the normal path returns {}.
-        # Returning {} here lets the cloud's fresh spec (after weights
-        # processing) drive the merged spec, avoiding stale dimensions
-        # (e.g. head_size changed by quantization).
+
         if (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.mode == "embedding_only"
-            and self.edge_cloud_cfg.role == "edge"
+            has_ec_transfer()
+            and get_ec_transfer().is_producer
+            and not self._edge_cloud_enabled
         ):
             return {}
 
@@ -8647,12 +8234,22 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
-        # embedding_only edge has no local attention layers; the spec
-        # is already empty (returned early above).  Cloud side keeps
-        # With the PP-reuse init path make_layers directly creates
-        # PPMissingLayer for non-local indices — no stale entries
-        # ever register in static_forward_context, so no filtering
-        # is needed.
+        if self._edge_cloud_enabled and hasattr(self, "model") and self.model is not None:
+            import re
+
+            local_layer_indices = {
+                idx
+                for idx, layer in enumerate(
+                    LayerShardLoader._get_transformer_model(self.model).layers
+                )
+                if not isinstance(layer, PPMissingLayer)
+            }
+            filtered_spec: dict[str, KVCacheSpec] = {}
+            for layer_name, spec in kv_cache_spec.items():
+                match = re.search(r"layers\.(\d+)", layer_name)
+                if match is None or int(match.group(1)) in local_layer_indices:
+                    filtered_spec[layer_name] = spec
+            kv_cache_spec = filtered_spec
 
         return kv_cache_spec
 
@@ -8719,24 +8316,10 @@ class NPUModelRunner(GPUModelRunner):
         return wrappers
 
     def capture_model(self) -> int:
-        # 边云模式的 ACL Graph 仍依赖父类 capture 循环触发 _dummy_run。
-        # 实际捕获发生在 segment 级 ACLGraphWrapper 内，通信保持在图外。
-        if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
+        """Capture NPU graphs and return actual graph pool memory bytes consumed."""
+        if self._edge_cloud_enabled:
             return 0
-
-        gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)
-        if gpu_model_runner_cls is None:
-            raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
-        parent_module_name = gpu_model_runner_cls.__module__
-        # profile_cudagraph_memory 阶段 ACLGraphWrapper 已捕获过图，
-        # 但 CUDAGraphWrapper.clear_all_graphs() 不清除 ACLGraphWrapper
-        # 的 concrete_aclgraph_entries。保留的 entry 会导致 capture_model
-        # 中 _warmup_and_capture 走 REPLAY 而非 CAPTURE 路径，
-        # REPLAY 时 forward_context.capturing 保持 False，
-        # 使得 _update_full_graph_params_if_needed 错误执行 → 挂死。
-        # 因此这里手动清空，强制重新 capture。
-        for wrapper in self._get_aclgraph_wrappers():
-            wrapper.concrete_aclgraph_entries.clear()
+        parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
         return result

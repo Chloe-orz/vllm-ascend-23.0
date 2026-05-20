@@ -68,10 +68,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
-    edge_cloud_send_tensor_dict,
-    get_edge_cloud_tensor_meta,
     init_ascend_model_parallel,
-    init_edge_cloud_tensor_meta,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -680,218 +677,32 @@ class NPUWorker(WorkerBase):
             self._pp_send_work_by_channel.clear()
             return
 
-        handles = self._pp_send_work_by_channel.pop(channel.value, [])
-        for handle in handles:
-            handle.wait()
-
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-        layer_slice_info: Any = None,
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        batch_type = scheduler_output.batch_type
-        use_alt_group = (batch_type == SchedulerBatchType.ALL_DECODE)
-
-        if envs_ascend.MSMONITOR_USE_DAEMON:
-            dp.step()
-
-        # Edge-cloud PD separation can keep one outstanding send per hidden
-        # channel.  Only wait on the channel about to be reused; legacy PP waits
-        # for all outstanding sends to preserve the original behavior.
-        if self.model_runner._edge_cloud_enabled:
-            bt = scheduler_output.batch_type
-            if bt in (
-                BatchType.PREFILL_FIRST,
-                BatchType.DECODE_FIRST,
-                BatchType.PREFILL_LAST,
-                BatchType.DECODE_LAST,
-            ):
-                self._wait_pp_send_work(self._hidden_channel_for(scheduler_output))
-            else:
-                self._wait_pp_send_work()
-        else:
-            self._wait_pp_send_work()
-
-        # Edge-cloud PD-separation: dispatch by batch_type and role.
-        if self.model_runner._edge_cloud_enabled:
-            bt = scheduler_output.batch_type
-            if is_cloud_device():
-                return self._execute_model_cloud(
-                    scheduler_output, layer_slice_info
-                )
-            if bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST):
-                return self._execute_model_edge_head(
-                    scheduler_output, layer_slice_info
-                )
-            if bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
-                return self._execute_model_edge_tail(
-                    scheduler_output, layer_slice_info
-                )
-
-        # Fallback: original path for non-edge-cloud or unhandled batch types.
-        return self._execute_model_legacy(
-            scheduler_output, layer_slice_info, use_alt_group
-        )
-
-    def _hidden_channel_for(self, scheduler_output: "SchedulerOutput") -> HiddenChannelType:
-        channel = scheduler_output.hidden_channel
-        if channel is not None:
-            return channel
-        bt = scheduler_output.batch_type
-        if bt in (BatchType.PREFILL_FIRST, BatchType.PREFILL_LAST):
-            return HiddenChannelType.PREFILL_1
-        if bt in (BatchType.DECODE_FIRST, BatchType.DECODE_LAST):
-            return HiddenChannelType.DECODE
-        raise RuntimeError(f"No hidden channel for batch_type={bt}")
-
-    def _execute_model_edge_head(
-        self,
-        scheduler_output: "SchedulerOutput",
-        layer_slice_info: Any,
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        """Edge head segment (PF/DF): segment_a -> isend -> suspend -> return EMPTY."""
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
-        output = self.model_runner.execute_model(
-            scheduler_output, intermediate_tensors=None,
-            layer_slice_info=layer_slice_info,
-        )
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
-
-        is_last_slice = (
-            layer_slice_info is None or layer_slice_info.is_last_slice
-        )
-        if not is_last_slice:
-            return None
-
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
-            return output
-
-        assert isinstance(output, IntermediateTensors)
-        if get_pp_group().world_size == 2:
-            channel = self._hidden_channel_for(scheduler_output)
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                                            num_tokens=scheduler_output.total_num_scheduled_tokens),
-                channel=channel,
-            )
-            logger.info(f"Send intermediate tensors to cloud, hidden_channel: {channel.value}")
-        # Return a placeholder output that carries the request IDs so the
-        # scheduler can correlate the batch, but contains no sampled tokens
-        # because sampling happens in the tail segment (PL/DL).
-        req_ids = list(scheduler_output.num_scheduled_tokens.keys())
-        return ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
-        )
-
-    def _execute_model_edge_tail(
-        self,
-        scheduler_output: "SchedulerOutput",
-        layer_slice_info: Any,
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        edge_sp = enable_sp()
-        edge_merge = get_edge_cloud_tensor_meta().merge_payload
-        """Edge tail segment (PL/DL): recv -> segment_e -> return output."""
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
-        channel = self._hidden_channel_for(scheduler_output)
-        tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-            num_tokens=scheduler_output.total_num_scheduled_tokens,
-            channel=channel,
-            sp_chunk=edge_sp and edge_merge,
-        )
-        logger.info(f"Receive intermediate tensors from cloud after, hidden_channel: {channel.value}")
-
-        if edge_sp and not edge_merge:
-            tensor_dict = {
-                k: sequence_parallel_chunk(v)
-                for k, v in tensor_dict.items()
-            }
-
-        intermediate_tensors = AsyncIntermediateTensors(
-            tensor_dict,
-            comm_handles=comm_handles,
-            comm_postprocess=comm_postprocess,
-        )
-
-        output = self.model_runner.execute_model(
-            scheduler_output, intermediate_tensors,
-            layer_slice_info=layer_slice_info,
-        )
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
-
-        is_last_slice = (
-            layer_slice_info is None or layer_slice_info.is_last_slice
-        )
-        if not is_last_slice:
-            return None
-
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
-            return output
-        return output
-
-    def _execute_model_cloud(
-        self,
-        scheduler_output: "SchedulerOutput",
-        layer_slice_info: Any,
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        """Cloud middle segment: recv -> segment_b/c -> isend -> return."""
-        logger.info(
-            f"Execute model, batch_type: {scheduler_output.batch_type}, " + (
-                f"slice: {layer_slice_info.slice_index + 1}/{layer_slice_info.total_slices}, "
-                f"layers: [{layer_slice_info.start_layer},{layer_slice_info.end_layer})"
-                if layer_slice_info is not None
-                else ""
-            )
-        )
         intermediate_tensors = None
-        is_first_slice = (
-            layer_slice_info is None or layer_slice_info.is_first_slice
-        )
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and is_first_slice:
-            # Pre-compute input preparation while edge runs segment_a.
-            # This overlaps cloud's _update_states, _prepare_inputs,
-            # _determine_batch_execution_and_padding, and
-            # _build_attention_metadata with edge's segment_a forward.
-            # On the merge_payload fast path the per-key tensors are
-            # materialized lazily inside comm_postprocess (after the
-            # merged buffer is split), so SP chunking must run there too
-            # — an eager chunk here would iterate an empty dict, rebind
-            # the variable, and sever the link to the postprocess that
-            # fills the original dict by reference (broken tokens).
-            do_sp_chunk = enable_sp() and (
-                self.model_runner.edge_cloud_cfg.mode != "embedding_only"
-                or not self.model_runner.supports_mm_inputs)
-            merge_payload = get_edge_cloud_tensor_meta().merge_payload
-            channel = self._hidden_channel_for(scheduler_output)
-            # In the shared-model edge-cloud topology the edge
-            # has a single distributed rank at in-group rank 0;
-            # the cloud first-worker of each dp_rank must
-            # receive the head-layer intermediate tensors from
-            # that single edge rank. Pass the explicit
-            # ``src=0`` so the receive is routed to the edge
-            # rather than the implicit "previous PP rank"
-            # (which would not point at the edge for cloud
-            # first-workers past the first one).
-            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-                num_tokens=scheduler_output.total_num_scheduled_tokens,
-                channel=channel,
-                sp_chunk=do_sp_chunk and merge_payload,
-                src=0,
-            )
-            logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
-
-            self.model_runner.cloud_prepare_early(scheduler_output)
-            if do_sp_chunk and not merge_payload:
-                tensor_dict = {
-                    k: sequence_parallel_chunk(v)
-                    for k, v in tensor_dict.items()
-                }
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
+        if forward_pass:
+            if is_cloud_device():
+                tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
+            elif not get_pp_group().is_first_rank:
+                # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
+                # it will conflict with the all-gather operation in flashcomm1.
+                if enable_sp():
+                    all_gather_group = None
+                else:
+                    all_gather_group = get_tp_group()
+                tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
+                    all_gather_group=all_gather_group
+                )
+                assert tensor_dict is not None
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
 
         if self.profiler is not None:
             self.profiler.step()
@@ -1002,41 +813,22 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         if is_edge_device():
-            # Edge-cloud with heterogeneous SP: aggregate SP shards to full
-            # sequence before cross-PP send so cloud can re-chunk by its SP.
-            if enable_sp() and (self.model_runner.edge_cloud_cfg.mode != "embedding_only"
-                or not self.model_runner.supports_mm_inputs):
-                _gathered = self._all_gather_tensor_dict(output.tensors)
-            else:
-                _gathered = output.tensors
             if get_pp_group().world_size == 2:
-                self._pp_send_work = get_pp_group().isend_tensor_dict(_gathered)
+                self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
-            if enable_sp():
-                tensor_dict = {
-                    k: sequence_parallel_chunk(v)
-                    for k, v in tensor_dict.items()
-                }
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
-           
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
 
         if is_cloud_device():
-            # Edge-cloud with heterogeneous SP: aggregate SP shards to full
-            # sequence before cross-PP send so edge can re-chunk by its SP.
-            if enable_sp():
-                _gathered = self._all_gather_tensor_dict(output.tensors)
-            else:
-                _gathered = output.tensors
             if get_pp_group().world_size == 2:
-                self._pp_send_work = get_pp_group().isend_tensor_dict(_gathered)
+                self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
         else:
             assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
