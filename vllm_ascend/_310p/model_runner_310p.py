@@ -19,8 +19,7 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager, nullcontext
-from functools import partial
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import torch
@@ -28,7 +27,6 @@ import torch.nn as nn
 import torch_npu
 from vllm.config import CUDAGraphMode
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -42,20 +40,17 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 from vllm_ascend._310p.block_table import MultiGroupBlockTable as MultiGroupBlockTable310
-from vllm_ascend._310p.kv_block_zeroer import AscendKVBlockZeroer310
 from vllm_ascend._310p.npu_input_batch import NPUInputBatch310 as NPUInputBatch
 from vllm_ascend._310p.ops.rotary_embedding import prepare_mrope_cos_sin_slices_from_runner
 from vllm_ascend._310p.sample.rejection_sampler import AscendRejectionSampler310
 from vllm_ascend._310p.sample.sampler import AscendSampler310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.spec_decode.utils import (
-    update_num_computed_tokens_for_batch_change,
-)
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_rc_device, lmhead_tp_enable
+from vllm_ascend.spec_decode.utils import update_num_computed_tokens_for_batch_change
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, lmhead_tp_enable
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
@@ -231,18 +226,7 @@ class NPUModelRunner310(NPUModelRunner):
         copy_snapshot_to_gpu(query_start_loc)
         return num_reqs_padded
 
-    def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
-        attn_state = super()._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
-        if (
-            self.speculative_config is not None
-            and not np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0)
-            and np.all(num_scheduled_tokens == self.uniform_decode_query_len)
-        ):
-            attn_state = AscendAttentionState.SpecDecoding
-            self.attn_state = attn_state
-        return attn_state
-
-    def _prepare_inputs(  # type: ignore[override]
+    def _prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
         num_scheduled_tokens: np.ndarray,
@@ -278,60 +262,6 @@ class NPUModelRunner310(NPUModelRunner):
         self.with_prefill = with_prefill
 
         cu_num_tokens = self._get_cumsum_and_arange(num_scheduled_tokens, self.query_pos.np)
-        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        self._compute_prev_positions(num_reqs)
-
-        if self.num_accepted_tokens_event is not None:
-            self.num_accepted_tokens_event.synchronize()
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[
-                    np.where(new_mask, 0, prev_idx)
-                ]
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = self.num_accepted_tokens.np[:num_reqs]
-            else:
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-            self.num_accepted_tokens.np[num_reqs:].fill(1)
-            self.num_accepted_tokens.copy_to_gpu()
-        else:
-            if is_rc_device():
-                self.num_accepted_tokens.np[num_reqs:].fill(1)
-                self.num_accepted_tokens.copy_to_gpu()
-            else:
-                self.num_accepted_tokens.np.fill(1)
-                self.num_accepted_tokens.gpu.fill_(1)
-
-        need_async_num_computed_update = (
-            self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
-        )
-
-        if need_async_num_computed_update:
-            self.prev_positions.copy_to_gpu(num_reqs)
-            self.prev_num_draft_tokens.copy_to_gpu()
-            cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
-                device=self.device, non_blocking=True
-            )
-            update_num_computed_tokens_for_batch_change(
-                self.num_computed_tokens,
-                self.num_accepted_tokens.gpu[:num_reqs],
-                self.prev_positions.gpu[:num_reqs],
-                self.valid_sampled_token_count_gpu,
-                self.prev_num_draft_tokens.gpu,
-                cpu_values,
-            )
-            # Make sure D2H is synchronized.
-            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].copy_(
-                self.num_computed_tokens[:num_reqs], non_blocking=False
-            )
-        else:
-            self.num_computed_tokens[:num_reqs].copy_(
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
-                non_blocking=True,
-            )
-        # Make sure when you update the positions and slot mapping, num_computed_tokens_cpu
-        # has been corrected.
         positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
         np.add(
             self.input_batch.num_computed_tokens_cpu[req_indices],
@@ -348,8 +278,6 @@ class NPUModelRunner310(NPUModelRunner):
             self.pcp_manager.init_batch_info(
                 num_scheduled_tokens,
                 self.input_batch.num_reqs,
-                self.input_batch.num_computed_tokens_cpu,
-                self.input_batch.num_prompt_tokens,
             )
 
         if self.speculative_config and self.use_cp:
@@ -442,15 +370,13 @@ class NPUModelRunner310(NPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
-        if is_rc_device():
-            self.query_start_loc.np[num_reqs + 1 :].fill(-1)
-        copy_snapshot_to_gpu(self.query_start_loc)
+        self.query_start_loc.copy_to_gpu()
 
         if self._has_gdn:
             self.gdn_query_start_loc.np[0] = 0
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
-            copy_snapshot_to_gpu(self.gdn_query_start_loc)
+            self.gdn_query_start_loc.copy_to_gpu()
 
         torch.add(
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
@@ -459,8 +385,10 @@ class NPUModelRunner310(NPUModelRunner):
         )
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
-        if not is_rc_device():
-            self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
+        prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+        self._compute_prev_positions(num_reqs)
+
+        self.query_start_loc.gpu[num_reqs + 1 :].fill_(-1)
 
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
         if self.uses_mrope:
@@ -495,6 +423,47 @@ class NPUModelRunner310(NPUModelRunner):
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
 
+        if self.num_accepted_tokens_event is not None:
+            self.num_accepted_tokens_event.synchronize()
+            if self.use_async_scheduling and prev_req_id_to_index:
+                prev_idx = self.prev_positions.np[:num_reqs]
+                new_mask = prev_idx < 0
+                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[
+                    np.where(new_mask, 0, prev_idx)
+                ]
+                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = self.num_accepted_tokens.np[:num_reqs]
+            else:
+                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
+        else:
+            self.num_accepted_tokens.np.fill(1)
+            self.num_accepted_tokens.gpu.fill_(1)
+
+        need_async_num_computed_update = (
+            self.use_async_spec_decode and self.valid_sampled_token_count_gpu is not None and prev_req_id_to_index
+        )
+        if need_async_num_computed_update:
+            self.prev_positions.copy_to_gpu(num_reqs)
+            self.prev_num_draft_tokens.copy_to_gpu()
+            cpu_values = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
+                device=self.device, non_blocking=True
+            )
+            update_num_computed_tokens_for_batch_change(
+                self.num_computed_tokens,
+                self.num_accepted_tokens.gpu[:num_reqs],
+                self.prev_positions.gpu[:num_reqs],
+                self.valid_sampled_token_count_gpu,
+                self.prev_num_draft_tokens.gpu,
+                cpu_values,
+            )
+        else:
+            self.num_computed_tokens[:num_reqs].copy_(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                non_blocking=True,
+            )
+
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
 
@@ -508,25 +477,12 @@ class NPUModelRunner310(NPUModelRunner):
         )
         if need_async_num_computed_update:
             self.seq_lens[:num_reqs] = self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
-            if is_rc_device():
-                tail_len = self.seq_lens.shape[0] - num_reqs
-                if tail_len > 0:
-                    self.seq_lens[num_reqs:].copy_(
-                        self.optimistic_seq_lens_cpu[num_reqs:].to(self.device, non_blocking=True),
-                    )
         else:
-            if is_rc_device():
-                self.seq_lens.copy_(
-                    self.optimistic_seq_lens_cpu[: self.seq_lens.shape[0]],
-                    non_blocking=True,
-                )
-            else:
-                self.seq_lens[:num_reqs].copy_(
-                    self.optimistic_seq_lens_cpu[:num_reqs],
-                    non_blocking=True,
-                )
-        if not is_rc_device():
-            self.seq_lens[num_reqs:].fill_(0)
+            self.seq_lens[:num_reqs].copy_(
+                self.optimistic_seq_lens_cpu[:num_reqs],
+                non_blocking=True,
+            )
+        self.seq_lens[num_reqs:].fill_(0)
 
         if (
             self._needs_seq_lens_cpu_sync
@@ -534,12 +490,13 @@ class NPUModelRunner310(NPUModelRunner):
             and self.valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
         ):
-            # Correct optimistic_seq_lens_cpu on CPU using the asynchronously
-            # copied valid-sampled-token counts; avoids an extra NPU->CPU copy
-            # of seq_lens and the event.synchronize() in attention metadata.
-            # The shared helper synchronizes on the D2H copy event before the
-            # host read to avoid consuming stale counts (see its docstring).
-            self._correct_optimistic_seq_lens_cpu(num_reqs)
+            self.optimistic_seq_lens_cpu[:num_reqs].copy_(self.seq_lens[:num_reqs], non_blocking=True)
+            if self._seq_lens_cpu_event is None:
+                self._seq_lens_cpu_event = torch.npu.Event()
+            self._seq_lens_cpu_event.record()
+            self._seq_lens_cpu_event_pending = True
+        else:
+            self._seq_lens_cpu_event_pending = False
 
         use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
