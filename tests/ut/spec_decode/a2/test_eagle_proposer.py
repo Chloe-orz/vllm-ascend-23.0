@@ -2592,7 +2592,6 @@ class TestRunMergedDraft(TestBase):
         mock_ascend_config.enable_reduce_sample = True
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
@@ -2654,12 +2653,7 @@ class TestRunMergedDraft(TestBase):
             }
         )
 
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
-        with (
-            patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
-        ):
+        with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
             draft_token_ids = self.proposer._run_merged_draft(
                 num_input_tokens=12,
                 batch_size=2,
@@ -2713,7 +2707,6 @@ class TestRunMergedDraft(TestBase):
         mock_ascend_config.enable_reduce_sample = False
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=True),
-            patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
             patch.object(llm_base_proposer, "get_forward_context", return_value=forward_context),
         ):
             draft_token_ids = self.proposer._run_merged_draft(
@@ -2780,10 +2773,7 @@ class TestRunMergedDraft(TestBase):
                 self.proposer.input_ids[:4] = torch.tensor([279, 1196, 374, 8014], dtype=torch.int32)
                 self.proposer.positions[:4] = torch.tensor([17, 18, 19, 20], dtype=torch.int64)
 
-                with (
-                    patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-                    patch.object(llm_base_proposer, "get_ascend_config", return_value=mock_ascend_config),
-                ):
+                with patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False):
                     draft_token_ids = self.proposer._run_merged_draft(
                         num_input_tokens=4,
                         batch_size=2,
