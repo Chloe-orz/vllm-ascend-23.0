@@ -69,7 +69,6 @@ developer_guide/performance_and_debug/index
 community/governance
 community/contributors
 community/issue-workflow-guidelines
-community/slash-commands
 community/versioning_policy
 community/user_stories/index
 :::
