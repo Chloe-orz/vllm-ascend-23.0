@@ -589,24 +589,25 @@ def _project_kv_cache_groups_to_worker(
     function filters the global groups to include only layers present on the
     given worker, adjusting UniformTypeKVCacheSpecs accordingly.
 
+    Edge-cloud fix: groups with no local layers are kept as empty placeholders
+    so that all workers share the same group count and indices. This keeps the
+    scheduler's block_ids aligned with each worker's layer-to-group mapping.
+
     Args:
         global_kv_cache_groups: The global KV cache groups for the whole model.
         worker_spec_list: The KV cache spec list of each layer on this worker.
 
     Returns:
-        The projected KV cache groups containing only this worker's layers.
+        The projected KV cache groups containing this worker's layers, with
+        empty groups preserved to match the global group count.
     """
     projected_groups: list[AscendKVCacheGroupSpec] = []
     for group in global_kv_cache_groups:
         worker_layer_names = [
             layer_name for layer_name in group.layer_names if layer_name in worker_spec_list
         ]
-        if not worker_layer_names:
-            # Skip groups that have no layers on this worker (e.g. edge-cloud
-            # sharding where non-local layers are replaced by PPMissingLayer).
-            continue
         group_spec = group.kv_cache_spec
-        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+        if worker_layer_names and isinstance(group_spec, UniformTypeKVCacheSpecs):
             group_spec = UniformTypeKVCacheSpecs(
                 block_size=group_spec.block_size,
                 kv_cache_specs={
@@ -614,6 +615,7 @@ def _project_kv_cache_groups_to_worker(
                     for layer_name in worker_layer_names
                 },
             )
+        # Keep empty groups as placeholders so Edge/Cloud group indices stay aligned.
         projected_groups.append(AscendKVCacheGroupSpec(worker_layer_names, group_spec))
     return projected_groups
 

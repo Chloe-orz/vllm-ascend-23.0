@@ -2238,23 +2238,29 @@ class NPUModelRunner(GPUModelRunner):
                     forward_context, num_tokens_padded, positions
                 )
             # intermediate_tensors 已由 NPUWorker 从 Edge 侧接收
-            if intermediate_tensors is not None:
-                logger.info(
-                    "[_model_forward Cloud] intermediate_tensors['hidden_states'] "
-                    "shape=%s ndim=%d, role=%s",
-                    list(intermediate_tensors["hidden_states"].shape),
-                    intermediate_tensors["hidden_states"].dim(),
-                    self.edge_cloud_cfg.role,
-                )
-            hidden_states = seg_c(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
+            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+            old_layer_idx = _EXTRA_CTX.layer_idx
+            if _EXTRA_CTX.layer_idx is not None:
+                _EXTRA_CTX.layer_idx = self.head_k
+            logger.info(
+                "[_model_forward Cloud] _EXTRA_CTX.layer_idx=%s before seg_c, "
+                "cloud start_layer expected=%d",
+                old_layer_idx,
+                self.head_k,
             )
-            if use_graph:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions
+            try:
+                hidden_states = seg_c(
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    **model_kwargs,
                 )
+                if use_graph:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions
+                    )
+            finally:
+                if old_layer_idx is not None:
+                    _EXTRA_CTX.layer_idx = old_layer_idx
             # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
             assert isinstance(hidden_states, IntermediateTensors)
             return hidden_states
@@ -2669,7 +2675,7 @@ class NPUModelRunner(GPUModelRunner):
             # But gdn needs an unpadded one.
             # gdn_query_start_loc is an unpadded version of query_start_loc.
             # TODO delete it if fia's check is removed.
-            if self._has_gdn:
+            if self._has_gdn and self.attn_groups[kv_cache_gid]:
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
                 if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
@@ -3037,13 +3043,14 @@ class NPUModelRunner(GPUModelRunner):
                     if enable_sp():
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
                     hidden_size = self.model_config.hf_config.hidden_size
+                    hc_mult = getattr(self.model_config.hf_config, 'hc_mult', 1)
                     dummy_hidden = torch.zeros(
-                        max_actual_tokens, hidden_size, dtype=self.dtype, device=self.device
+                        max_actual_tokens, hc_mult, hidden_size, dtype=self.dtype, device=self.device
                     )
-                    # residual 与 hidden_states 同 shape，满足 layer(residual=None) 的初次调用
+                    # hidden_states/residual 在段间传递时均为 (n, hc_mult, h)
                     self.intermediate_tensors = {
                         "hidden_states": dummy_hidden,
-                        "residual": dummy_hidden.new_zeros(max_actual_tokens, hidden_size),
+                        "residual": dummy_hidden.clone(),
                     }
                 intermediate_tensors = IntermediateTensors(
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
@@ -3198,7 +3205,9 @@ class NPUModelRunner(GPUModelRunner):
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+            [isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+             for attn_group in self.attn_groups
+             if attn_group]  # skip empty groups (edge-cloud placeholder groups)
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)

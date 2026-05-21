@@ -901,8 +901,25 @@ class DeepseekV4Model(nn.Module):
                 self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             else:
                 self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size)
+        def _make_empty_intermediate_tensors(
+            batch_size: int,
+            dtype: torch.dtype,
+            device: torch.device,
+        ) -> IntermediateTensors:
+            return IntermediateTensors({
+                "hidden_states": torch.zeros(
+                    (batch_size, hc_mult, config.hidden_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+                "residual": torch.zeros(
+                    (batch_size, hc_mult, config.hidden_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+            })
+
+        self.make_empty_intermediate_tensors = _make_empty_intermediate_tensors
 
         self.norm_eps = config.rms_norm_eps
         self.hc_eps = config.hc_eps
@@ -1183,7 +1200,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP,
 
             if "sink" in name:
                 # Handle attention sinks (distributed across ranks)
-                if name not in params_dict:
+                if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
                 narrow_weight = loaded_weight.narrow(0, head_start,
