@@ -162,6 +162,49 @@ class AscendConfig:
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
         self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
 
+        self.enable_context_parallel = self._get_config_value(
+            additional_config,
+            "enable_context_parallel",
+            "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL",
+            ascend_envs.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL,
+        )
+        self.enable_matmul_allreduce = self._get_config_value(
+            additional_config,
+            "enable_matmul_allreduce",
+            "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE",
+            ascend_envs.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE,
+        )
+        self.enable_fused_mc2 = self._get_config_value(
+            additional_config,
+            "enable_fused_mc2",
+            "VLLM_ASCEND_ENABLE_FUSED_MC2",
+            ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
+        )
+        self.enable_mlapo = self._get_config_value(
+            additional_config,
+            "enable_mlapo",
+            "VLLM_ASCEND_ENABLE_MLAPO",
+            ascend_envs.VLLM_ASCEND_ENABLE_MLAPO,
+        )
+        self.enable_flashcomm2_parallel_size = self._get_config_value(
+            additional_config,
+            "enable_flashcomm2_parallel_size",
+            "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE",
+            ascend_envs.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE,
+        )
+        self.msmonitor_use_daemon = self._get_config_value(
+            additional_config,
+            "msmonitor_use_daemon",
+            "MSMONITOR_USE_DAEMON",
+            ascend_envs.MSMONITOR_USE_DAEMON,
+        )
+        self.enable_transpose_kv_cache_by_block = self._get_config_value(
+            additional_config,
+            "enable_transpose_kv_cache_by_block",
+            "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK",
+            ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK,
+        )
+
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
@@ -262,10 +305,6 @@ class AscendConfig:
         self.sparse_json = self.hamming_sparse["sparse_json_location"]
         self._check_enable_hamming_sparse()
 
-        # Enable Block Verify and Entropy Verify in Rejection Sampler
-        rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
-        self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
-
     @staticmethod
     def _get_config_value(additional_config: dict[str, Any], config_key: str, env_key: str, env_value: Any) -> Any:
         if config_key in additional_config:
@@ -279,32 +318,6 @@ class AscendConfig:
                 "next release."
             )
         return env_value
-
-    @classmethod
-    def _check_mooncake_c8_kv_cache_quant(cls, vllm_config: "VllmConfig") -> None:
-        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-        if kv_transfer_config is None:
-            return
-
-        quant_config = getattr(vllm_config, "quant_config", None)
-        enable_c8_quant = getattr(quant_config, "enable_c8_quant", False)
-        if enable_c8_quant is not True:
-            return
-
-        from vllm_ascend.utils import is_gqa_backend, uses_mooncake_connector
-
-        if not is_gqa_backend(vllm_config):
-            return
-
-        if not uses_mooncake_connector(kv_transfer_config):
-            return
-
-        raise ValueError(
-            "MooncakeConnector does not support C8 KV cache quantization on GQA models. "
-            "The producer keeps KV cache in bf16 while the consumer allocates int8 KV cache, so raw "
-            "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
-            "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
-        )
 
     def _check_mix_placement(self):
         if self.mix_placement:

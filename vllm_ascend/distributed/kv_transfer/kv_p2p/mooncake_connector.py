@@ -55,7 +55,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import RequestStatus
 
-from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
@@ -954,60 +953,14 @@ class KVCacheRecvingThread(threading.Thread):
             session_id,
         )
 
-        ready_attention_group_reformat_block_ids = []
-        for reformat_group, is_group_transfer_end in attention_group_reformat_block_ids:
-            if is_group_transfer_end:
-                ready_attention_group_reformat_block_ids.append(reformat_group)
-        if not ready_attention_group_reformat_block_ids:
-            return
-
-        gqa_reformat_groups = [
-            (group_idx, grouped_local_block_ids, num_group_pulls, layer_indices)
-            for (
-                group_idx,
-                grouped_local_block_ids,
-                num_group_pulls,
-                layer_indices,
-            ) in ready_attention_group_reformat_block_ids
-            if num_group_pulls > 1
-        ]
-
-        if self.is_hma_required:
-            for group_idx, grouped_local_block_ids, num_group_pulls, layer_indices in gqa_reformat_groups:
-                num_reformat_blocks = sum(len(block_ids) for block_ids in grouped_local_block_ids)
-                logger.debug(
-                    "Reformat hybrid linear KV cache for GQA attention group. "
-                    "group_idx=%s, num_group_pulls=%s, num_block_groups=%s, num_reformat_blocks=%s, "
-                    "layer_indices=%s",
-                    group_idx,
-                    num_group_pulls,
-                    len(grouped_local_block_ids),
-                    num_reformat_blocks,
-                    layer_indices,
-                )
-                group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
-                if not group_kv_caches:
-                    continue
-                self.reformat_kv_cache_hybrid_linear_torch(grouped_local_block_ids, num_group_pulls, group_kv_caches)
-            return
-
-        uniform_num_pulls = {num_group_pulls for _, _, num_group_pulls, _ in ready_attention_group_reformat_block_ids}
-        if len(uniform_num_pulls) != 1:
-            raise RuntimeError(
-                f"Non-hybrid Mooncake KV reformat expects uniform group pulls, but got {uniform_num_pulls}."
-            )
-
-        num_group_pulls = next(iter(uniform_num_pulls))
-        need_cat_cache = num_group_pulls > 1
-        need_nz_cache = get_ascend_config().enable_kv_nz
-        if not (need_cat_cache or need_nz_cache):
-            return
-
-        use_fused_op = ascend_envs.VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK
-        for group_idx, reformat_block_ids, _, layer_indices in ready_attention_group_reformat_block_ids:
-            group_kv_caches = self._get_group_kv_caches(group_idx, layer_indices)
-            if not group_kv_caches:
-                continue
+        # Determine if the current position is the offset position at the end of
+        # the KV transmission.
+        is_kv_transfer_end = global_offset == tp_num_need_pulls * self._prefill_pp_size - 1
+        need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
+        need_nz_cache = get_ascend_config().enable_kv_nz and is_kv_transfer_end
+        use_fused_op = get_ascend_config().enable_transpose_kv_cache_by_block
+        if need_nz_cache or need_cat_cache:
+            # use fused op to reformat kv cache, we keep original implementation to provide ability to disable it.
             if use_fused_op and enable_custom_op():
                 if need_cat_cache:
                     self.reformat_kv_cache_with_fused_op(reformat_block_ids, num_group_pulls, group_kv_caches)

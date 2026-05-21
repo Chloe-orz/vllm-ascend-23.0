@@ -348,9 +348,36 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             mc2_tokens_capacity,
             get_ascend_config().enable_fused_mc2,
         )
-    elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
-    elif soc_version == AscendDeviceType._310P:
+        num_experts_per_device = num_experts // ep_world_size
+        if num_experts_per_device <= 24 and ep_world_size >= 16 and num_tokens <= mc2_tokens_capacity:
+            moe_comm_type = MoECommType.MC2
+        else:
+            moe_comm_type = MoECommType.ALLGATHER
+
+    elif soc_version in {AscendDeviceType.A3}:
+        # TODO: drop the EP-size guard when dispatch_ffn_combine supports larger EP sizes
+        # TODO: drop speculative method guard when dispatch_gmm_combine_decode supports w16a16
+        fused_mc2_enable = get_ascend_config().enable_fused_mc2
+        dispatch_ffn_combine_enable = get_ep_group().world_size <= 32 and (not is_draft_model)
+        if num_tokens <= mc2_tokens_capacity:
+            fused_decode_enable = fused_mc2_enable
+            if fused_mc2_enable == 1:
+                fused_decode_enable = fused_mc2_enable and dispatch_ffn_combine_enable
+            elif fused_mc2_enable == 2:
+                fused_decode_enable = (
+                    fused_mc2_enable
+                    and speculative_enable_dispatch_gmm_combine_decode(vllm_config)
+                    and quant_type == "w8a8_dynamic"
+                )
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_decode_enable else MoECommType.MC2
+        else:
+            fused_prefill_enable = fused_mc2_enable
+            if fused_mc2_enable == 1:
+                fused_prefill_enable = fused_mc2_enable and dispatch_ffn_combine_enable
+            elif fused_mc2_enable == 2:
+                fused_prefill_enable = False
+            moe_comm_type = MoECommType.FUSED_MC2 if fused_prefill_enable else MoECommType.ALLTOALL
+    elif soc_version in {AscendDeviceType._310P}:
         moe_comm_type = MoECommType.ALLGATHER
 
     else:

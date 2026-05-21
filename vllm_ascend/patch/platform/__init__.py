@@ -43,19 +43,7 @@ if (
 ):
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
-# EngineCore PD-separation / edge-cloud / passive-PP hooks. Unconditionally
-# loaded — every behavior change inside the patch is gated at runtime by the
-# ``ascend_config.edge_cloud_config.pd_separation.enabled`` /
-# ``parallel_config.is_edge_node`` checks, so when none of those are on the
-# patched code paths are byte-equivalent to
-# upstream vLLM. Loading must be unconditional because the leader (edge)
-# process has no env-level signal at platform-init time that PD/edge-cloud is
-# requested — the flag is set on
-# the VllmConfig only and reaches us via ``EngineCore.__init__``.
-import vllm_ascend.patch.platform.patch_engine_core  # noqa
-
-if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
-    import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 
 if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
     import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa

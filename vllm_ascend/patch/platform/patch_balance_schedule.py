@@ -25,25 +25,13 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
-from vllm_ascend.utils import vllm_version_is
-
 _ORIGINAL_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
 _ORIGINAL_SCHEDULER = Scheduler
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
-    # TODO: Unify this path with AscendConfig once AscendConfig initialization
-    # is moved earlier in the startup flow.
-    try:
-        from vllm_ascend.ascend_config import get_ascend_config
-
-        return bool(get_ascend_config().enable_balance_scheduling)
-    except Exception:
-        pass
     additional_config = getattr(vllm_config, "additional_config", None) or {}
-    if "enable_balance_scheduling" in additional_config:
-        return bool(additional_config["enable_balance_scheduling"])
-    return bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0")))
+    return bool(additional_config.get("enable_balance_scheduling", False))
 
 
 class BalanceScheduler(Scheduler):
@@ -81,11 +69,9 @@ class BalanceScheduler(Scheduler):
         running_tensor = torch.tensor([len(self.running)], dtype=torch.int, device="cpu")
         dist.all_gather(self.balance_queue, running_tensor, group=dp_group)
 
-    def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+    def schedule(self) -> SchedulerOutput:
         if not self._balance_enabled:
-            if vllm_version_is("0.23.0"):
-                return super().schedule()
-            return super().schedule(throttle_prefills)
+            return super().schedule()
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and

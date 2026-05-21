@@ -111,6 +111,15 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def clear_enable_sp():
+    global _ENABLE_SP
+    _ENABLE_SP = None
+    enable_dsa_cp.cache_clear()
+    enable_dsa_cp_with_layer_shard.cache_clear()
+    enable_dsa_cp_with_o_proj_tp.cache_clear()
+    _libc_getenv.cache_clear()
+
+
 def is_310p():
     return get_ascend_device_type() == AscendDeviceType._310P
 
@@ -1035,6 +1044,10 @@ def enable_sp(vllm_config=None, enable_shared_expert_dp: bool = False) -> bool:
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp() or enable_sp_by_pass()
+
+
+def prefill_context_parallel_enable() -> bool:
+    return get_ascend_config().enable_context_parallel
 
 
 def is_moe_model(vllm_config: VllmConfig):

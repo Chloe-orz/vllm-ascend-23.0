@@ -294,8 +294,10 @@ class LlamaXliteModel(XliteModel):
         xlite_config.experts_weight_transpose = True
 
         xlite_config.attn_type = AttnMHA
-        xlite_config.scoring_func = ScoringFuncSoftmax
         xlite_config.weight_nz = get_ascend_config().weight_nz_mode == 2
+        scheduler_config = vllm_config.scheduler_config
+        max_batch_size = scheduler_config.max_num_seqs
+        max_seq_len = vllm_config.model_config.max_model_len
         xlite_config.max_m = (
             vllm_config.scheduler_config.max_num_batched_tokens
             if get_ascend_config().xlite_graph_config.full_mode

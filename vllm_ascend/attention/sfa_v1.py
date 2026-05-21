@@ -596,10 +596,11 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.is_kv_producer = kv_transfer_config is not None and kv_transfer_config.is_kv_producer
         self.is_kv_consumer = kv_transfer_config is not None and kv_transfer_config.is_kv_consumer
 
-        self.sfa_qsfa_tile_size = SFA_QSFA_TILE_SIZE
-        self.sfa_qsfa_packed_kv_head_dim = 0
-        self.sfa_qsfa_k_nope_clip_alpha: torch.Tensor | None = None
-        self.sfa_qsfa_kr_cache_dummy: torch.Tensor | None = None
+        # The MLAPO operator fuses the pre-processing steps on Q/K/V in MLA into a single operator
+        # NOTE: it imposes a limit on the number of input tokens and conflicts with FlashComm
+        self.enable_mlapo = get_ascend_config().enable_mlapo
+
+        assert self.indexer is not None, "Indexer is required for DSA."
 
         self.local_num_heads = self.num_heads
         self.layer_name = kwargs.get("layer_name")

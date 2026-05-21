@@ -110,111 +110,15 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_compilation_config.enable_static_kernel)
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_rejects_mooncake_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="MooncakeConnectorV1",
-            kv_role="kv_consumer",
-        )
-        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
-        test_vllm_config.model_config = self._make_model_config()
-
-        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
-            init_ascend_config(test_vllm_config)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_rejects_multi_connector_mooncake_c8_consumer(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_consumer",
-            kv_connector_extra_config={
-                "connectors": [
-                    {
-                        "kv_connector": "MooncakeConnectorV1",
-                        "kv_role": "kv_consumer",
-                    }
-                ]
-            },
-        )
-        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
-        test_vllm_config.model_config = self._make_model_config()
-
-        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
-            init_ascend_config(test_vllm_config)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_allows_layerwise_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="MooncakeLayerwiseConnector",
-            kv_role="kv_consumer",
-        )
-        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
-        test_vllm_config.model_config = self._make_model_config()
-
-        ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertIsNotNone(ascend_config)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_allows_mha_mooncake_c8_kv_cache_consumer(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="MooncakeConnectorV1",
-            kv_role="kv_consumer",
-        )
-        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
-        test_vllm_config.model_config = self._make_model_config(
-            total_num_attention_heads=8,
-            total_num_kv_heads=8,
-        )
-
-        ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertIsNotNone(ascend_config)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_rejects_mooncake_c8_kv_cache_producer(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="MooncakeConnectorV1",
-            kv_role="kv_producer",
-        )
-        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
-        test_vllm_config.model_config = self._make_model_config()
-
-        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
-            init_ascend_config(test_vllm_config)
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_init_ascend_config_rejects_mooncake_c8_kv_cache_both_role(self, mock_fix_incompatible_config):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.kv_transfer_config = KVTransferConfig(
-            kv_connector="MooncakeConnectorV1",
-            kv_role="kv_both",
-        )
-        test_vllm_config.quant_config = SimpleNamespace(enable_c8_quant=True)
-        test_vllm_config.model_config = self._make_model_config()
-
-        with self.assertRaisesRegex(ValueError, "does not support C8 KV cache quantization"):
-            init_ascend_config(test_vllm_config)
-
-    @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
         with patch.dict(
             os.environ,
             {
+                "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "1",
                 "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
@@ -227,6 +131,7 @@ class TestAscendConfig(TestBase):
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
+        self.assertTrue(ascend_config.enable_context_parallel)
         self.assertTrue(ascend_config.enable_matmul_allreduce)
         self.assertEqual(ascend_config.enable_fused_mc2, 2)
         self.assertFalse(ascend_config.enable_mlapo)
@@ -248,7 +153,7 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_migrated_config_skips_default_env_fallback_logs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         with patch.dict(os.environ, {}, clear=True):
@@ -263,10 +168,11 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config, mock_info_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {
+            "enable_context_parallel": False,
             "enable_matmul_allreduce": False,
             "enable_fused_mc2": 0,
             "enable_mlapo": True,
@@ -279,6 +185,7 @@ class TestAscendConfig(TestBase):
         with patch.dict(
             os.environ,
             {
+                "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL": "1",
                 "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
                 "VLLM_ASCEND_ENABLE_FUSED_MC2": "2",
                 "VLLM_ASCEND_ENABLE_MLAPO": "0",
@@ -291,6 +198,7 @@ class TestAscendConfig(TestBase):
         ):
             ascend_config = init_ascend_config(test_vllm_config)
 
+        self.assertFalse(ascend_config.enable_context_parallel)
         self.assertFalse(ascend_config.enable_matmul_allreduce)
         self.assertEqual(ascend_config.enable_fused_mc2, 0)
         self.assertTrue(ascend_config.enable_mlapo)
@@ -303,19 +211,18 @@ class TestAscendConfig(TestBase):
         mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}, clear=True)
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_enable_flashcomm1_config_overrides_disabled_env(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"enable_flashcomm1": True}
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}, clear=True):
+        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "0"}):
             ascend_config = init_ascend_config(test_vllm_config)
+
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertTrue(enable_sp(test_vllm_config))
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_enable_sp_falls_back_to_env_without_current_config(self, mock_check_and_update_config):
+    def test_enable_sp_falls_back_to_env_without_current_config(self):
         clear_enable_sp()
         with (
             patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"}),
@@ -325,8 +232,7 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.utils.logger.warning_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_flashcomm2_warning_uses_enable_flashcomm1_config(self, mock_check_and_update_config, mock_warning_once):
+    def test_flashcomm2_warning_uses_enable_flashcomm1_config(self, mock_warning_once):
         test_vllm_config = VllmConfig()
         test_vllm_config.parallel_config.tensor_parallel_size = 4
         test_vllm_config.kv_transfer_config = None
@@ -350,7 +256,7 @@ class TestAscendConfig(TestBase):
         self.assertNotIn(flashcomm1_warning, [call.args[0] for call in mock_warning_once.call_args_list])
 
     @_clean_up_ascend_config
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    @patch("vllm_ascend.platform.NPUPlatform._fix_incompatible_config")
     def test_get_ascend_config(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         ascend_config = init_ascend_config(test_vllm_config)

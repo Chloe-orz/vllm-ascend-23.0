@@ -193,7 +193,7 @@ class TestTorchNPUProfilerWrapper(TestBase):
         )
         mock_export_type.Text = "Text"
         mock_profiler_level.Level1 = "Level1"
-        mock_aic_metrics.PipeUtilization = "PipeUtilization"
+        mock_aic_metrics.AiCoreNone = "AiCoreNone"
         mock_profiler_activity.CPU = "CPU"
         mock_profiler_activity.NPU = "NPU"
         mock_profile.return_value = MagicMock()
