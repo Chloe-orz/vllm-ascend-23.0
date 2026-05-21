@@ -25,6 +25,7 @@ _server_cmd: &server_cmd
   - "4"
   - "--port"
   - "$SERVER_PORT"
+  - "--async-scheduling"
   - "--quantization"
   - "ascend"
   - "--trust-remote-code"
@@ -46,20 +47,21 @@ _benchmark_acc: &_benchmark_acc
     max_out_len: 32768
     batch_size: 32
     baseline: 90
-    threshold: 10
+    threshold: 5
 
 _benchmark_TPOT50_3_5k_1_5k: &_benchmark_TPOT50_3_5k_1_5k
-  case_type: performance
-  dataset_path: vllm-ascend/GSM8K-in3500-bs2800
-  request_conf: vllm_api_stream_chat
-  dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-  num_prompts: 392
-  max_out_len: 1500
-  batch_size: 98
-  trust_remote_code: true
-  request_rate: 0
-  baseline: 1
-  threshold: 0.97
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 392
+    max_out_len: 1500
+    batch_size: 98
+    trust_remote_code: true
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
 
 _benchmark_TPOT50_16K_1K: &_benchmark_TPOT50_16K_1K
   case_type: performance
@@ -248,8 +250,6 @@ test_cases:
       HCCL_BUFFSIZE: "400"
       VLLM_ASCEND_BALANCE_SCHEDULING: "1"
     server_cmd:
-      - "--port"
-      - "$SERVER_PORT"
       - "--tool-call-parser"
       - "kimi_k2"
       - "--reasoning-parser"
@@ -275,6 +275,7 @@ test_cases:
       - "0.9"
       - "--seed"
       - "1024"
+      - "--async-scheduling"
       - "--enable-prefix-caching"
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[4,8,16], "cudagraph_mode":"FULL_DECODE_ONLY"}'

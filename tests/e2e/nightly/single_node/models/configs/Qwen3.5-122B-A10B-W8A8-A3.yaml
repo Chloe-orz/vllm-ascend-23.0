@@ -33,6 +33,7 @@ _server_cmd: &server_cmd
   - "--speculative_config"
   - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
   - "--trust-remote-code"
+  - "--async-scheduling"
   - "--allowed-local-media-path"
   - "/"
   - "--quantization"
@@ -57,7 +58,7 @@ test_cases:
         max_out_len: 65536
         batch_size: 32
         baseline: 90
-        threshold: 10
+        threshold: 5
         thinking: true
         temperature: 1.0
         top_p: 0.95
