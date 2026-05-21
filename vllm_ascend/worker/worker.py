@@ -31,7 +31,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, is_cloud_device, is_edge_device
+from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, get_world_group, is_cloud_device, is_edge_device
 from vllm_ascend.distributed.parallel_state import edge_cloud_broadcast_recv
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -630,6 +630,13 @@ class NPUWorker(WorkerBase):
             self.parallel_config.decode_context_parallel_size,
         )
         init_ascend_model_parallel(self.parallel_config)
+        tp_group = get_tp_group()
+        pp_group = get_pp_group()
+        wg = get_world_group()
+        print(f"[DistInit] rank={self.rank} "
+              f"tp_ws={tp_group.world_size} tp_rank={tp_group.rank_in_group} tp_ranks={tp_group.ranks} | "
+              f"pp_ws={pp_group.world_size} pp_rank={pp_group.rank_in_group} pp_ranks={pp_group.ranks} | "
+              f"world_ws={wg.world_size} world_rank={wg.rank_in_group}")
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def _create_profiler(self, trace_name: str):

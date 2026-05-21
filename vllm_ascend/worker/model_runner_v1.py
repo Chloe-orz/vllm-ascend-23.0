@@ -577,6 +577,11 @@ class NPUModelRunner(GPUModelRunner):
             inputs_embeds: torch.Tensor | None = None,
             **extra_layer_kwargs: Any,
         ) -> torch.Tensor | IntermediateTensors:
+            tp_group = get_tp_group()
+            pp_group = get_pp_group()
+            print(f"[SegForward] rank={torch.distributed.get_rank()} "
+                  f"tp_ranks={tp_group.ranks} pp_ranks={pp_group.ranks} "
+                  f"pp_ws={pp_group.world_size} pp_rank={pp_group.rank_in_group}")
             return model.forward_edge_cloud_segment(
                 start_layer,
                 end_layer,
