@@ -579,9 +579,9 @@ class NPUModelRunner(GPUModelRunner):
         ) -> torch.Tensor | IntermediateTensors:
             tp_group = get_tp_group()
             pp_group = get_pp_group()
-            print(f"[SegForward] rank={torch.distributed.get_rank()} "
-                  f"tp_ranks={tp_group.ranks} pp_ranks={pp_group.ranks} "
-                  f"pp_ws={pp_group.world_size} pp_rank={pp_group.rank_in_group}")
+            # print(f"[SegForward] rank={torch.distributed.get_rank()} "
+            #       f"tp_ranks={tp_group.ranks} pp_ranks={pp_group.ranks} "
+            #       f"pp_ws={pp_group.world_size} pp_rank={pp_group.rank_in_group}")
             return model.forward_edge_cloud_segment(
                 start_layer,
                 end_layer,
@@ -3314,17 +3314,17 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
-        logger.info(
-            "[_allocate_kv_cache_tensors] kv_cache_tensors_count=%d "
-            "layer_spec_count=%d runner_only_attn_layers=%s "
-            "shared_kv_cache_layers=%s use_compress=%s use_sparse=%s",
-            len(kv_cache_config.kv_cache_tensors),
-            len(layer_kv_cache_spec),
-            sorted(self.runner_only_attn_layers),
-            self.shared_kv_cache_layers,
-            self.use_compress,
-            self.use_sparse,
-        )
+        # logger.info(
+        #     "[_allocate_kv_cache_tensors] kv_cache_tensors_count=%d "
+        #     "layer_spec_count=%d runner_only_attn_layers=%s "
+        #     "shared_kv_cache_layers=%s use_compress=%s use_sparse=%s",
+        #     len(kv_cache_config.kv_cache_tensors),
+        #     len(layer_kv_cache_spec),
+        #     sorted(self.runner_only_attn_layers),
+        #     self.shared_kv_cache_layers,
+        #     self.use_compress,
+        #     self.use_sparse,
+        # )
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
@@ -3361,15 +3361,15 @@ class NPUModelRunner(GPUModelRunner):
                         cache_size_aligned = kv_cache_tensor.size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
-                    logger.info(
-                        "[_allocate_kv_cache_tensors] compress-branch layer=%s "
-                        "size=%d tensor_numel=%d device=%s data_ptr=%s",
-                        layer_name,
-                        kv_cache_tensor.size,
-                        tensor.numel(),
-                        tensor.device,
-                        tensor.data_ptr(),
-                    )
+                    # logger.info(
+                    #     "[_allocate_kv_cache_tensors] compress-branch layer=%s "
+                    #     "size=%d tensor_numel=%d device=%s data_ptr=%s",
+                    #     layer_name,
+                    #     kv_cache_tensor.size,
+                    #     tensor.numel(),
+                    #     tensor.device,
+                    #     tensor.data_ptr(),
+                    # )
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         kv_cache_raw_tensors[layer_name_inner] = tensor
@@ -3456,24 +3456,24 @@ class NPUModelRunner(GPUModelRunner):
                                     kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor)
                             else:
                                 kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
-                            logger.info(
-                                "[_allocate_kv_cache_tensors] attn-branch layer=%s "
-                                "k_numel=%d v_numel=%d",
-                                layer_name_inner,
-                                k_tensor.numel() if k_tensor is not None else 0,
-                                v_tensor.numel() if v_tensor is not None else 0,
-                            )
+                            # logger.info(
+                            #     "[_allocate_kv_cache_tensors] attn-branch layer=%s "
+                            #     "k_numel=%d v_numel=%d",
+                            #     layer_name_inner,
+                            #     k_tensor.numel() if k_tensor is not None else 0,
+                            #     v_tensor.numel() if v_tensor is not None else 0,
+                            # )
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
-        logger.info(
-            "[_allocate_kv_cache_tensors] expected_layers=%s allocated_layers=%s",
-            sorted(layer_names),
-            sorted(kv_cache_raw_tensors.keys()),
-        )
+        # logger.info(
+        #     "[_allocate_kv_cache_tensors] expected_layers=%s allocated_layers=%s",
+        #     sorted(layer_names),
+        #     sorted(kv_cache_raw_tensors.keys()),
+        # )
         assert layer_names == set(kv_cache_raw_tensors.keys()), "Some layers are not correctly initialized"
 
         return kv_cache_raw_tensors
