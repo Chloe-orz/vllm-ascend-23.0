@@ -69,6 +69,7 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    has_sinks=False,
     input_ids=None,
 ):
     """A context manager that stores the current forward context,
@@ -419,7 +420,6 @@ class _ExtraForwardContextProxy:
         "in_profile_run",
         "padded_num_tokens",
         "sinks",
-        "eplb_heat_collection_status",
     )
 
     def check_extra_attr(self, name: str):
