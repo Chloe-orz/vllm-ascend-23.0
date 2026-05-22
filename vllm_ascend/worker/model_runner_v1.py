@@ -2610,8 +2610,8 @@ class NPUModelRunner(GPUModelRunner):
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
         default_stream = torch.npu.current_stream()
-        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):
-            self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)
+        with torch.npu.stream(self.valid_sampled_token_count_copy_stream):  
+            self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  
             counts = valid_sampled_tokens_count
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None
@@ -3457,6 +3457,22 @@ class NPUModelRunner(GPUModelRunner):
                         batch_desc,
                         num_tokens_across_dp,
                     )
+                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                if self.use_compress:
+                    if deferred_state_corrections_fn:
+                        deferred_state_corrections_fn()
+                        deferred_state_corrections_fn = None
+                    num_reqs = self.input_batch.num_reqs
+                    req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+                    dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
+                    np.add(
+                        self.input_batch.num_computed_tokens_cpu[req_indices],
+                        self.query_pos.np[:total_num_scheduled_tokens],
+                        out=dsa_positions_np,
+                    )
+
+                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
                 # Save spec_decode_common_attn_metadata for cloud-side
                 # MTP draft proposal.  On the cloud side,
@@ -6582,7 +6598,7 @@ class NPUModelRunner(GPUModelRunner):
             num_input_tokens=num_tokens_padded,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
             positions=self.positions,
-            positions_cpu=self.positions.cpu() if self.use_compress else None,
+            positions_cpu=self._dsa_positions_cpu_buf if self.use_compress else None,
             attn_state=self.attn_state,
             decode_token_per_req=self.decode_token_per_req,
             prefill_context_parallel_metadata=self.long_seq_metadata,
@@ -6946,6 +6962,7 @@ class NPUModelRunner(GPUModelRunner):
             # check how to build dummy
             if self.use_compress:
                 self.positions.fill_(127)
+                self._dsa_positions_cpu_buf.fill_(127)
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
                 num_tokens_padded=num_tokens_padded,
@@ -7109,6 +7126,7 @@ class NPUModelRunner(GPUModelRunner):
             self._finalize_dump_data(dump=False)
             if self.use_compress and force_attention:
                 self.positions.fill_(0)
+                self._dsa_positions_cpu_buf.fill_(0)
             return hidden_states, hidden_states
 
     @torch.inference_mode()
