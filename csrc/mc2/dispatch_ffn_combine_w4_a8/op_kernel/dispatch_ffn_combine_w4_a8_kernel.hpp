@@ -134,7 +134,8 @@ public:
                GM_ADDR ptrOutput_, LayoutD2 layoutD1_, LayoutD2 layoutD2_, GM_ADDR expertIdx_,
                GM_ADDR moeInitRoutingQuantV2Scale_, GM_ADDR moeInitRoutingQuantV2Offset_,
                GM_ADDR expertTokensBeforeCapacity_, GM_ADDR probs_, GM_ADDR ptrWorkspace_, GM_ADDR gmExpertTokenNums_,
-               int32_t ubMoveNum_, optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_, float swigluLimit_,
+               int32_t ubMoveNum_, GM_ADDR ptrXActiveMask_,
+               optiling::MoeInitRoutingQuantV2TilingData moeInitRoutingQuantV2TilingData_, float swigluLimit_,
                GM_ADDR symmetricPtr_ = nullptr)
             : problemShape(problemShape_),
               EP(EP_),
@@ -171,6 +172,7 @@ public:
               ptrExpertTokenNums(gmExpertTokenNums_),
               ubMoveNum(ubMoveNum_),
               symmetricPtr(symmetricPtr_),
+              ptrXActiveMask(ptrXActiveMask_),
               moeInitRoutingQuantV2TilingData(moeInitRoutingQuantV2TilingData_),
               swigluLimit(swigluLimit_)
         {

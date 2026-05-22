@@ -119,8 +119,6 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);  
         }
         ubPerTokenScaleOutput = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
-        ubOffset += 32;
-        sharedTmpBuffer = resource.ubBuf.template GetBufferByByte<uint8_t>(ubOffset);
     }
     CATLASS_DEVICE
     void Finalize()
@@ -310,7 +308,7 @@ private:
     int32_t eventUbDVMTE3List[UB_STAGES];
 
     uint32_t ubListId{0};
-    size_t ubOffset = 0;
+    size_t ubOffset;
 
     AscendC::LocalTensor<float> ubCFp32List[UB_STAGES];
     AscendC::LocalTensor<float> ubCFp32ChunkNList[UB_STAGES];
