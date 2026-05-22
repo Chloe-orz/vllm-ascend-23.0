@@ -245,6 +245,54 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+
+
+class EdgeCloudSegment(torch.nn.Module):
+    """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
+
+    将基础模型的 ``forward_edge_cloud_segment``（模型加载阶段通过
+    monkey-patch 注入）包装为标准 nn.Module，使 ACLGraphWrapper 可以像
+    标准流程包裹完整模型一样包裹 segment：:
+
+        ACLGraphWrapper(EdgeCloudSegment(model, N-1, N), ...)
+
+    使用 nn.Module 而非函数闭包，确保 ``torch.npu.graph`` 的参数追踪、
+    缓冲区管理、模块分发与标准（非边云）流程完全一致。
+
+    注意：model 被存入 list 而非直接作为属性，避免 nn.Module.__setattr__
+    将其注册为子模块。若注册为子模块，torch.npu.graph 捕获时会遍历完整
+    模型层级，为所有层（含 PPMissingLayer）分配图内存池，导致边侧 OOM。
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        start_layer: int,
+        end_layer: int,
+    ):
+        super().__init__()
+        self._model_ref = [model]
+        self._start_layer = start_layer
+        self._end_layer = end_layer
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **extra_layer_kwargs: Any,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self._model_ref[0].forward_edge_cloud_segment(
+            self._start_layer,
+            self._end_layer,
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            **extra_layer_kwargs,
+        )
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -556,52 +604,6 @@ class NPUModelRunner(GPUModelRunner):
             return False
         return getattr(forward_context, "in_profile_run", False)
 
-
-    class EdgeCloudSegment(torch.nn.Module):
-        """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
-    
-        将基础模型的 ``forward_edge_cloud_segment``（模型加载阶段通过
-        monkey-patch 注入）包装为标准 nn.Module，使 ACLGraphWrapper 可以像
-        标准流程包裹完整模型一样包裹 segment：:
-    
-            ACLGraphWrapper(EdgeCloudSegment(model, N-1, N), ...)
-    
-        使用 nn.Module 而非函数闭包，确保 ``torch.npu.graph`` 的参数追踪、
-        缓冲区管理、模块分发与标准（非边云）流程完全一致。
-    
-        注意：model 被存入 list 而非直接作为属性，避免 nn.Module.__setattr__
-        将其注册为子模块。若注册为子模块，torch.npu.graph 捕获时会遍历完整
-        模型层级，为所有层（含 PPMissingLayer）分配图内存池，导致边侧 OOM。
-        """
-    
-        def __init__(
-            self,
-            model: torch.nn.Module,
-            start_layer: int,
-            end_layer: int,
-        ):
-            super().__init__()
-            self._model_ref = [model]
-            self._start_layer = start_layer
-            self._end_layer = end_layer
-    
-        def forward(
-            self,
-            input_ids: torch.Tensor | None = None,
-            positions: torch.Tensor | None = None,
-            intermediate_tensors: IntermediateTensors | None = None,
-            inputs_embeds: torch.Tensor | None = None,
-            **extra_layer_kwargs: Any,
-        ) -> torch.Tensor | IntermediateTensors:
-            return self._model_ref[0].forward_edge_cloud_segment(
-                self._start_layer,
-                self._end_layer,
-                input_ids,
-                positions,
-                intermediate_tensors,
-                inputs_embeds,
-                **extra_layer_kwargs,
-            )
 
 
     def _create_segment_callable(
