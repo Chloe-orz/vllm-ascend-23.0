@@ -577,6 +577,11 @@ class NPUModelRunner(GPUModelRunner):
             inputs_embeds: torch.Tensor | None = None,
             **extra_layer_kwargs: Any,
         ) -> torch.Tensor | IntermediateTensors:
+            tp_group = get_tp_group()
+            pp_group = get_pp_group()
+            # print(f"[SegForward] rank={torch.distributed.get_rank()} "
+            #       f"tp_ranks={tp_group.ranks} pp_ranks={pp_group.ranks} "
+            #       f"pp_ws={pp_group.world_size} pp_rank={pp_group.rank_in_group}")
             return model.forward_edge_cloud_segment(
                 start_layer,
                 end_layer,
@@ -2238,23 +2243,29 @@ class NPUModelRunner(GPUModelRunner):
                     forward_context, num_tokens_padded, positions
                 )
             # intermediate_tensors 已由 NPUWorker 从 Edge 侧接收
-            if intermediate_tensors is not None:
-                logger.info(
-                    "[_model_forward Cloud] intermediate_tensors['hidden_states'] "
-                    "shape=%s ndim=%d, role=%s",
-                    list(intermediate_tensors["hidden_states"].shape),
-                    intermediate_tensors["hidden_states"].dim(),
-                    self.edge_cloud_cfg.role,
-                )
-            hidden_states = seg_c(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
+            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+            old_layer_idx = _EXTRA_CTX.layer_idx
+            if _EXTRA_CTX.layer_idx is not None:
+                _EXTRA_CTX.layer_idx = self.head_k
+            logger.info(
+                "[_model_forward Cloud] _EXTRA_CTX.layer_idx=%s before seg_c, "
+                "cloud start_layer expected=%d",
+                old_layer_idx,
+                self.head_k,
             )
-            if use_graph:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions
+            try:
+                hidden_states = seg_c(
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    **model_kwargs,
                 )
+                if use_graph:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions
+                    )
+            finally:
+                if old_layer_idx is not None:
+                    _EXTRA_CTX.layer_idx = old_layer_idx
             # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
             assert isinstance(hidden_states, IntermediateTensors)
             return hidden_states
@@ -2669,7 +2680,7 @@ class NPUModelRunner(GPUModelRunner):
             # But gdn needs an unpadded one.
             # gdn_query_start_loc is an unpadded version of query_start_loc.
             # TODO delete it if fia's check is removed.
-            if self._has_gdn:
+            if self._has_gdn and self.attn_groups[kv_cache_gid]:
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
                 if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
@@ -3037,13 +3048,14 @@ class NPUModelRunner(GPUModelRunner):
                     if enable_sp():
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
                     hidden_size = self.model_config.hf_config.hidden_size
+                    hc_mult = getattr(self.model_config.hf_config, 'hc_mult', 1)
                     dummy_hidden = torch.zeros(
-                        max_actual_tokens, hidden_size, dtype=self.dtype, device=self.device
+                        max_actual_tokens, hc_mult, hidden_size, dtype=self.dtype, device=self.device
                     )
-                    # residual 与 hidden_states 同 shape，满足 layer(residual=None) 的初次调用
+                    # hidden_states/residual 在段间传递时均为 (n, hc_mult, h)
                     self.intermediate_tensors = {
                         "hidden_states": dummy_hidden,
-                        "residual": dummy_hidden.new_zeros(max_actual_tokens, hidden_size),
+                        "residual": dummy_hidden.clone(),
                     }
                 intermediate_tensors = IntermediateTensors(
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
@@ -3198,7 +3210,9 @@ class NPUModelRunner(GPUModelRunner):
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+            [isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+             for attn_group in self.attn_groups
+             if attn_group]  # skip empty groups (edge-cloud placeholder groups)
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
@@ -3300,17 +3314,17 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
-        logger.info(
-            "[_allocate_kv_cache_tensors] kv_cache_tensors_count=%d "
-            "layer_spec_count=%d runner_only_attn_layers=%s "
-            "shared_kv_cache_layers=%s use_compress=%s use_sparse=%s",
-            len(kv_cache_config.kv_cache_tensors),
-            len(layer_kv_cache_spec),
-            sorted(self.runner_only_attn_layers),
-            self.shared_kv_cache_layers,
-            self.use_compress,
-            self.use_sparse,
-        )
+        # logger.info(
+        #     "[_allocate_kv_cache_tensors] kv_cache_tensors_count=%d "
+        #     "layer_spec_count=%d runner_only_attn_layers=%s "
+        #     "shared_kv_cache_layers=%s use_compress=%s use_sparse=%s",
+        #     len(kv_cache_config.kv_cache_tensors),
+        #     len(layer_kv_cache_spec),
+        #     sorted(self.runner_only_attn_layers),
+        #     self.shared_kv_cache_layers,
+        #     self.use_compress,
+        #     self.use_sparse,
+        # )
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
@@ -3347,15 +3361,15 @@ class NPUModelRunner(GPUModelRunner):
                         cache_size_aligned = kv_cache_tensor.size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
                         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
-                    logger.info(
-                        "[_allocate_kv_cache_tensors] compress-branch layer=%s "
-                        "size=%d tensor_numel=%d device=%s data_ptr=%s",
-                        layer_name,
-                        kv_cache_tensor.size,
-                        tensor.numel(),
-                        tensor.device,
-                        tensor.data_ptr(),
-                    )
+                    # logger.info(
+                    #     "[_allocate_kv_cache_tensors] compress-branch layer=%s "
+                    #     "size=%d tensor_numel=%d device=%s data_ptr=%s",
+                    #     layer_name,
+                    #     kv_cache_tensor.size,
+                    #     tensor.numel(),
+                    #     tensor.device,
+                    #     tensor.data_ptr(),
+                    # )
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         kv_cache_raw_tensors[layer_name_inner] = tensor
@@ -3442,24 +3456,24 @@ class NPUModelRunner(GPUModelRunner):
                                     kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor, dsa_k_tensor)
                             else:
                                 kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor)
-                            logger.info(
-                                "[_allocate_kv_cache_tensors] attn-branch layer=%s "
-                                "k_numel=%d v_numel=%d",
-                                layer_name_inner,
-                                k_tensor.numel() if k_tensor is not None else 0,
-                                v_tensor.numel() if v_tensor is not None else 0,
-                            )
+                            # logger.info(
+                            #     "[_allocate_kv_cache_tensors] attn-branch layer=%s "
+                            #     "k_numel=%d v_numel=%d",
+                            #     layer_name_inner,
+                            #     k_tensor.numel() if k_tensor is not None else 0,
+                            #     v_tensor.numel() if v_tensor is not None else 0,
+                            # )
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
-        logger.info(
-            "[_allocate_kv_cache_tensors] expected_layers=%s allocated_layers=%s",
-            sorted(layer_names),
-            sorted(kv_cache_raw_tensors.keys()),
-        )
+        # logger.info(
+        #     "[_allocate_kv_cache_tensors] expected_layers=%s allocated_layers=%s",
+        #     sorted(layer_names),
+        #     sorted(kv_cache_raw_tensors.keys()),
+        # )
         assert layer_names == set(kv_cache_raw_tensors.keys()), "Some layers are not correctly initialized"
 
         return kv_cache_raw_tensors

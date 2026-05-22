@@ -223,29 +223,29 @@ class LayerShardLoader:
                             should_remove = False
                     except ImportError:
                         pass
-            logger.info(
-                "[LayerShardLoader][Clean] prefix=%s, current_type=%s, "
-                "in_model=%s, remove=%s",
-                prefix,
-                current_type,
-                not should_remove,
-                should_remove,
-            )
+            # logger.info(
+            #     "[LayerShardLoader][Clean] prefix=%s, current_type=%s, "
+            #     "in_model=%s, remove=%s",
+            #     prefix,
+            #     current_type,
+            #     not should_remove,
+            #     should_remove,
+            # )
             if should_remove:
                 del compilation_config.static_forward_context[prefix]
                 removed_prefixes.append(prefix)
 
-        if removed_prefixes:
-            logger.info(
-                "[LayerShardLoader] Removed %d stale entries from "
-                "static_forward_context: %s",
-                len(removed_prefixes),
-                removed_prefixes,
-            )
-        else:
-            logger.info(
-                "[LayerShardLoader] No stale entries removed from static_forward_context."
-            )
+        # if removed_prefixes:
+        #     logger.info(
+        #         "[LayerShardLoader] Removed %d stale entries from "
+        #         "static_forward_context: %s",
+        #         len(removed_prefixes),
+        #         removed_prefixes,
+        #     )
+        # else:
+        #     logger.info(
+        #         "[LayerShardLoader] No stale entries removed from static_forward_context."
+        #     )
 
         # static_all_moe_layers is a plain list; modify in-place so that
         # existing references (e.g. in ForwardContext) see the update.
@@ -256,13 +256,13 @@ class LayerShardLoader:
         removed_moe = len(original_all_moe) - len(
             compilation_config.static_all_moe_layers
         )
-        if removed_moe:
-            logger.info(
-                "[LayerShardLoader] Removed %d stale entries from "
-                "static_all_moe_layers. Remaining: %d",
-                removed_moe,
-                len(compilation_config.static_all_moe_layers),
-            )
+        # if removed_moe:
+        #     logger.info(
+        #         "[LayerShardLoader] Removed %d stale entries from "
+        #         "static_all_moe_layers. Remaining: %d",
+        #         removed_moe,
+        #         len(compilation_config.static_all_moe_layers),
+        #     )
 
     @classmethod
     def validate_sharding(cls, model: nn.Module, layer_plan: EdgeCloudLayerPlan) -> None:

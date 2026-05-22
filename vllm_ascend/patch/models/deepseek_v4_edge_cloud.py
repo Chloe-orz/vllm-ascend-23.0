@@ -96,6 +96,7 @@ def _forward_edge_cloud_segment_v4(
             hidden_states = inputs_embeds
         else:
             hidden_states = self.embed_input_ids(input_ids)
+        hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
         residual = None
     else:
         assert intermediate_tensors is not None, (
@@ -104,7 +105,6 @@ def _forward_edge_cloud_segment_v4(
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
 
-    hidden_states = hidden_states.unsqueeze(-2).repeat(1, self.hc_mult, 1)
     # ----- Execute layers in [start_layer, end_layer) -----
     # llama_4_scaling is currently None because scaling config is not enabled.
     # When enabled, compute it from config (see DeepseekV4Model.forward).
@@ -123,6 +123,14 @@ def _forward_edge_cloud_segment_v4(
     # tail (segment E) do not need ``input_ids``.  We only pass
     # ``hidden_states`` and ``residual`` across the network.
 
+    if not is_last_segment:
+        # residual keeps its original (n, hc_mult, h) shape, aligned with
+        # standard forward path and make_empty_intermediate_tensors buffer.
+        return IntermediateTensors({
+            "hidden_states": hidden_states,
+            "residual": residual,
+        })
+
     # Last segment: hc_head + norm
     hidden_states = self.hc_head(
         hidden_states,
@@ -131,17 +139,6 @@ def _forward_edge_cloud_segment_v4(
         self.hc_head_base,
     )
 
-    if not is_last_segment:
-        residual = self.hc_head(
-            residual,
-            self.hc_head_fn,
-            self.hc_head_scale,
-            self.hc_head_base,
-        )
-        return IntermediateTensors({
-            "hidden_states": hidden_states,
-            "residual": residual,
-        })
 
     hidden_states = self.norm(hidden_states)
     return hidden_states

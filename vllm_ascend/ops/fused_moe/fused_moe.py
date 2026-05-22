@@ -453,6 +453,11 @@ class AscendFusedMoE(FusedMoE):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         self.ensure_moe_quant_config_init()
+        live_ep = get_ep_group()
+        # print(f"[FusedMoE-fwd] layer={self.layer_name} "
+        #       f"live_ep_ws={live_ep.world_size}, live_ep_rank={live_ep.rank_in_group}, "
+        #       f"cached_ep_ws={self.moe_config.ep_group.world_size}, "
+        #       f"moe_ep_size={self.ep_size}, local_num_experts={self.local_num_experts}")
         return self.runner.forward(
             hidden_states,
             router_logits,

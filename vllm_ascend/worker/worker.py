@@ -31,7 +31,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, is_cloud_device, is_edge_device
+from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, get_world_group, is_cloud_device, is_edge_device
 from vllm_ascend.distributed.parallel_state import edge_cloud_broadcast_recv
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -388,7 +388,7 @@ class NPUWorker(WorkerBase):
                 )
                 model = self.model_runner.model
                 num_layers = len(model.model.layers) if hasattr(model, 'model') and hasattr(model.model, 'layers') else 0
-                logger.info(f"[Cloud] PP stage: middle, rank={self.rank}, local_rank={self.local_rank}, num_layers={num_layers}")
+                logger.info(f"[Cloud] PP stage: middle, rank={self.rank}, local_rank={self.local_rank}, num_layers={num_layers}, recv tensor {intermediate_tensors}")
             # Non-edge-cloud PP: original async recv
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
@@ -418,7 +418,7 @@ class NPUWorker(WorkerBase):
         if is_edge_device():
             # Edge NPU0 sends first stage output before recv (async)
             if get_pp_group().world_size == 2:
-                logger.info(f"[Edge] PP stage: first (send), rank={self.rank}, local_rank={self.local_rank}")
+                logger.info(f"[Edge] PP stage: first (send), rank={self.rank}, local_rank={self.local_rank}, send tensor {output.tensors}")
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
             # Unified broadcast receive
             tensor_dict, handles, postprocess = edge_cloud_broadcast_recv()
@@ -427,6 +427,7 @@ class NPUWorker(WorkerBase):
                 comm_handles=handles,
                 comm_postprocess=postprocess,
             )
+            logger.info(f"edge recv from cloud intermediate_tensors : {intermediate_tensors}")
             # Get model layer info for debug output
             model = self.model_runner.model
             num_layers = len(model.model.layers) if hasattr(model, 'model') and hasattr(model.model, 'layers') else 0
@@ -439,7 +440,7 @@ class NPUWorker(WorkerBase):
         # Cloud NPU0: send result back to Edge NPU0 (async)
         elif is_cloud_device():
             if get_pp_group().world_size == 2:
-                logger.info(f"[Cloud] PP stage: last (send back to Edge), rank={self.rank}, local_rank={self.local_rank}")
+                logger.info(f"[Cloud] PP stage: last (send back to Edge), rank={self.rank}, local_rank={self.local_rank}, send tesor {output.tensors}")
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
         # Non-edge-cloud PP: original async send
         else:
@@ -630,6 +631,13 @@ class NPUWorker(WorkerBase):
             self.parallel_config.decode_context_parallel_size,
         )
         init_ascend_model_parallel(self.parallel_config)
+        tp_group = get_tp_group()
+        pp_group = get_pp_group()
+        wg = get_world_group()
+        print(f"[DistInit] rank={self.rank} "
+              f"tp_ws={tp_group.world_size} tp_rank={tp_group.rank_in_group} tp_ranks={tp_group.ranks} | "
+              f"pp_ws={pp_group.world_size} pp_rank={pp_group.rank_in_group} pp_ranks={pp_group.ranks} | "
+              f"world_ws={wg.world_size} world_rank={wg.rank_in_group}")
         ensure_ec_transfer_initialized(self.vllm_config)
 
     def _create_profiler(self, trace_name: str):
