@@ -2247,7 +2247,9 @@ class NPUModelRunner(GPUModelRunner):
                 "Cloud segment_c requires intermediate_tensors from Edge side"
             )
 
-            seg_c = self.segment_c_wrapper if use_graph else self.segment_c
+            # 验证：临时强制 Cloud 侧 segment_c 走 eager，排除 MoE MC2 与 ACL Graph 不兼容问题
+            # seg_c = self.segment_c_wrapper if use_graph else self.segment_c
+            seg_c = self.segment_c
 
             if use_graph:
                 self._update_full_graph_params_if_needed(
@@ -2858,6 +2860,10 @@ class NPUModelRunner(GPUModelRunner):
             )
         num_tokens_padded = batch_desc.num_tokens
         num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+        role = getattr(self, 'edge_cloud_cfg', None)
+        role_str = role.role if role else 'std'
+        print(f"[DummyRun] role={role_str} num_tokens={num_tokens} num_tokens_padded={num_tokens_padded} "
+              f"num_reqs={num_reqs} num_reqs_padded={num_reqs_padded} cudagraph_mode={cudagraph_runtime_mode}")
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded

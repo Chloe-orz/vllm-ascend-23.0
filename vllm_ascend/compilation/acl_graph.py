@@ -129,6 +129,8 @@ class ACLGraphWrapper:
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
                 logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
+            print(f"[ACLGraph] Capturing graph mode={self.runtime_mode.name} "
+                  f"batch_descriptor={entry.batch_descriptor}")
             # validate that aclgraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
