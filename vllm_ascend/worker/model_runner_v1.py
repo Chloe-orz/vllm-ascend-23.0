@@ -600,18 +600,18 @@ class EdgeCloudSegment(torch.nn.Module):
         )
 
 
-def _create_segment_callable(
+    def _create_segment_callable(
         self,
         model: torch.nn.Module,
         start_layer: int,
         end_layer: int,
     ) -> Any:
         """创建一个仅执行指定层区间 [start_layer, end_layer) 的 nn.Module。
-
+        
         返回 EdgeCloudSegment（nn.Module 子类）而非函数闭包，
         确保 ACLGraphWrapper 包裹的是标准 nn.Module，与标准流程的
         图捕获方式对齐（torch.npu.graph 捕获 nn.Module.forward()）。
-
+        
         边云场景下所有模型均已在加载阶段通过对应 patch 文件注入
         forward_edge_cloud_segment，因此直接委托即可，无需额外 fallback。
         """
@@ -2186,27 +2186,10 @@ def _create_segment_callable(
         assert forward_context is not None
 
         # 判断当前是否应使用 ACL Graph（Decode 阶段且配置允许时）
-        # 边云场景分 segment 策略：
-        #   - Edge segment_a：含 Hash MoE + MC2/HCCL，强制 eager
-        #   - Cloud segment_c：含标准 MoE + MC2/HCCL，强制 eager
-        #   - Edge segment_e：单层（tail_k=1），不含 Hash MoE，layer_idx 固定，
-        #                     允许 graph（需配合 intermediate_tensors copy 到固定 buffer）
-        if self._edge_cloud_enabled:
-            if self.edge_cloud_cfg.role == "cloud":
-                use_graph = False
-            else:
-                # Edge: segment_a (intermediate_tensors is None) -> eager
-                #       segment_e (intermediate_tensors is not None) -> graph allowed
-                use_graph = (
-                    intermediate_tensors is not None
-                    and forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
-                    and self.edge_cloud_cfg.enable_decode_graph
-                )
-        else:
-            use_graph = (
-                forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
-                and self.edge_cloud_cfg.enable_decode_graph
-            )
+        use_graph = (
+            forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+            and self.edge_cloud_cfg.enable_decode_graph
+        )
 
         if self.edge_cloud_cfg.role == "edge":
             # Edge 侧：segment_a（首段）+ segment_e（尾段）
