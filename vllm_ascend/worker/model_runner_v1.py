@@ -614,9 +614,11 @@ class NPUModelRunner(GPUModelRunner):
             return segment
         if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             return segment
-        # profile / dummy_run / capture 期间跳过图包装，避免跨节点 HCCL 通信
-        # 与 torch.npu.NPUGraph 死锁；同时防止图捕获到无效的跨节点状态
-        if self._is_dummy_or_profile_run():
+        # 标准（非边云）流程在 profile / dummy_run 期间跳过图包装，
+        # 避免跨节点 HCCL 通信与 torch.npu.NPUGraph 死锁。
+        # 边云模式下 segment 内部不包含 HCCL（通信在 segment 外的 worker.py 中），
+        # 因此 dummy_run 期间也应包装，以便 warmup 阶段预捕获固定 size 的图。
+        if self._is_dummy_or_profile_run() and not self._edge_cloud_enabled:
             return segment
 
         return ACLGraphWrapper(
@@ -2201,6 +2203,15 @@ class NPUModelRunner(GPUModelRunner):
                 if _EXTRA_CTX.layer_idx is not None:
                     _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
+                # ACL Graph 要求输入地址固定；将动态接收的 intermediate_tensors
+                # copy 到 dummy_run 阶段预分配的固定 buffer 中，保证 capture/replay 地址一致
+                if use_graph and intermediate_tensors is not None:
+                    for key, tensor in intermediate_tensors.items():
+                        self.intermediate_tensors[key][:tensor.shape[0]].copy_(tensor)
+                    intermediate_tensors = IntermediateTensors(
+                        {k: self.intermediate_tensors[k][:v.shape[0]] for k, v in intermediate_tensors.items()}
+                    )
+
                 try:
                     if use_graph:
                         self._update_full_graph_params_if_needed(
@@ -2253,6 +2264,15 @@ class NPUModelRunner(GPUModelRunner):
                 old_layer_idx,
                 self.head_k,
             )
+            # ACL Graph 要求输入地址固定；将动态接收的 intermediate_tensors
+            # copy 到 dummy_run 阶段预分配的固定 buffer 中，保证 capture/replay 地址一致
+            if use_graph and intermediate_tensors is not None:
+                for key, tensor in intermediate_tensors.items():
+                    self.intermediate_tensors[key][:tensor.shape[0]].copy_(tensor)
+                intermediate_tensors = IntermediateTensors(
+                    {k: self.intermediate_tensors[k][:v.shape[0]] for k, v in intermediate_tensors.items()}
+                )
+
             try:
                 hidden_states = seg_c(
                     positions=positions,

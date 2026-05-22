@@ -388,7 +388,7 @@ class NPUWorker(WorkerBase):
                 )
                 model = self.model_runner.model
                 num_layers = len(model.model.layers) if hasattr(model, 'model') and hasattr(model.model, 'layers') else 0
-                logger.info(f"[Cloud] PP stage: middle, rank={self.rank}, local_rank={self.local_rank}, num_layers={num_layers}, recv tensor {intermediate_tensors}")
+                logger.info(f"[Cloud] PP stage: middle, rank={self.rank}, local_rank={self.local_rank}, num_layers={num_layers}")
             # Non-edge-cloud PP: original async recv
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
@@ -418,7 +418,7 @@ class NPUWorker(WorkerBase):
         if is_edge_device():
             # Edge NPU0 sends first stage output before recv (async)
             if get_pp_group().world_size == 2:
-                logger.info(f"[Edge] PP stage: first (send), rank={self.rank}, local_rank={self.local_rank}, send tensor {output.tensors}")
+                logger.info(f"[Edge] PP stage: first (send), rank={self.rank}, local_rank={self.local_rank}")
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
             # Unified broadcast receive
             tensor_dict, handles, postprocess = edge_cloud_broadcast_recv()
@@ -427,7 +427,6 @@ class NPUWorker(WorkerBase):
                 comm_handles=handles,
                 comm_postprocess=postprocess,
             )
-            logger.info(f"edge recv from cloud intermediate_tensors : {intermediate_tensors}")
             # Get model layer info for debug output
             model = self.model_runner.model
             num_layers = len(model.model.layers) if hasattr(model, 'model') and hasattr(model.model, 'layers') else 0
@@ -440,7 +439,7 @@ class NPUWorker(WorkerBase):
         # Cloud NPU0: send result back to Edge NPU0 (async)
         elif is_cloud_device():
             if get_pp_group().world_size == 2:
-                logger.info(f"[Cloud] PP stage: last (send back to Edge), rank={self.rank}, local_rank={self.local_rank}, send tesor {output.tensors}")
+                logger.info(f"[Cloud] PP stage: last (send back to Edge), rank={self.rank}, local_rank={self.local_rank}")
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
         # Non-edge-cloud PP: original async send
         else:
