@@ -587,6 +587,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 w2_scale=w2_scale,
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
+                is_per_channel_weight=self.is_per_channel_weight,
                 swiglu_limit=layer.swiglu_limit,
             )
         )
@@ -646,17 +647,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 weight.to(torch.float32), torch.tensor([1.0]).npu(), None, torch.quint4x2, -1, False
             )
 
-    def pack_int4_to_int8(self, weight: torch.Tensor) -> torch.Tensor:
-        shape = weight.shape
-        weight = weight.reshape(-1, 2)
-        weight0 = weight[:, :1]
-        weight1 = weight[:, 1:]
-        weight1_4 = torch.bitwise_left_shift(weight1, 4)
-        weight2_4 = weight0 & 0b00001111
-        weight_add = torch.bitwise_or(weight1_4, weight2_4)
-        # The clone() call is used to break the view chain
-        return weight_add.reshape(shape[:-1] + (shape[-1] // 2,)).clone()
-
     @staticmethod
     def maybe_squeeze_per_channel_weight_scale(scale: torch.Tensor) -> torch.Tensor:
         if scale.dim() > 1 and scale.shape[1] == 1:
@@ -678,7 +668,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             scale_np = scale.cpu().numpy()
             scale_np.dtype = np.uint32
             scale_uint64_tensor = torch.from_numpy(scale_np.astype(np.int64)).npu()
-            if self.is_per_channel_weight and squeeze:
+            if self.is_per_channel_weight:
                 return self.maybe_squeeze_per_channel_weight_scale(scale_uint64_tensor)
             return scale_uint64_tensor
 

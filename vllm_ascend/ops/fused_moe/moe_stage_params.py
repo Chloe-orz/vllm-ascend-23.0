@@ -81,10 +81,6 @@ class MoEQuantParams:
         return self.quant_type in (QuantType.W8A8, QuantType.W4A8)
 
     @property
-    def is_fp8(self) -> bool:
-        return self.quant_type == QuantType.W8A8FP8
-
-    @property
     def use_w4a8_per_channel_gmm_swiglu(self) -> bool:
         return self.quant_type == QuantType.W4A8 and self.is_per_channel_weight
 

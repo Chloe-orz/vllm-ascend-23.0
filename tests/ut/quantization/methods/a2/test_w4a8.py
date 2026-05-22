@@ -284,7 +284,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
     @patch("torch.Tensor.npu", new=lambda self: self)
-    def test_process_weights_after_loading(self, mock_npu_quantize, mock_npu_format_cast, mock_maybe_trans_nz):
+    def test_process_weights_after_loading(self, mock_npu_quantize, mock_npu_format_cast):
         mock_npu_quantize.return_value = torch.Tensor()
         mock_npu_format_cast.side_effect = identity
         mock_maybe_trans_nz.side_effect = identity
@@ -310,14 +310,6 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method.process_weights_after_loading(per_channel_layer)
         self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
-
-    def test_pack_to_int32_asserts_new_quant_packed_dim(self):
-        self.quant_method.new_quant_version = True
-        weight = torch.zeros((self.experts, self.output_size, 10), dtype=torch.int8)
-        expected_message = f"the last dim of weight needs to be divided by 4 but got shape {weight.shape}"
-
-        with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
-            self.quant_method.pack_to_int32(weight)
 
     def test_get_weight_compressed_tensors(self):
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
@@ -370,6 +362,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         top_k = 2
 
         layer = self.build_layer(is_new_quant_version=True, is_per_channel_weight=True)
+        self.quant_method.is_per_channel_weight = True
         layer.swiglu_limit = 1000000
         x = torch.randn(tokens, hidden_size, dtype=torch.bfloat16)
         router_logits = torch.randn(tokens, num_experts, dtype=torch.float32)

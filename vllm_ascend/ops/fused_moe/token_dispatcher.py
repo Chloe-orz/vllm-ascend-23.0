@@ -243,6 +243,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             expand_scales,
         ) = output[0:7]
 
+        # The dispatch operator may still return a non-None dynamic_scale when
+        # quant_mode=0. Clear it for unquantized dispatch paths such as MXFP4.
+        if not token_dispatch_input.quant.dispatch_with_quant:
+            dynamic_scale = None
+
         group_list_type = kwargs_mc2["expert_token_nums_type"]
         return MoETokenDispatchOutput(
             hidden_states=expand_x,

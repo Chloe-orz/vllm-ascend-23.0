@@ -58,7 +58,6 @@ def build_token_dispatch_input_fixture(
     comm_quant_mode: int | None = None,
     act_quant_type: torch.dtype | None = None,
     is_per_channel_weight: bool = False,
-    mc2_mask: torch.Tensor | None = None,
 ) -> MoETokenDispatchInput:
     mxfp_spec = None
     if quant_type in (QuantType.MXFP8, QuantType.MXFP4):
