@@ -129,8 +129,6 @@ class ACLGraphWrapper:
                 # shape. E.g. we only log it for the first subgraph in
                 # piecewise mode.
                 logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
-            print(f"[ACLGraph] Capturing graph mode={self.runtime_mode.name} "
-                  f"batch_descriptor={entry.batch_descriptor}")
             # validate that aclgraph capturing is legal at this point.
             validate_cudagraph_capturing_enabled()
 
@@ -228,17 +226,63 @@ def update_full_graph_params(
     speculative_config=None,
     num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
+    layer_indices: list[int] | None = None,
 ):
+    """更新 attention 图参数，供下一次图回放使用。
+
+    当提供 ``layer_indices``（边云模式）时，仅更新列表中指定的层的参数。
+    这避免了 ``graph_params.attn_params``（仅包含当前 segment 图中实际
+    捕获的层的条目）与 ``forward_context.attn_metadata``（包含所有真实层
+    的条目）之间的位置错配。
+
+    调用方（``_update_full_graph_params_if_needed``）根据 segment 的
+    ``[start_layer, end_layer)`` 范围计算 ``layer_indices`` 列表。
+    """
     impl_cls = attn_backend.get_impl_cls()
-    impl_cls.update_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        speculative_config,
-        num_dcp_pcp_tokens,
-        draft_attn_metadatas,
-    )
+
+    if layer_indices is not None:
+        # 边云场景：过滤 attn_metadata，仅保留当前 segment 中的层。
+        # backend 的 update_graph_params 内部使用 zip，依赖
+        # attn_metadata keys 与 graph_params.attn_params 列表条目
+        # 之间的 1:1 位置对应关系。
+        original_metadata = forward_context.attn_metadata
+        filtered_metadata = _filter_attn_metadata_for_layers(
+            original_metadata, layer_indices
+        )
+        forward_context.attn_metadata = filtered_metadata
+
+    try:
+        impl_cls.update_graph_params(
+            update_stream,
+            forward_context,
+            num_tokens,
+            vllm_config,
+            speculative_config,
+            num_dcp_pcp_tokens,
+            draft_attn_metadatas,
+        )
+    finally:
+        if layer_indices is not None:
+            forward_context.attn_metadata = original_metadata
+
+
+def _filter_attn_metadata_for_layers(
+    attn_metadata: dict,
+    layer_indices: list[int],
+) -> dict:
+    """返回仅包含指定层索引对应条目的 dict。
+
+    attn_metadata 的 key 格式通常为 ``"model.layers.3.self_attn"``。
+    通过匹配 ``.layers.{idx}.`` 子串来定位目标层。
+    """
+    result: dict = {}
+    for idx in layer_indices:
+        needle = f".layers.{idx}."
+        for key in attn_metadata:
+            if needle in key:
+                result[key] = attn_metadata[key]
+                break
+    return result
 
 
 @dataclass

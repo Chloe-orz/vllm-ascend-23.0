@@ -556,43 +556,66 @@ class NPUModelRunner(GPUModelRunner):
             return False
         return getattr(forward_context, "in_profile_run", False)
 
-    def _create_segment_callable(
+
+class EdgeCloudSegment(torch.nn.Module):
+    """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
+
+    将基础模型的 ``forward_edge_cloud_segment``（模型加载阶段通过
+    monkey-patch 注入）包装为标准 nn.Module，使 ACLGraphWrapper 可以像
+    标准流程包裹完整模型一样包裹 segment：:
+
+        ACLGraphWrapper(EdgeCloudSegment(model, N-1, N), ...)
+
+    使用 nn.Module 而非函数闭包，确保 ``torch.npu.graph`` 的参数追踪、
+    缓冲区管理、模块分发与标准（非边云）流程完全一致。
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        start_layer: int,
+        end_layer: int,
+    ):
+        super().__init__()
+        self._edge_model = model
+        self._start_layer = start_layer
+        self._end_layer = end_layer
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **extra_layer_kwargs: Any,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self._edge_model.forward_edge_cloud_segment(
+            self._start_layer,
+            self._end_layer,
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            **extra_layer_kwargs,
+        )
+
+
+def _create_segment_callable(
         self,
         model: torch.nn.Module,
         start_layer: int,
         end_layer: int,
     ) -> Any:
-        """创建一个仅执行指定层区间 [start_layer, end_layer) 的 callable.
+        """创建一个仅执行指定层区间 [start_layer, end_layer) 的 nn.Module。
+
+        返回 EdgeCloudSegment（nn.Module 子类）而非函数闭包，
+        确保 ACLGraphWrapper 包裹的是标准 nn.Module，与标准流程的
+        图捕获方式对齐（torch.npu.graph 捕获 nn.Module.forward()）。
 
         边云场景下所有模型均已在加载阶段通过对应 patch 文件注入
         forward_edge_cloud_segment，因此直接委托即可，无需额外 fallback。
         """
-        # 委托给模型自身的 forward_edge_cloud_segment。
-        # Monkey patch 由 llama_edge_cloud.py / deepseek_v4_edge_cloud.py /
-        # qwen3_5_edge_cloud.py 在模型加载前注入。
-        def _segment_forward(
-            input_ids: torch.Tensor | None = None,
-            positions: torch.Tensor | None = None,
-            intermediate_tensors: IntermediateTensors | None = None,
-            inputs_embeds: torch.Tensor | None = None,
-            **extra_layer_kwargs: Any,
-        ) -> torch.Tensor | IntermediateTensors:
-            tp_group = get_tp_group()
-            pp_group = get_pp_group()
-            # print(f"[SegForward] rank={torch.distributed.get_rank()} "
-            #       f"tp_ranks={tp_group.ranks} pp_ranks={pp_group.ranks} "
-            #       f"pp_ws={pp_group.world_size} pp_rank={pp_group.rank_in_group}")
-            return model.forward_edge_cloud_segment(
-                start_layer,
-                end_layer,
-                input_ids,
-                positions,
-                intermediate_tensors,
-                inputs_embeds,
-                **extra_layer_kwargs,
-            )
-
-        return _segment_forward
+        return EdgeCloudSegment(model, start_layer, end_layer)
 
 
     def _wrap_segment_if_needed(
@@ -614,11 +637,9 @@ class NPUModelRunner(GPUModelRunner):
             return segment
         if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             return segment
-        # 标准（非边云）流程在 profile / dummy_run 期间跳过图包装，
-        # 避免跨节点 HCCL 通信与 torch.npu.NPUGraph 死锁。
-        # 边云模式下 segment 内部不包含 HCCL（通信在 segment 外的 worker.py 中），
-        # 因此 dummy_run 期间也应包装，以便 warmup 阶段预捕获固定 size 的图。
-        if self._is_dummy_or_profile_run() and not self._edge_cloud_enabled:
+        # profile / dummy_run / capture 期间跳过图包装，避免跨节点 HCCL 通信
+        # 与 torch.npu.NPUGraph 死锁；同时防止图捕获到无效的跨节点状态
+        if self._is_dummy_or_profile_run():
             return segment
 
         return ACLGraphWrapper(
@@ -2088,13 +2109,18 @@ class NPUModelRunner(GPUModelRunner):
         forward_context,
         num_tokens_padded: int,
         positions: torch.Tensor | None,
+        layer_indices: list[int] | None = None,
     ) -> None:
-        """Update ACL full-graph params when running in FULL graph mode.
+        """更新 ACL 全图参数（仅在 FULL 图模式下生效）。
 
-        This is a thin wrapper around :func:`update_full_graph_params` that
-        guards the call with the same conditions used in the standard
-        (non-edge-cloud) path, so each segment (segment_a, segment_e,
-        segment_c) can safely invoke it before/after graph capture.
+        本方法是 :func:`update_full_graph_params` 的薄封装，使用与标准
+        （非边云）路径相同的守卫条件，使每个 segment（segment_a、segment_e、
+        segment_c）可以在图捕获/回放前后安全调用。
+
+        当 ``layer_indices`` 不为 None（边云模式）时，仅更新指定层的图参数，
+        避免 ``graph_params.attn_params``（仅包含当前 segment 图中捕获的层条目）
+        与 ``forward_context.attn_metadata``（包含所有真实层的条目）之间的
+        位置错配。
         """
         if (
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
@@ -2110,6 +2136,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 self.speculative_config,
                 positions.shape[0],
+                layer_indices=layer_indices,
             )
 
     def _model_forward(
@@ -2159,10 +2186,27 @@ class NPUModelRunner(GPUModelRunner):
         assert forward_context is not None
 
         # 判断当前是否应使用 ACL Graph（Decode 阶段且配置允许时）
-        use_graph = (
-            forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
-            and self.edge_cloud_cfg.enable_decode_graph
-        )
+        # 边云场景分 segment 策略：
+        #   - Edge segment_a：含 Hash MoE + MC2/HCCL，强制 eager
+        #   - Cloud segment_c：含标准 MoE + MC2/HCCL，强制 eager
+        #   - Edge segment_e：单层（tail_k=1），不含 Hash MoE，layer_idx 固定，
+        #                     允许 graph（需配合 intermediate_tensors copy 到固定 buffer）
+        if self._edge_cloud_enabled:
+            if self.edge_cloud_cfg.role == "cloud":
+                use_graph = False
+            else:
+                # Edge: segment_a (intermediate_tensors is None) -> eager
+                #       segment_e (intermediate_tensors is not None) -> graph allowed
+                use_graph = (
+                    intermediate_tensors is not None
+                    and forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+                    and self.edge_cloud_cfg.enable_decode_graph
+                )
+        else:
+            use_graph = (
+                forward_context.cudagraph_runtime_mode != CUDAGraphMode.NONE
+                and self.edge_cloud_cfg.enable_decode_graph
+            )
 
         if self.edge_cloud_cfg.role == "edge":
             # Edge 侧：segment_a（首段）+ segment_e（尾段）
@@ -2203,8 +2247,9 @@ class NPUModelRunner(GPUModelRunner):
                 if _EXTRA_CTX.layer_idx is not None:
                     _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
-                # ACL Graph 要求输入地址固定；将动态接收的 intermediate_tensors
-                # copy 到 dummy_run 阶段预分配的固定 buffer 中，保证 capture/replay 地址一致
+                # ACL Graph 要求输入 tensor 地址在 capture/replay 间保持不变。
+                # 动态接收的 intermediate_tensors 每次地址不同，需 copy 到 dummy_run
+                # 阶段预分配的固定 buffer 后再传入 segment。
                 if use_graph and intermediate_tensors is not None:
                     for key, tensor in intermediate_tensors.items():
                         self.intermediate_tensors[key][:tensor.shape[0]].copy_(tensor)
@@ -2214,8 +2259,13 @@ class NPUModelRunner(GPUModelRunner):
 
                 try:
                     if use_graph:
+                        tail_layer_indices = list(range(
+                            self.num_layers - self.tail_k,
+                            self.num_layers,
+                        ))
                         self._update_full_graph_params_if_needed(
-                            forward_context, num_tokens_padded, positions
+                            forward_context, num_tokens_padded, positions,
+                            layer_indices=tail_layer_indices,
                         )
                     hidden_states = seg_e(
                         positions=positions,
@@ -2224,7 +2274,8 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     if use_graph:
                         self._update_full_graph_params_if_needed(
-                            forward_context, num_tokens_padded, positions
+                            forward_context, num_tokens_padded, positions,
+                            layer_indices=tail_layer_indices,
                         )
                 finally:
                     # segment_e 执行完毕后恢复原始 layer_idx
@@ -2247,9 +2298,7 @@ class NPUModelRunner(GPUModelRunner):
                 "Cloud segment_c requires intermediate_tensors from Edge side"
             )
 
-            # 验证：临时强制 Cloud 侧 segment_c 走 eager，排除 MoE MC2 与 ACL Graph 不兼容问题
-            # seg_c = self.segment_c_wrapper if use_graph else self.segment_c
-            seg_c = self.segment_c
+            seg_c = self.segment_c_wrapper if use_graph else self.segment_c
 
             if use_graph:
                 self._update_full_graph_params_if_needed(
@@ -2266,14 +2315,6 @@ class NPUModelRunner(GPUModelRunner):
                 old_layer_idx,
                 self.head_k,
             )
-            # ACL Graph 要求输入地址固定；将动态接收的 intermediate_tensors
-            # copy 到 dummy_run 阶段预分配的固定 buffer 中，保证 capture/replay 地址一致
-            if use_graph and intermediate_tensors is not None:
-                for key, tensor in intermediate_tensors.items():
-                    self.intermediate_tensors[key][:tensor.shape[0]].copy_(tensor)
-                intermediate_tensors = IntermediateTensors(
-                    {k: self.intermediate_tensors[k][:v.shape[0]] for k, v in intermediate_tensors.items()}
-                )
 
             try:
                 hidden_states = seg_c(
@@ -2860,10 +2901,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         num_tokens_padded = batch_desc.num_tokens
         num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
-        role = getattr(self, 'edge_cloud_cfg', None)
-        role_str = role.role if role else 'std'
-        print(f"[DummyRun] role={role_str} num_tokens={num_tokens} num_tokens_padded={num_tokens_padded} "
-              f"num_reqs={num_reqs} num_reqs_padded={num_reqs_padded} cudagraph_mode={cudagraph_runtime_mode}")
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
