@@ -183,6 +183,7 @@ class BaseDeviceAdaptor:
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
+        swiglu_limit: int = 0,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
@@ -1095,35 +1096,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             cache_mode="Norm",
         )
 
-    @classmethod
-    def npu_fused_infer_attention_score(
-        cls,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: Any,
-        *,
-        key_cache: torch.Tensor | None,
-        value_cache: torch.Tensor | None,
-        current_key: torch.Tensor,
-        current_value: torch.Tensor,
-        num_heads: int,
-        num_key_value_heads: int,
-        head_size: int,
-        scale: float,
-        is_prefill_no_cache: bool,
-        **kwargs,
-    ):
-        return torch_npu.npu_fused_infer_attention_score(
-            query=query,
-            key=key.contiguous(),
-            value=value.contiguous(),
-            num_key_value_heads=num_key_value_heads,
-            num_heads=num_heads,
-            scale=scale,
-            **kwargs,
-        )
-
     @staticmethod
     def npu_moe_init_routing(
         hidden_states,
@@ -1222,6 +1194,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         weight_scale: torch.Tensor,
         x_scale: torch.Tensor,
         bias=None,
+        swiglu_limit: int = 0,
         use_mxfp_quant: bool = False,
         act_quant_type: torch.dtype | int = torch.float8_e4m3fn,
         weight_quant_type: torch.dtype | int = torch.float8_e4m3fn,
@@ -1229,28 +1202,16 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         mxfp_quant_dtype: QuantType | None = None,
     ):
         if not use_mxfp_quant:
-            if act_quant_type == torch.float8_e4m3fn:
-                out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                    x=x,
-                    weight=[weight],
-                    weight_scale=[weight_scale],
-                    x_scale=x_scale,
-                    group_list=group_list,
-                    quant_dtype=torch.float8_e4m3fn,
-                    dequant_dtype=torch.float32,
-                )
-                return out, out_scale, None
-            else:
-                return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                    x=x,
-                    weight=weight,
-                    group_list=group_list,
-                    weight_scale=weight_scale,
-                    x_scale=x_scale,
-                    bias=bias,
-                    swiglu_limit=swiglu_limit,
-                    use_mxfp_quant=False,
-                )
+            return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                x=x,
+                weight=weight,
+                group_list=group_list,
+                weight_scale=weight_scale,
+                x_scale=x_scale,
+                bias=bias,
+                swiglu_limit=swiglu_limit,
+                use_mxfp_quant=False,
+            )
 
         # W4A8 mxfp
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
