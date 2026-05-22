@@ -862,8 +862,8 @@ Once your server is started, you can query the model with input prompts:
 
 **Note**:
 
-- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost). For PD-separated deployment, use the host IP of the node where the proxy script resides.
-- `<port>`: The port number specified in the server startup command (e.g., 8000). For PD-separated deployment, use the port configured in the proxy script.
+- `<node0_ip>`: The IP address of the node where the server is running (e.g., localhost).
+- `<port>`: The port number specified in the server startup command (e.g., 8000).
 
 ```shell
 curl http://<node0_ip>:<port>/v1/completions \
