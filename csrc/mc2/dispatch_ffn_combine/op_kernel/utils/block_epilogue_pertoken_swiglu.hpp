@@ -119,6 +119,8 @@ public:
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(eventUbDMTE3VList[i]);  
         }
         ubPerTokenScaleOutput = resource.ubBuf.template GetBufferByByte<float>(ubOffset);
+        ubOffset += 32;
+        sharedTmpBuffer = resource.ubBuf.template GetBufferByByte<uint8_t>(ubOffset);
     }
     CATLASS_DEVICE
     void Finalize()
@@ -150,7 +152,6 @@ public:
 
         uint32_t epilogueCoreNum = 40,
         float swigluLimit = 0.0f,
-        uint32_t blockK = 1,
         Callback &&callback = Callback{}
     )
     {
