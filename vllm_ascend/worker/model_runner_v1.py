@@ -568,6 +568,10 @@ class EdgeCloudSegment(torch.nn.Module):
 
     使用 nn.Module 而非函数闭包，确保 ``torch.npu.graph`` 的参数追踪、
     缓冲区管理、模块分发与标准（非边云）流程完全一致。
+
+    注意：model 被存入 list 而非直接作为属性，避免 nn.Module.__setattr__
+    将其注册为子模块。若注册为子模块，torch.npu.graph 捕获时会遍历完整
+    模型层级，为所有层（含 PPMissingLayer）分配图内存池，导致边侧 OOM。
     """
 
     def __init__(
@@ -577,7 +581,7 @@ class EdgeCloudSegment(torch.nn.Module):
         end_layer: int,
     ):
         super().__init__()
-        self._edge_model = model
+        self._model_ref = [model]
         self._start_layer = start_layer
         self._end_layer = end_layer
 
@@ -589,7 +593,7 @@ class EdgeCloudSegment(torch.nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         **extra_layer_kwargs: Any,
     ) -> torch.Tensor | IntermediateTensors:
-        return self._edge_model.forward_edge_cloud_segment(
+        return self._model_ref[0].forward_edge_cloud_segment(
             self._start_layer,
             self._end_layer,
             input_ids,
