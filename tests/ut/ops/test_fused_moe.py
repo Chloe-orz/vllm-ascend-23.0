@@ -647,9 +647,9 @@ class TestAscendMoERunner:
     )
     def test_runner_reduction_properties(self, monkeypatch, moe_comm_type, flash_comm_v1_enabled, expected):
         runner = AscendMoERunner.__new__(AscendMoERunner)
-        monkeypatch.setattr(fused_moe_legacy_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=moe_comm_type))
+        monkeypatch.setattr(fused_moe_module, "_EXTRA_CTX", SimpleNamespace(moe_comm_type=moe_comm_type))
         monkeypatch.setattr(
-            fused_moe_legacy_module,
+            fused_moe_module,
             "_EXTRA_CTX",
             SimpleNamespace(moe_comm_type=moe_comm_type, flash_comm_v1_enabled=flash_comm_v1_enabled),
         )
