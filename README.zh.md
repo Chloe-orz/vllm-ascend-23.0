@@ -55,9 +55,9 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 - 硬件：Atlas 800I A2 Inference系列、Atlas A2 Training系列、Atlas 800I A3 Inference系列、Atlas A3 Training系列、Atlas 300I Duo（实验性支持）
 - 操作系统：Linux
 - 软件：
-    - Python >= 3.10, < 3.13
-    - CANN == 9.0.1 (Ascend HDK 版本详见 [版本说明](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
-    - PyTorch == 2.10.0, torch-npu == 2.10.0.post2
+    - Python >= 3.10, < 3.12
+    - CANN == 9.0.0 (Ascend HDK 版本详见 [版本说明](https://www.hiascend.com/document/detail/zh/canncommercial/900/releasenote/releasenote_0000.html))
+    - PyTorch == 2.10.0, torch-npu == 2.10.0
     - vLLM (与vllm-ascend版本一致)
 
 ## 开始使用
@@ -66,8 +66,8 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-| v0.20.2rc1 | 最新RC版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)了解更多 |
-| v0.18.0 | 最新正式/稳定版本 | 请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/v0.18.0/installation.html)了解更多 |
+|v0.19.1rc1| 最新RC版本 |请查看[快速开始](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html)和[安装指南](https://docs.vllm.ai/projects/ascend/en/latest/installation.html)了解更多|
+|v0.18.0| 最新正式/稳定版本 |[快速开始](https://docs.vllm.ai/projects/ascend/en/v0.18.0/quick_start.html) and [安装指南](https://docs.vllm.ai/projects/ascend/en/v0.18.0/installation.html)了解更多|
 
 ## 分支策略
 
