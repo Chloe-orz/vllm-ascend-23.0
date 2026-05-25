@@ -49,7 +49,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
-from vllm.distributed.parallel_state import is_edge_device, is_edge_cloud_pp_mode
+from vllm.distributed.parallel_state import is_edge_device
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -4427,6 +4427,12 @@ class NPUModelRunner(GPUModelRunner):
                     intermediate_tensors = IntermediateTensors(
                         {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                     )
+                    logger.info(
+                        "[Cloud _dummy_run] Sliced intermediate_tensors["
+                        "'hidden_states'] shape=%s for intermediate_tokens=%d",
+                        list(intermediate_tensors["hidden_states"].shape),
+                        intermediate_tokens,
+                    )
             elif get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
@@ -4516,7 +4522,7 @@ class NPUModelRunner(GPUModelRunner):
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
                     intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
-                if self.intermediate_tensors is None:  # 增加deepseek-v4判断
+                if self.intermediate_tensors is None:
                     max_actual_tokens = self.max_num_tokens
                     if enable_sp():
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
@@ -4529,51 +4535,54 @@ class NPUModelRunner(GPUModelRunner):
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
 
-                need_dummy_logits = not is_profile and lmhead_tp_enable()
-                max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-                dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
+            need_dummy_logits = not is_profile and lmhead_tp_enable()
+            max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
+            dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
 
-                with set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
+            with set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens_padded,
+                num_tokens_across_dp=num_tokens_across_dp,
+                in_profile_run=is_profile,
+                num_actual_tokens=num_tokens_padded,
+                aclgraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_desc,
+                model_instance=self.model,
+            ):
+                outputs = self._model_forward(
+                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                )
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, _ = outputs
+            elif isinstance(outputs, IntermediateTensors):
+                hidden_states = outputs["hidden_states"]
+            else:
+                hidden_states = outputs
+            dummy_compute_logits(hidden_states)
+
+            if self.drafter:
+                self.drafter.dummy_run(
                     num_tokens=num_tokens_padded,
+                    with_prefill=with_prefill,
+                    num_reqs=num_reqs_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
-                    in_profile_run=is_profile,
-                    num_actual_tokens=num_tokens_padded,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
-                    model_instance=self.model,
-                ):
-                    outputs = self._model_forward(
-                        num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
-                    )
-                if self.use_aux_hidden_state_outputs:
-                    hidden_states, _ = outputs
-                elif isinstance(outputs, IntermediateTensors):
-                    hidden_states = outputs["hidden_states"]
-                else:
-                    hidden_states = outputs
-                dummy_compute_logits(hidden_states)
+                    dummy_compute_logits=dummy_drafter_compute_logits,
+                    in_graph_capturing=not force_attention,
+                    is_profile=is_profile,
+                )
+            if is_profile and self.dynamic_eplb:
+                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
+                target.clear_all_moe_loads()
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_end()
 
-                if self.drafter:
-                    self.drafter.dummy_run(
-                        num_tokens=num_tokens_padded,
-                        with_prefill=with_prefill,
-                        num_reqs=num_reqs_padded,
-                        num_tokens_across_dp=num_tokens_across_dp,
-                        aclgraph_runtime_mode=cudagraph_runtime_mode,
-                        batch_descriptor=batch_desc,
-                        dummy_compute_logits=dummy_drafter_compute_logits,
-                        in_graph_capturing=not force_attention,
-                        is_profile=is_profile,
-                    )
-                if is_profile and self.dynamic_eplb:
-                    target = self.model.language_model if hasattr(self.model, "language_model") else self.model
-                    target.clear_all_moe_loads()
-                if self.dynamic_eplb:
-                    self.eplb_updator.forward_end()
-
-                self._finalize_dump_data(dump=False)
+            self._finalize_dump_data(dump=False)
+            if self.use_compress and force_attention:
+                self.positions.fill_(0)
+                self._dsa_positions_cpu_buf.fill_(0)
             return hidden_states, hidden_states
 
 
