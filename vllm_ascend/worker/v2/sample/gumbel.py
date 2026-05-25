@@ -113,13 +113,10 @@ def _gumbel_sample_kernel(
 
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-
     if temp != 0.0 and APPLY_TEMPERATURE:
-        # NOTE(woosuk): Match the behavior of _temperature_kernel.
         logits = logits / temp
 
     if processed_logits_ptr is not None:
-        # Store the temperature-applied logits.
         if processed_logits_col_ptr is not None:
             col = tl.load(processed_logits_col_ptr)
         else:
@@ -142,6 +139,7 @@ def _gumbel_sample_kernel(
         # because triton-ascend's compiler does not support float64.
         r = tl.rand(gumbel_seed, block).to(tl.float32)
         gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+        gumbel_noise = gumbel_noise.to(tl.float32)
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
@@ -166,7 +164,7 @@ def gumbel_sample(
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
-    num_tokens, vocab_size = logits.shape
+    num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = torch.empty(
