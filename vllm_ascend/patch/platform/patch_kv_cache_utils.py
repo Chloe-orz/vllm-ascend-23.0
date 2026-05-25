@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
+from dataclasses import replace
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
