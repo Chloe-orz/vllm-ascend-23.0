@@ -46,7 +46,10 @@ def _forward_edge_cloud_segment_qwen3_5(
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
     else:
-        assert intermediate_tensors is not None
+        assert intermediate_tensors is not None, (
+            "intermediate_tensors is None in edge-cloud segment; "
+            "check that all TP ranks receive tensors correctly."
+        )
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
 
