@@ -631,7 +631,10 @@ class NPUWorker(WorkerBase):
                 tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
                     all_gather_group=all_gather_group
                 )
-                assert tensor_dict is not None
+                assert tensor_dict is not None, (
+                    "worker irecv_tensor_dict returned None, "
+                    "previous stage may have failed to send."
+                )
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
                     comm_handles=comm_handles,

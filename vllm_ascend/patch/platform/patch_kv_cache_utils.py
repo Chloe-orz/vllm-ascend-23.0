@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
-from collections import defaultdict
+from dataclasses import replace
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
@@ -264,3 +264,52 @@ else:
 import vllm.v1.engine.core  # noqa: E402
 
 vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+
+_orig_unify_kv_cache_spec_page_size = (
+    vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size
+)
+
+
+def _ascend_unify_kv_cache_spec_page_size(kv_cache_spec):
+    """Ascend-compatible unify_kv_cache_spec_page_size.
+
+    vLLM's unify_kv_cache_spec_page_size does not correctly handle specs with
+    page_size_padded set (e.g. after mamba alignment in Ascend). When block_size
+    is scaled up, page_size_padded must also be scaled to keep page_size_bytes
+    consistent and avoid assertion failures.
+    """
+    page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
+    if len(page_sizes) <= 1:
+        return kv_cache_spec
+
+    max_page_size = max(page_sizes)
+    new_kv_cache_spec = {}
+    for layer_name, layer_spec in kv_cache_spec.items():
+        if layer_spec.page_size_bytes == max_page_size:
+            new_kv_cache_spec[layer_name] = layer_spec
+        else:
+            layer_page_size = layer_spec.page_size_bytes
+            if max_page_size % layer_page_size != 0:
+                raise NotImplementedError(
+                    "The page size of the layer is not divisible by the "
+                    "maximum page size. Cannot unify by adjusting block_size."
+                )
+            ratio = max_page_size // layer_page_size
+            new_block_size = layer_spec.block_size * ratio
+            if getattr(layer_spec, "page_size_padded", None) is not None:
+                new_page_size_padded = layer_spec.page_size_padded * ratio
+                new_spec = replace(
+                    layer_spec,
+                    block_size=new_block_size,
+                    page_size_padded=new_page_size_padded,
+                )
+            else:
+                new_spec = replace(layer_spec, block_size=new_block_size)
+            assert new_spec.page_size_bytes == max_page_size
+            new_kv_cache_spec[layer_name] = new_spec
+    return new_kv_cache_spec
+
+
+vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size = (
+    _ascend_unify_kv_cache_spec_page_size
+)

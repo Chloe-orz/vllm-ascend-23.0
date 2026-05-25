@@ -2471,6 +2471,16 @@ class NPUModelRunner(GPUModelRunner):
 
             if not self.broadcast_pp_output:
                 # Common case.
+                if self._edge_cloud_enabled and isinstance(
+                    hidden_states, IntermediateTensors
+                ):
+                    # Edge-cloud head segment always returns IntermediateTensors,
+                    # regardless of is_last_rank, so the worker can send them to
+                    # the cloud side and receive results back for the tail segment.
+                    hidden_states.kv_connector_output = kv_connector_output
+                    self.kv_connector_output = kv_connector_output
+                    self._finalize_dump_data()
+                    return hidden_states
                 if not get_pp_group().is_last_rank:
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
@@ -2549,8 +2559,9 @@ class NPUModelRunner(GPUModelRunner):
             # receive sampled token ids from the last PP rank when using
             # async scheduling + pipeline parallelism so downstream code
             # (e.g., PCP input preparation) can access them.
-            if self.use_async_scheduling and pp.world_size > 1 and not skip_pp_pd_broadcast:
-                self._pp_receive_prev_sampled_token_ids_to_input_batch()
+            if self.use_async_scheduling and get_pp_group().world_size > 1:
+                if not self._edge_cloud_enabled:
+                    self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
             # In case of PP with kv transfer, we need to pass through the
@@ -2695,7 +2706,8 @@ class NPUModelRunner(GPUModelRunner):
         # last PP rank so other PP ranks can receive them without going
         # through the scheduler/engine IPC path.
         if self.use_async_scheduling:
-            if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
+            pp = get_pp_group()
+            if not self._edge_cloud_enabled and pp.world_size > 1 and pp.is_last_rank:
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
         if not self.use_async_scheduling:
@@ -3038,7 +3050,10 @@ class NPUModelRunner(GPUModelRunner):
         tp = self.vllm_config.parallel_config.tensor_parallel_size
 
         if sync_self:
-            assert intermediate_tensors is not None
+            assert intermediate_tensors is not None, (
+                "sync_and_slice_intermediate_tensors received None; "
+                "check PP/TP tensor delivery."
+            )
             for k, v in intermediate_tensors.items():
                 copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                 if k not in self.intermediate_tensors.tensors:
