@@ -407,7 +407,10 @@ def edge_cloud_broadcast_recv() -> tuple[
 
     if is_pp_npu0:
         tensor_dict, comm_handles, comm_postprocess = pp_group.irecv_tensor_dict()
-        assert tensor_dict is not None
+        assert tensor_dict is not None, (
+            "edge_cloud_broadcast_recv: PP tensor_dict is None, "
+            "sender may have failed."
+        )
 
         metadata_list, _ = _split_tensor_dict(tensor_dict)
         tp_group.broadcast_object(metadata_list, src=0)
@@ -431,6 +434,8 @@ def edge_cloud_broadcast_recv() -> tuple[
         return tensor_dict, comm_handles, comm_postprocess
 
     metadata_list = tp_group.broadcast_object(None, src=0)
+    if metadata_list is None:
+        metadata_list = []
     recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
     handles: list[Handle] = []
 
