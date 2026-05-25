@@ -17,6 +17,7 @@ def validate_cmp(y_cal, y_ref, device="npu"):
     torch.testing.assert_close(y_ref, y_cal, rtol=3e-03, atol=1e-02, equal_nan=True)
 
 
+@pytest.mark.skipif(not is_310p_hw(), reason="Tested separately on a 310P machine.")
 @pytest.mark.parametrize("has_initial_state", [False, True])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])

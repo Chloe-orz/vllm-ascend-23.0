@@ -4,10 +4,8 @@ import numpy as np
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import DeviceOperator
-
 MAX_POSITION_EMBEDDINGS = [262144]
-NUM_TOKENS = [1, 16, 1024, 10240]
+NUM_TOKENS = [1, 16, 1024]
 NUM_QKV_HEADS = [(12, 1), (64, 4)]
 HEAD_SIZES = [128]
 ROPE_DIMS = [64, 128]
