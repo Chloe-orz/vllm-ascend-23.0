@@ -396,8 +396,8 @@ class TestTokenDispatcherWithMC2(TestBase):
             output = self.dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
         mock_dispatch.assert_called_once()
-        self.assertIsNone(output.dynamic_scale)
-        self.assertFalse(output.combine_metadata.quant.dispatch_with_quant)
+        self.assertIsNotNone(output.dynamic_scale)
+        self.assertTrue(output.combine_metadata.quant.dispatch_with_quant)
 
 
 class TestTokenDispatcherWithAllGather(TestBase):

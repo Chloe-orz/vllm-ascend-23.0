@@ -243,11 +243,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             expand_scales,
         ) = output[0:7]
 
-        # The dispatch operator may still return a non-None dynamic_scale when
-        # quant_mode=0. Clear it for unquantized dispatch paths such as MXFP4.
-        if not token_dispatch_input.quant.dispatch_with_quant:
-            dynamic_scale = None
-
         group_list_type = kwargs_mc2["expert_token_nums_type"]
         return MoETokenDispatchOutput(
             hidden_states=expand_x,
@@ -357,13 +352,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         self,
         token_dispatch_input: MoETokenDispatchInput,
     ):
-        quant_type = token_dispatch_input.quant.quant_type
-        dynamic_scale = token_dispatch_input.routing.pertoken_scale
-        unquantized_mxfp4_dispatch = quant_type == QuantType.MXFP4 and dynamic_scale is None
-        # Without prepare-stage scales, MXFP4 stays unquantized in dispatch and
-        # is quantized again inside the MLP path.
-        with_quant = token_dispatch_input.quant.dispatch_with_quant and quant_type != QuantType.W8A8FP8
-        with_quant = with_quant and not unquantized_mxfp4_dispatch
+        # TODO: After AllGather MXFP4 communication quantization thorough verification, remove this judgment.
+        #  MXFP4 keeps dispatch unquantized in AllGather path, and quantizes again inside the MLP path.
+        with_quant = (
+            token_dispatch_input.quant.dispatch_with_quant and token_dispatch_input.quant.quant_type != QuantType.MXFP4
+        )
         is_mxfp = token_dispatch_input.quant.is_mxfp
         hidden_states = token_dispatch_input.hidden_states
         topk_weights = token_dispatch_input.topk_weights

@@ -86,34 +86,7 @@ class MoEQuantParams:
 
     @property
     def dispatch_with_quant(self) -> bool:
-        return self.quant_type in (
-            QuantType.W8A8,
-            QuantType.W4A8,
-            QuantType.MXFP8,
-            QuantType.MXFP4,
-            QuantType.W4A8MXFP,
-            QuantType.W8A8FP8,
-        )
-
-    @property
-    def get_dst_type(self):
-        if self.is_w4a4_mxfp:
-            return torch_npu.float4_e2m1fn_x2
-        elif self.is_mxfp or self.is_fp8:
-            return torch.float8_e4m3fn
-        elif self.dispatch_with_quant:
-            return torch.int8
-        else:
-            return None
-
-    @property
-    def get_scale_type(self):
-        if self.is_mxfp:
-            return torch.float8_e8m0fnu
-        elif self.dispatch_with_quant:
-            return torch.float32
-        else:
-            return None
+        return self.quant_type in (QuantType.W8A8, QuantType.W4A8, QuantType.MXFP8, QuantType.MXFP4)
 
 
 __all__ = [
