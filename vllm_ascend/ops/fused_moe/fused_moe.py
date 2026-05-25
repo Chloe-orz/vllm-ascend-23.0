@@ -751,7 +751,8 @@ else:
 
     @property
     def is_internal_router(self) -> bool:
-        return False
+        gate = self.gate
+        return gate is not None and hasattr(gate, "weight_fp32")
 
     @property
     def use_dp_chunking(self) -> bool:
@@ -968,7 +969,7 @@ else:
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
-                maybe_wait_event(fused_moe_evts.before_dispatch)
+                maybe_wait_event(fused_moe_evts.after_routed_experts)
                 hidden_states = torch_npu.npu_quant_matmul(
                     quantized_x,
                     self._shared_experts.gate_up_proj.weight,
@@ -1047,9 +1048,40 @@ else:
                 before_routed_experts = torch.npu.current_stream().record_event()
                 after_routed_experts = None
 
-            fused_moe_results = self.no_shared_forward_impl(
+        if self.is_internal_router:
+            gate = self.gate
+            assert gate is not None
+            # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
+            # increase with extra hidden states. We also assume that all gate
+            # linear is unquantized so that we the weight is pre-casted in
+            # process_weights_after_loading of AscendUnquantizedLinearMethod.
+            hidden_states_fp32 = hidden_states.float()
+            before_routed_experts = torch.npu.current_stream().record_event()
+            router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+            after_routed_experts = torch.npu.current_stream().record_event()
+        else:
+            before_routed_experts = torch.npu.current_stream().record_event()
+            after_routed_experts = None
+
+        fused_moe_results = self.forward_impl(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            return_with_event=True,
+        )
+        routed_out = fused_moe_results.routed_out
+
+        if self._shared_experts is None:
+            return routed_out
+
+        if self.shared_multistream_overlap_gate:
+            fc3_context = get_flash_common3_context()
+            assert fc3_context is not None
+            shared_out = fc3_context.shared_out
+        else:
+            shared_out = self._forward_shared_experts(
                 hidden_states,
                 FusedMoEEvents(
+                    after_routed_experts=after_routed_experts,
                     before_routed_experts=before_routed_experts,
                     before_dispatch=fused_moe_results.before_dispatch_evt,
                     before_gmm2=fused_moe_results.before_gmm2_evt,
