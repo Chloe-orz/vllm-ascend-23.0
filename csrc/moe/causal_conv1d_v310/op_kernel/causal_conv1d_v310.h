@@ -607,9 +607,7 @@ __aicore__ inline void CausalConv1dV310<T>::Process()
             cacheIdx = static_cast<int32_t>(cacheIdx64);
         }
 
-        const bool hasInit = (tilingData_->hasInitialStateMode != 0)
-                                 ? ReadInitialStateModeValue(seq)
-                                 : (tilingData_->runMode == 1);
+        const bool hasInit = (tilingData_->hasInitialStateMode != 0) ? (initialStateModeGm.GetValue(seq) != 0) : true;
         int32_t stateTokenOffset = 0;
         if (isSpecDecodingGlobal) {
             int32_t accepted = ReadNumAcceptedTokensValue(seq);

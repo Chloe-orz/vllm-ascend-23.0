@@ -266,6 +266,8 @@ static ge::graphStatus GetShapeDtypeInfo(gert::TilingContext *context, CausalCon
                 OP_LOGE(context, "cuSeqlen is too large for int32 indexing, got %ld", cuSeqlen),
                 return ge::GRAPH_FAILED);
 
+    const int64_t *qslData = nullptr;
+
     if (!qslAbsent && isDecodeMode && inputMode == 2) {
         const int64_t batchFromQsl = qslSize - 1;
         if (batchFromQsl != batch) {
