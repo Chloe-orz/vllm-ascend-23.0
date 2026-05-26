@@ -305,91 +305,10 @@ def get_nested_attr(obj: Any, /, *attrs: str, default: Any = None, raises: bool 
     return current
 
 
-def get_dotted_attr(obj: Any, dotted_attr: str, /, *, default: Any = None, raises: bool = False) -> Any:
-    """Get a nested attribute from an object using a dotted attribute string.
-
-    This is a convenience wrapper around :meth:`_get_nested_attr` that allows specifying the attribute path as a single
-    dotted string.
-
-    Args:
-        obj (Any): Root object.
-        dotted_attr (str): Dotted attribute string, e.g., "foo.bar.baz" to access `obj.foo.bar.baz`.
-        default (Any, keyword-only, default=None): Default value to return if any attribute is missing.
-        raises (bool, keyword-only, default=False): Whether to raise an error if any attribute is missing.
-
-    Returns:
-        Any: The resolved nested attribute.
-    """
-    return get_nested_attr(obj, *dotted_attr.split("."), default=default, raises=raises)
-
-
-class WeightGetterConfig(TypedDict):
-    """Configuration dictionary for layer weight extraction in `get_layer_weights`.
-
-    This class is written as a TypedDict for better type checking with `mypy` in the `xlite` module.
-    """
-
-    secondary_flattening: str | slice | None
-    post_processor: Callable[[torch.Tensor], torch.Tensor] | None
-
-
-def get_layer_weights(
-    layers: Sequence[nn.Module],
-    layer_attr: str,
-    /,
-    *,
-    secondary_flattening: str | slice | None = None,
-    post_processor: Callable[[torch.Tensor], torch.Tensor] | None = None,
-    **kwargs: Any,
-) -> list[torch.Tensor]:
-    """Extract specified weights from a sequence of layers with optional secondary flattening and post-processing.
-
-    This function retrieves the specified attribute (e.g., "self_attn.q_proj.weight") from each layer in the provided
-    sequence. If `secondary_flattening` is specified, it will further expand the retrieved attribute as a list and
-    collect all items from these lists across layers. An optional `post_processor` can be applied to each retrieved
-    tensor before returning the final list of weights.
-
-    Args:
-        layers (Sequence[nn.Module]): Sequence of layers to retrieve weights from.
-        layer_attr (str): Dotted attribute string specifying the layer attribute to retrieve (`layers.[i].[layer_attr]`)
-            , e.g., "self_attn.q_norm.weight".
-        secondary_flattening (str | slice | None, optional): If specified, indicates that the retrieved layer attribute
-            is a list of tensors and we need to further flatten it. The expansion can be specified as:
-
-            - `str`: A dotted attribute string such that `layers.[i].[secondary_flattening]` gives the number of items
-              to flatten for that layer.
-            - `slice`: A slice specifying how to slice `layers.[i].[layer_attr]` and then flatten the sliced part.
-            - `None`: No secondary flattening; `layers.[i].[layer_attr]` is directly collected.
-        post_processor (Callable[[torch.Tensor], torch.Tensor] | None, optional): An optional function to apply to
-            each retrieved tensor before returning the final list of weights.
-        **kwargs: Additional keyword arguments for future extensions.
-
-    Returns:
-        list[torch.Tensor]: List of retrieved weights.
-    """
-    if not secondary_flattening:
-        weights = [
-            weight for layer in layers if (weight := get_dotted_attr(layer, layer_attr, default=None)) is not None
-        ]
-    elif isinstance(secondary_flattening, str):
-        weights = [
-            weight
-            for layer in layers
-            if (weight_lst := get_dotted_attr(layer, layer_attr, default=[])) is not None
-            for weight in weight_lst[: get_dotted_attr(layer, secondary_flattening, default=0)]
-        ]
-    elif isinstance(secondary_flattening, slice):
-        weights = [
-            weight
-            for layer in layers
-            if (weight_lst := get_dotted_attr(layer, layer_attr, default=[])) is not None
-            for weight in weight_lst[secondary_flattening]
-        ]
-    else:
-        raise ValueError(
-            f"Invalid type for secondary_flattening: {type(secondary_flattening)}. Expected str, slice, or None."
-        )
-
-    if not post_processor:
-        return weights
-    return [post_processor(weight) for weight in weights]
+def rgetattr(obj: Any, attr, default=None):
+    try:
+        for part in attr.split("."):
+            obj = getattr(obj, part)
+        return obj
+    except AttributeError:
+        return default
