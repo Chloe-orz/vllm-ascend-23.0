@@ -483,7 +483,7 @@ def rejection_sample(
                     global_vocab_size,
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
-                    enable_reduce_sampling=True,
+                    ENABLE_REDUCE_SAMPLING=True,
                     BLOCK_SIZE=block_size,
                 )
             else:
@@ -521,7 +521,7 @@ def rejection_sample(
                     global_vocab_size,
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
-                    enable_reduce_sampling=True,
+                    ENABLE_REDUCE_SAMPLING=True,
                     BLOCK_SIZE=block_size,
                 )
             else:
@@ -592,7 +592,7 @@ def rejection_sample(
                     vocab_size,  # global_vocab_size
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
-                    enable_reduce_sampling=False,
+                    ENABLE_REDUCE_SAMPLING=False,
                     BLOCK_SIZE=block_size,
                 )
             else:
@@ -630,7 +630,7 @@ def rejection_sample(
                     vocab_size,  # global_vocab_size
                     batch_size,
                     NO_DRAFT_PROBS=draft_probs is None,
-                    enable_reduce_sampling=False,
+                    ENABLE_REDUCE_SAMPLING=False,
                     BLOCK_SIZE=block_size,
                 )
             else:
@@ -874,7 +874,7 @@ def sample_recovered_tokens(
             global_vocab_size if global_vocab_size is not None else vocab_size,
             NO_DRAFT_PROBS=draft_probs is None,
             BLOCK_VERIFY=use_block_verify,
-            enable_reduce_sampling=enable_reduce_sampling,
+            ENABLE_REDUCE_SAMPLING=enable_reduce_sampling,
             SUB_BLOCK=512,
             # TODO: enable multibuffer when accuracy problem is solved.
             multibuffer=False,
