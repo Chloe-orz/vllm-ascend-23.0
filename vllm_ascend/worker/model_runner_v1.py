@@ -6527,26 +6527,18 @@ class NPUModelRunner(GPUModelRunner):
             # update global cos, sin
             update_cos_sin(positions)
 
-            # ========== 边云模式（Edge-Cloud Mode）中间张量处理 ==========
-            # 边云模式下根据 role 判断是否需要 intermediate_tensors，
-            # 替代标准 PP（Pipeline Parallelism）的 is_first_rank 判断（pp_size=1 时所有 rank 都是 first）。
             if self._edge_cloud_enabled:
                 if self.edge_cloud_cfg.role == "edge":
-                    # Edge 端：不需要中间张量（第一阶段）
                     intermediate_tensors = None
                 else:
-                    # Cloud 端：需要中间张量
                     intermediate_tokens = num_tokens_padded
                     if enable_sp():
-                        # 如果启用序列并行（SP），token 数需要除以 tp_size（向上取整）
                         tp_size = get_tensor_model_parallel_world_size()
                         intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                     if self.intermediate_tensors is None:
-                        # 首次创建 intermediate_tensors，使用最大可能 token 数
                         max_actual_tokens = self.max_num_tokens
                         if enable_sp():
                             max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
-                        # 调用模型方法创建空的中间张量
                         self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                             batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
                         )
@@ -6643,12 +6635,9 @@ class NPUModelRunner(GPUModelRunner):
             if self.dynamic_eplb:
                 self.eplb_updator.forward_end()
 
-            # ========== Edge 设备特殊处理：Edge 首阶段需要执行最后一层 ==========
+            # ========== Edge last layer ==========
             if is_edge_device():
-                # 断言：边设备输出必须是 IntermediateTensors 类型
                 assert isinstance(outputs, IntermediateTensors)
-
-                # 重新准备 intermediate_tensors（与上文逻辑相同）
                 intermediate_tokens = num_tokens_padded
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
@@ -6657,11 +6646,9 @@ class NPUModelRunner(GPUModelRunner):
                     max_actual_tokens = self.max_num_tokens
                     if enable_sp():
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
-                        # 调用模型方法创建空的中间张量
                     self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                         batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
                     )
-                # 切片
                 intermediate_tensors = IntermediateTensors(
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
