@@ -917,6 +917,12 @@ class NPUModelRunner(GPUModelRunner):
                     f"{expected_role!r}, got {self.edge_cloud_cfg.role!r}."
                 )
             self.head_k, self.tail_k = self.edge_cloud_cfg.head_tail_k
+            if self.edge_cloud_cfg.mode == "embedding_only":
+                self.head_k = 0
+                self.tail_k = 0
+                logger.info(
+                    "Edge-cloud mode is 'embedding_only', forcing head_k=0, tail_k=0"
+                )
             hf_config = getattr(self.model_config, "hf_text_config", None)
             model_type = getattr(hf_config, "model_type", "")
             self._is_qwen3_5 = "qwen3_5" in model_type
@@ -1021,6 +1027,8 @@ class NPUModelRunner(GPUModelRunner):
         model: torch.nn.Module,
         start_layer: int,
         end_layer: int,
+        is_first_segment: bool | None = None,
+        is_last_segment: bool | None = None,
     ) -> Any:
         def _segment_forward(
             input_ids: torch.Tensor | None = None,
@@ -1036,6 +1044,8 @@ class NPUModelRunner(GPUModelRunner):
                 positions,
                 intermediate_tensors,
                 inputs_embeds,
+                is_first_segment=is_first_segment,
+                is_last_segment=is_last_segment,
                 **extra_layer_kwargs,
             )
 
@@ -1087,8 +1097,9 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         logger.info(
-            "Starting to load model in edge-cloud mode: role=%s, head_k=%d, tail_k=%d",
+            "Starting to load model in edge-cloud mode: role=%s, mode=%s, head_k=%d, tail_k=%d",
             self.edge_cloud_cfg.role,
+            self.edge_cloud_cfg.mode,
             self.head_k,
             self.tail_k,
         )
@@ -1110,6 +1121,7 @@ class NPUModelRunner(GPUModelRunner):
             role=self.edge_cloud_cfg.role,
             total_layers=self.num_layers,
             k=[self.head_k, self.tail_k],
+            mode=self.edge_cloud_cfg.mode,
         )
         LayerShardLoader.apply_sharding(
             self.model, layer_plan, self.vllm_config.compilation_config
@@ -1134,15 +1146,25 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
 
         if self.edge_cloud_cfg.role == "edge":
-            self.segment_a = self._create_segment_callable(self.model, 0, self.head_k)
+            self.segment_a = self._create_segment_callable(
+                self.model, 0, self.head_k, is_first_segment=True, is_last_segment=False
+            )
             self.segment_e = self._create_segment_callable(
-                self.model, self.num_layers - self.tail_k, self.num_layers
+                self.model,
+                self.num_layers - self.tail_k,
+                self.num_layers,
+                is_first_segment=False,
+                is_last_segment=True,
             )
             self.segment_a_wrapper = self._wrap_segment_if_needed(self.segment_a)
             self.segment_e_wrapper = self._wrap_segment_if_needed(self.segment_e)
         else:
             self.segment_c = self._create_segment_callable(
-                self.model, self.head_k, self.num_layers - self.tail_k
+                self.model,
+                self.head_k,
+                self.num_layers - self.tail_k,
+                is_first_segment=False,
+                is_last_segment=False,
             )
             self.segment_c_wrapper = self._wrap_segment_if_needed(self.segment_c)
 
