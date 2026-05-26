@@ -29,15 +29,19 @@ def _forward_edge_cloud_segment_qwen3_5(
     positions: torch.Tensor,
     intermediate_tensors: IntermediateTensors | None = None,
     inputs_embeds: torch.Tensor | None = None,
+    is_first_segment: bool | None = None,
+    is_last_segment: bool | None = None,
     **extra_layer_kwargs: Any,
 ) -> torch.Tensor | IntermediateTensors:
     num_layers = len(self.layers)
-    assert 0 <= start_layer < end_layer <= num_layers, (
+    assert 0 <= start_layer <= end_layer <= num_layers, (
         f"Invalid segment range [{start_layer}, {end_layer}) for {num_layers} layers"
     )
 
-    is_first_segment = start_layer == 0 and get_pp_group().is_first_rank
-    is_last_segment = end_layer == num_layers and get_pp_group().is_last_rank
+    if is_first_segment is None:
+        is_first_segment = start_layer == 0 and get_pp_group().is_first_rank
+    if is_last_segment is None:
+        is_last_segment = end_layer == num_layers and get_pp_group().is_last_rank
 
     if is_first_segment:
         if inputs_embeds is not None:
@@ -62,6 +66,8 @@ def _forward_edge_cloud_segment_qwen3_5(
         )
 
     if not is_last_segment:
+        if residual is None:
+            residual = torch.zeros_like(hidden_states)
         return IntermediateTensors(
             {"hidden_states": hidden_states, "residual": residual}
         )
