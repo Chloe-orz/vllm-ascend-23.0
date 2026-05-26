@@ -2074,7 +2074,7 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
     TORCH_CHECK(x.dim() > 1, "x dim should larger than 1");
     TORCH_CHECK(quant_mode == 0 || quant_mode == 1, "quant_mode only support 0 or 1, but got ", quant_mode);
     TORCH_CHECK(swiglu_mode == 0 || swiglu_mode == 1, "swiglu_mode only support 0 or 1, but got ", swiglu_mode);
-    TORCH_CHECK(std::isfinite(clamp_limit) && clamp_limit >= 0.0, "clamp_limit should be positive finite");
+    TORCH_CHECK(clamp_limit >= 0.0, "clamp_limit should be non-negative");
     TORCH_CHECK(std::isfinite(glu_alpha), "glu_alpha should be finite");
     TORCH_CHECK(std::isfinite(glu_bias), "glu_bias should be finite");
     TORCH_CHECK(x.size(x.dim() - 1) % 2 == 0, "x last dim should be even");
@@ -2924,8 +2924,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
             "int quant_mode=0, "
             "int swiglu_mode=0, "
             "float clamp_limit=0.0, "
-            "float glu_alpha=1.0, "
-            "float glu_bias=0.0"
+            "float glu_alpha=1.702, "
+            "float glu_bias=1.0"
         ") -> (Tensor y, Tensor scale)"
     );
     ops.impl("npu_dequant_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::npu_dequant_swiglu_quant);

@@ -644,6 +644,7 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::SwiGluGate(
     SetMaskNorm();
     ResetMask();
     PipeBarrier<PIPE_V>();
+
     if (tl_->clampLimit > 0.0f) {
         // tmpUbF32Gate
         Mins(tmpUbF32Gate, tmpUbF32Gate, tl_->clampLimit, calEleNum);
@@ -651,10 +652,11 @@ __aicore__ inline void DequantSwigluQuantBase<TEMPLATE_DSQ_ARGS>::SwiGluGate(
         Maxs(tmpUbF32Gate, tmpUbF32Gate, -(tl_->clampLimit), calEleNum);
         PipeBarrier<PIPE_V>();
     }
-        Adds(tmpUbF32Gate, tmpUbF32Gate, tl_->gluBias, calEleNum);
-        PipeBarrier<PIPE_V>();
+    Adds(tmpUbF32Gate, tmpUbF32Gate, tl_->gluBias, calEleNum);
+    PipeBarrier<PIPE_V>();
+
     if (tl_->clampLimit > 0.0f) {
-    // tmpUbF32Act
+        // tmpUbF32Act
         Mins(tmpUbF32Act, tmpUbF32Act, tl_->clampLimit, calEleNum);
         PipeBarrier<PIPE_V>();
     }
