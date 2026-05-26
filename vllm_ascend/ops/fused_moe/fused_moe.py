@@ -409,18 +409,31 @@ else:
         ):
             vllm_config = get_current_vllm_config()
 
-            if (
-                self.custom_routing_function is None
-                and self.e_score_correction_bias is not None
-                and not vllm_config.model_config.is_deepseek_mla
-            ):
-                self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                    dtype=vllm_config.model_config.dtype
-                )
-
-            self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-            self.multistream_overlap_shared_expert = (
-                ascend_config.multistream_overlap_shared_expert and shared_experts is not None
+        # init moe
+        eplb_config = ascend_config.eplb_config
+        self.mix_placement = getattr(ascend_config, "mix_placement", False)
+        self.n_shared_experts = num_shared_experts
+        num_experts += num_shared_experts if self.mix_placement else 0
+        self.moe_config.num_experts = num_experts
+        self.global_expert_map, self._expert_map, self.log2phy, self.global_redundant_expert_num = init_eplb_config(
+            eplb_config, self.moe_instance_id, self.moe_config, self.mix_placement, num_shared_experts
+        )
+        self.global_num_experts = num_experts + self.global_redundant_expert_num
+        self.dynamic_eplb = eplb_config.dynamic_eplb and (self.log2phy is not None)
+        self.local_num_experts = self.global_num_experts // self.ep_size
+        if not vllm_version_is("0.20.2"):
+            self.expert_map_manager._local_num_experts = self.local_num_experts
+            self.expert_map_manager._expert_map = self._expert_map
+        if self._expert_map is not None:
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.",
+                self.ep_rank,
+                self.ep_size,
+                self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self._expert_map),
             )
             mix_placement = getattr(ascend_config, "mix_placement", False)
 

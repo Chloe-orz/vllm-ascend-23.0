@@ -31,6 +31,65 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_qwen3_moe_w8a8_distributed_tp2():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+        "vllm-ascend/Qwen3-30B-A3B-W8A8",
+        max_model_len=8192,
+        tensor_parallel_size=2,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+        quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_qwen3_moe_distributed_aiv_tp2():
+    os.environ["HCCL_OP_EXPANSION_MODE"] = "AIV"
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    dtype = "auto"
+    max_tokens = 5
+    with VllmRunner(
+        "Qwen/Qwen3-30B-A3B",
+        dtype=dtype,
+        tensor_parallel_size=2,
+        cudagraph_capture_sizes=[1, 2, 4, 8],
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.skipif(vllm_version_is("0.20.2"), reason="no need to support model_runner for v0.20.2")
+@pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("enforce_eager", [True])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+def test_qwen3_moe_distributed_tp2_ep2_mrv2(
+    max_tokens: int,
+    enforce_eager: bool,
+) -> None:
+    example_prompts = [
+        "The president of the United States is",
+    ]
+
+    with VllmRunner(
+        "Qwen/Qwen3-30B-A3B",
+        tensor_parallel_size=2,
+        enable_expert_parallel=True,
+        enforce_eager=enforce_eager,
+    ) as vllm_model:
+        vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    golden_results = [
+        "The president of the United States is the commander in chief of",
+    ]
+
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+
+
 @pytest.mark.asyncio
 async def test_qwen3_moe_w8a8_distributed_tp2_ep_dynamic_eplb():
     model = "vllm-ascend/Qwen3-30B-A3B-W8A8"
