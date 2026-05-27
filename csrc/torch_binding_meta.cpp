@@ -787,27 +787,6 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     return output;
 }
 
-std::tuple<at::Tensor, at::Tensor> npu_fused_gdn_gating_meta(
-    const at::Tensor& A_log,
-    const at::Tensor& a,
-    const at::Tensor& b,
-    const at::Tensor& dt_bias,
-    double beta,
-    double threshold)
-{
-    (void)beta;
-    (void)threshold;
-    int64_t batch = a.size(0);
-    int64_t num_heads = a.size(1);
-
-    at::Tensor g = at::empty_symint(
-        {1, batch, num_heads}, a.options().dtype(c10::kFloat));
-    at::Tensor beta_output = at::empty_symint(
-        {1, batch, num_heads}, b.options());
-
-    return std::make_tuple(g, beta_output);
-}
-
 std::vector<at::Tensor> moe_grouped_matmul_meta(
     at::Tensor x,
     at::Tensor weight,
