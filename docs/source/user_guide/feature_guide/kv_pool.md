@@ -459,7 +459,7 @@ export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=1073741824   # 1 GB
 
 ### Installing Memcache
 
-**MemCache depends on MemFabric. Therefore, MemFabric must be installed. Installing the memcache after the memfabric is installed.**
+**MemCache depends on MemFabric. Therefore, MemFabric must be installed.Installing the memcache after the memfabric is installed.**
 
 ```shell
 pip install memfabric-hybrid
@@ -501,14 +501,8 @@ ock.mmc.local_service.dram.size = 1GB
 
 Starting the MetaService service.
 
-Run `pip show memcache_hybrid` and find the `Location` value in the output. Use that value as `{INSTALL_PATH}` below.
-
 ```shell
-pip show memcache_hybrid
-```
-
-```shell
-export MMC_META_CONFIG_PATH={INSTALL_PATH}/memcache_hybrid/config/mmc-meta.conf
+export MMC_META_CONFIG_PATH=/usr/local/memcache_hybrid/latest/config/mmc-meta.conf
 
 python -c "from memcache_hybrid import MetaService; MetaService.main()"
 ```
@@ -581,6 +575,7 @@ export VLLM_USE_V1=1
 KV_CONFIG='{
   "kv_connector": "MultiConnector",
   "kv_role": "'$KV_ROLE'",
+  "engine_id": "2",
   "kv_connector_extra_config": {
     "connectors": [
       {
@@ -630,13 +625,9 @@ python -m vllm.entrypoints.openai.api_server "${CMD_ARGS[@]}" > log_${ROLE}.log 
 echo "vLLM started. Log file: log_${ROLE}.log"
 ```
 
-#### 2. Start proxy_server
+#### [2、Start proxy_server](#2start-proxy_server)
 
-Refer to [Start proxy_server](#2-start-proxy_server) in the MooncakeStore deployment section.
-
-#### 3. Run Inference
-
-Refer to [Run Inference](#3-run-inference) in the MooncakeStore deployment section.
+#### [3、run-inference](#3run-inference)
 
 ### PD-Mixed Scenario
 
@@ -720,7 +711,7 @@ echo "vLLM started. Log file: log_mix.log"
 
 ```
 
-#### [2. Run Inference](#2-run-inference)
+#### [2.Run Inference](#2run-inference)
 
 ## Example of using Yuanrong as a KV Pool backend
 
