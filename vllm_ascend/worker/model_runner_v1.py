@@ -2247,12 +2247,6 @@ class NPUModelRunner(GPUModelRunner):
             old_layer_idx = _EXTRA_CTX.layer_idx
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = self.head_k
-            logger.info(
-                "[_model_forward Cloud] _EXTRA_CTX.layer_idx=%s before seg_c, "
-                "cloud start_layer expected=%d",
-                old_layer_idx,
-                self.head_k,
-            )
             try:
                 hidden_states = seg_c(
                     positions=positions,
