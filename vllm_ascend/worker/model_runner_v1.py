@@ -823,21 +823,6 @@ class NPUModelRunner(GPUModelRunner):
         transformer_model = LayerShardLoader._get_transformer_model(self.model)
         self.num_layers = len(transformer_model.layers)
 
-        # For embedding_only, save the full kv_cache_spec BEFORE sharding on
-        # BOTH edge and cloud. After sharding, static_forward_context may be
-        # cleaned (edge has no local layers, cloud may also be affected by
-        # _clean_compilation_config), causing get_kv_cache_spec() to return an
-        # empty dict. We capture the full spec here while the model is still
-        # intact and reuse it later.
-        if self.edge_cloud_cfg.mode == "embedding_only":
-            self._full_kv_cache_spec = self.get_kv_cache_spec()
-            logger.info(
-                "[EdgeCloud] embedding_only %s saved full kv_cache_spec "
-                "with %d layers before sharding.",
-                self.edge_cloud_cfg.role,
-                len(self._full_kv_cache_spec),
-            )
-
         layer_plan = EdgeCloudLayerPlan(
             role=self.edge_cloud_cfg.role,
             total_layers=self.num_layers,
@@ -5299,14 +5284,17 @@ class NPUModelRunner(GPUModelRunner):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        # embedding_only saved the full spec before sharding because after
-        # sharding static_forward_context may be cleaned on both sides.
+        # embedding_only: edge has no local attention layers, so its
+        # static_forward_context is empty and the normal path returns {}.
+        # Returning {} here lets the cloud's fresh spec (after weights
+        # processing) drive the merged spec, avoiding stale dimensions
+        # (e.g. head_size changed by quantization).
         if (
             self._edge_cloud_enabled
             and self.edge_cloud_cfg.mode == "embedding_only"
-            and hasattr(self, "_full_kv_cache_spec")
+            and self.edge_cloud_cfg.role == "edge"
         ):
-            return self._full_kv_cache_spec
+            return {}
 
         if (
             has_ec_transfer()
