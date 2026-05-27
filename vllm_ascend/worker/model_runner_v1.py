@@ -3480,7 +3480,7 @@ class NPUModelRunner(GPUModelRunner):
             # But gdn needs an unpadded one.
             # gdn_query_start_loc is an unpadded version of query_start_loc.
             # TODO delete it if fia's check is removed.
-            if self._has_gdn:
+            if self._has_gdn and self.attn_groups[kv_cache_gid]:
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
                 if isinstance(builder, GDNAttentionMetadataBuilder):
