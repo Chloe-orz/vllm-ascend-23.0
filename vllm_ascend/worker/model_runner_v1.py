@@ -6002,21 +6002,29 @@ class NPUModelRunner(GPUModelRunner):
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
         if self._edge_cloud_enabled and hasattr(self, "model") and self.model is not None:
-            import re
+            # In embedding_only mode, edge side has no transformer layers but
+            # still needs kv_cache_spec to be non-empty so the scheduler can
+            # allocate KV cache and schedule requests. Cloud side manages the
+            # actual KV cache usage; edge side keeps the spec for scheduling.
+            if not (
+                self.edge_cloud_cfg.mode == "embedding_only"
+                and self.edge_cloud_cfg.role == "edge"
+            ):
+                import re
 
-            local_layer_indices = {
-                idx
-                for idx, layer in enumerate(
-                    LayerShardLoader._get_transformer_model(self.model).layers
-                )
-                if not isinstance(layer, PPMissingLayer)
-            }
-            filtered_spec: dict[str, KVCacheSpec] = {}
-            for layer_name, spec in kv_cache_spec.items():
-                match = re.search(r"layers\.(\d+)", layer_name)
-                if match is None or int(match.group(1)) in local_layer_indices:
-                    filtered_spec[layer_name] = spec
-            kv_cache_spec = filtered_spec
+                local_layer_indices = {
+                    idx
+                    for idx, layer in enumerate(
+                        LayerShardLoader._get_transformer_model(self.model).layers
+                    )
+                    if not isinstance(layer, PPMissingLayer)
+                }
+                filtered_spec: dict[str, KVCacheSpec] = {}
+                for layer_name, spec in kv_cache_spec.items():
+                    match = re.search(r"layers\.(\d+)", layer_name)
+                    if match is None or int(match.group(1)) in local_layer_indices:
+                        filtered_spec[layer_name] = spec
+                kv_cache_spec = filtered_spec
 
         return kv_cache_spec
 

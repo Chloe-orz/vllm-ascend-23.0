@@ -804,6 +804,7 @@ class NPUWorker(WorkerBase):
                     comm_handles=comm_handles,
                     comm_postprocess=comm_postprocess,
                 )
+                print(f"cloud recv from edge, tensor = {intermediate_tensors}")
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
                 # it will conflict with the all-gather operation in flashcomm1.
@@ -827,86 +828,9 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
-        print("model_runner.execute_model cloud before.", flush=True)
-        output = self.model_runner.execute_model(
-            scheduler_output, intermediate_tensors,
-            layer_slice_info=layer_slice_info,
-        )
-        print("model_runner.execute_model cloud after.", flush=True)
-
-        is_last_slice = (
-            layer_slice_info is None or layer_slice_info.is_last_slice
-        )
-        if not is_last_slice:
-            return None
-
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
-            return output
-
-        assert isinstance(output, IntermediateTensors)
-        # Echo the head_token back to the edge so the tail segment can
-        # correlate the data-plane tensor with the control-plane scheduler output.
-        token = scheduler_output.head_token
-        if token:
-            output.tensors["_head_token"] = torch.tensor(
-                list(bytearray(token, "utf-8")),
-                dtype=torch.uint8,
-                device="npu",
-            )
-        if get_pp_group().world_size == 2:
-            print("Send intermediate tensors to edge before", flush=True)
-            self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
-            print("Send intermediate tensors to edge after", flush=True)
-        return output
-
-    def _execute_model_legacy(
-        self,
-        scheduler_output: "SchedulerOutput",
-        layer_slice_info: Any,
-        use_alt_group: bool,
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        """Original non-edge-cloud path (standard PP, layer-slicing, etc.)."""
-        # Only receive intermediate tensors on the first slice.
-        is_first_slice = (
-            layer_slice_info is None or layer_slice_info.is_first_slice
-        )
-
-        intermediate_tensors = None
-        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and is_first_slice:
-            if not get_pp_group().is_first_rank:
-                if enable_sp():
-                    all_gather_group = None
-                else:
-                    all_gather_group = get_tp_group()
-                tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                    all_gather_group=all_gather_group,
-                    use_alt_group=use_alt_group,
-                )
-                assert tensor_dict is not None, (
-                    "worker irecv_tensor_dict returned None, "
-                    "previous stage may have failed to send."
-                )
-                intermediate_tensors = AsyncIntermediateTensors(
-                    tensor_dict,
-                    comm_handles=comm_handles,
-                    comm_postprocess=comm_postprocess,
-                )
-
-        if self.profiler is not None:
-            self.profiler.step()
-
-        output = self.model_runner.execute_model(
-            scheduler_output, intermediate_tensors,
-            layer_slice_info=layer_slice_info,
-        )
-
-        is_last_slice = (
-            layer_slice_info is None or layer_slice_info.is_last_slice
-        )
-        if not is_last_slice:
-            return None
-
+        print(f"model_runner.execute_model input = {intermediate_tensors}")
+        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        print(f"model_runner.execute_model output = {output}")
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -915,13 +839,16 @@ class NPUWorker(WorkerBase):
         if is_edge_device():
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                print(f"edge send to cloud, tensor = {output.tensors}")
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
+            print(f"edge model_runner.execute_model input = {intermediate_tensors}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            print(f"edge model_runner.execute_model output = {output}")
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
@@ -929,6 +856,7 @@ class NPUWorker(WorkerBase):
         if is_cloud_device():
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                print(f"cloud send to edge, tensor = {output.tensors}")
         else:
             assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
