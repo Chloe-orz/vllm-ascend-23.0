@@ -164,12 +164,12 @@ msgstr ""
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:35
 msgid ""
-"**FULL_AND_PIECEWISE**: Default mode, same as the upstream vLLM strategy."
-" The compile-time path follows PIECEWISE compilation, while the runtime "
-"may still use full-graph behavior for uniform decode batches."
+"**FULL / FULL_DECODE_ONLY**: Npugraph_ex optimizes the FX graph via "
+"npugraph_ex (`force_eager=True`, compile-time only, no capture). The "
+"optimized callable is then captured and replayed by ACLGraph at runtime."
 msgstr ""
-"**FULL_AND_PIECEWISE**：默认模式，与上游 vLLM 策略相同。编译时路径遵循 PIECEWISE "
-"编译，而运行时对于均匀解码批次仍可能使用全图行为。"
+"**FULL / FULL_DECODE_ONLY**：Npugraph_ex 通过 npugraph_ex "
+"(`force_eager=True`，仅编译时，无捕获) 优化 FX 图。然后，优化后的可调用对象在运行时由 ACLGraph 捕获和重放。"
 
 #: ../../source/user_guide/feature_guide/graph_mode.md:36
 msgid ""
