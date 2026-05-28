@@ -52,6 +52,7 @@ config:
 env_common: &env_common
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
@@ -62,7 +63,7 @@ env_common: &env_common
   ACL_OP_INIT_MODE: "1"
   ASCEND_A3_ENABLE: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
+  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
   HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_INTRA_PCIE_ENABLE: "1"
   HCCL_INTRA_ROCE_ENABLE: "0"
@@ -79,7 +80,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -100,7 +101,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -120,6 +121,7 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
+        "engine_id": "0",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {
@@ -140,7 +142,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -161,7 +163,7 @@ templates:
       - --max-model-len
       - "131072"
       - --additional-config
-      - '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -181,6 +183,7 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
+        "engine_id": "0",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {
@@ -202,7 +205,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -225,7 +228,7 @@ templates:
       - --max-num-batched-tokens
       - "32"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -245,6 +248,7 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30100",
+        "engine_id": "0",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {
@@ -266,7 +270,7 @@ templates:
       - --host
       - "0.0.0.0"
       - --port
-      - ${PORT}
+      - $SERVER_PORT
       - --data-parallel-size
       - ${DP_SIZE}
       - --data-parallel-rank
@@ -289,7 +293,7 @@ templates:
       - --max-num-batched-tokens
       - "32"
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+      - '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
       - --max-num-batched-tokens
       - "4096"
       - --trust-remote-code
@@ -309,6 +313,7 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30100",
+        "engine_id": "0",
         "kv_connector_extra_config": {
           "use_ascend_direct": true,
           "prefill": {
