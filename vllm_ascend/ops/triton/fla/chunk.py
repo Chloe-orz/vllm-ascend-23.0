@@ -182,8 +182,7 @@ def chunk_gated_delta_rule_fwd(
 
         if get_pcp_group().rank_in_group > 0:
             rerun_initial_state = initial_state.clone()
-            prefill_seq_offset = actual_num_decodes
-            prefill_slice = slice(prefill_seq_offset, final_state.shape[0])
+            prefill_slice = slice(num_decodes, final_state.shape[0])
             rerun_initial_state[prefill_slice] = updated_h_state[prefill_slice]
             h, v_new, _ = chunk_gated_delta_rule_fwd_h(
                 k=k,
