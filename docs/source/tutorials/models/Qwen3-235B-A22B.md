@@ -221,24 +221,22 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
-vllm serve your_model_path \
-    --host <host_ip> \
-    --port <port> \
-    --tensor-parallel-size 8 \
-    --data-parallel-size 1 \
-    --seed 1024 \
-    --quantization ascend \
-    --served-model-name qwen3 \
-    --max-num-seqs 32 \
-    --max-model-len 131072 \
-    --max-num-batched-tokens 8096 \
-    --enable-expert-parallel \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.95 \
-    --hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true}' \
-    --async-scheduling
+vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
+--host 0.0.0.0 \
+--port 8000 \
+--tensor-parallel-size 8 \
+--data-parallel-size 1 \
+--seed 1024 \
+--quantization ascend \
+--served-model-name qwen3 \
+--max-num-seqs 32 \
+--max-model-len 133000 \
+--max-num-batched-tokens 8096 \
+--enable-expert-parallel \
+--trust-remote-code \
+--gpu-memory-utilization 0.95 \
+--hf-overrides '{"rope_parameters": {"rope_type":"yarn","rope_theta":1000000,"factor":4,"original_max_position_embeddings":32768}}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
 ```
 
 :::{note}
@@ -343,57 +341,23 @@ export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 
-export HCCL_BUFFSIZE=512
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
-export OMP_NUM_THREADS=1
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export TASK_QUEUE_ENABLE=1
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
-export ASCEND_RT_VISIBLE_DEVICES=$1
-
-vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
-    --host 0.0.0.0 \
-    --port $2 \
-    --data-parallel-size $3 \
-    --data-parallel-rank $4 \
-    --data-parallel-address $5 \
-    --data-parallel-rpc-port $6 \
-    --tensor-parallel-size $7 \
-    --enable-expert-parallel \
-    --served-model-name qwen3_235b \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 16384 \
-    --max-num-seqs 24 \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
-    --quantization ascend \
-    --no-enable-prefix-caching \
-    --enforce-eager \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 1}' \
-    --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_extra_config": {
-             "use_ascend_direct": true,
-             "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 8,
-                    "tp_size": 4
-             }
-        }
-        }'
+vllm serve Qwen/Qwen3-235B-A22B \
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 2 \
+--api-server-count 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $local_ip \
+--data-parallel-rpc-port 13389 \
+--seed 1024 \
+--served-model-name qwen3 \
+--tensor-parallel-size 8 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 32768 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--gpu-memory-utilization 0.9
 ```
 
 **Decode node 0** (set `nic_name` and `local_ip` to your own):
@@ -419,46 +383,24 @@ export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export ASCEND_RT_VISIBLE_DEVICES=$1
-
-vllm serve "/data/weights/Qwen3-235B-A22B-w8a8-rot" \
-    --host 0.0.0.0 \
-    --port $2 \
-    --data-parallel-size $3 \
-    --data-parallel-rank $4 \
-    --data-parallel-address $5 \
-    --data-parallel-rpc-port $6 \
-    --tensor-parallel-size $7 \
-    --enable-expert-parallel \
-    --served-model-name qwen3_235b \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 512 \
-    --max-num-seqs 128 \
-    --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
-    --quantization ascend \
-    --no-enable-prefix-caching \
-    --async-scheduling \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "enable_fused_mc2": 2}' \
-    --kv-transfer-config \
-        '{"kv_connector": "MooncakeConnectorV1",
-        "kv_role": "kv_consumer",
-        "kv_port": "30100",
-        "engine_id": "1",
-        "kv_connector_extra_config": {
-             "use_ascend_direct": true,
-             "prefill": {
-                    "dp_size": 2,
-                    "tp_size": 8
-             },
-             "decode": {
-                    "dp_size": 8,
-                    "tp_size": 4
-             }
-        }
-        }'
+vllm serve Qwen/Qwen3-235B-A22B \
+--host 0.0.0.0 \
+--port 8000 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--seed 1024 \
+--tensor-parallel-size 8 \
+--served-model-name qwen3 \
+--max-num-seqs 16 \
+--max-model-len 32768 \
+--max-num-batched-tokens 4096 \
+--enable-expert-parallel \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
 ```
 
 **Decode node 1** (set `nic_name` and `local_ip` to your own):
@@ -766,7 +708,202 @@ export TP_SOCKET_IFNAME=<ifname>
 export HCCL_SOCKET_IFNAME=<ifname>
 
 export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export TASK_QUEUE_ENABLE=1
+
+vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
+--host 0.0.0.0 \
+--port 8000 \
+--tensor-parallel-size 4 \
+--data-parallel-size 4 \
+--seed 1024 \
+--quantization ascend \
+--served-model-name qwen3 \
+--max-num-seqs 128 \
+--max-model-len 40960 \
+--max-num-batched-tokens 16384 \
+--enable-expert-parallel \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
+--no-enable-prefix-caching \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+```
+
+Benchmark scripts:
+
+```shell
+vllm bench serve --model qwen3 \
+--tokenizer vllm-ascend/Qwen3-235B-A22B-w8a8 \
+--ignore-eos \
+--dataset-name random \
+--random-input-len 3584 \
+--random-output-len 1536 \
+--num-prompts 800 \
+--max-concurrency 160 \
+--request-rate 24 \
+--host 0.0.0.0 \
+--port 8000 \
+```
+
+Reference test results:
+
+| num_requests | concurrency | mean TTFT(ms) | mean TPOT(ms) | output token throughput (tok/s) |
+|----- | ----- | ----- | ----- | -----|
+| 720 | 144 | 4717.45 | 48.69 | 2761.72 |
+
+Note:
+
+1. Setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=1` enables MoE fused operators that reduce time consumption of MoE in both prefill and decode. This is an experimental feature which only supports W8A8 quantization on Atlas A3 servers now. If you encounter any problems when using this feature, you can disable it by setting `export VLLM_ASCEND_ENABLE_FUSED_MC2=0` and update issues in vLLM-Ascend community.
+2. Here we disable prefix cache because of random datasets. You can enable prefix cache if requests have long common prefix.
+
+### Three Node A3 -- PD disaggregation
+
+On three Atlas 800 A3(64G*16) server, we recommend to use one node as one prefill instance and two nodes as one decode instance. Example server scripts:
+Prefill Node 1
+
+```shell
+#!/bin/sh
+export HCCL_IF_IP=prefill_node_1_ip
+
+# Set ifname according to your network setting
+ifname=""
+
+export GLOO_SOCKET_IFNAME=${ifname}
+export TP_SOCKET_IFNAME=${ifname}
+export HCCL_SOCKET_IFNAME=${ifname}
+
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_BUFFSIZE=512
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=2
+export TASK_QUEUE_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
+--host 0.0.0.0 \
+--port 8000 \
+--tensor-parallel-size 8 \
+--data-parallel-size 2 \
+--data-parallel-size-local 2 \
+--data-parallel-start-rank 0 \
+--data-parallel-address prefill_node_1_ip \
+--data-parallel-rpc-port prefill_node_dp_port \
+--seed 1024 \
+--quantization ascend \
+--served-model-name qwen3 \
+--max-num-seqs 24 \
+--max-model-len 40960 \
+--max-num-batched-tokens 16384 \
+--enable-expert-parallel \
+--enforce-eager \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
+--no-enable-prefix-caching \
+--kv-transfer-config \
+'{"kv_connector": "MooncakeConnectorV1",
+"kv_role": "kv_producer",
+"kv_port": "30000",
+"engine_id": "0",
+"kv_connector_extra_config": {
+      "prefill": {
+            "dp_size": 2,
+            "tp_size": 8
+      },
+      "decode": {
+            "dp_size": 8,
+            "tp_size": 4
+      }
+}
+}'
+```
+
+Decode Node 1
+
+```shell
+#!/bin/sh
+export HCCL_IF_IP=decode_node_1_ip
+
+ifname=""
+
+export GLOO_SOCKET_IFNAME=${ifname}
+export TP_SOCKET_IFNAME=${ifname}
+export HCCL_SOCKET_IFNAME=${ifname}
+
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+# To reduce memory fragmentation and avoid out of memory
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=1
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+export VLLM_ASCEND_ENABLE_FUSED_MC2=2
+export TASK_QUEUE_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+
+vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
+--host 0.0.0.0 \
+--port 8000 \
+--tensor-parallel-size 4 \
+--data-parallel-size 8 \
+--data-parallel-size-local 4 \
+--data-parallel-start-rank 0 \
+--data-parallel-address decode_node_1_ip \
+--data-parallel-rpc-port decode_node_dp_port \
+--seed 1024 \
+--quantization ascend \
+--served-model-name qwen3 \
+--max-num-seqs 128 \
+--max-model-len 40960 \
+--max-num-batched-tokens 256 \
+--enable-expert-parallel \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--no-enable-prefix-caching \
+--kv-transfer-config \
+'{"kv_connector": "MooncakeConnectorV1",
+"kv_role": "kv_consumer",
+"kv_port": "30100",
+"engine_id": "1",
+"kv_connector_extra_config": {
+      "prefill": {
+            "dp_size": 2,
+            "tp_size": 8
+      },
+      "decode": {
+            "dp_size": 8,
+            "tp_size": 4
+      }
+}
+}'
+```
+
+Decode Node 2
+
+```shell
+#!/bin/sh
+export HCCL_IF_IP=decode_node_2_ip
+
+ifname=""
+
+export GLOO_SOCKET_IFNAME=${ifname}
+export TP_SOCKET_IFNAME=${ifname}
+export HCCL_SOCKET_IFNAME=${ifname}
+
+# Load model from ModelScope to speed up download
+export VLLM_USE_MODELSCOPE=True
+# To reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 export OMP_NUM_THREADS=1
@@ -777,27 +914,43 @@ sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export TASK_QUEUE_ENABLE=1
 
-vllm serve your_model_path \
-    --served-model-name qwen3 \
-    --host <host_ip> \
-    --port <port> \
-    --async-scheduling \
-    --tensor-parallel-size 4 \
-    --data-parallel-size 4 \
-    --data-parallel-size-local 4 \
-    --data-parallel-start-rank 0 \
-    --data-parallel-address <node_ip> \
-    --data-parallel-rpc-port <rpc_port> \
-    --enable-expert-parallel \
-    --max-num-seqs 128 \
-    --max-model-len 32768 \
-    --max-num-batched-tokens 16384 \
-    --gpu-memory-utilization 0.9 \
-    --trust-remote-code \
-    --quantization ascend \
-    --no-enable-prefix-caching \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1": true, "enable_fused_mc2": 1}'
+vllm serve vllm-ascend/Qwen3-235B-A22B-w8a8 \
+--host 0.0.0.0 \
+--port 8000 \
+--headless \
+--tensor-parallel-size 4 \
+--data-parallel-size 8 \
+--data-parallel-size-local 4 \
+--data-parallel-start-rank 4 \
+--data-parallel-address decode_node_1_ip \
+--data-parallel-rpc-port decode_node_dp_port \
+--seed 1024 \
+--quantization ascend \
+--served-model-name qwen3 \
+--max-num-seqs 128 \
+--max-model-len 40960 \
+--max-num-batched-tokens 256 \
+--enable-expert-parallel \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--no-enable-prefix-caching \
+--kv-transfer-config \
+'{"kv_connector": "MooncakeConnectorV1",
+"kv_role": "kv_consumer",
+"kv_port": "30100",
+"engine_id": "1",
+"kv_connector_extra_config": {
+      "prefill": {
+            "dp_size": 2,
+            "tp_size": 8
+      },
+      "decode": {
+            "dp_size": 8,
+            "tp_size": 4
+      }
+}
+}'
 ```
 
 <u>Single-node PD Hybrid — Low Latency:</u>

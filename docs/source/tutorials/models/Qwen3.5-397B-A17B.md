@@ -116,23 +116,23 @@ sysctl kernel.sched_migration_cost_ns=50000
 export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --quantization ascend \
-  --served-model-name qwen3.5 \
-  --max-num-seqs 128 \
-  --max-model-len 133000 \
-  --max-num-batched-tokens 16384 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.90 \
-  --enable-prefix-caching \
-  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true, "enable_fused_mc2":1, "enable_flashcomm1":true}'
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 1 \
+--tensor-parallel-size 16 \
+--enable-expert-parallel \
+--seed 1024 \
+--quantization ascend \
+--served-model-name qwen3.5 \
+--max-num-seqs 128 \
+--max-model-len 133000 \
+--max-num-batched-tokens 16384 \
+--trust-remote-code \
+--gpu-memory-utilization 0.90 \
+--enable-prefix-caching \
+--speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--additional-config '{"enable_cpu_binding":true}' \
 ```
 
 Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
@@ -180,27 +180,26 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --data-parallel-size 2 \
-  --api-server-count 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-address $local_ip \
-  --data-parallel-rpc-port 13389 \
-  --seed 1024 \
-  --served-model-name qwen3.5 \
-  --tensor-parallel-size 8 \
-  --enable-expert-parallel \
-  --max-num-seqs 16 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 4096 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --no-enable-prefix-caching \
-  --quantization ascend \
-  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 2 \
+--api-server-count 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $local_ip \
+--data-parallel-rpc-port 13389 \
+--seed 1024 \
+--served-model-name qwen3.5 \
+--tensor-parallel-size 8 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 32768 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
+--no-enable-prefix-caching \
+--speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
 
 Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
@@ -231,28 +230,27 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --headless \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 1 \
-  --data-parallel-address $node0_ip \
-  --data-parallel-rpc-port 13389 \
-  --seed 1024 \
-  --tensor-parallel-size 8 \
-  --served-model-name qwen3.5 \
-  --max-num-seqs 16 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 4096 \
-  --enable-expert-parallel \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --no-enable-prefix-caching \
-  --quantization ascend \
-  --speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
+--host 0.0.0.0 \
+--port 8000 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--seed 1024 \
+--tensor-parallel-size 8 \
+--served-model-name qwen3.5 \
+--max-num-seqs 16 \
+--max-model-len 32768 \
+--max-num-batched-tokens 4096 \
+--enable-expert-parallel \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
+--no-enable-prefix-caching \
+--speculative_config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}' \
+--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+--additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
 ```
 
 Common Issues Tip: If the headless node exits immediately, check whether node 0 is already running, whether `--data-parallel-address` points to node 0, and whether `--data-parallel-start-rank` is unique for each node.
@@ -456,7 +454,9 @@ vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   }'
 ```
 
-Common Issues Tip: If decode node 0 fails to initialize, check that `MASTER_IP_ADDRESS` points to decode node 0 itself, `--data-parallel-start-rank` is 0, and `kv_connector_extra_config.decode.dp_size` matches the global decode DP size.
+       - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
+       - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+       - `--no-enable-prefix-caching`: The prefix-cache feature is enabled by default. You can use the `--no-enable-prefix-caching` parameter to disable this feature. Notice: for Prefill-Decode disaggregation feature, known issue on D node: [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944)
 
 #### 5.4.3 Decode Node 1
 

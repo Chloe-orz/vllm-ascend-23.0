@@ -250,19 +250,22 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve your_model_path \
-    --served-model-name qwen3 \
-    --trust-remote-code \
-    --async-scheduling \
-    --quantization ascend \
-    --distributed-executor-backend mp \
-    --tensor-parallel-size 4 \
-    --max-model-len 5500 \
-    --max-num-batched-tokens 40960 \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --port <port> \
-    --gpu-memory-utilization 0.9 \
-    --additional-config '{"enable_flashcomm1": true}'
+# Enable FlashComm_v1 optimization when tensor parallel is enabled.
+export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
+
+vllm serve vllm-ascend/Qwen3-32B-W8A8 \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --quantization ascend \
+  --distributed-executor-backend mp \
+  --tensor-parallel-size 4 \
+  --max-model-len 5500 \
+  --max-num-batched-tokens 40960 \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --additional-config '{"pa_shape_list":[48,64,72,80], "weight_prefetch_config":{"enabled":true}}' \
+  --port 8113 \
+  --block-size 128 \
+  --gpu-memory-utilization 0.9
 ```
 
 Qwen3-32B-W4A4:
@@ -645,4 +648,38 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [vLLM-Ascend FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3 Dense models.
+### 7. FullGraph Optimization
+
+ACLGraph offers several key optimizations to improve model execution efficiency. By replaying the entire model execution graph at once, we significantly reduce dispatch latency compared to multiple smaller replays. This approach also stabilizes multi-device performance, as capturing the model as a single static graph mitigates dispatch fluctuations across devices. Additionally, consolidating graph captures frees up streams, allowing for the capture of more graphs and optimizing resource usage, ultimately leading to improved system efficiency and reduced overhead.
+
+The configuration compilation_config = { "cudagraph_mode": "FULL_DECODE_ONLY"} is used when starting the service. This setup is necessary to enable the aclgraph's full decode-only mode.
+
+### 8. Asynchronous Scheduling
+
+Asynchronous scheduling is a technique used to optimize inference efficiency. It allows non-blocking task scheduling to improve concurrency and throughput, especially when processing large-scale models.
+
+## Optimization Highlights
+
+Building on the specific example scenarios outlined earlier, this section highlights the key tuning points that played a crucial role in achieving optimal performance. By focusing on the most impactful adjustments to hyperparameters and optimizations, we’ll emphasize the strategies that can be leveraged to maximize throughput, minimize latency, and ensure efficient resource utilization in various environments. These insights will help guide you in fine-tuning your own configurations for the best possible results.
+
+### 1.Prefetch Buffer Size
+
+Setting the right prefetch buffer size is essential for optimizing weight loading and the size of this prefetch buffer is directly related to the time that can be hidden by vector computations. To achieve a near-perfect overlap between the prefetch and computation streams, you can flexibly adjust the buffer size by profiling and observing the degree of overlap at different buffer sizes.
+
+For example, in the real-world scenario mentioned above, I set the prefetch buffer size for the gate_up_proj and down_proj in the MLP to 18MB. The reason for this is that, at this value, the vector computations of RMSNorm and SiLU can effectively hide the prefetch stream, thereby accelerating the Matmul computations of the two linear layers.
+
+### 2.Max-num-batched-tokens
+
+The max-num-batched-tokens parameter determines the maximum number of tokens that can be processed in a single batch. Adjusting this value helps to balance throughput and memory usage. Setting this value too small can negatively impact end-to-end performance, as fewer tokens are processed per batch, potentially leading to inefficiencies. Conversely, setting it too large increases the risk of Out of Memory (OOM) errors due to excessive memory consumption.
+
+In the above real-world scenario, we not only conducted extensive testing to determine the most cost-effective value, but also took into account the accumulation of decode tokens when enabling chunked prefill. If the value is set too small, a single request may be chunked multiple times, and during the early stages of inference, a batch may contain only a small number of decode tokens. This can result in the end-to-end throughput falling short of expectations.
+
+### 3.Cudagraph_capture_sizes
+
+The cudagraph_capture_sizes parameter controls the granularity of graph captures during the inference process. Adjusting this value determines how much of the computation graph is captured at once, which can significantly impact both performance and memory usage.
+
+If this list is not manually specified, it will be filled with a series of evenly distributed values, which typically ensures good performance. However, if you want to fine-tune it further, manually specifying the values will yield better results. This is because if the batch size falls between two sizes, the framework will automatically pad the token count to the larger size. This often leads to actual performance deviating from the expected or even degrading.
+
+Therefore, like the above real-world scenario, when adjusting the benchmark request concurrency, we always ensure that the concurrency is actually included in the cudagraph_capture_sizes list. This way, during the decode phase, padding operations are essentially avoided, ensuring the reliability of the experimental data.
+
+It's important to note that if you enable FlashComm_v1, the values in this list must be integer multiples of the TP size. Any values that do not meet this condition will be automatically filtered out. Therefore, I recommend incrementally adding concurrency based on the TP size after enabling FlashComm_v1.

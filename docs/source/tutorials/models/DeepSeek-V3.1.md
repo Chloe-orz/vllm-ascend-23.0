@@ -611,9 +611,44 @@ local_ip="141.xx.xx.3"
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name deepseek_v3 \
+      --max-model-len 65536 \
+      --max-num-batched-tokens 256 \
+      --max-num-seqs 28 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
+      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "30200",
+      "engine_id": "2",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                }
+          }
+      }'
+    ```
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -688,19 +723,56 @@ local_ip="141.xx.xx.4"
 # The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
 
-# [Optional] jemalloc
-# jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
-# export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+      --host 0.0.0.0 \
+      --port $2 \
+      --data-parallel-size $3 \
+      --data-parallel-rank $4 \
+      --data-parallel-address $5 \
+      --data-parallel-rpc-port $6 \
+      --tensor-parallel-size $7 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name deepseek_v3 \
+      --max-model-len 65536 \
+      --max-num-batched-tokens 256 \
+      --max-num-seqs 28 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --quantization ascend \
+      --no-enable-prefix-caching \
+      --speculative-config '{"num_speculative_tokens": 1, "method": "mtp"}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 24, 32, 48, 56]}' \
+      --additional-config '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":16}}' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "30200",
+      "engine_id": "2",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 32,
+                        "tp_size": 1
+                }
+          }
+      }'
+    ```
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 
-export VLLM_RPC_TIMEOUT=3600000
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=120
+    - `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
+    - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+    - `cudagraph_capture_sizes`: The recommended value is `n x (mtp + 1)`. And the min is `n = 1` and the max is `n = max-num-seqs`. For other values, it is recommended to set them to the number of frequently occurring requests on the Decode (D) node.
+    - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
+    - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
+    - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
 
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10

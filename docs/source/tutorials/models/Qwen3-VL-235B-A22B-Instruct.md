@@ -243,30 +243,23 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --quantization ascend \
-  --data-parallel-size 2 \
-  --api-server-count 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-address $local_ip \
-  --data-parallel-rpc-port 13389 \
-  --seed 1024 \
-  --served-model-name qwen3-vl-235b \
-  --tensor-parallel-size 8 \
-  --enable-expert-parallel \
-  --max-num-seqs 16 \
-  --max-model-len 262144 \
-  --max-num-batched-tokens 4096 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --no-enable-prefix-caching \
-  --mm-processor-cache-gb 0 \
-  --limit-mm-per-prompt.image 1 \
-  --limit-mm-per-prompt.video 0 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 2 \
+--api-server-count 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $local_ip \
+--data-parallel-rpc-port 13389 \
+--seed 1024 \
+--served-model-name qwen3 \
+--tensor-parallel-size 8 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 262144 \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
 ```
 
 Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
@@ -297,31 +290,24 @@ export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 export HCCL_OP_EXPANSION_MODE="AIV"
 
-vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --quantization ascend \
-  --headless \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-start-rank 1 \
-  --data-parallel-address $node0_ip \
-  --data-parallel-rpc-port 13389 \
-  --seed 1024 \
-  --tensor-parallel-size 8 \
-  --served-model-name qwen3-vl-235b \
-  --max-num-seqs 16 \
-  --max-model-len 262144 \
-  --max-num-batched-tokens 4096 \
-  --enable-expert-parallel \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.9 \
-  --no-enable-prefix-caching \
-  --mm-processor-cache-gb 0 \
-  --limit-mm-per-prompt.image 1 \
-  --limit-mm-per-prompt.video 0 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
+--host 0.0.0.0 \
+--port 8000 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address $node0_ip \
+--data-parallel-rpc-port 13389 \
+--seed 1024 \
+--tensor-parallel-size 8 \
+--served-model-name qwen3 \
+--max-num-seqs 16 \
+--max-model-len 262144 \
+--max-num-batched-tokens 4096 \
+--enable-expert-parallel \
+--trust-remote-code \
+--gpu-memory-utilization 0.9 \
 ```
 
 If the service starts successfully, the following information is displayed on node 0:

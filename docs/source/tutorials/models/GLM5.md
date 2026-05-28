@@ -183,7 +183,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w4a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---additional-config '{"multistream_overlap_shared_expert": true}' \
+--additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
 ```
@@ -219,7 +219,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
 --quantization ascend \
 --enable-chunked-prefill \
 --enable-prefix-caching \
---additional-config '{"multistream_overlap_shared_expert": true}' \
+--additional-config '{"fuse_muls_add": true, "multistream_overlap_shared_expert": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}' \
 --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
 --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' 
 ```
