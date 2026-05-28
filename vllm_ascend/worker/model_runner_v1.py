@@ -522,6 +522,12 @@ class NPUModelRunner(GPUModelRunner):
                     f"{expected_role!r}, got {self.edge_cloud_cfg.role!r}."
                 )
             self.head_k, self.tail_k = self.edge_cloud_cfg.head_tail_k
+            if self.edge_cloud_cfg.mode == "embedding_only":
+                self.head_k = 0
+                self.tail_k = 0
+                logger.info(
+                    "Edge-cloud mode is 'embedding_only', forcing head_k=0, tail_k=0"
+                )
             hf_config = getattr(self.model_config, "hf_text_config", None)
             model_type = getattr(hf_config, "model_type", "")
             self._is_qwen3_5 = "qwen3_5" in model_type
@@ -605,6 +611,8 @@ class NPUModelRunner(GPUModelRunner):
         model: torch.nn.Module,
         start_layer: int,
         end_layer: int,
+        is_first_segment: bool | None = None,
+        is_last_segment: bool | None = None,
     ) -> Any:
         def _segment_forward(
             input_ids: torch.Tensor | None = None,
@@ -620,6 +628,8 @@ class NPUModelRunner(GPUModelRunner):
                 positions,
                 intermediate_tensors,
                 inputs_embeds,
+                is_first_segment=is_first_segment,
+                is_last_segment=is_last_segment,
                 **extra_layer_kwargs,
             )
 
@@ -671,8 +681,9 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         logger.info(
-            "Starting to load model in edge-cloud mode: role=%s, head_k=%d, tail_k=%d",
+            "Starting to load model in edge-cloud mode: role=%s, mode=%s, head_k=%d, tail_k=%d",
             self.edge_cloud_cfg.role,
+            self.edge_cloud_cfg.mode,
             self.head_k,
             self.tail_k,
         )
@@ -694,6 +705,7 @@ class NPUModelRunner(GPUModelRunner):
             role=self.edge_cloud_cfg.role,
             total_layers=self.num_layers,
             k=[self.head_k, self.tail_k],
+            mode=self.edge_cloud_cfg.mode,
         )
         LayerShardLoader.apply_sharding(
             self.model, layer_plan, self.vllm_config.compilation_config
@@ -718,15 +730,25 @@ class NPUModelRunner(GPUModelRunner):
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
 
         if self.edge_cloud_cfg.role == "edge":
-            self.segment_a = self._create_segment_callable(self.model, 0, self.head_k)
+            self.segment_a = self._create_segment_callable(
+                self.model, 0, self.head_k, is_first_segment=True, is_last_segment=False
+            )
             self.segment_e = self._create_segment_callable(
-                self.model, self.num_layers - self.tail_k, self.num_layers
+                self.model,
+                self.num_layers - self.tail_k,
+                self.num_layers,
+                is_first_segment=False,
+                is_last_segment=True,
             )
             self.segment_a_wrapper = self._wrap_segment_if_needed(self.segment_a)
             self.segment_e_wrapper = self._wrap_segment_if_needed(self.segment_e)
         else:
             self.segment_c = self._create_segment_callable(
-                self.model, self.head_k, self.num_layers - self.tail_k
+                self.model,
+                self.head_k,
+                self.num_layers - self.tail_k,
+                is_first_segment=False,
+                is_last_segment=False,
             )
             self.segment_c_wrapper = self._wrap_segment_if_needed(self.segment_c)
 
@@ -2104,6 +2126,29 @@ class NPUModelRunner(GPUModelRunner):
                     # Edge-cloud head segment always returns IntermediateTensors,
                     # regardless of is_last_rank, so the worker can send them to
                     # the cloud side and receive results back for the tail segment.
+                    # For embedding_only edge, the output tensors have actual
+                    # batch size (no cudagraph padding on edge), but cloud's
+                    # pre-allocated buffer is sized to max_num_tokens. Pad here
+                    # so that cloud's sync_and_slice copy_ succeeds.
+                    if (
+                        self.edge_cloud_cfg.mode == "embedding_only"
+                        and self.edge_cloud_cfg.role == "edge"
+                    ):
+                        padded_tensors: dict[str, torch.Tensor] = {}
+                        for k, v in hidden_states.items():
+                            if v.shape[0] < self.max_num_tokens:
+                                pad = torch.zeros(
+                                    self.max_num_tokens - v.shape[0],
+                                    *v.shape[1:],
+                                    dtype=v.dtype,
+                                    device=v.device,
+                                )
+                                v = torch.cat([v, pad], dim=0)
+                            padded_tensors[k] = v
+                        hidden_states = IntermediateTensors(
+                            padded_tensors,
+                            kv_connector_output=hidden_states.kv_connector_output,
+                        )
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
@@ -2990,7 +3035,7 @@ class NPUModelRunner(GPUModelRunner):
             # But gdn needs an unpadded one.
             # gdn_query_start_loc is an unpadded version of query_start_loc.
             # TODO delete it if fia's check is removed.
-            if self._has_gdn:
+            if self._has_gdn and self.attn_groups[kv_cache_gid]:
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
                 if isinstance(builder, GDNAttentionMetadataBuilder):
@@ -3244,18 +3289,26 @@ class NPUModelRunner(GPUModelRunner):
             # update global cos, sin
             update_cos_sin(positions)
 
+            # ========== 边云模式（Edge-Cloud Mode）中间张量处理 ==========
+            # 边云模式下根据 role 判断是否需要 intermediate_tensors，
+            # 替代标准 PP（Pipeline Parallelism）的 is_first_rank 判断（pp_size=1 时所有 rank 都是 first）。
             if self._edge_cloud_enabled:
                 if self.edge_cloud_cfg.role == "edge":
+                    # Edge 端：不需要中间张量（第一阶段）
                     intermediate_tensors = None
                 else:
+                    # Cloud 端：需要中间张量
                     intermediate_tokens = num_tokens_padded
                     if enable_sp():
+                        # 如果启用序列并行（SP），token 数需要除以 tp_size（向上取整）
                         tp_size = get_tensor_model_parallel_world_size()
                         intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                     if self.intermediate_tensors is None:
+                        # 首次创建 intermediate_tensors，使用最大可能 token 数
                         max_actual_tokens = self.max_num_tokens
                         if enable_sp():
                             max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+                        # 调用模型方法创建空的中间张量
                         self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                             batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
                         )
@@ -3350,9 +3403,12 @@ class NPUModelRunner(GPUModelRunner):
             if self.dynamic_eplb:
                 self.eplb_updator.forward_end()
 
-            # ========== Edge last layer ==========
+            # ========== Edge 设备特殊处理：Edge 首阶段需要执行最后一层 ==========
             if is_edge_device():
+                # 断言：边设备输出必须是 IntermediateTensors 类型
                 assert isinstance(outputs, IntermediateTensors)
+
+                # 重新准备 intermediate_tensors（与上文逻辑相同）
                 intermediate_tokens = num_tokens_padded
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
@@ -3361,9 +3417,11 @@ class NPUModelRunner(GPUModelRunner):
                     max_actual_tokens = self.max_num_tokens
                     if enable_sp():
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+                        # 调用模型方法创建空的中间张量
                     self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                         batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
                     )
+                # 切片
                 intermediate_tensors = IntermediateTensors(
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
@@ -3414,6 +3472,7 @@ class NPUModelRunner(GPUModelRunner):
 
             self._finalize_dump_data(dump=False)
             return hidden_states, hidden_states
+
 
     @torch.inference_mode()
     def _dummy_sampler_run(
@@ -3546,6 +3605,34 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self._mamba_copy_bufs = None
+
+        # For embedding_only edge, skip KV cache tensor allocation and
+        # attention backend initialization. The edge does not execute any
+        # attention layers; keeping a full kv_cache_config is only for the
+        # scheduler to correctly schedule requests.
+        if (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.mode == "embedding_only"
+            and self.edge_cloud_cfg.role == "edge"
+        ):
+            # Edge does not execute any attention layers, but downstream code
+            # (e.g. execute_model) still iterates over attn_groups using
+            # kv_cache_groups as the outer loop.  Keep a list of empty lists
+            # so that len(attn_groups) == len(kv_cache_groups) and inner
+            # loops simply execute zero times.
+            self.attn_groups = [
+                [] for _ in range(len(kv_cache_config.kv_cache_groups))
+            ]
+            self.use_hybrid_blocks = False
+            self.need_accepted_tokens = False
+            self.may_reinitialize_input_batch(kv_cache_config)
+            self.kv_cache = {}
+            logger.info(
+                "[EdgeCloud] embedding_only edge skipped KV cache tensor "
+                "allocation and attention backend initialization."
+            )
+            return
+
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
@@ -4241,6 +4328,17 @@ class NPUModelRunner(GPUModelRunner):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
+        # embedding_only: edge has no local attention layers, so its
+        # static_forward_context is empty and the normal path returns {}.
+        # Returning {} here lets the cloud's fresh spec (after weights
+        # processing) drive the merged spec, avoiding stale dimensions
+        # (e.g. head_size changed by quantization).
+        if (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.mode == "embedding_only"
+            and self.edge_cloud_cfg.role == "edge"
+        ):
+            return {}
 
         if (
             has_ec_transfer()
@@ -4343,21 +4441,29 @@ class NPUModelRunner(GPUModelRunner):
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
         if self._edge_cloud_enabled and hasattr(self, "model") and self.model is not None:
-            import re
+            # In embedding_only mode, edge side has no transformer layers but
+            # still needs kv_cache_spec to be non-empty so the scheduler can
+            # allocate KV cache and schedule requests. Cloud side manages the
+            # actual KV cache usage; edge side keeps the spec for scheduling.
+            if not (
+                self.edge_cloud_cfg.mode == "embedding_only"
+                and self.edge_cloud_cfg.role == "edge"
+            ):
+                import re
 
-            local_layer_indices = {
-                idx
-                for idx, layer in enumerate(
-                    LayerShardLoader._get_transformer_model(self.model).layers
-                )
-                if not isinstance(layer, PPMissingLayer)
-            }
-            filtered_spec: dict[str, KVCacheSpec] = {}
-            for layer_name, spec in kv_cache_spec.items():
-                match = re.search(r"layers\.(\d+)", layer_name)
-                if match is None or int(match.group(1)) in local_layer_indices:
-                    filtered_spec[layer_name] = spec
-            kv_cache_spec = filtered_spec
+                local_layer_indices = {
+                    idx
+                    for idx, layer in enumerate(
+                        LayerShardLoader._get_transformer_model(self.model).layers
+                    )
+                    if not isinstance(layer, PPMissingLayer)
+                }
+                filtered_spec: dict[str, KVCacheSpec] = {}
+                for layer_name, spec in kv_cache_spec.items():
+                    match = re.search(r"layers\.(\d+)", layer_name)
+                    if match is None or int(match.group(1)) in local_layer_indices:
+                        filtered_spec[layer_name] = spec
+                kv_cache_spec = filtered_spec
 
         return kv_cache_spec
 

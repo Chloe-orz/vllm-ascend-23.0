@@ -398,6 +398,25 @@ class NPUWorker(WorkerBase):
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
 
+        # For embedding_only edge, the edge device does not actually store KV
+        # cache tensors. Return a very large virtual value so that
+        # get_kv_cache_configs() does not clamp num_blocks to the edge's
+        # (small) available memory. The real num_blocks is determined by cloud.
+        if (
+            self.model_runner.edge_cloud_cfg.enabled
+            and self.model_runner.edge_cloud_cfg.mode == "embedding_only"
+            and self.model_runner.edge_cloud_cfg.role == "edge"
+        ):
+            virtual_memory = 1 << 40  # 1 TiB virtual
+            logger.info(
+                "[EdgeCloud] embedding_only edge using virtual available_memory "
+                "(%.2f GiB) instead of real %.2f GiB to avoid limiting cloud "
+                "KV cache size.",
+                GiB(virtual_memory),
+                GiB(self.available_kv_cache_memory_bytes),
+            )
+            self.available_kv_cache_memory_bytes = virtual_memory
+
         logger.debug(profile_result)
         logger.info_once(
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
@@ -428,6 +447,7 @@ class NPUWorker(WorkerBase):
                     comm_handles=comm_handles,
                     comm_postprocess=comm_postprocess,
                 )
+                print(f"cloud recv from edge, tensor = {intermediate_tensors}")
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
                 # it will conflict with the all-gather operation in flashcomm1.
@@ -451,7 +471,9 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
+        print(f"model_runner.execute_model input = {intermediate_tensors}")
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        print(f"model_runner.execute_model output = {output}")
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -460,13 +482,16 @@ class NPUWorker(WorkerBase):
         if is_edge_device():
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                print(f"edge send to cloud, tensor = {output.tensors}")
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
+            print(f"edge model_runner.execute_model input = {intermediate_tensors}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            print(f"edge model_runner.execute_model output = {output}")
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
@@ -474,6 +499,7 @@ class NPUWorker(WorkerBase):
         if is_cloud_device():
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                print(f"cloud send to edge, tensor = {output.tensors}")
         else:
             assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
