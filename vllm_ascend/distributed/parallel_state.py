@@ -397,13 +397,18 @@ def edge_cloud_broadcast_recv() -> tuple[
     if metadata_list is None:
         metadata_list = []
     recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
-    handles: list[Handle] = []
 
     for key, value in metadata_list:
         if isinstance(value, TensorMetadata):
             tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
             recv_tensor_dict[key] = tensor
-            if tensor.numel() == 0:
+        else:
+            recv_tensor_dict[key] = value
+
+    def broadcast_postprocess():
+        handles = []
+        for tensor in recv_tensor_dict.values():
+            if not isinstance(tensor, torch.Tensor) or tensor.numel() == 0:
                 continue
             group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
             handles.append(
@@ -411,6 +416,7 @@ def edge_cloud_broadcast_recv() -> tuple[
                     tensor, src=tp_group.ranks[0], group=group, async_op=True
                 )
             )
-        else:
-            recv_tensor_dict[key] = value
-    return recv_tensor_dict, handles, []
+        for handle in handles:
+            handle.wait()
+
+    return recv_tensor_dict, [], [broadcast_postprocess]
