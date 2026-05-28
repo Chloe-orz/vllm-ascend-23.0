@@ -1766,9 +1766,9 @@ class NPUModelRunner(GPUModelRunner):
             assert num_reqs == num_reqs_padded
 
             # Do not insert if the last value already equals the num_tokens
-            if query_start_loc.np[num_reqs_padded] < num_tokens_padded:
+            if self.query_start_loc.np[num_reqs_padded] < num_tokens_padded:
                 # Insert a dummy request instead of change the last value directly
-                query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
+                self.query_start_loc.np[num_reqs_padded + 1] = num_tokens_padded
                 num_reqs_padded = num_reqs_padded + 1
 
         copy_snapshot_to_gpu(query_start_loc)
