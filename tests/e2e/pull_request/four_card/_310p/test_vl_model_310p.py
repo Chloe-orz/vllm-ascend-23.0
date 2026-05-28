@@ -20,6 +20,7 @@ import sys
 
 from tests.e2e.conftest import wait_until_npu_memory_free
 
+# Add 310p directory to sys.path.
 current_dir = os.path.dirname(os.path.abspath(__file__))
 full_dir = os.path.dirname(os.path.dirname(current_dir))
 sys.path.insert(0, full_dir)

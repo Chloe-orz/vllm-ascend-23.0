@@ -892,15 +892,6 @@ class NPUModelRunner(GPUModelRunner):
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
-
-        # Saved in execute_model() so sample_tokens() can access scheduler_output
-        # for edge-cloud mamba state sync (especially on the cloud side).
-        self._last_scheduler_output: "SchedulerOutput | None" = None
-
-        # Saved on the cloud side during execute_model() for use by
-        # _run_draft_cloud_segment() which runs later in sample_tokens().
-        self._cloud_spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None = None
-        self._cloud_spec_decode_num_reqs: int = 0
         self.enable_hamming_sparse = (self.ascend_config.enable_hamming_sparse is True)
         self.enable_hamming_sparse = self.enable_hamming_sparse and not vllm_config.speculative_config
         if self.enable_hamming_sparse is True:
@@ -3378,68 +3369,22 @@ class NPUModelRunner(GPUModelRunner):
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
-                    if self.cache_config.mamba_cache_mode == "align":
-                        if vllm_version_is("0.20.2"):
-                            mamba_bufs = self._get_mamba_copy_bufs()
-                            preprocess_bufs = mamba_bufs
-                        else:
-                            mamba_bufs = self._get_mamba_bufs()
-                            preprocess_bufs = mamba_bufs.preprocess
-                        mamba_utils.preprocess_mamba(
-                            scheduler_output,
-                            self.kv_cache_config,
-                            self.cache_config,
-                            self.mamba_state_idx,
-                            self.input_batch,
-                            self.requests,
-                            self.compilation_config.static_forward_context,
-                            self.model.get_mamba_state_copy_func(),
-                            preprocess_bufs,
-                        )
-                        # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                        # for requests whose state was copied to a new block.
-                        # Re-sync to GPU so the mamba kernel reads from the
-                        # correct initial state slot (init_token_idx = 0).
-                        self.num_accepted_tokens.np[:num_reqs] = (
-                            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                        )
-                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
-
-                        if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
-                            mamba_utils.stage_postprocess_inputs_to_gpu(
-                                mamba_bufs.postprocess_align,
-                                scheduler_output,
-                                self.input_batch.req_ids,
-                                num_reqs,
-                                self.requests,
-                                self.mamba_state_idx,
-                            )
-                    if self.use_compress:
-                        if deferred_state_corrections_fn:
-                            deferred_state_corrections_fn()
-                            deferred_state_corrections_fn = None
-                        num_reqs = self.input_batch.num_reqs
-                        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
-                        dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
-                        np.add(
-                            self.input_batch.num_computed_tokens_cpu[req_indices],
-                            self.query_pos.np[:total_num_scheduled_tokens],
-                            out=dsa_positions_np,
-                        )
-
-                    # Run core input preparation.
-                    # NOTE: _prepare_inputs was already called inline above; it
-                    # is NOT idempotent (rewrites num_accepted_tokens_cpu in
-                    # place under async spec decode), so reuse its results here
-                    # instead of letting _run_input_preparation call it again.
-                    cache = self._run_input_preparation(
+                    if vllm_version_is("0.20.2"):
+                        mamba_bufs = self._get_mamba_copy_bufs()
+                        preprocess_bufs = mamba_bufs
+                    else:
+                        mamba_bufs = self._get_mamba_bufs()
+                        preprocess_bufs = mamba_bufs.preprocess
+                    mamba_utils.preprocess_mamba(
                         scheduler_output,
-                        precomputed=(
-                            logits_indices,
-                            spec_decode_metadata,
-                            total_num_scheduled_tokens,
-                            num_scheduled_tokens_compressed_list,
-                        ),
+                        self.kv_cache_config,
+                        self.cache_config,
+                        self.mamba_state_idx,
+                        self.input_batch,
+                        self.requests,
+                        self.compilation_config.static_forward_context,
+                        self.model.get_mamba_state_copy_func(),
+                        preprocess_bufs,
                     )
                     total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
                     num_tokens_padded = cache["num_tokens_padded"]
@@ -3460,6 +3405,16 @@ class NPUModelRunner(GPUModelRunner):
                         num_tokens_across_dp,
                     )
                     self.num_accepted_tokens.copy_to_gpu(num_reqs)
+
+                    if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
+                        mamba_utils.stage_postprocess_inputs_to_gpu(
+                            mamba_bufs.postprocess_align,
+                            scheduler_output,
+                            self.input_batch.req_ids,
+                            num_reqs,
+                            self.requests,
+                            self.mamba_state_idx,
+                        )
                 if self.use_compress:
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
