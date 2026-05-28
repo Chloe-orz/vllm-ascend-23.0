@@ -311,6 +311,14 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(new_layer.w13_scale_bias.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
 
+    def test_pack_to_int32_asserts_new_quant_packed_dim(self):
+        self.quant_method.new_quant_version = True
+        weight = torch.zeros((self.experts, self.output_size, 10), dtype=torch.int8)
+        expected_message = f"the last dim of weight needs to be divided by 4 but got shape {weight.shape}"
+
+        with self.assertRaisesRegex(AssertionError, re.escape(expected_message)):
+            self.quant_method.pack_to_int32(weight)
+
     def test_get_weight_compressed_tensors(self):
         self.quant_method.quant_method = COMPRESSED_TENSORS_METHOD
         result = self.quant_method.get_weight(self.experts, self.input_size, self.output_size, torch.bfloat16)
