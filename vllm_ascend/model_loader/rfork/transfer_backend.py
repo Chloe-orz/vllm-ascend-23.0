@@ -515,14 +515,28 @@ class RForkTransferBackend:
                     ret.to_string(),
                 )
                 return False
-            logger.debug(
-                "transfer weights chunk %d/%d done, time: %.4fs",
-                index,
-                len(transfer_chunks),
-                time.perf_counter() - chunk_start_time,
+
+            seed_ptr_list.append(seed_ptr)
+            client_ptr_list.append(tensor.data_ptr())
+            client_len_list.append(tensor.numel() * tensor.element_size())
+
+        start_transfer_tic = time.time()
+        ret = transfer_engine.batch_transfer_sync_read(
+            seed_session_id,
+            client_ptr_list,
+            seed_ptr_list,
+            client_len_list,
+        )
+        if ret.is_error():
+            logger.error(
+                "Failed to transfer weights from remote instance seed_ip=%s, seed_port=%s, ret=%s",
+                seed_instance_ip,
+                seed_instance_service_port,
+                ret.to_string(),
             )
-        transfer_time = time.perf_counter() - transfer_start_time
-        logger.info("transfer weights time: %.4fs", transfer_time)
+            return False
+
+        logger.info("transfer weights time: %.4fs", time.time() - start_transfer_tic)
         return True
 
 
@@ -538,7 +552,7 @@ def get_remote_instance_transfer_engine_info(seed_url: str, local_seed_key: str)
                 seed_url,
                 response.status_code,
             )
-            return None, None, None
+            return None, None
 
         data = response.json()
         info = data.get("rfork_transfer_engine_info", None)
@@ -550,36 +564,7 @@ def get_remote_instance_transfer_engine_info(seed_url: str, local_seed_key: str)
             "Failed to get rfork_transfer_engine_info in response from %s.",
             seed_url,
         )
-        return None, None, None
+        return None, None
     except Exception as e:
         logger.error("Exception getting transfer engine info from %s: %s", seed_url, e)
-        return None, None, None
-
-
-def get_remote_instance_weight_shape_info(seed_url: str, local_seed_key: str):
-    try:
-        response = requests.get(
-            f"{seed_url}/get_rfork_transfer_engine_shape_info",
-            params={"seed_key": local_seed_key},
-        )
-        if response.status_code != 200:
-            logger.debug(
-                "GET %s/get_rfork_transfer_engine_shape_info failed: %s",
-                seed_url,
-                response.status_code,
-            )
-            return None
-
-        data = response.json()
-        info = data.get("rfork_transfer_engine_shape_info", None)
-        if info is None or isinstance(info, dict):
-            return info
-
-        logger.error(
-            "Failed to get rfork_transfer_engine_shape_info in response from %s.",
-            seed_url,
-        )
-        return None
-    except Exception as e:
-        logger.debug("Exception getting transfer engine shape info from %s: %s", seed_url, e)
-        return None
+        return None, None

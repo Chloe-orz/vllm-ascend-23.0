@@ -466,13 +466,9 @@ def create_scheme_for_layer(
     if scheme_cls is not None:
         return scheme_cls()
 
-    err_msg = (
-        "Currently, vLLM Ascend doesn't support quant_type=%s for layer_type=%s. "
-        "Please use a supported quantization format "
-        "or load the model with its original float weights."
-    )
-    logger.error(err_msg, quant_type, layer_type)
-    raise NotImplementedError(err_msg % (quant_type, layer_type))
+    err_msg = f"Currently, vLLM Ascend doesn't support quant_type={quant_type} for layer_type={layer_type}."
+    logger.error(err_msg)
+    raise NotImplementedError(err_msg)
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -645,6 +641,7 @@ class AscendModelSlimConfig(QuantizationConfig):
                 logger.debug("Select AscendUnquantizedFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
                 return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             scheme = create_scheme_for_layer(self.quant_description, prefix, "moe", self.packed_modules_mapping)
+            logger.debug("Select AscendFusedMoEMethod for %s (layer=%s)", prefix, "FusedMoE")
             return AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid)
         elif isinstance(layer, VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix, self.packed_modules_mapping):

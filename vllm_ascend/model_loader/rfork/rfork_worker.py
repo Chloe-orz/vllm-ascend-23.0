@@ -129,16 +129,15 @@ class RForkWorker:
             ),
             health_timeout_sec=self.seed_timeout_sec,
         )
-        if port <= 0:
-            logger.warning("start_seed_service failed for device_id=%s", self.device_id)
-            return
-
-        self.rfork_heartbeat_thread = threading.Thread(
-            target=self.seed_protocol.report_seed,
-            args=(port,),
-            daemon=True,
-            name="RForkHeartbeat",
-        )
-        self.rfork_heartbeat_thread.start()
-        logger.info("Seed service started for device_id=%s, port=%s", self.device_id, port)
+        if port > 0:
+            self.rfork_heartbeat_thread = threading.Thread(
+                target=self.seed_protocol.report_seed,
+                args=(port,),
+                daemon=True,
+                name="RForkHeartbeat",
+            )
+            self.rfork_heartbeat_thread.start()
+            logger.info(
+                self.device_id,
+            )
         self.seed_service_started = True

@@ -41,8 +41,7 @@ def get_local_seed_key(
             f"RFork seed key is not set: model_url={model_url!r}, "
             f"model_deploy_strategy_name={model_deploy_strategy_name!r}. "
             "Ensure model_loader_extra_config contains "
-            "`model_url` and `model_deploy_strategy_name`, or set "
-            "MODEL_URL and MODEL_DEPLOY_STRATEGY_NAME."
+            "`model_url` and `model_deploy_strategy_name`."
         )
         logger.error(err_msg)
         raise RuntimeError(err_msg)

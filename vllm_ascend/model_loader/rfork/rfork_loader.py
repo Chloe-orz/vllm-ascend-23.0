@@ -129,9 +129,7 @@ class RForkModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
         config = load_config.model_loader_extra_config
-        if config is None:
-            config = {}
-        elif not isinstance(config, dict):
+        if not isinstance(config, dict):
             err_msg = "RFork requires --model-loader-extra-config to be a JSON object."
             logger.error(err_msg)
             raise RuntimeError(err_msg)
