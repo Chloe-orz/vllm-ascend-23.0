@@ -44,37 +44,13 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
-    global _MC2
     if parallel_config.enable_edge_cloud:
-        # Edge-cloud mode has a non-uniform rank layout (edge + cloud),
-        # so the standard DP*PP*PCP*TP grid does not apply.
-        # Instead, initialize Ascend-specific groups aligned with the
-        # edge/cloud TP split established in ensure_model_parallel_initialized.
-        world_size = torch.distributed.get_world_size()
-        backend = torch.distributed.get_backend(get_world_group().device_group)
-        edge_npu_count = parallel_config.edge_npu_count
-
-        edge_ranks = list(range(edge_npu_count))
-        cloud_ranks = list(range(edge_npu_count, world_size))
-
-        _MC2 = init_model_parallel_group(
-            [edge_ranks, cloud_ranks],
-            get_world_group().local_rank,
-            backend,
-            group_name="mc2",
-        )
-
-        # Ascend-specific groups that are currently disabled by default
-        # in edge-cloud mode. If enabled in the future, they must follow
-        # the same edge/cloud separation principle:
-        #   _DYNAMIC_EPLB, _FC3_QUANT_X,
-        #   _OTP, _LMTP, _EMBED_TP, _MLP_TP,
-        #   _FLASHCOMM2_OTP, _FLASHCOMM2_ODP,
-        #   _SHARD_WEIGHT, _P_TP
+        # Edge-cloud mode does not use the standard uniform rank layout
+        # (DP * PP * PCP * TP). Skip MC2 / P_TP / DYNAMIC_EPLB init.
         return
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-    global_tp_size = 1 if parallel_config.enable_edge_cloud else parallel_config.tensor_parallel_size
+    global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size
