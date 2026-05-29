@@ -640,7 +640,6 @@ class NPUWorker(WorkerBase):
                     comm_handles=comm_handles,
                     comm_postprocess=comm_postprocess,
                 )
-                print(f"cloud recv from edge, tensor = {intermediate_tensors}")
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
                 # it will conflict with the all-gather operation in flashcomm1.
