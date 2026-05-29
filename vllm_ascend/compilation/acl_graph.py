@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import dataclasses
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import patch
@@ -87,6 +89,8 @@ class ACLGraphWrapper:
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
         self.aclgraph_options = cudagraph_options
+        self.graph_params: Any | None = None
+        self.draft_graph_params: Any | None = None
         # the entries for different batch descriptors that we need to capture
         # aclgraphs for.
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
@@ -107,10 +111,18 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def init_graph_params(self, aclgraph_capture_sizes: list[int]) -> None:
+        self.graph_params = make_graph_params(aclgraph_capture_sizes)
+
+    def init_draft_graph_params(self, aclgraph_capture_sizes: list[int]) -> None:
+        self.draft_graph_params = make_graph_params(aclgraph_capture_sizes)
+
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        if hasattr(aclgraph_runtime_mode, "decode_mode"):
+            aclgraph_runtime_mode = aclgraph_runtime_mode.decode_mode()
 
         if aclgraph_runtime_mode == CUDAGraphMode.NONE or aclgraph_runtime_mode != self.runtime_mode:
             # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
@@ -170,10 +182,8 @@ class ACLGraphWrapper:
             # to save memory
             global _graph_params
             global _draft_graph_params
-            global _draft_graph_prefill_params
             weak_ref_workspaces(_graph_params)
             weak_ref_workspaces(_draft_graph_params)
-            weak_ref_workspaces(_draft_graph_prefill_params)
 
             # here we always use weak ref for the output
             # to save memory
@@ -214,6 +224,33 @@ class ACLGraphWrapper:
         return entry.output
 
 
+def _collect_tensor_addresses(*values) -> list[int]:
+    addresses: list[int] = []
+    visited: set[int] = set()
+
+    def visit(value):
+        if isinstance(value, torch.Tensor):
+            addresses.append(value.data_ptr())
+            return
+        value_id = id(value)
+        if value_id in visited:
+            return
+        visited.add(value_id)
+        if isinstance(value, dict):
+            for item in value.values():
+                visit(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                visit(item)
+        elif hasattr(value, "items"):
+            for _, item in value.items():
+                visit(item)
+
+    for value in values:
+        visit(value)
+    return addresses
+
+
 def weak_ref_workspaces(params):
     if params is None:
         return
@@ -232,17 +269,100 @@ def update_full_graph_params(
     speculative_config=None,
     num_dcp_pcp_tokens=None,
     draft_attn_metadatas=None,
+    layer_indices: list[int] | None = None,
+    graph_params: GraphParams | None = None,
+    draft_graph_params: GraphParams | None = None,
 ):
-    impl_cls = attn_backend.get_impl_cls()
-    impl_cls.update_graph_params(
-        update_stream,
-        forward_context,
+    """更新 attention 图参数，供下一次图回放使用。
+
+    标准流程使用全局 GraphParams；边云流程为每个 segment 传入独立
+    GraphParams，避免 segment_a / segment_e 的 task handle 相互错配。
+    """
+    logger.info(
+        "[update_full_graph_params] num_tokens=%s, layer_indices=%s, "
+        "graph_params_id=%s, draft_graph_params_id=%s",
         num_tokens,
-        vllm_config,
-        speculative_config,
-        num_dcp_pcp_tokens,
-        draft_attn_metadatas,
+        layer_indices,
+        id(graph_params) if graph_params is not None else None,
+        id(draft_graph_params) if draft_graph_params is not None else None,
     )
+    with graph_params_scope(graph_params, draft_graph_params):
+        impl_cls = attn_backend.get_impl_cls()
+
+        original_metadata = None
+
+        if layer_indices is not None:
+            # 强制要求 layer_indices 为升序自然层号，与图捕获时 islice(self.layers)
+            # 的遍历顺序严格一致，防止 zip(attn_keys, attn_params) 错位
+            assert layer_indices == sorted(layer_indices), (
+                "layer_indices must be in ascending natural order to align with "
+                "graph_params.attn_params append order."
+            )
+            original_metadata = forward_context.attn_metadata
+            forward_context.attn_metadata = _filter_attn_metadata_for_layers(
+                original_metadata, layer_indices
+            )
+
+        try:
+            impl_cls.update_graph_params(
+                update_stream,
+                forward_context,
+                num_tokens,
+                vllm_config,
+                speculative_config,
+                num_dcp_pcp_tokens,
+                draft_attn_metadatas,
+            )
+        finally:
+            if original_metadata is not None:
+                forward_context.attn_metadata = original_metadata
+    
+
+def _filter_attn_metadata_for_layers(
+    attn_metadata: dict,
+    layer_indices: list[int],
+) -> dict:
+    """返回仅包含指定层索引对应条目的 dict，key 顺序与 layer_indices 一致。
+
+    attn_metadata 的 key 格式通常为 ``"model.layers.3.self_attn"``。
+    通过匹配 ``.layers.{idx}.`` 子串来定位目标层。
+
+    重要：边云流程中图捕获按自然层顺序遍历（islice(self.layers)），
+    graph_params.attn_params 也按该顺序追加。因此过滤后必须保持
+    layer_indices 的自然顺序，使 update_graph_params 的 zip 配对
+    与图捕获顺序严格对齐，避免错位。
+    """
+    result: dict = {}
+    missing_layer_indices: list[int] = []
+    for idx in layer_indices:
+        needle = f".layers.{idx}."
+        matched_keys = [k for k in attn_metadata if needle in k]
+        if not matched_keys:
+            missing_layer_indices.append(idx)
+            continue
+        # 边云流程要求每层恰好一个 attention metadata key，
+        # 以确保 graph_params.attn_params 的追加顺序与过滤后顺序 1:1 对齐。
+        # 若未来模型引入 cross-attn / multi-head 拆分，需同步调整此逻辑。
+        if len(matched_keys) > 1:
+            raise ValueError(
+                f"Layer {idx} has multiple attention metadata keys: {matched_keys}. "
+                f"This breaks the 1:1 alignment between attn_metadata and attn_params."
+            )
+        result[matched_keys[0]] = attn_metadata[matched_keys[0]]
+    if missing_layer_indices:
+        raise ValueError(
+            "Missing attention metadata for layer indices "
+            f"{missing_layer_indices}. Available keys: {list(attn_metadata)}"
+        )
+
+    logger.info(
+        "[_filter_attn_metadata_for_layers] layer_indices=%s, "
+        "original_keys=%s, filtered_keys=%s",
+        layer_indices,
+        list(attn_metadata.keys()),
+        list(result.keys()),
+    )
+    return result
 
 
 @dataclass
@@ -254,53 +374,75 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
+_draft_graph_params: GraphParams | None = None
+_active_graph_params: GraphParams | None = None
+_active_draft_graph_params: GraphParams | None = None
+
+
+def make_graph_params(aclgraph_capture_sizes: list[int]) -> GraphParams:
+    return GraphParams(
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+    )
+
+
+@contextmanager
+def graph_params_scope(
+    graph_params: GraphParams | None,
+    draft_graph_params: GraphParams | None = None,
+):
+    global _active_graph_params, _active_draft_graph_params
+    old_graph_params = _active_graph_params
+    old_draft_graph_params = _active_draft_graph_params
+    if graph_params is not None:
+        _active_graph_params = graph_params
+    if draft_graph_params is not None:
+        _active_draft_graph_params = draft_graph_params
+    try:
+        yield
+    finally:
+        # 在切回旧的 graph_params 之前，确保当前流上所有 attention 参数更新任务
+        # 已全部完成，避免异步流仍在引用本段 graph_params 导致 task handle 错配
+        if graph_params is not None:
+            torch.npu.current_stream().synchronize()
+        _active_graph_params = old_graph_params
+        _active_draft_graph_params = old_draft_graph_params
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):
     global _graph_params
     if _graph_params is not None:
         raise ValueError("Graph parameters have already been set!")
-    _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
+    _graph_params = make_graph_params(aclgraph_capture_sizes)
 
 
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
-    global _graph_params
-    if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
+    graph_params = get_graph_params()
+    if graph_params is not None:
+        graph_params.workspaces[num_tokens] = workspace
 
 
 def get_graph_params():
-    return _graph_params
-
-
-_draft_graph_params: GraphParams | None = None
+    return _active_graph_params or _graph_params
 
 
 def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     global _draft_graph_params
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
-    _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
+    _draft_graph_params = make_graph_params(aclgraph_capture_sizes)
 
 
 def update_draft_graph_params_workspaces(num_tokens: int, workspace: Any):
-    global _draft_graph_params
-    if _draft_graph_params is not None:
-        _draft_graph_params.workspaces[num_tokens] = workspace
+    draft_graph_params = get_draft_graph_params()
+    if draft_graph_params is not None:
+        draft_graph_params.workspaces[num_tokens] = workspace
 
 
 def get_draft_graph_params():
-    return _draft_graph_params
+    return _active_draft_graph_params or _draft_graph_params
 
 
 _draft_graph_prefill_params: GraphParams | None = None
