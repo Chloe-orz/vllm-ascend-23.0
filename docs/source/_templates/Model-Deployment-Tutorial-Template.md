@@ -217,7 +217,45 @@ Omitted. Requirements are the same as for Accuracy Evaluation.
 
 **Content Writing Requirements:**
 
-Provide recommended configurations for three typical scenarios (long context, low latency, high throughput). Clearly state that the configurations are not globally optimal and guide users to perform tuning based on their actual circumstances.
+Provide recommended configurations for three scenarios (long sequence, low latency, high throughput) for each model that can achieve optimal performance, but do not provide specific performance data.
+
+**Example:**
+
+### Best Practice Configuration Reference
+
+### Table 1: Scenario Overview
+
+| Scenario | Deployment Mode | *Total NPUs | Weight Version | Optimization Rationale |
+|----------|----------------|-------------|----------------|------------------------|
+| High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
+| Long Context | | | | |
+| Low Latency | | | | |
+
+> **Note**: `*Total NPUs` indicates the total number of NPUs used across all nodes.
+
+### Table 2: Node-Level Detailed Configuration
+
+| Scenario | Configuration | #NPUs | TP | DP | BS | Concurrency | Max Context Length | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
+|----------|---------------|-------|----|----|----|-------------|--------------------|---------------------|-----------|-----------|--------------|------------------|
+| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 64 | 30k | 3 | Off | On | On | On |
+| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 64 | 30k | 12 | Off | On | Off | On |
+| Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
+| Long Context | Server-D Node | | | | | | | | | | | |
+| Low Latency | Server-P Node / Single Machine | | | | | | | | | | | |
+| Low Latency | Server-D Node | | | | | | | | | | | |
+
+## 10 Performance Tuning (Optional)
+
+**Content Writing Requirements:**
+
+- Summarize key optimization techniques and parameter tuning experiences for the model to help users achieve optimal performance in specific scenarios. Include optimization technique descriptions, enablement methods, parameter tuning recommendations, and typical configuration examples.
+- Hyperlinks to the features guide may be used to allow users to view detailed descriptions of specific features.
+
+### 10.1 Key Optimization Points
+
+In this section, we will introduce the key optimization points that can significantly improve the performance of the XX model. These techniques aim to improve throughput and efficiency in various scenarios.
+
+#### 10.1.1 Basic Optimizations
 
 **Example:**
 
