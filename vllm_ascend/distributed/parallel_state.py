@@ -44,9 +44,13 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
+    if parallel_config.enable_edge_cloud:
+        # Edge-cloud mode does not use the standard uniform rank layout
+        # (DP * PP * PCP * TP). Skip MC2 / P_TP / DYNAMIC_EPLB init.
+        return
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-    global_tp_size = 1 if parallel_config.enable_edge_cloud else parallel_config.tensor_parallel_size
+    global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size
