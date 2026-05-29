@@ -318,63 +318,13 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
-    # Declare globals upfront to avoid "used prior to global declaration" errors
-    global _MC2
     if parallel_config.enable_edge_cloud:
-        # In edge-cloud mode, _MC2 is initialized with the same group_ranks as
-        # upstream _EP: all edge workers form one EP group and all cloud
-        # workers form another. Ranks are arranged by dp instance:
-        # instance0_edge, instance0_cloud, instance1_edge, instance1_cloud.
-        # P_TP / DYNAMIC_EPLB / fine-grained TP groups are skipped because
-        # edge-cloud mode does not use the standard uniform rank layout
-        # (DP * PP * PCP * TP).
-        backend = torch.distributed.get_backend(get_world_group().device_group)
-        edge_npu_count = parallel_config.edge_npu_count
-        cloud_npu_count = parallel_config.cloud_npu_count
-        if parallel_config.is_shared_model_edge:
-            # Shared-model edge-cloud topology: the edge has a
-            # single distributed rank (rank 0) and the cloud
-            # occupies ranks 1..1 + N*C.
-            ep_edge_ranks = [0]
-            ep_cloud_ranks = list(
-                range(1,
-                      1 + parallel_config.data_parallel_size * cloud_npu_count))
-        else:
-            world_size_per_instance = edge_npu_count + cloud_npu_count
-            ep_edge_ranks = []
-            ep_cloud_ranks = []
-            for dp_idx in range(parallel_config.data_parallel_size):
-                base = dp_idx * world_size_per_instance
-                ep_edge_ranks.extend(range(base, base + edge_npu_count))
-                ep_cloud_ranks.extend(
-                    range(base + edge_npu_count, base + world_size_per_instance))
-        _MC2 = init_model_parallel_group(
-            [ep_edge_ranks, ep_cloud_ranks],
-            get_world_group().local_rank,
-            backend,
-            group_name="mc2",
-        )
-
-        # Phase6 hidden data-plane channels are still required in edge-cloud
-        # mode.  The default PP group is PREFILL_1, the alternate PP group is
-        # DECODE, and the extra hidden-channel group is PREFILL_2.
-        pp_group = get_pp_group()
-        if pp_group.world_size > 1:
-            pp_group.create_alternate_groups(backend)
-            if hasattr(pp_group, "create_hidden_channel_groups"):
-                pp_group.create_hidden_channel_groups(backend)
-
-        # Ascend-specific groups that are currently disabled by default
-        # in edge-cloud mode. If enabled in the future, they must follow
-        # the same edge/cloud separation principle:
-        #   _DYNAMIC_EPLB, _FC3_QUANT_X,
-        #   _OTP, _LMTP, _EMBED_TP, _MLP_TP,
-        #   _FLASHCOMM2_OTP, _FLASHCOMM2_ODP,
-        #   _SHARD_WEIGHT, _P_TP
+        # Edge-cloud mode does not use the standard uniform rank layout
+        # (DP * PP * PCP * TP). Skip MC2 / P_TP / DYNAMIC_EPLB init.
         return
     world_size = torch.distributed.get_world_size()
     backend = torch.distributed.get_backend(get_world_group().device_group)
-    global_tp_size = 1 if parallel_config.enable_edge_cloud else parallel_config.tensor_parallel_size
+    global_tp_size = parallel_config.tensor_parallel_size
     global_dp_size = parallel_config.data_parallel_size
     global_pp_size = parallel_config.pipeline_parallel_size
     global_pcp_size = parallel_config.prefill_context_parallel_size
