@@ -60,8 +60,7 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
 
 
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
-        self.parallel_config = parallel_config
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
@@ -70,7 +69,6 @@ class MooncakeBackend(Backend):
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
         self._lazy_init = lazy_init and self._use_fabric_mem
-        self._contribute_memory = contribute_memory
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
 
@@ -78,7 +76,7 @@ class MooncakeBackend(Backend):
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def ensure_initialized(self):
+    def _ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -86,7 +84,7 @@ class MooncakeBackend(Backend):
             if self._store_initialized:
                 return
 
-            logger.info("Initializing Mooncake store. metadata_server=%s", self.config.metadata_server)
+            logger.info("Initializing Mooncake store on first put.")
             self.store = self._setup_store()
             self._store_initialized = True
 
@@ -102,26 +100,6 @@ class MooncakeBackend(Backend):
 
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
-        ssd_kwargs = _ssd_setup_kwargs(self.config)
-        # Scheduler-only clients (contribute_memory=False) do not contribute
-        # KV cache memory and therefore do not need SSD offload. Passing
-        # enable_ssd_offload=True for them would cause Mooncake to register
-        # an extra active client on the master, inflating both the client
-        # count and the reported SSD storage usage.
-        if ssd_kwargs and not self._contribute_memory:
-            ssd_kwargs = {}
-        # Each rank that contributes memory to the pool uses its own SSD
-        # directory to avoid bucket file collisions. Key by the globally unique
-        # rank so that DP/TP/PP/CP replicas never share a directory (dense and
-        # MoE alike); only ranks that contribute memory need an offload dir.
-        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
-            global_rank = get_global_rank(self.parallel_config)
-            rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
-            try:
-                os.makedirs(rank_path, exist_ok=True)
-            except OSError as e:
-                raise RuntimeError(f"Failed to create per-rank SSD offload directory: {rank_path!r} ({e})")
-            ssd_kwargs["ssd_offload_path"] = rank_path
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
@@ -129,48 +107,32 @@ class MooncakeBackend(Backend):
             transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
             ret = store.setup(
-                local_hostname=self.local_seg,
-                metadata_server=self.config.metadata_server,
-                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
-                local_buffer_size=self.config.local_buffer_size if self._contribute_memory else 0,
-                protocol=self.config.protocol,
-                rdma_devices=self.config.device_name,
-                master_server_addr=self.config.master_server_address,
-                engine=transfer_engine.get_engine(),
-                **ssd_kwargs,
+                self.local_seg,
+                self.config.metadata_server,
+                self.config.global_segment_size,
+                self.config.local_buffer_size,
+                self.config.protocol,
+                self.config.device_name,
+                self.config.master_server_address,
+                transfer_engine.get_engine(),
             )
         else:
             self.local_seg = local_hostname
             ret = store.setup(
-                local_hostname=self.local_seg,
-                metadata_server=self.config.metadata_server,
-                global_segment_size=self.config.global_segment_size if self._contribute_memory else 0,
-                local_buffer_size=0,
-                protocol=self.config.protocol,
-                rdma_devices=self.config.device_name,
-                master_server_addr=self.config.master_server_address,
-                **ssd_kwargs,
+                self.local_seg,
+                self.config.metadata_server,
+                self.config.global_segment_size,
+                0,
+                self.config.protocol,
+                self.config.device_name,
+                self.config.master_server_address,
             )
 
         if ret != 0:
             msg = "Initialize mooncake failed."
-            logger.error(
-                "Initialize mooncake failed. ret=%d, metadata_server=%s. Check mooncake config and network.",
-                ret,
-                self.config.metadata_server,
-            )
+            logger.error(msg)
             raise RuntimeError(msg)
-        if ssd_kwargs:
-            logger.info(
-                "Mooncake SSD offload enabled (Mode A): path=%s",
-                self.config.ssd_offload_path,
-            )
         return store
-
-    @classmethod
-    def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        torch.npu.set_device(0)
-        return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
         local_rank = get_world_group().local_rank
@@ -197,48 +159,22 @@ class MooncakeBackend(Backend):
         self.ensure_initialized()
         assert self.store is not None
         try:
-            config = ReplicateConfig()
-            if self.config.preferred_segment:
-                config.preferred_segment = self.local_seg
-            config.prefer_alloc_in_same_node = self.config.prefer_alloc_in_same_node
-            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
-            failed_codes = [int(value) for value in res if value < 0]
-            failed_count = len(failed_codes)
-            if failed_count:
-                error_codes = sorted(set(failed_codes))
-                logger.error(
-                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
-                    failed_count,
-                    len(keys),
-                    error_codes,
-                )
-                logger.debug("Failed to put key details. keys=%s, result=%s", keys, res)
-                if self._lazy_init:
-                    logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            self._ensure_initialized()
+            assert self.store is not None
+            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
+            for value in res:
+                if value < 0:
+                    logger.error("Failed to put key %s,res:%s", keys, res)
+                    if self._lazy_init:
+                        logger.error("If this is the first DSV4(compress) request, this failure is expected.")
         except Exception as e:
-            logger.error(
-                "Failed to put %d keys out of %d. Check store state and memory.",
-                len(keys),
-                len(keys),
-            )
-            logger.debug(
-                "Failed to put key details. keys=%s, type=%s, error=%s",
-                keys,
-                type(e).__name__,
-                e,
-            )
+            logger.error("Failed to put key %s,error:%s", keys, e)
             if self._lazy_init:
-                logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+                logger.error("If this is the first DSV4(compress) request, this failure is expected.")
 
     def get(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
-            logger.error(
-                "Failed to get %d keys out of %d. Store is not initialized; "
-                "call put() first to trigger initialization.",
-                len(keys),
-                len(keys),
-            )
-            logger.debug("Failed to get key details. keys=%s", keys)
+            logger.error("MooncakeBackend.get called before store initialization, keys=%s", keys)
             return
         assert self.store is not None
         logger.debug(

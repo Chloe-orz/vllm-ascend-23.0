@@ -1,7 +1,5 @@
 # Standard
-import os
 import threading
-import time
 from enum import Enum
 from typing import Any
 
@@ -38,27 +36,21 @@ class MmcDirect(Enum):
 
 
 class MemcacheBackend(Backend):
-    def __init__(
-        self,
-        parallel_config: ParallelConfig,
-        local_rank: int | None = None,
-        init_bm: bool = True,
-        lazy_init: bool = False,
-    ):
-        self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
-        self._init_bm = init_bm
-        self._lazy_init = lazy_init and _is_device_sdma()
-
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
+        self.local_rank = get_world_group().local_rank
         self.store: Any | None = None
+        self._is_a2 = get_ascend_device_type() in {AscendDeviceType.A2}
+        self._lazy_init = lazy_init and not self._is_a2
         self._store_initialized = False
         self._store_init_lock = threading.Lock()
-        self._pending_buffers: tuple[list[int], list[int]] | None = None
+        self._registered_buffers: tuple[list[int], list[int]] | None = None
+        self._buffers_registered = False
 
         if not self._lazy_init:
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def ensure_initialized(self):
+    def _ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -66,7 +58,7 @@ class MemcacheBackend(Backend):
             if self._store_initialized:
                 return
 
-            logger.info("Initializing Memcache store. local_rank=%d", self.local_rank)
+            logger.info("Initializing Memcache store on first put.")
             self.store = self._setup_store()
             self._store_initialized = True
             self._register_buffers_if_needed()
@@ -84,7 +76,14 @@ class MemcacheBackend(Backend):
         store = DistributedObjectStore()
 
         try:
-            res = store.init(self.local_rank, init_bm=self._init_bm)
+            if self._is_a2:
+                tmp_tensor = torch.zeros(1, device="npu")
+                output_tensor_list = [torch.empty_like(tmp_tensor) for _ in range(torch.distributed.get_world_size())]
+                torch.distributed.all_gather(output_tensor_list, tmp_tensor, group=get_world_group().device_group)
+            store = DistributedObjectStore()
+            res = store.init(self.local_rank)
+            assert res == 0
+            return store
         except ValueError as e:
             logger.error("Configuration loading failed. error=%s. Check memcache config and environment.", e)
             raise
@@ -116,17 +115,21 @@ class MemcacheBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
-        self._pending_buffers = (list(ptrs), list(sizes))
+        self._registered_buffers = (list(ptrs), list(sizes))
         self._register_buffers_if_needed()
 
     def _register_buffers_if_needed(self):
-        if self._pending_buffers is None or not self._store_initialized:
+        if not self._is_a2:
+            return
+        if self._registered_buffers is None or self._buffers_registered:
+            return
+        if not self._store_initialized:
             return
         assert self.store is not None
-        ptrs, sizes = self._pending_buffers
+        ptrs, sizes = self._registered_buffers
         for ptr, size in zip(ptrs, sizes):
             self.store.register_buffer(ptr, size)
-        self._pending_buffers = None
+        self._buffers_registered = True
 
     def exists(self, keys: list[str]) -> list[int]:
         if self._lazy_init and not self._store_initialized:
@@ -156,13 +159,7 @@ class MemcacheBackend(Backend):
 
     def get(self, key: list[str], addr: list[list[int]], size: list[list[int]]):
         if self._lazy_init and not self._store_initialized:
-            logger.error(
-                "Failed to get %d keys out of %d. Store is not initialized; "
-                "call put() first to trigger initialization.",
-                len(key),
-                len(key),
-            )
-            logger.debug("Failed to get key details. keys=%s", key)
+            logger.error("MemcacheBackend.get called before store initialization, keys=%s", key)
             return
         assert self.store is not None
         try:
@@ -197,31 +194,15 @@ class MemcacheBackend(Backend):
         self.ensure_initialized()
         assert self.store is not None
         try:
+            self._ensure_initialized()
+            assert self.store is not None
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
-            failed_codes = [int(value) for value in res if value != 0]
-            failed_count = len(failed_codes)
-            if failed_count:
-                error_codes = sorted(set(failed_codes))
-                logger.error(
-                    "Failed to put %d keys out of %d. error_codes=%s. Check memory and store capacity.",
-                    failed_count,
-                    len(key),
-                    error_codes,
-                )
-                logger.debug("Failed to put key details. keys=%s, result=%s", key, res)
-                if self._lazy_init:
-                    logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+            for value in res:
+                if value != 0:
+                    logger.error("Failed to put key %s,res:%s", key, res)
+                    if self._lazy_init:
+                        logger.error("If this is the first DSV4(compress) request, this failure is expected.")
         except Exception as e:
-            logger.error(
-                "Failed to put %d keys out of %d. Check store state and memory.",
-                len(key),
-                len(key),
-            )
-            logger.debug(
-                "Failed to put key details. keys=%s, type=%s, error=%s",
-                key,
-                type(e).__name__,
-                e,
-            )
+            logger.error("Failed to put key %s,error:%s", key, e)
             if self._lazy_init:
-                logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
+                logger.error("If this is the first DSV4(compress) request, this failure is expected.")
