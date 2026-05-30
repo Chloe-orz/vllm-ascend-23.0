@@ -24,7 +24,6 @@ from vllm.logger import logger
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
-    FP8_METHOD,
     AscendDeviceType,
     get_ascend_device_type,
 )

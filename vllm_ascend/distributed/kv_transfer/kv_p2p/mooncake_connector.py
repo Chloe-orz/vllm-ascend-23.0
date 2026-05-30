@@ -2233,6 +2233,29 @@ class MooncakeConnectorWorker:
 
         self.num_blocks = self.kv_cache_config.num_blocks
         logger.info("num_blocks: %s", self.num_blocks)
+        self.block_len = []
+        if self.use_mla or self.use_sparse:
+            block_rank = 3  # [block_size, latent_dim]
+            for i in range(len(first_kv_cache_tuple)):
+                block_shape = first_kv_cache_tuple[i].shape[-block_rank:]
+                logger.info("block_shape: %s", block_shape)
+                self.block_len.append(first_kv_cache_tuple[i].element_size() * math.prod(block_shape))
+        else:
+            # eager:[num_block, block_size, num_head, hidden_dim]
+            block_rank = (
+                len(first_kv_cache.shape) - 1
+            )  # [block_size, kv_heads, head_dim] or [block_size, kv_heads*head_dim]
+            block_shape = first_kv_cache.shape[-block_rank:]
+            logger.info("block_shape: %s", block_shape)
+            self.block_len = [first_kv_cache.element_size() * math.prod(block_shape)]
+
+        logger.info(
+            "Registering KV_Caches. use_mla: %s, use_sparse: %s, shape %s",
+            self.use_mla,
+            self.use_sparse,
+            first_kv_cache.shape,
+        )
+
         self.kv_caches = kv_caches
         # Maps each KV cache group to its serialized group spec and physical
         # layer indices: {group_id: (group_spec, [layer_idx0, layer_idx1, ...])}.

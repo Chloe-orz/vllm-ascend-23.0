@@ -1466,20 +1466,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 input_layout = "BNSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
-                if self.head_padding > 0:
-                    q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
-                    q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, self.head_padding), "constant", 0)
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads, 1)
-                attn_output_shape = (num_tokens, self.num_heads_padded, 1, self.kv_lora_rank)
+                attn_output_shape = (num_tokens, self.num_heads, 1, self.kv_lora_rank)
             else:
                 input_layout = "BSND_NBSD"
                 q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1).contiguous()
-                if self.head_padding > 0:
-                    q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
-                    q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
-                attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
+                attn_output_shape = (self.num_heads, num_tokens, 1, self.kv_lora_rank)
         else:
             # The output layout is set to NBSD to eliminate the need for a
             # transpose operation after attention.

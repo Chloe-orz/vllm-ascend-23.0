@@ -40,18 +40,7 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod, VocabParallelEmbedding
 from vllm.model_executor.models.utils import WeightsMapper
 
-from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD,
-    AscendDeviceType,
-    calc_split_factor,
-    get_ascend_device_type,
-    vllm_version_is,
-)
-
-if vllm_version_is("0.23.0"):
-    from vllm.model_executor.layers.fused_moe import FusedMoE
-else:
-    from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, AscendDeviceType, calc_split_factor, get_ascend_device_type
 
 from .methods import get_scheme_class
 
