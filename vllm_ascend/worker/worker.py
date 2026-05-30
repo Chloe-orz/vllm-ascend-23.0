@@ -561,6 +561,13 @@ class NPUWorker(WorkerBase):
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
+            logger.info(
+                "[DEBUG] worker calling capture_model: "
+                "cudagraph_mode=%s mode=%s use_aclgraph=%s",
+                self.vllm_config.compilation_config.cudagraph_mode,
+                self.vllm_config.compilation_config.mode,
+                getattr(self.model_runner, "use_aclgraph", "N/A"),
+            )
             npugraph_memory_bytes = self.model_runner.capture_model()
 
         # Suggest an optimal --kv-cache-memory value for future runs.

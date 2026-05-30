@@ -476,6 +476,16 @@ class NPUModelRunner(GPUModelRunner):
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
 
         self.use_aclgraph = self._use_aclgraph()
+        logger.info(
+            "[DEBUG] model_runner __init__: use_aclgraph=%s "
+            "cudagraph_mode=%s mode=%s enforce_eager=%s "
+            "cudagraph_capture_sizes=%s",
+            self.use_aclgraph,
+            self.compilation_config.cudagraph_mode,
+            self.compilation_config.mode,
+            self.model_config.enforce_eager,
+            self.compilation_config.cudagraph_capture_sizes,
+        )
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
@@ -4745,9 +4755,22 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
+        logger.info(
+            "[DEBUG] _check_and_update_cudagraph_mode BEFORE: "
+            "cudagraph_mode=%s mode=%s use_aclgraph=%s",
+            self.compilation_config.cudagraph_mode,
+            self.compilation_config.mode,
+            self.use_aclgraph,
+        )
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
-
+        logger.info(
+            "[DEBUG] _check_and_update_cudagraph_mode AFTER: "
+            "cudagraph_mode=%s mode=%s use_aclgraph=%s",
+            self.compilation_config.cudagraph_mode,
+            self.compilation_config.mode,
+            self.use_aclgraph,
+        )
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
@@ -4775,6 +4798,16 @@ class NPUModelRunner(GPUModelRunner):
                             wrapper.init_draft_graph_params(self.cudagraph_batch_sizes)
 
     def capture_model(self) -> int:
+        logger.info(
+            "[DEBUG] capture_model entry: "
+            "cudagraph_mode=%s mode=%s use_aclgraph=%s "
+            "cudagraph_batch_sizes=%s enforce_eager=%s",
+            self.compilation_config.cudagraph_mode,
+            self.compilation_config.mode,
+            self.use_aclgraph,
+            self.cudagraph_batch_sizes,
+            self.model_config.enforce_eager,
+        )
         # 边云模式的 ACL Graph 仍依赖父类 capture 循环触发 _dummy_run。
         # 实际捕获发生在 segment 级 ACLGraphWrapper 内，通信保持在图外。
         if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
