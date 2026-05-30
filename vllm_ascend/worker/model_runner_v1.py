@@ -4817,8 +4817,16 @@ class NPUModelRunner(GPUModelRunner):
         if gpu_model_runner_cls is None:
             raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
         parent_module_name = gpu_model_runner_cls.__module__
+        logger.info(
+            "[DEBUG] capture_model calling GPUModelRunner.capture_model "
+            "with %d sizes via module %s",
+            len(self.cudagraph_batch_sizes),
+            parent_module_name,
+        )
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            return GPUModelRunner.capture_model(self)
+            result = GPUModelRunner.capture_model(self)
+        logger.info("[DEBUG] capture_model returned: %d bytes", result)
+        return result
 
     def _prepare_multimodal_fields(self):
         """

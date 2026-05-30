@@ -555,6 +555,14 @@ class NPUWorker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
+        logger.info(
+            "[DEBUG] compile_or_warm_up_model: "
+            "warmup_sizes=%s cg_capture_sizes=%s compile_sizes=%s enforce_eager=%s",
+            warmup_sizes,
+            cg_capture_sizes,
+            self.vllm_config.compilation_config.compile_sizes,
+            self.model_config.enforce_eager,
+        )
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
