@@ -2664,11 +2664,22 @@ class NPUModelRunner(GPUModelRunner):
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
         if hasattr(cudagraph_runtime_mode, "decode_mode"):
             cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
+        logger.info(
+            "[DEBUG] update_full_graph_params_if_needed: mode=%s capturing=%s "
+            "use_sparse=%s",
+            cudagraph_runtime_mode,
+            forward_context.capturing,
+            self.use_sparse,
+        )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
             and not self.use_sparse
         ):
+            logger.info(
+                "[DEBUG] update_full_graph_params_if_needed: WILL EXECUTE "
+                "update_full_graph_params"
+            )
             assert positions is not None
             if graph_wrapper is not None:
                 assert graph_wrapper.graph_params is not None
@@ -2923,6 +2934,14 @@ class NPUModelRunner(GPUModelRunner):
         try:
             # if seg_c_graph:
             #     torch.npu.current_stream().synchronize()
+            fc = get_forward_context()
+            num_entries = len(seg_c.concrete_aclgraph_entries) if seg_c_graph else -1
+            logger.info(
+                "[DEBUG] cloud forward: seg_c_graph=%s capturing=%s "
+                "entries=%d use_graph=%s",
+                seg_c_graph, fc.capturing if fc else "N/A",
+                num_entries, use_graph,
+            )
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -4843,6 +4862,15 @@ class NPUModelRunner(GPUModelRunner):
         # 因此这里手动清空，强制重新 capture。
         for wrapper in self._get_aclgraph_wrappers():
             wrapper.concrete_aclgraph_entries.clear()
+        for wrapper in self._get_aclgraph_wrappers():
+            logger.info(
+                "[DEBUG] capture_model: wrapper=%s entries=%d",
+                type(wrapper).__name__,
+                len(wrapper.concrete_aclgraph_entries),
+            )
+        logger.info(
+            "[DEBUG] capture_model: about to call GPUModelRunner.capture_model"
+        )
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
         logger.info("[DEBUG] capture_model returned: %d bytes", result)
