@@ -777,7 +777,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
-        model = self.model
         if self.edge_cloud_cfg.role == "edge":
             self.segment_a = self._create_segment_callable(
                 self.model, 0, self.head_k, is_first_segment=True, is_last_segment=False
@@ -4067,17 +4066,17 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache for all shared layers
                         kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors.keys(
-                ):
-                    if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-                    else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
-                        tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
-                        kv_cache_raw_tensors[layer_name_inner] = tensor
+                # elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors.keys(
+                # ):
+                #     if self.vllm_config.kv_transfer_config is None:
+                #         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                #     else:
+                #         cache_size_aligned = kv_cache_tensor.size + alignment
+                #         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                #         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+                #     for layer_name_inner in kv_cache_tensor.shared_by:
+                #         # shared the kvcache between the self_attn specs in the same group
+                #         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
