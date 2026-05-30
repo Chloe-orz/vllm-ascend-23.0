@@ -4797,6 +4797,17 @@ class NPUModelRunner(GPUModelRunner):
                         if self.speculative_config:
                             wrapper.init_draft_graph_params(self.cudagraph_batch_sizes)
 
+    def _get_aclgraph_wrappers(self) -> list[ACLGraphWrapper]:
+        """返回所有可能残留 profile 阶段图捕获结果的 ACLGraphWrapper。"""
+        wrappers: list[ACLGraphWrapper] = []
+        if isinstance(self.model, ACLGraphWrapper):
+            wrappers.append(self.model)
+        for attr in ("segment_a_wrapper", "segment_e_wrapper", "segment_c_wrapper"):
+            wrapper = getattr(self, attr, None)
+            if isinstance(wrapper, ACLGraphWrapper):
+                wrappers.append(wrapper)
+        return wrappers
+
     def capture_model(self) -> int:
         logger.info(
             "[DEBUG] capture_model entry: "
@@ -4823,6 +4834,15 @@ class NPUModelRunner(GPUModelRunner):
             len(self.cudagraph_batch_sizes),
             parent_module_name,
         )
+        # profile_cudagraph_memory 阶段 ACLGraphWrapper 已捕获过图，
+        # 但 CUDAGraphWrapper.clear_all_graphs() 不清除 ACLGraphWrapper
+        # 的 concrete_aclgraph_entries。保留的 entry 会导致 capture_model
+        # 中 _warmup_and_capture 走 REPLAY 而非 CAPTURE 路径，
+        # REPLAY 时 forward_context.capturing 保持 False，
+        # 使得 _update_full_graph_params_if_needed 错误执行 → 挂死。
+        # 因此这里手动清空，强制重新 capture。
+        for wrapper in self._get_aclgraph_wrappers():
+            wrapper.concrete_aclgraph_entries.clear()
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
         logger.info("[DEBUG] capture_model returned: %d bytes", result)
