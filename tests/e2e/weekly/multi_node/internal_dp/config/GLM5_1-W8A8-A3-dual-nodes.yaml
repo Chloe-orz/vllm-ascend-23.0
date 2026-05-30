@@ -19,7 +19,8 @@ special_dependencies:
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
 deployment:
-  - envs:
+  -
+    envs:
       <<: *env_common
     server_cmd: >
       vllm serve Eco-Tech/GLM-5.2-w8a8

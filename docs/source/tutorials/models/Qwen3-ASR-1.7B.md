@@ -50,7 +50,7 @@ In addition, if you don't want to use the docker image as above, you can also bu
 
 ## Deployment
 
-### Atlas 300I A2 2UP
+``` bash
 
 ```shell
 vllm serve "Qwen/Qwen3-ASR-1.7B" \
