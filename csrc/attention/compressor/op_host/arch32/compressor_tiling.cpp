@@ -362,7 +362,7 @@ ge::graphStatus CompressorTiling::GenTilingKey() const
         dtype,
         coff,
         rotaryMode,
-        cacheMode,
+        1,
         templateId,
         ropeDtype
     );

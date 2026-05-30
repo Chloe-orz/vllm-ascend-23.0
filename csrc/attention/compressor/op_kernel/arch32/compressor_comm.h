@@ -337,5 +337,5 @@ __aicore__ inline void DumpTensorForDim2(GlobalTensor<T> tensor, uint32_t desc, 
     // AscendC::DumpTensor(tensor, desc, dumpSize, shapeInfo);
 }
 
-} // namespace Compressor
+}
 #endif
