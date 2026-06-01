@@ -217,12 +217,11 @@ class ACLGraphWrapper:
             # so that update_attn_params only executes after the previous graph replay has fully completed.
             # If we do not in main model and in full-graph mode when using merge-eagle-graph,
             # we do not need to synchronize.
-            use_eagle = (
-                self.vllm_config.speculative_config.method in ("eagle", "eagle3")
-                if self.vllm_config.speculative_config
-                else False
-            )
-            if self.runtime_mode != CUDAGraphMode.FULL or not _EXTRA_CTX.is_draft_model or not use_eagle:
+            # When enable_enpu is on, model_runner orders update vs replay; skip here.	 
+            # When FULL + EAGLE draft (merge path), replay does not need this barrier.	 
+            is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle	 
+            need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle	 
+            if not self.enable_enpu and need_sync:
                 logger.info("sync replay before start")
                 torch.npu.current_stream().synchronize()
                 logger.info("sync replay before end")
