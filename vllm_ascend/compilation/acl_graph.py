@@ -356,7 +356,17 @@ def _filter_attn_metadata_for_layers(
                 f"Layer {idx} has multiple attention metadata keys: {matched_keys}. "
                 f"This breaks the 1:1 alignment between attn_metadata and attn_params."
             )
-        result[matched_keys[0]] = attn_metadata[matched_keys[0]]
+        value = attn_metadata[matched_keys[0]]
+        # DSA/linear-attention 等不参与 update_graph_params 的层，
+        # 其 metadata 不包含 seq_lens_list 等 FIA 专有属性。
+        # 跳过这些层使 attn_keys 与 graph_params.attn_params 的 zip 对齐。
+        if getattr(value, "skip_graph_params_update", False):
+            logger.info(
+                "[_filter_attn_metadata_for_layers] skipping layer %d "
+                "(skip_graph_params_update=True)", idx
+            )
+            continue
+        result[matched_keys[0]] = value
     if missing_layer_indices:
         raise ValueError(
             "Missing attention metadata for layer indices "
