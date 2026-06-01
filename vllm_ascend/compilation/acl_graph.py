@@ -132,7 +132,7 @@ class ACLGraphWrapper:
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
             return self.runnable(*args, **kwargs)
-        logger.info("start __call__ run")
+        # logger.info("start __call__ run")
         with graph_params_scope(self.graph_params, self.draft_graph_params):
             if batch_descriptor not in self.concrete_aclgraph_entries:
                 # create a new entry for this batch descriptor
@@ -222,11 +222,11 @@ class ACLGraphWrapper:
             is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle	 
             need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle	 
             if not self.enable_enpu and need_sync:
-                logger.info("sync replay before start")
+                # logger.info("sync replay before start")
                 torch.npu.current_stream().synchronize()
-                logger.info("sync replay before end")
+                # logger.info("sync replay before end")
             entry.aclgraph.replay()
-            logger.info("end __call__ run")
+            # logger.info("end __call__ run")
             return entry.output
 
 
@@ -292,7 +292,7 @@ def update_full_graph_params(
     #     id(graph_params) if graph_params is not None else None,
     #     id(draft_graph_params) if draft_graph_params is not None else None,
     # )
-    logger.info("[update_full_graph_params] start")
+    # logger.info("[update_full_graph_params] start")
     with graph_params_scope(graph_params, draft_graph_params):
         impl_cls = attn_backend.get_impl_cls()
 
@@ -323,7 +323,7 @@ def update_full_graph_params(
         finally:
             if original_metadata is not None:
                 forward_context.attn_metadata = original_metadata
-    logger.info("[update_full_graph_params] end")
+    # logger.info("[update_full_graph_params] end")
     
 
 def _filter_attn_metadata_for_layers(
@@ -361,19 +361,19 @@ def _filter_attn_metadata_for_layers(
         # 其 metadata 不包含 seq_lens_list 等 FIA 专有属性。
         # 跳过这些层使 attn_keys 与 graph_params.attn_params 的 zip 对齐。
         if getattr(value, "skip_graph_params_update", False):
-            logger.info(
-                "[_filter_attn_metadata_for_layers] skipping layer %d "
-                "(skip_graph_params_update=True)", idx
-            )
+            # logger.info(
+            #     "[_filter_attn_metadata_for_layers] skipping layer %d "
+            #     "(skip_graph_params_update=True)", idx
+            # )
             continue
         result[matched_keys[0]] = value
-    if skipped_no_key_layers:
-        logger.info(
-            "[_filter_attn_metadata_for_layers] skipped %d layers without "
-            "metadata keys (e.g. non-FlashAttention layers): %s",
-            len(skipped_no_key_layers),
-            skipped_no_key_layers[:10],
-        )
+    # if skipped_no_key_layers:
+    #     logger.info(
+    #         "[_filter_attn_metadata_for_layers] skipped %d layers without "
+    #         "metadata keys (e.g. non-FlashAttention layers): %s",
+    #         len(skipped_no_key_layers),
+    #         skipped_no_key_layers[:10],
+    #     )
 
     # logger.info(
     #     "[_filter_attn_metadata_for_layers] layer_indices=%s, "
@@ -382,7 +382,7 @@ def _filter_attn_metadata_for_layers(
     #     list(attn_metadata.keys()),
     #     list(result.keys()),
     # )
-    logger.info("[_filter_attn_metadata_for_layers] end")
+    # logger.info("[_filter_attn_metadata_for_layers] end")
     return result
 
 

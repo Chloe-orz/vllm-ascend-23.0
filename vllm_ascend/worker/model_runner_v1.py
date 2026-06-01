@@ -2869,6 +2869,15 @@ class NPUModelRunner(GPUModelRunner):
                     _EXTRA_CTX.layer_idx = old_layer_idx
 
             assert isinstance(hidden_states, IntermediateTensors)
+            for k, v in hidden_states.tensors.items():
+                if isinstance(v, torch.Tensor):
+                    logger.info(
+                        "[FSTREQ] edge seg_a output %s: shape=%s "
+                        "NaN=%s mean=%f",
+                        k, list(v.shape),
+                        torch.isnan(v).any().item(),
+                        v.float().mean().item(),
+                    )
             return hidden_states
 
         # Step 2：执行 Segment E（尾 tail_k 层 + norm）
@@ -2890,6 +2899,17 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_layers - self.tail_k,
                     self.num_layers,
                 ))
+            # NaN 诊断：检查 edge 从 cloud 接收到的 intermediate_tensors
+            if intermediate_tensors is not None:
+                for k, v in intermediate_tensors.tensors.items():
+                    if isinstance(v, torch.Tensor):
+                        logger.info(
+                            "[FSTREQ] edge recv cloud %s: shape=%s "
+                            "NaN=%s mean=%f",
+                            k, list(v.shape),
+                            torch.isnan(v).any().item(),
+                            v.float().mean().item(),
+                        )
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2929,6 +2949,28 @@ class NPUModelRunner(GPUModelRunner):
         assert self.edge_cloud_cfg.role == "cloud", (
             "Cloud segment_c should only be executed when role == 'cloud'"
         )
+        # NaN 诊断：检查接收到的 intermediate_tensors
+        if intermediate_tensors is not None:
+            for k, v in intermediate_tensors.tensors.items():
+                if isinstance(v, torch.Tensor):
+                    has_nan = torch.isnan(v).any().item()
+                    has_inf = torch.isinf(v).any().item()
+                    if has_nan or has_inf:
+                        logger.warning(
+                            "[FSTREQ] cloud received %s: NaN=%s Inf=%s "
+                            "shape=%s mean=%f max=%f min=%f",
+                            k, has_nan, has_inf,
+                            list(v.shape), v.float().mean().item(),
+                            v.float().max().item(), v.float().min().item(),
+                        )
+                    else:
+                        logger.info(
+                            "[FSTREQ] cloud received %s: shape=%s "
+                            "mean=%f max=%f min=%f",
+                            k, list(v.shape),
+                            v.float().mean().item(),
+                            v.float().max().item(), v.float().min().item(),
+                        )
         # Warmup（profile_run）期间，Cloud 通过 PP non-first rank 路径自行构造
         # minimal intermediate_tensors（仅含 shape 信息）用于图捕获，此时 intermediate_tensors
         # 不为 None 但也是 dummy。运行时 real inference 时，intermediate_tensors 由
@@ -2984,6 +3026,16 @@ class NPUModelRunner(GPUModelRunner):
 
         # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
         assert isinstance(hidden_states, IntermediateTensors)
+        for k, v in hidden_states.tensors.items():
+            if isinstance(v, torch.Tensor):
+                logger.info(
+                    "[FSTREQ] cloud seg_c output %s: shape=%s "
+                    "NaN=%s mean=%f max=%f min=%f",
+                    k, list(v.shape),
+                    torch.isnan(v).any().item(),
+                    v.float().mean().item(),
+                    v.float().max().item(), v.float().min().item(),
+                )
         return hidden_states
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
