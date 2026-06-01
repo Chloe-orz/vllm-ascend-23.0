@@ -561,27 +561,27 @@ class NPUWorker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
-        logger.info(
-            "[DEBUG] compile_or_warm_up_model: "
-            "warmup_sizes=%s cg_capture_sizes=%s compile_sizes=%s enforce_eager=%s",
-            warmup_sizes,
-            cg_capture_sizes,
-            self.vllm_config.compilation_config.compile_sizes,
-            self.model_config.enforce_eager,
-        )
+        # logger.info(
+        #     "[DEBUG] compile_or_warm_up_model: "
+        #     "warmup_sizes=%s cg_capture_sizes=%s compile_sizes=%s enforce_eager=%s",
+        #     warmup_sizes,
+        #     cg_capture_sizes,
+        #     self.vllm_config.compilation_config.compile_sizes,
+        #     self.model_config.enforce_eager,
+        # )
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            logger.info(
-                "[DEBUG] worker calling capture_model: "
-                "cudagraph_mode=%s mode=%s use_aclgraph=%s",
-                self.vllm_config.compilation_config.cudagraph_mode,
-                self.vllm_config.compilation_config.mode,
-                getattr(self.model_runner, "use_aclgraph", "N/A"),
-            )
+            # logger.info(
+            #     "[DEBUG] worker calling capture_model: "
+            #     "cudagraph_mode=%s mode=%s use_aclgraph=%s",
+            #     self.vllm_config.compilation_config.cudagraph_mode,
+            #     self.vllm_config.compilation_config.mode,
+            #     getattr(self.model_runner, "use_aclgraph", "N/A"),
+            # )
             npugraph_memory_bytes = self.model_runner.capture_model()
 
         # Suggest an optimal --kv-cache-memory value for future runs.

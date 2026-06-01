@@ -476,16 +476,16 @@ class NPUModelRunner(GPUModelRunner):
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
 
         self.use_aclgraph = self._use_aclgraph()
-        logger.info(
-            "[DEBUG] model_runner __init__: use_aclgraph=%s "
-            "cudagraph_mode=%s mode=%s enforce_eager=%s "
-            "cudagraph_capture_sizes=%s",
-            self.use_aclgraph,
-            self.compilation_config.cudagraph_mode,
-            self.compilation_config.mode,
-            self.model_config.enforce_eager,
-            self.compilation_config.cudagraph_capture_sizes,
-        )
+        # logger.info(
+        #     "[DEBUG] model_runner __init__: use_aclgraph=%s "
+        #     "cudagraph_mode=%s mode=%s enforce_eager=%s "
+        #     "cudagraph_capture_sizes=%s",
+        #     self.use_aclgraph,
+        #     self.compilation_config.cudagraph_mode,
+        #     self.compilation_config.mode,
+        #     self.model_config.enforce_eager,
+        #     self.compilation_config.cudagraph_capture_sizes,
+        # )
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
@@ -2678,22 +2678,22 @@ class NPUModelRunner(GPUModelRunner):
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
         if hasattr(cudagraph_runtime_mode, "decode_mode"):
             cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
-        logger.info(
-            "[DEBUG] update_full_graph_params_if_needed: mode=%s capturing=%s "
-            "use_sparse=%s",
-            cudagraph_runtime_mode,
-            forward_context.capturing,
-            self.use_sparse,
-        )
+        # logger.info(
+        #     "[DEBUG] update_full_graph_params_if_needed: mode=%s capturing=%s "
+        #     "use_sparse=%s",
+        #     cudagraph_runtime_mode,
+        #     forward_context.capturing,
+        #     self.use_sparse,
+        # )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
             and not self.use_sparse
         ):
-            logger.info(
-                "[DEBUG] update_full_graph_params_if_needed: WILL EXECUTE "
-                "update_full_graph_params"
-            )
+            # logger.info(
+            #     "[DEBUG] update_full_graph_params_if_needed: WILL EXECUTE "
+            #     "update_full_graph_params"
+            # )
             assert positions is not None
             if graph_wrapper is not None:
                 assert graph_wrapper.graph_params is not None
@@ -2922,10 +2922,10 @@ class NPUModelRunner(GPUModelRunner):
         """Cloud 侧分段执行：segment_c（中段）。"""
         if use_graph:
             self._cloud_graph_call_count += 1
-            logger.info(
-                "[DEBUG] cloud graph call #%d",
-                self._cloud_graph_call_count,
-            )
+            # logger.info(
+            #     "[DEBUG] cloud graph call #%d",
+            #     self._cloud_graph_call_count,
+            # )
         assert self.edge_cloud_cfg.role == "cloud", (
             "Cloud segment_c should only be executed when role == 'cloud'"
         )
@@ -2961,16 +2961,16 @@ class NPUModelRunner(GPUModelRunner):
             fc = get_forward_context()
             num_entries = len(seg_c.concrete_aclgraph_entries) if seg_c_graph else -1
             bd = fc.batch_descriptor
-            logger.info(
-                "[DEBUG] cloud forward: seg_c_graph=%s capturing=%s "
-                "entries=%d use_graph=%s bd=(%s,%s,%s,%s)",
-                seg_c_graph, fc.capturing if fc else "N/A",
-                num_entries, use_graph,
-                bd.num_tokens if bd else "N/A",
-                bd.num_reqs if bd else "N/A",
-                bd.uniform if bd else "N/A",
-                "lora" if (bd and bd.has_lora) else "no_lora",
-            )
+            # logger.info(
+            #     "[DEBUG] cloud forward: seg_c_graph=%s capturing=%s "
+            #     "entries=%d use_graph=%s bd=(%s,%s,%s,%s)",
+            #     seg_c_graph, fc.capturing if fc else "N/A",
+            #     num_entries, use_graph,
+            #     bd.num_tokens if bd else "N/A",
+            #     bd.num_reqs if bd else "N/A",
+            #     bd.uniform if bd else "N/A",
+            #     "lora" if (bd and bd.has_lora) else "no_lora",
+            # )
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -4803,22 +4803,22 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
-        logger.info(
-            "[DEBUG] _check_and_update_cudagraph_mode BEFORE: "
-            "cudagraph_mode=%s mode=%s use_aclgraph=%s",
-            self.compilation_config.cudagraph_mode,
-            self.compilation_config.mode,
-            self.use_aclgraph,
-        )
+        # logger.info(
+        #     "[DEBUG] _check_and_update_cudagraph_mode BEFORE: "
+        #     "cudagraph_mode=%s mode=%s use_aclgraph=%s",
+        #     self.compilation_config.cudagraph_mode,
+        #     self.compilation_config.mode,
+        #     self.use_aclgraph,
+        # )
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
-        logger.info(
-            "[DEBUG] _check_and_update_cudagraph_mode AFTER: "
-            "cudagraph_mode=%s mode=%s use_aclgraph=%s",
-            self.compilation_config.cudagraph_mode,
-            self.compilation_config.mode,
-            self.use_aclgraph,
-        )
+        # logger.info(
+        #     "[DEBUG] _check_and_update_cudagraph_mode AFTER: "
+        #     "cudagraph_mode=%s mode=%s use_aclgraph=%s",
+        #     self.compilation_config.cudagraph_mode,
+        #     self.compilation_config.mode,
+        #     self.use_aclgraph,
+        # )
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
@@ -4857,16 +4857,16 @@ class NPUModelRunner(GPUModelRunner):
         return wrappers
 
     def capture_model(self) -> int:
-        logger.info(
-            "[DEBUG] capture_model entry: "
-            "cudagraph_mode=%s mode=%s use_aclgraph=%s "
-            "cudagraph_batch_sizes=%s enforce_eager=%s",
-            self.compilation_config.cudagraph_mode,
-            self.compilation_config.mode,
-            self.use_aclgraph,
-            self.cudagraph_batch_sizes,
-            self.model_config.enforce_eager,
-        )
+        # logger.info(
+        #     "[DEBUG] capture_model entry: "
+        #     "cudagraph_mode=%s mode=%s use_aclgraph=%s "
+        #     "cudagraph_batch_sizes=%s enforce_eager=%s",
+        #     self.compilation_config.cudagraph_mode,
+        #     self.compilation_config.mode,
+        #     self.use_aclgraph,
+        #     self.cudagraph_batch_sizes,
+        #     self.model_config.enforce_eager,
+        # )
         # 边云模式的 ACL Graph 仍依赖父类 capture 循环触发 _dummy_run。
         # 实际捕获发生在 segment 级 ACLGraphWrapper 内，通信保持在图外。
         if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
@@ -4876,12 +4876,12 @@ class NPUModelRunner(GPUModelRunner):
         if gpu_model_runner_cls is None:
             raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
         parent_module_name = gpu_model_runner_cls.__module__
-        logger.info(
-            "[DEBUG] capture_model calling GPUModelRunner.capture_model "
-            "with %d sizes via module %s",
-            len(self.cudagraph_batch_sizes),
-            parent_module_name,
-        )
+        # logger.info(
+        #     "[DEBUG] capture_model calling GPUModelRunner.capture_model "
+        #     "with %d sizes via module %s",
+        #     len(self.cudagraph_batch_sizes),
+        #     parent_module_name,
+        # )
         # profile_cudagraph_memory 阶段 ACLGraphWrapper 已捕获过图，
         # 但 CUDAGraphWrapper.clear_all_graphs() 不清除 ACLGraphWrapper
         # 的 concrete_aclgraph_entries。保留的 entry 会导致 capture_model
@@ -4892,18 +4892,18 @@ class NPUModelRunner(GPUModelRunner):
         for wrapper in self._get_aclgraph_wrappers():
             wrapper.concrete_aclgraph_entries.clear()
         self._cloud_graph_call_count = 0
-        for wrapper in self._get_aclgraph_wrappers():
-            logger.info(
-                "[DEBUG] capture_model: wrapper=%s entries=%d",
-                type(wrapper).__name__,
-                len(wrapper.concrete_aclgraph_entries),
-            )
-        logger.info(
-            "[DEBUG] capture_model: about to call GPUModelRunner.capture_model"
-        )
+        # for wrapper in self._get_aclgraph_wrappers():
+        #     logger.info(
+        #         "[DEBUG] capture_model: wrapper=%s entries=%d",
+        #         type(wrapper).__name__,
+        #         len(wrapper.concrete_aclgraph_entries),
+        #     )
+        # logger.info(
+        #     "[DEBUG] capture_model: about to call GPUModelRunner.capture_model"
+        # )
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
-        logger.info("[DEBUG] capture_model returned: %d bytes", result)
+        # logger.info("[DEBUG] capture_model returned: %d bytes", result)
         return result
 
     def _prepare_multimodal_fields(self):
