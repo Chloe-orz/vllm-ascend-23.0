@@ -44,6 +44,7 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
+    global _MC2
     if parallel_config.enable_edge_cloud:
         # Edge-cloud mode has a non-uniform rank layout (edge + cloud),
         # so the standard DP*PP*PCP*TP grid does not apply.
@@ -56,7 +57,6 @@ def init_ascend_model_parallel(
         edge_ranks = list(range(edge_npu_count))
         cloud_ranks = list(range(edge_npu_count, world_size))
 
-        global _MC2
         _MC2 = init_model_parallel_group(
             [edge_ranks, cloud_ranks],
             get_world_group().local_rank,
@@ -131,7 +131,6 @@ def init_ascend_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
 
-    global _MC2
     _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
 
     if get_ascend_config().eplb_config.dynamic_eplb:
