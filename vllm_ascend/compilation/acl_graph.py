@@ -132,96 +132,98 @@ class ACLGraphWrapper:
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
             return self.runnable(*args, **kwargs)
+        with graph_params_scope(self.graph_params, self.draft_graph_params):
+            if batch_descriptor not in self.concrete_aclgraph_entries:
+                # create a new entry for this batch descriptor
+                self.concrete_aclgraph_entries[batch_descriptor] = ACLGraphEntry(batch_descriptor=batch_descriptor)
 
-        if batch_descriptor not in self.concrete_aclgraph_entries:
-            # create a new entry for this batch descriptor
-            self.concrete_aclgraph_entries[batch_descriptor] = ACLGraphEntry(batch_descriptor=batch_descriptor)
+            entry = self.concrete_aclgraph_entries[batch_descriptor]
 
-        entry = self.concrete_aclgraph_entries[batch_descriptor]
+            if entry.aclgraph is None:
+                if self.aclgraph_options.debug_log_enable:
+                    # Since we capture aclgraph for many different shapes and
+                    # capturing is fast, we don't need to log it for every
+                    # shape. E.g. we only log it for the first subgraph in
+                    # piecewise mode.
+                    logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
+                # validate that aclgraph capturing is legal at this point.
+                validate_cudagraph_capturing_enabled()
 
-        if entry.aclgraph is None:
-            if self.aclgraph_options.debug_log_enable:
-                # Since we capture aclgraph for many different shapes and
-                # capturing is fast, we don't need to log it for every
-                # shape. E.g. we only log it for the first subgraph in
-                # piecewise mode.
-                logger.debug("Capturing a aclgraph on (%s,%s)", self.runtime_mode.name, entry.batch_descriptor)
-            # validate that aclgraph capturing is legal at this point.
-            validate_cudagraph_capturing_enabled()
+                input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
+                entry.input_addresses = input_addresses
+                aclgraph = torch.npu.NPUGraph()
 
-            input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
-            entry.input_addresses = input_addresses
-            aclgraph = torch.npu.NPUGraph()
+                with ExitStack() as stack:
+                    if self.aclgraph_options.gc_disable:
+                        # during every model forward for piecewise aclgraph
+                        # mode, we will capture many pieces of aclgraphs
+                        # (roughly one per layer). running gc again and again
+                        # across layers will make the aclgraph capture very slow.
+                        # therefore, we only run gc for the first graph,
+                        # and disable gc for the rest of the graphs.
+                        stack.enter_context(patch("gc.collect", lambda: None))
+                        stack.enter_context(patch("torch.npu.empty_cache", lambda: None))
 
-            with ExitStack() as stack:
-                if self.aclgraph_options.gc_disable:
-                    # during every model forward for piecewise aclgraph
-                    # mode, we will capture many pieces of aclgraphs
-                    # (roughly one per layer). running gc again and again
-                    # across layers will make the aclgraph capture very slow.
-                    # therefore, we only run gc for the first graph,
-                    # and disable gc for the rest of the graphs.
-                    stack.enter_context(patch("gc.collect", lambda: None))
-                    stack.enter_context(patch("torch.npu.empty_cache", lambda: None))
+                    # mind-exploding: carefully manage the reference and memory.
+                    forward_context.capturing = True
+                    with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                        # `output` is managed by pytorch's aclgraph pool
+                        output = self.runnable(*args, **kwargs)
+                        if self.aclgraph_options.weak_ref_output:
+                            # by converting it to weak ref,
+                            # the original `output` will immediately be released
+                            # to save memory. It is only safe to do this for
+                            # the last graph in piecewise aclgraph mode, because
+                            # the output of the last graph will not be used by
+                            # any other acl graph.
+                            output = weak_ref_tensors(output)
 
-                # mind-exploding: carefully manage the reference and memory.
-                forward_context.capturing = True
-                with torch.npu.graph(aclgraph, pool=self.graph_pool):
-                    # `output` is managed by pytorch's aclgraph pool
-                    output = self.runnable(*args, **kwargs)
-                    if self.aclgraph_options.weak_ref_output:
-                        # by converting it to weak ref,
-                        # the original `output` will immediately be released
-                        # to save memory. It is only safe to do this for
-                        # the last graph in piecewise aclgraph mode, because
-                        # the output of the last graph will not be used by
-                        # any other acl graph.
-                        output = weak_ref_tensors(output)
+                # here we always use weak ref for the workspaces
+                # to save memory
+                global _graph_params
+                global _draft_graph_params
+                global _draft_graph_prefill_params
+                weak_ref_workspaces(_graph_params)
+                weak_ref_workspaces(_draft_graph_params)
+                weak_ref_workspaces(_draft_graph_prefill_params)
 
-            # here we always use weak ref for the workspaces
-            # to save memory
-            global _graph_params
-            global _draft_graph_params
-            weak_ref_workspaces(_graph_params)
-            weak_ref_workspaces(_draft_graph_params)
+                # here we always use weak ref for the output
+                # to save memory
+                entry.output = weak_ref_tensors(output)
+                entry.aclgraph = aclgraph
 
-            # here we always use weak ref for the output
-            # to save memory
-            entry.output = weak_ref_tensors(output)
-            entry.aclgraph = aclgraph
+                compilation_counter.num_cudagraph_captured += 1
 
-            compilation_counter.num_cudagraph_captured += 1
+                # important: we need to return the output, rather than
+                # the weak ref of the output, so that pytorch can correctly
+                # manage the memory during acl graph capture
+                return output
 
-            # important: we need to return the output, rather than
-            # the weak ref of the output, so that pytorch can correctly
-            # manage the memory during acl graph capture
-            return output
+            if self.is_debugging_mode:
+                # check if the input addresses are the same
+                new_input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
+                assert new_input_addresses == entry.input_addresses, (
+                    f"Input addresses for aclgraphs are different "
+                    f"during replay. Expected {entry.input_addresses}, "
+                    f"got {new_input_addresses}"
+                )
 
-        if self.is_debugging_mode:
-            # check if the input addresses are the same
-            new_input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
-            assert new_input_addresses == entry.input_addresses, (
-                f"Input addresses for aclgraphs are different "
-                f"during replay. Expected {entry.input_addresses}, "
-                f"got {new_input_addresses}"
-            )
-
-        logger.info_once("Replaying aclgraph")
-        # In async scheduling or multi-threaded (MT) scenarios, it is possible that
-        # the CPU's record event (from update_attn_params) for the iteration i completes
-        # before the grph replay of iteration i-1.
-        # To ensure proper ordering, we must call synchronize here before replaying,
-        # so that update_attn_params only executes after the previous graph replay has fully completed.
-        # If we do not in main model and in full-graph mode when using merge-eagle-graph,
-        # we do not need to synchronize.
-        # When enable_enpu is on, model_runner orders update vs replay; skip here.
-        # When FULL + EAGLE draft (merge path), replay does not need this barrier.
-        is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-        if not self.enable_enpu and need_sync:
-            torch.npu.current_stream().synchronize()
-        entry.aclgraph.replay()
-        return entry.output
+            logger.info_once("Replaying aclgraph")
+            # In async scheduling or multi-threaded (MT) scenarios, it is possible that
+            # the CPU's record event (from update_attn_params) for the iteration i completes
+            # before the grph replay of iteration i-1.
+            # To ensure proper ordering, we must call synchronize here before replaying,
+            # so that update_attn_params only executes after the previous graph replay has fully completed.
+            # If we do not in main model and in full-graph mode when using merge-eagle-graph,
+            # we do not need to synchronize.
+            # When enable_enpu is on, model_runner orders update vs replay; skip here.
+            # When FULL + EAGLE draft (merge path), replay does not need this barrier.
+            is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+            need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+            if not self.enable_enpu and need_sync:
+                torch.npu.current_stream().synchronize()
+            entry.aclgraph.replay()
+            return entry.output
 
 
 def _collect_tensor_addresses(*values) -> list[int]:
