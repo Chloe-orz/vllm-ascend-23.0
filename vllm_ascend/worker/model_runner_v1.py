@@ -46,7 +46,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
-from vllm.distributed.parallel_state import is_edge_device
+from vllm.distributed.parallel_state import is_edge_device, is_edge_cloud_pp_mode
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -2177,6 +2177,18 @@ class NPUModelRunner(GPUModelRunner):
                         self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
+            
+            # 边云场景：当 hidden_states 为 IntermediateTensors 时，说明当前段计算已完成，
+            # 需要把结果返回给 NPUWorker 进行跨节点通信（isend_tensor_dict）。
+            # 此处提前 return，跳过标准 PP 的 logits/sampling 流程。
+
+            if is_edge_cloud_pp_mode() and isinstance(hidden_states, IntermediateTensors) and not is_edge_device():
+                hidden_states.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+                if self.debugger is not None:
+                    self.debugger.stop()
+                    self.debugger.step()
+                return hidden_states
 
             if not self.broadcast_pp_output:
                 # Common case.
