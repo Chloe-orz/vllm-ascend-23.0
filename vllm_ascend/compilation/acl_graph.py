@@ -341,12 +341,12 @@ def _filter_attn_metadata_for_layers(
     与图捕获顺序严格对齐，避免错位。
     """
     result: dict = {}
-    missing_layer_indices: list[int] = []
+    skipped_no_key_layers: list[int] = []
     for idx in layer_indices:
         needle = f".layers.{idx}."
         matched_keys = [k for k in attn_metadata if needle in k]
         if not matched_keys:
-            missing_layer_indices.append(idx)
+            skipped_no_key_layers.append(idx)
             continue
         # 边云流程要求每层恰好一个 attention metadata key，
         # 以确保 graph_params.attn_params 的追加顺序与过滤后顺序 1:1 对齐。
@@ -367,10 +367,12 @@ def _filter_attn_metadata_for_layers(
             )
             continue
         result[matched_keys[0]] = value
-    if missing_layer_indices:
-        raise ValueError(
-            "Missing attention metadata for layer indices "
-            f"{missing_layer_indices}. Available keys: {list(attn_metadata)}"
+    if skipped_no_key_layers:
+        logger.info(
+            "[_filter_attn_metadata_for_layers] skipped %d layers without "
+            "metadata keys (e.g. non-FlashAttention layers): %s",
+            len(skipped_no_key_layers),
+            skipped_no_key_layers[:10],
         )
 
     # logger.info(
