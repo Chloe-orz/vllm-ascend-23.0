@@ -149,7 +149,7 @@ class ACLGraphWrapper:
                 # validate that aclgraph capturing is legal at this point.
                 validate_cudagraph_capturing_enabled()
 
-                input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
+                input_addresses = _collect_tensor_addresses(args, kwargs)
                 entry.input_addresses = input_addresses
                 aclgraph = torch.npu.NPUGraph()
 
@@ -201,7 +201,7 @@ class ACLGraphWrapper:
 
             if self.is_debugging_mode:
                 # check if the input addresses are the same
-                new_input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
+                new_input_addresses = _collect_tensor_addresses(args, kwargs)
                 assert new_input_addresses == entry.input_addresses, (
                     f"Input addresses for aclgraphs are different "
                     f"during replay. Expected {entry.input_addresses}, "
