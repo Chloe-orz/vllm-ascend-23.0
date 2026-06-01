@@ -2851,8 +2851,8 @@ class NPUModelRunner(GPUModelRunner):
             finally:
                 # 恢复 layer_idx 前先同步当前流，确保 weight_prefetch 等
                 # 依赖 layer_idx 的异步任务已在正确层号下完成，防止后续段读到错层权重
-                # if seg_a_graph:
-                #     torch.npu.current_stream().synchronize()
+                if seg_a_graph:
+                    torch.npu.current_stream().synchronize()
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
 
@@ -2940,8 +2940,8 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
         try:
-            # if seg_c_graph:
-            #     torch.npu.current_stream().synchronize()
+            if seg_c_graph:
+                torch.npu.current_stream().synchronize()
             fc = get_forward_context()
             num_entries = len(seg_c.concrete_aclgraph_entries) if seg_c_graph else -1
             bd = fc.batch_descriptor
