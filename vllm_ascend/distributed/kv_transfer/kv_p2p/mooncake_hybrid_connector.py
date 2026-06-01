@@ -1316,15 +1316,17 @@ class MooncakeConnectorScheduler:
     def _compute_transfer_block_ids(self, block_ids: BlockIds, prompt_len: int) -> BlockIds:
         transfer_block_ids = []
         for i, blocks in enumerate(block_ids):
-            if self.use_compress and self.num_swa_blocks[i] == 0:
-                group_token_len = prompt_len // self.group_compress_ratio[i]
+            if self.num_swa_blocks[i] == 0:
+                if self.use_compress:
+                    group_block_len = math.ceil((prompt_len // self.group_compress_ratio[i]) / self.group_block_size[i])
+                else:
+                    group_block_len = math.ceil(prompt_len / self.group_block_size[i])
+                if group_block_len > 0:
+                    transfer_block_ids.append(blocks[:group_block_len])
+                else:
+                    transfer_block_ids.append([])
             else:
-                group_token_len = prompt_len
-            group_block_len = math.ceil(group_token_len / self.group_block_size[i])
-            if group_block_len > 0:
-                transfer_block_ids.append(blocks[:group_block_len])
-            else:
-                transfer_block_ids.append([])
+                transfer_block_ids.append(blocks)
         return tuple(transfer_block_ids)
 
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
@@ -1447,7 +1449,8 @@ class MooncakeConnectorScheduler:
             logger.info("Delaying free of %d blocks for request %s", sum(computed_block_lens), request.request_id)
             self._reqs_need_send[request.request_id] = time.time()
 
-        num_prompt_blocks = math.ceil(request.num_prompt_tokens / self.block_size)
+        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        computed_block_ids = self._compute_transfer_block_ids(computed_block_ids, len(request.prompt_token_ids))
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
