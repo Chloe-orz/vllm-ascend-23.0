@@ -336,23 +336,13 @@ def init_ascend_model_parallel(
         backend = torch.distributed.get_backend(get_world_group().device_group)
         edge_npu_count = parallel_config.edge_npu_count
         cloud_npu_count = parallel_config.cloud_npu_count
-        if parallel_config.is_shared_model_edge:
-            # Shared-model edge-cloud topology: the edge has a
-            # single distributed rank (rank 0) and the cloud
-            # occupies ranks 1..1 + N*C.
-            ep_edge_ranks = [0]
-            ep_cloud_ranks = list(
-                range(1,
-                      1 + parallel_config.data_parallel_size * cloud_npu_count))
-        else:
-            world_size_per_instance = edge_npu_count + cloud_npu_count
-            ep_edge_ranks = []
-            ep_cloud_ranks = []
-            for dp_idx in range(parallel_config.data_parallel_size):
-                base = dp_idx * world_size_per_instance
-                ep_edge_ranks.extend(range(base, base + edge_npu_count))
-                ep_cloud_ranks.extend(
-                    range(base + edge_npu_count, base + world_size_per_instance))
+        world_size_per_instance = edge_npu_count + cloud_npu_count
+        ep_edge_ranks = []
+        ep_cloud_ranks = []
+        for dp_idx in range(parallel_config.data_parallel_size):
+            base = dp_idx * world_size_per_instance
+            ep_edge_ranks.extend(range(base, base + edge_npu_count))
+            ep_cloud_ranks.extend(range(base + edge_npu_count, base + world_size_per_instance))
         _MC2 = init_model_parallel_group(
             [ep_edge_ranks, ep_cloud_ranks],
             get_world_group().local_rank,
