@@ -37,13 +37,6 @@ def _forward_edge_cloud_segment_qwen3_5(
     is_last_segment: bool | None = None,
     **extra_layer_kwargs: Any,
 ) -> torch.Tensor | IntermediateTensors:
-    # [DIAG-SYNC] seg_a 入口处强制同步。
-    # 若此处 sync 修复 → 异步操作在 seg_a 外部（输入准备/update_cos_sin等）
-    # 若此处 sync 不修复 → 异步操作在 seg_a 内部（embedding/log 段）
-    if start_layer == 0:
-        import torch_npu
-        torch_npu.npu.current_stream().synchronize()
-
     num_layers = len(self.layers)
     assert 0 <= start_layer <= end_layer <= num_layers, (
         f"Invalid segment range [{start_layer}, {end_layer}) for {num_layers} layers"
@@ -57,38 +50,20 @@ def _forward_edge_cloud_segment_qwen3_5(
     # [DIAG] 仅在非图捕获、非 profile 时记录 seg_a 关键状态，
     # 避免与 ACL 计算图冲突。记录首/次请求差异用于排查。
     if is_first_segment:
-        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
-        if not _EXTRA_CTX.capturing and not getattr(_EXTRA_CTX, "in_profile_run", False):
-            global _seg_call_count
-            _seg_call_count += 1
-            logger.info(
-                "[EdgeCloud seg_a DIAG] call=%d start=%d end=%d "
-                "input_ids_shape=%s positions[:5]=%s positions[-5:]=%s "
-                "is_first_layer=%s layer_idx=%s",
-                _seg_call_count, start_layer, end_layer,
-                tuple(input_ids.shape) if input_ids is not None else None,
-                positions[:5].tolist() if positions is not None else None,
-                positions[-5:].tolist() if positions is not None else None,
-                getattr(_EXTRA_CTX, "is_first_layer", None),
-                _EXTRA_CTX.layer_idx,
-            )
 
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
             hidden_states = self.embed_input_ids(input_ids)
 
-        if not _EXTRA_CTX.capturing and not getattr(_EXTRA_CTX, "in_profile_run", False):
-            logger.info(
-                "[EdgeCloud seg_a DIAG] call=%d after_embed "
-                "hidden_mean=%.6f hidden_std=%.6f nan=%d inf=%d",
-                _seg_call_count,
-                hidden_states.float().mean().item(),
-                hidden_states.float().std().item(),
-                torch.isnan(hidden_states).sum().item(),
-                torch.isinf(hidden_states).sum().item(),
-            )
+        # [DIAG-SYNC] embedding 之后、diagnostic log 之前同步。
+        # 若修复 → 异步操作来自前面的 diagnostic log（line 55-68）
+        # 若不修复 → 异步操作来自 after_embed diagnostic（line 80-84）
+        if start_layer == 0:
+            from vllm_ascend.ascend_forward_context import _EXTRA_CTX as _CTX2
+            if not _CTX2.capturing and not getattr(_CTX2, "in_profile_run", False):
+                import torch_npu
+                torch_npu.npu.current_stream().synchronize()
 
         residual = None
     else:
