@@ -117,7 +117,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
                 layer.weight,
                 layer.weight_scale,
                 pertoken_scale=pertoken_scale,
-                bias=bias if self.act_quant_type == torch.int8 else None,
+                bias=bias,
                 output_dtype=x.dtype,
             )
         if need_unsqz:
@@ -145,8 +145,7 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
             del layer.weight_offset
         else:
             # cast quantized weight tensors in NZ format for higher inference speed
-            if self.act_quant_type == torch.int8:
-                layer.weight.data = maybe_trans_nz(layer.weight.data)
+            layer.weight.data = maybe_trans_nz(layer.weight.data)
             layer.weight_scale.data = layer.weight_scale.data.flatten()
             layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
             layer.weight_offset.data = layer.weight_offset.data.flatten()
