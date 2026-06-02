@@ -764,6 +764,8 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
+            # 确保 HCCL 回传数据在 NPU 上可用后再启动 segment_e forward
+            torch.npu.synchronize()
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
