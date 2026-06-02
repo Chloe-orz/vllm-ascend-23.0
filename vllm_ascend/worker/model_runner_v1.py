@@ -614,6 +614,9 @@ class NPUModelRunner(GPUModelRunner):
                     "additional_config.edge_cloud_config.enabled=true."
                 )
 
+        # [DIAG] 边云首请求排查标志：首次真实请求前需清零 KV cache
+        self._first_real_request = True
+
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -2138,6 +2141,33 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
+        # [DIAG] 首次真实请求前清零所有 KV cache 张量，排除 warmup 脏数据干扰
+        if self._first_real_request:
+            self._first_real_request = False
+            if hasattr(self, "kv_caches") and self.kv_caches:
+                logger.info(
+                    "[EdgeCloud DIAG] Zeroing %d KV cache tensors before "
+                    "first real request (role=%s)",
+                    len(self.kv_caches), self.edge_cloud_cfg.role
+                    if self._edge_cloud_enabled else "none",
+                )
+                for kv_cache_tensor in self.kv_caches:
+                    if kv_cache_tensor is not None:
+                        kv_cache_tensor.zero_()
+                torch.npu.synchronize()
+            if hasattr(self, "cross_layers_kv_cache") and self.cross_layers_kv_cache is not None:
+                self.cross_layers_kv_cache.zero_()
+            # 同时清零 attention backend 层内的 key_cache / value_cache 引用
+            for attn_group in self.attn_groups:
+                for attn_layer in attn_group:
+                    impl = getattr(attn_layer, "impl", None)
+                    if impl is not None:
+                        if hasattr(impl, "key_cache") and impl.key_cache is not None:
+                            impl.key_cache = None
+                        if hasattr(impl, "value_cache") and impl.value_cache is not None:
+                            impl.value_cache = None
+            logger.info("[EdgeCloud DIAG] KV cache zeroing complete")
+
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
         with (
@@ -3001,6 +3031,11 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None,
         sync_self: bool,
     ) -> IntermediateTensors:
+        # 边云场景：在 copy 前显式等待所有 HCCL comm handles，
+        # 确保远端 tensor 数据已完整到达后再执行 copy_。
+        if intermediate_tensors is not None and hasattr(intermediate_tensors, "wait_for_comm"):
+            intermediate_tensors.wait_for_comm()
+
         assert self.intermediate_tensors is not None
         tp = self.vllm_config.parallel_config.tensor_parallel_size
 
