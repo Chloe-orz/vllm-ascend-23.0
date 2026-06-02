@@ -2144,19 +2144,26 @@ class NPUModelRunner(GPUModelRunner):
         # [DIAG] 首次真实请求前清零所有 KV cache 张量，排除 warmup 脏数据干扰
         if self._first_real_request:
             self._first_real_request = False
+
+            def _zero_tensor_or_tuple(obj):
+                if isinstance(obj, torch.Tensor):
+                    obj.zero_()
+                elif isinstance(obj, (list, tuple)):
+                    for item in obj:
+                        _zero_tensor_or_tuple(item)
+
             if hasattr(self, "kv_caches") and self.kv_caches:
                 logger.info(
-                    "[EdgeCloud DIAG] Zeroing %d KV cache tensors before "
+                    "[EdgeCloud DIAG] Zeroing KV cache (entries=%d) before "
                     "first real request (role=%s)",
                     len(self.kv_caches), self.edge_cloud_cfg.role
                     if self._edge_cloud_enabled else "none",
                 )
-                for kv_cache_tensor in self.kv_caches:
-                    if kv_cache_tensor is not None:
-                        kv_cache_tensor.zero_()
+                for entry in self.kv_caches:
+                    _zero_tensor_or_tuple(entry)
                 torch.npu.synchronize()
             if hasattr(self, "cross_layers_kv_cache") and self.cross_layers_kv_cache is not None:
-                self.cross_layers_kv_cache.zero_()
+                _zero_tensor_or_tuple(self.cross_layers_kv_cache)
             # 同时清零 attention backend 层内的 key_cache / value_cache 引用
             for attn_group in self.attn_groups:
                 for attn_layer in attn_group:
