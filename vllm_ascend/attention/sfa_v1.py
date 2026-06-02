@@ -66,9 +66,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_with_layer_shard,
     enable_dsa_cp_with_o_proj_tp,
-    enable_sfa_dcp_replicated_indexer,
     enable_sp,
-    get_ascend_device_type,
     get_weight_prefetch_method,
     maybe_trans_nz,
 )
@@ -1620,9 +1618,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 cache_mode="PA_BSND",
             )
         # run mlapo ops when dsa-cp is disabled, and ensure that num_tokens satisfies the count limitation
-        elif self.enable_mlapo and (
-            get_ascend_device_type() == AscendDeviceType.A5 or num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS
-        ):
+        if self.enable_mlapo and num_input_tokens <= MLAPO_MAX_SUPPORTED_TOKENS:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states.contiguous(), need_gather_q_kv
             )
