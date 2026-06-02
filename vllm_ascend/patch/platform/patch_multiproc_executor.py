@@ -203,6 +203,43 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
 
 class AscendWorkerProc(WorkerProc):
+    def _init_message_queues(
+        self, input_shm_handle: Handle, vllm_config: VllmConfig
+    ) -> None:
+        if vllm_config.parallel_config.nnodes_within_dp == 1:
+            # Single-node: use local MQ
+            self.rpc_broadcast_mq = MessageQueue.create_from_handle(
+                input_shm_handle, self.worker.rank
+            )
+            self.worker_response_mq = MessageQueue(1, 1)
+            self.peer_response_handles = []
+            self.local_rpc_broadcast_mq = None
+            self.local_worker_response_mq = None
+        elif envs.VLLM_PP_NON_LEADER_ENGINE_CORE:
+            # Non-leader PP rank with passive EngineCore:
+            # Dual MQ — local MQ for passive enginecore handshake +
+            # cross-node MQ for actual communication with pp rank0.
+            from vllm.distributed.parallel_state import get_inner_dp_world_group
+            # Local MQs (for passive enginecore handshake only)
+            self.local_rpc_broadcast_mq = MessageQueue.create_from_handle(
+                input_shm_handle, self.local_rank
+            )
+            self.local_worker_response_mq = MessageQueue(1, 1)
+            self.local_peer_response_handles: list = []
+            # Cross-node MQs (for actual work with pp rank0)
+            self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
+                external_writer_handle=None,
+                blocking=False,
+            )
+            self.worker_response_mq, self.peer_response_handles = (
+                get_inner_dp_world_group().create_single_reader_mq_broadcasters(
+                    reader_rank_in_group=0
+                )
+            )
+        else:
+            # Delegate to parent class for the inner_dp_world_group path
+            super()._init_message_queues(input_shm_handle, vllm_config)
+
     @staticmethod
     def make_worker_process(
         vllm_config: VllmConfig,
@@ -250,43 +287,6 @@ class AscendWorkerProc(WorkerProc):
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
-
-    def _init_message_queues(
-        self, input_shm_handle: Handle, vllm_config: VllmConfig
-    ) -> None:
-        if vllm_config.parallel_config.nnodes_within_dp == 1:
-            # Single-node: use local MQ
-            self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-                input_shm_handle, self.worker.rank
-            )
-            self.worker_response_mq = MessageQueue(1, 1)
-            self.peer_response_handles = []
-            self.local_rpc_broadcast_mq = None
-            self.local_worker_response_mq = None
-        elif envs.VLLM_PP_NON_LEADER_ENGINE_CORE:
-            # Non-leader PP rank with passive EngineCore:
-            # Dual MQ — local MQ for passive enginecore handshake +
-            # cross-node MQ for actual communication with pp rank0.
-            from vllm.distributed.parallel_state import get_inner_dp_world_group
-            # Local MQs (for passive enginecore handshake only)
-            self.local_rpc_broadcast_mq = MessageQueue.create_from_handle(
-                input_shm_handle, self.local_rank
-            )
-            self.local_worker_response_mq = MessageQueue(1, 1)
-            self.local_peer_response_handles: list = []
-            # Cross-node MQs (for actual work with pp rank0)
-            self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
-                external_writer_handle=None,
-                blocking=False,
-            )
-            self.worker_response_mq, self.peer_response_handles = (
-                get_inner_dp_world_group().create_single_reader_mq_broadcasters(
-                    reader_rank_in_group=0
-                )
-            )
-        else:
-            # Delegate to parent class for the inner_dp_world_group path
-            super()._init_message_queues(input_shm_handle, vllm_config)
 
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
