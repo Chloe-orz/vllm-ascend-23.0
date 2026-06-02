@@ -37,6 +37,13 @@ def _forward_edge_cloud_segment_qwen3_5(
     is_last_segment: bool | None = None,
     **extra_layer_kwargs: Any,
 ) -> torch.Tensor | IntermediateTensors:
+    # [DIAG-SYNC] seg_a 入口处强制同步。
+    # 若此处 sync 修复 → 异步操作在 seg_a 外部（输入准备/update_cos_sin等）
+    # 若此处 sync 不修复 → 异步操作在 seg_a 内部（embedding/log 段）
+    if start_layer == 0:
+        import torch_npu
+        torch_npu.npu.current_stream().synchronize()
+
     num_layers = len(self.layers)
     assert 0 <= start_layer <= end_layer <= num_layers, (
         f"Invalid segment range [{start_layer}, {end_layer}) for {num_layers} layers"
@@ -95,50 +102,6 @@ def _forward_edge_cloud_segment_qwen3_5(
     for layer_idx, layer in enumerate(
         islice(self.layers, start_layer, end_layer), start=start_layer
     ):
-        # [DIAG] 对 seg_a 的首层，使用 forward hook 捕获子模块中间输出
-        _hooks = []
-        _hook_stats = {}
-        if is_first_segment and layer_idx == start_layer:
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
-            if not _EXTRA_CTX.capturing and not getattr(_EXTRA_CTX, "in_profile_run", False):
-                def _make_hook(name):
-                    def _hook(_module, _args, _kwargs, output):
-                        out = output[0] if isinstance(output, tuple) else output
-                        if isinstance(out, torch.Tensor):
-                            _hook_stats[name] = (
-                                out.float().mean().item(),
-                                out.float().std().item(),
-                                torch.isnan(out).sum().item(),
-                                torch.isinf(out).sum().item(),
-                            )
-                        # 同时捕获 residual（元组第二个元素）
-                        if isinstance(output, tuple) and len(output) > 1:
-                            res = output[1]
-                            if isinstance(res, torch.Tensor):
-                                _hook_stats[name + "_residual"] = (
-                                    res.float().mean().item(),
-                                    res.float().std().item(),
-                                    torch.isnan(res).sum().item(),
-                                    torch.isinf(res).sum().item(),
-                                )
-                    return _hook
-
-                # 注意：self_attn.forward() 无返回值（原地写入 output），
-                # 故 hook self_attn 内部实际返回 tensor 的子模块：
-                #   qkv_proj → QKV 投影输出
-                #   o_proj   → 注意力输出（QKV_proj → Q/K_norm → RoPE → Attn → O_proj）
-                for sub_name, sub_mod in layer.named_modules():
-                    if sub_name in (
-                        "input_layernorm",
-                        "self_attn.qkv_proj",
-                        "self_attn.o_proj",
-                        "post_attention_layernorm",
-                        "mlp",
-                    ):
-                        h = sub_mod.register_forward_hook(_make_hook(sub_name), with_kwargs=True)
-                        _hooks.append(h)
-
         hidden_states, residual = layer(
             hidden_states=hidden_states,
             residual=residual,
@@ -146,32 +109,6 @@ def _forward_edge_cloud_segment_qwen3_5(
             **extra_layer_kwargs,
         )
 
-        for h in _hooks:
-            h.remove()
-
-        # 记录首层各子模块的中间状态
-        if is_first_segment and layer_idx == start_layer:
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
-            if not _EXTRA_CTX.capturing and not getattr(_EXTRA_CTX, "in_profile_run", False):
-                logger.info(
-                    "[EdgeCloud seg_a DIAG] call=%d after_layer=%d "
-                    "hidden_mean=%.6f hidden_std=%.6f nan=%d inf=%d "
-                    "residual_mean=%.6f residual_std=%.6f",
-                    _seg_call_count, layer_idx,
-                    hidden_states.float().mean().item(),
-                    hidden_states.float().std().item(),
-                    torch.isnan(hidden_states).sum().item(),
-                    torch.isinf(hidden_states).sum().item(),
-                    residual.float().mean().item() if residual is not None else -1.0,
-                    residual.float().std().item() if residual is not None else -1.0,
-                )
-                for name, (m, s, n, inf) in sorted(_hook_stats.items()):
-                    logger.info(
-                        "[EdgeCloud seg_a DIAG] call=%d %s "
-                        "mean=%.6f std=%.6f nan=%d inf=%d",
-                        _seg_call_count, name, m, s, n, inf,
-                    )
 
     if not is_last_segment:
         if residual is None:
