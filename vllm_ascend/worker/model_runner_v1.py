@@ -2869,6 +2869,25 @@ class NPUModelRunner(GPUModelRunner):
                     _EXTRA_CTX.layer_idx = old_layer_idx
 
             assert isinstance(hidden_states, IntermediateTensors)
+
+            # [DIAG] 检查 Edge seg_a 输出 hidden_states（仅首次非 warmup）
+            if not getattr(forward_context, "in_profile_run", False) and not getattr(self, '_diag_edge_seg_a_done', False):
+                hs = hidden_states["hidden_states"]
+                logger.info(
+                    "[DIAG] Edge seg_a output hidden_states: "
+                    "shape=%s mean=%f std=%f min=%f max=%f",
+                    list(hs.shape), hs.mean().item(), hs.std().item(),
+                    hs.min().item(), hs.max().item(),
+                )
+                rs = hidden_states["residual"]
+                logger.info(
+                    "[DIAG] Edge seg_a output residual: "
+                    "shape=%s mean=%f std=%f min=%f max=%f",
+                    list(rs.shape), rs.mean().item(), rs.std().item(),
+                    rs.min().item(), rs.max().item(),
+                )
+                self._diag_edge_seg_a_done = True
+
             return hidden_states
 
         # Step 2：执行 Segment E（尾 tail_k 层 + norm）
@@ -2993,6 +3012,7 @@ class NPUModelRunner(GPUModelRunner):
                 rs.min().item(), rs.max().item(),
             )
             self._diag_cloud_input_done = True
+            self._diag_cloud_first_done = True
 
         try:
             hidden_states = seg_c(
@@ -3006,6 +3026,13 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
+        except BaseException:
+            logger.exception(
+                "[DIAG] Cloud seg_c FAILED with exception "
+                "(in_warmup=%s, use_graph=%s, num_tokens=%s)",
+                in_warmup, use_graph, num_tokens_padded,
+            )
+            raise
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
