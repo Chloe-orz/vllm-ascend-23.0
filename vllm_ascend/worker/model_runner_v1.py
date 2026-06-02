@@ -49,7 +49,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
-from vllm.distributed.parallel_state import is_edge_device
+from vllm.distributed.parallel_state import is_edge_device, is_edge_cloud_pp_mode
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -328,19 +328,6 @@ class EdgeCloudSegment(torch.nn.Module):
             is_last_segment=self._is_last_segment,
             **extra_layer_kwargs,
         )
-
-@dataclass
-class HeadState:
-    """Minimal suspended state for an edge-cloud head-segment batch.
-
-    The heavy intermediate tensors (hidden states) are sent to the cloud
-    immediately; we only keep enough metadata to correlate the tail-segment
-    batch with its head segment via ``head_token``.
-    """
-    head_token: str
-    scheduler_output: "SchedulerOutput"
-    req_ids: tuple[str, ...]
-
 
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -833,26 +820,16 @@ class NPUModelRunner(GPUModelRunner):
         is_first_segment: bool | None = None,
         is_last_segment: bool | None = None,
     ) -> Any:
-        def _segment_forward(
-            input_ids: torch.Tensor | None = None,
-            positions: torch.Tensor | None = None,
-            intermediate_tensors: IntermediateTensors | None = None,
-            inputs_embeds: torch.Tensor | None = None,
-            **extra_layer_kwargs: Any,
-        ) -> torch.Tensor | IntermediateTensors:
-            return model.forward_edge_cloud_segment(
-                start_layer,
-                end_layer,
-                input_ids,
-                positions,
-                intermediate_tensors,
-                inputs_embeds,
-                is_first_segment=is_first_segment,
-                is_last_segment=is_last_segment,
-                **extra_layer_kwargs,
-            )
+        """创建一个仅执行指定层区间 [start_layer, end_layer) 的 nn.Module。
 
-        return _segment_forward
+        返回 EdgeCloudSegment（nn.Module 子类）而非函数闭包，
+        确保 ACLGraphWrapper 包裹的是标准 nn.Module，与标准流程的
+        图捕获方式对齐（torch.npu.graph 捕获 nn.Module.forward()）。
+
+        边云场景下所有模型均已在加载阶段通过对应 patch 文件注入
+        forward_edge_cloud_segment，因此直接委托即可，无需额外 fallback。
+        """
+        return EdgeCloudSegment(model, start_layer, end_layer, is_first_segment, is_last_segment)
 
     def _wrap_segment_if_needed(
         self,
@@ -953,6 +930,10 @@ class NPUModelRunner(GPUModelRunner):
             for idx, layer in enumerate(transformer_model.layers)
         ]
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
+
+        # 创建分段 callable 并按需包装 ACLGraphWrapper
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
 
         if self.edge_cloud_cfg.role == "edge":
             self.segment_a = self._create_segment_callable(
@@ -2692,22 +2673,6 @@ class NPUModelRunner(GPUModelRunner):
                     self.debugger.step()
                 return hidden_states
 
-            # --- Layer slice: save intermediate state for non-last ---
-            if (
-                layer_slice_info is not None
-                and not layer_slice_info.is_last_slice
-            ):
-                # The model returns IntermediateTensors for non-last PP
-                # ranks.  Detach the hidden/residual so they serve as
-                # fresh inputs for the next slice's forward pass.
-                assert isinstance(hidden_states, IntermediateTensors)
-                self._layerwise_intermediate = hidden_states
-                if self.debugger is not None:
-                    self.debugger.stop()
-                    self.debugger.step()
-                return None
-            # --- End layerwise chunk save ---
-
             if not self.broadcast_pp_output:
                 # Common case.
                 if self._edge_cloud_enabled and isinstance(
@@ -3358,25 +3323,14 @@ class NPUModelRunner(GPUModelRunner):
         forward_context = get_forward_context()
         assert forward_context is not None
 
-        model_inputs: dict[str, Any] = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "intermediate_tensors": intermediate_tensors,
-            "inputs_embeds": inputs_embeds,
-            **model_kwargs,
-        }
-        if self._edge_cloud_enabled:
-            if self.edge_cloud_cfg.role == "edge":
-                segment = (
-                    self.segment_a_wrapper
-                    if intermediate_tensors is None
-                    else self.segment_e_wrapper
-                )
-            else:
-                segment = self.segment_c_wrapper
-            run_model = partial(segment, **model_inputs)
-        else:
-            run_model = partial(self.model, **model_inputs)
+        # 判断当前是否应使用 ACL Graph（Decode 阶段且配置允许时）
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        if hasattr(cudagraph_runtime_mode, "decode_mode"):
+            cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
+        use_graph = (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.edge_cloud_cfg.enable_decode_graph
+        )
 
         if self.edge_cloud_cfg.role == "edge":
             return self._edge_cloud_forward_edge(
@@ -3475,203 +3429,6 @@ class NPUModelRunner(GPUModelRunner):
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
-
-    def _execute_layerwise_continuation(
-        self,
-        layer_slice_info: Any,
-    ) -> IntermediateTensors | None:
-        """Run model forward for a non-first layer slice.
-
-        On the first slice, execute_model set up all the batch state
-        (requests, attention metadata, positions, etc.) and saved the
-        intermediate hidden_states/residual in
-        ``self._layerwise_intermediate``.  Subsequent slices only need to
-        feed that intermediate state back into the model for the current
-        slice's layer range.
-        """
-        assert self._layerwise_intermediate is not None, (
-            "Layer slice continuation requires saved intermediate state from "
-            "the previous slice.  Was slice 0 executed first?"
-        )
-
-        intermediate_tensors = self._layerwise_intermediate
-        self._layerwise_intermediate = None
-
-        # Re-use the positions and attention metadata that slice 0 prepared.
-        positions = self._layerwise_positions
-        attn_metadata = self._layerwise_attn_metadata
-        num_tokens_padded = self._layerwise_num_tokens_padded
-        num_tokens_across_dp = self._layerwise_num_tokens_across_dp
-        batch_desc = self._layerwise_batch_desc
-
-        has_encoder_input = False
-        clear_kv_metadata = self.speculative_config is None
-
-        with (
-            record_function_or_nullcontext("layerwise forward"),
-            set_ascend_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens_padded,
-                num_tokens_across_dp=num_tokens_across_dp,
-                aclgraph_runtime_mode=CUDAGraphMode.NONE,
-                batch_descriptor=batch_desc,
-                num_actual_tokens=num_tokens_padded,
-                model_instance=self.model,
-                max_tokens_across_pcp=0,
-                skip_compiled=has_encoder_input,
-            ),
-            self.maybe_get_kv_connector_output(
-                self._layerwise_scheduler_output,
-                **({"defer_finalize": not clear_kv_metadata}),
-            ) as kv_connector_output,
-        ):
-            hidden_states = self._model_forward(
-                num_tokens_padded,
-                None,               # input_ids
-                positions,
-                intermediate_tensors,
-                None,               # inputs_embeds
-                layer_slice_info=layer_slice_info,
-            )
-
-        with record_function_or_nullcontext("layerwise post process"):
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = hidden_states
-            if self.pcp_size > 1:
-                hidden_states = self.pcp_manager.get_restore_hidden_states(
-                    hidden_states
-                )
-
-            # Non-last slice: save intermediate and return None.
-            if not layer_slice_info.is_last_slice:
-                assert isinstance(hidden_states, IntermediateTensors)
-                self._layerwise_intermediate = hidden_states
-                return None
-
-            # Last slice on a non-final PP rank: return IntermediateTensors
-            # so NPUWorker performs the PP send.
-            if not get_pp_group().is_last_rank:
-                assert isinstance(hidden_states, IntermediateTensors)
-                hidden_states.kv_connector_output = kv_connector_output
-                self.kv_connector_output = kv_connector_output
-                return hidden_states
-
-            # Last slice on the last PP rank: the model returned logits
-            # (after norm + lm_head).  Replicate the post-processing from
-            # execute_model() so that sample_tokens() can produce the
-            # final ModelRunnerOutput.
-            assert not isinstance(hidden_states, IntermediateTensors)
-            assert not self.broadcast_pp_output, (
-                "Layerwise chunking with broadcast_pp_output is not yet "
-                "supported on the last PP rank."
-            )
-            assert not self.is_pooling_model, (
-                "Layerwise chunking with pooling models is not yet "
-                "supported on the last PP rank."
-            )
-            logits_indices = self._layerwise_logits_indices
-            sample_hidden_states = hidden_states[logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states)
-            self.execute_model_state = ExecuteModelState(
-                self._layerwise_scheduler_output,
-                logits,
-                self._layerwise_spec_decode_metadata,
-                self._layerwise_spec_decode_common_attn_metadata,
-                hidden_states,
-                sample_hidden_states,
-                None,   # aux_hidden_states
-                self._layerwise_attn_metadata,
-                self._layerwise_positions,
-                self._layerwise_ec_connector_output,
-                self._layerwise_cudagraph_stats,
-                self._layerwise_batch_desc,
-            )
-            self.kv_connector_output = kv_connector_output
-            return None
-
-    def suspend_head_state(self, scheduler_output: SchedulerOutput) -> None:
-        """Suspend the minimal head-segment context for later tail-segment pairing.
-
-        Called just before the edge head-segment returns IntermediateTensors
-        to the worker for cross-node transmission.
-        """
-        token = scheduler_output.head_token
-        if not token:
-            return
-        if token in self._pending_head_states:
-            raise RuntimeError(
-                f"head_token={token} already suspended; "
-                "previous tail did not consume it"
-            )
-        self._pending_head_states[token] = HeadState(
-            head_token=token,
-            scheduler_output=scheduler_output,
-            req_ids=tuple(self.input_batch.req_ids),
-        )
-
-    def _resume_and_validate_head_state(
-        self,
-        scheduler_output: SchedulerOutput,
-        intermediate_tensors: IntermediateTensors,
-    ) -> None:
-        """Validate control-plane / data-plane alignment for a tail segment.
-
-        The EngineCore sends the head_token over ZMQ (control plane); the
-        cloud worker echoes it back inside the intermediate tensors payload
-        (data plane).  Both must match before we execute the tail segment.
-        """
-        token_ctrl = scheduler_output.head_token
-        if not token_ctrl:
-            raise RuntimeError(
-                "PL/DL scheduler_output must carry head_token from cloud"
-            )
-
-        token_tensor = intermediate_tensors.tensors.pop("_head_token", None)
-        if token_tensor is None:
-            raise RuntimeError(
-                "intermediate_tensors missing '_head_token'; "
-                "cloud worker must embed it"
-            )
-        token_pp = bytes(token_tensor.cpu().numpy().tolist()).decode("utf-8")
-
-        if token_ctrl != token_pp:
-            raise RuntimeError(
-                f"Control-plane vs data-plane head_token mismatch: "
-                f"ZMQ={token_ctrl}, PP={token_pp}"
-            )
-
-        head_state = self._pending_head_states.pop(token_ctrl, None)
-        if head_state is None:
-            raise RuntimeError(
-                f"No suspended HeadState for head_token={token_ctrl}; "
-                f"tail dispatched without matching head or already consumed"
-            )
-
-        expected = self._expected_tail_batch_type(
-            head_state.scheduler_output.batch_type
-        )
-        if scheduler_output.batch_type != expected:
-            raise RuntimeError(
-                f"HeadState batch_type mismatch: head was "
-                f"{head_state.scheduler_output.batch_type}, "
-                f"tail is {scheduler_output.batch_type}"
-            )
-
-        tail_req_ids = tuple(scheduler_output.num_scheduled_tokens)
-        if tail_req_ids != head_state.req_ids:
-            raise RuntimeError(
-                f"HeadState req_ids mismatch: head had "
-                f"{head_state.req_ids}, tail scheduler_output has "
-                f"{tail_req_ids}"
-            )
-
-    @staticmethod
-    def _expected_tail_batch_type(head_bt: BatchType) -> BatchType:
-        return {
-            BatchType.PREFILL_FIRST: BatchType.PREFILL_LAST,
-            BatchType.DECODE_FIRST: BatchType.DECODE_LAST,
-        }[head_bt]
 
     def _edge_cloud_forward_cloud(
         self,
@@ -4485,12 +4242,6 @@ class NPUModelRunner(GPUModelRunner):
                     intermediate_tensors = IntermediateTensors(
                         {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                     )
-                    logger.info(
-                        "[Cloud _dummy_run] Sliced intermediate_tensors["
-                        "'hidden_states'] shape=%s for intermediate_tokens=%d",
-                        list(intermediate_tensors["hidden_states"].shape),
-                        intermediate_tokens,
-                    )
             elif get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
@@ -4569,6 +4320,10 @@ class NPUModelRunner(GPUModelRunner):
                 target.clear_all_moe_loads()
             if self.dynamic_eplb:
                 self.eplb_updator.forward_end()
+            self._finalize_dump_data(dump=False)
+            if self.use_compress and force_attention:
+                self.positions.fill_(0)
+                self._dsa_positions_cpu_buf.fill_(0)
 
             # ========== Edge 设备特殊处理：Edge 首阶段需要执行最后一层 ==========
             if is_edge_device():
@@ -4580,7 +4335,7 @@ class NPUModelRunner(GPUModelRunner):
                 if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
                     intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
-                if self.intermediate_tensors is None:
+                if self.intermediate_tensors is None:  # 增加deepseek-v4判断
                     max_actual_tokens = self.max_num_tokens
                     if enable_sp():
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
@@ -4593,54 +4348,54 @@ class NPUModelRunner(GPUModelRunner):
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
 
-            need_dummy_logits = not is_profile and lmhead_tp_enable()
-            max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-            dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
+                need_dummy_logits = not is_profile and lmhead_tp_enable()
+                max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
+                dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
 
-            with set_ascend_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens_padded,
-                num_tokens_across_dp=num_tokens_across_dp,
-                in_profile_run=is_profile,
-                num_actual_tokens=num_tokens_padded,
-                aclgraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_desc,
-                model_instance=self.model,
-            ):
-                outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
-                )
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
-            elif isinstance(outputs, IntermediateTensors):
-                hidden_states = outputs["hidden_states"]
-            else:
-                hidden_states = outputs
-            dummy_compute_logits(hidden_states)
-
-            if self.drafter:
-                self.drafter.dummy_run(
+                with set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
                     num_tokens=num_tokens_padded,
-                    with_prefill=with_prefill,
-                    num_reqs=num_reqs_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    in_profile_run=is_profile,
+                    num_actual_tokens=num_tokens_padded,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
-                    dummy_compute_logits=dummy_drafter_compute_logits,
-                    in_graph_capturing=not force_attention,
-                    is_profile=is_profile,
-                )
-            if is_profile and self.dynamic_eplb:
-                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
-                target.clear_all_moe_loads()
-            if self.dynamic_eplb:
-                self.eplb_updator.forward_end()
+                    model_instance=self.model,
+                ):
+                    outputs = self._model_forward(
+                        num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    )
+                if self.use_aux_hidden_state_outputs:
+                    hidden_states, _ = outputs
+                elif isinstance(outputs, IntermediateTensors):
+                    hidden_states = outputs["hidden_states"]
+                else:
+                    hidden_states = outputs
+                dummy_compute_logits(hidden_states)
 
-            self._finalize_dump_data(dump=False)
-            if self.use_compress and force_attention:
-                self.positions.fill_(0)
-                self._dsa_positions_cpu_buf.fill_(0)
+                if self.drafter:
+                    self.drafter.dummy_run(
+                        num_tokens=num_tokens_padded,
+                        with_prefill=with_prefill,
+                        num_reqs=num_reqs_padded,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        aclgraph_runtime_mode=cudagraph_runtime_mode,
+                        batch_descriptor=batch_desc,
+                        dummy_compute_logits=dummy_drafter_compute_logits,
+                        in_graph_capturing=not force_attention,
+                        is_profile=is_profile,
+                    )
+                if is_profile and self.dynamic_eplb:
+                    target = self.model.language_model if hasattr(self.model, "language_model") else self.model
+                    target.clear_all_moe_loads()
+                if self.dynamic_eplb:
+                    self.eplb_updator.forward_end()
+
+                self._finalize_dump_data(dump=False)
+                if self.use_compress and force_attention:
+                    self.positions.fill_(0)
+                    self._dsa_positions_cpu_buf.fill_(0)
             return hidden_states, hidden_states
 
 
@@ -6148,10 +5903,24 @@ class NPUModelRunner(GPUModelRunner):
         return wrappers
 
     def capture_model(self) -> int:
-        """Capture NPU graphs and return actual graph pool memory bytes consumed."""
-        if self._edge_cloud_enabled:
+        # 边云模式的 ACL Graph 仍依赖父类 capture 循环触发 _dummy_run。
+        # 实际捕获发生在 segment 级 ACLGraphWrapper 内，通信保持在图外。
+        if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
             return 0
-        parent_module_name = _get_gpu_model_runner_module_name(self)
+
+        gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)
+        if gpu_model_runner_cls is None:
+            raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
+        parent_module_name = gpu_model_runner_cls.__module__
+        # profile_cudagraph_memory 阶段 ACLGraphWrapper 已捕获过图，
+        # 但 CUDAGraphWrapper.clear_all_graphs() 不清除 ACLGraphWrapper
+        # 的 concrete_aclgraph_entries。保留的 entry 会导致 capture_model
+        # 中 _warmup_and_capture 走 REPLAY 而非 CAPTURE 路径，
+        # REPLAY 时 forward_context.capturing 保持 False，
+        # 使得 _update_full_graph_params_if_needed 错误执行 → 挂死。
+        # 因此这里手动清空，强制重新 capture。
+        for wrapper in self._get_aclgraph_wrappers():
+            wrapper.concrete_aclgraph_entries.clear()
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
         return result
