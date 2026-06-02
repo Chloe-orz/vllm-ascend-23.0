@@ -410,6 +410,7 @@ def find_longest_cache_hit(
 
 vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordinator
 vllm.v1.core.single_type_kv_cache_manager.SlidingWindowManager.find_longest_cache_hit = find_longest_cache_hit
+vllm.v1.core.kv_cache_coordinator.get_manager_for_kv_cache_spec = get_manager_for_kv_cache_spec
 
 # `kv_cache_manager` imports `get_kv_cache_coordinator` with
 # `from ... import ...`, so if it was loaded before this patch runs
