@@ -2908,6 +2908,27 @@ class NPUModelRunner(GPUModelRunner):
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
+
+        # [DIAG] 检查 Edge seg_e 最终输出 hidden_states（仅首次非 warmup）
+        if intermediate_tensors is not None and not getattr(self, '_diag_edge_e_done', False):
+            if isinstance(hidden_states, torch.Tensor):
+                logger.info(
+                    "[DIAG] Edge seg_e output hidden_states (after norm): "
+                    "shape=%s mean=%f std=%f min=%f max=%f",
+                    list(hidden_states.shape), hidden_states.mean().item(),
+                    hidden_states.std().item(), hidden_states.min().item(),
+                    hidden_states.max().item(),
+                )
+            elif isinstance(hidden_states, IntermediateTensors):
+                hs = hidden_states["hidden_states"]
+                logger.info(
+                    "[DIAG] Edge seg_e output (IntermediateTensors) hidden_states: "
+                    "shape=%s mean=%f std=%f min=%f max=%f",
+                    list(hs.shape), hs.mean().item(), hs.std().item(),
+                    hs.min().item(), hs.max().item(),
+                )
+            self._diag_edge_e_done = True
+
         return hidden_states
 
     def _edge_cloud_forward_cloud(
@@ -2955,22 +2976,25 @@ class NPUModelRunner(GPUModelRunner):
         old_layer_idx = _EXTRA_CTX.layer_idx
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
+        # [DIAG] 检查输入 hidden_states 统计量（仅首次非 warmup 请求）
+        if not in_warmup and not getattr(self, '_diag_cloud_first_done', False):
+            hs = intermediate_tensors["hidden_states"]
+            logger.info(
+                "[DIAG] Cloud seg_c input hidden_states: "
+                "shape=%s mean=%f std=%f min=%f max=%f",
+                list(hs.shape), hs.mean().item(), hs.std().item(),
+                hs.min().item(), hs.max().item(),
+            )
+            rs = intermediate_tensors["residual"]
+            logger.info(
+                "[DIAG] Cloud seg_c input residual: "
+                "shape=%s mean=%f std=%f min=%f max=%f",
+                list(rs.shape), rs.mean().item(), rs.std().item(),
+                rs.min().item(), rs.max().item(),
+            )
+            self._diag_cloud_input_done = True
+
         try:
-            # if seg_c_graph:
-            #     torch.npu.current_stream().synchronize()
-            fc = get_forward_context()
-            num_entries = len(seg_c.concrete_aclgraph_entries) if seg_c_graph else -1
-            bd = fc.batch_descriptor
-            # logger.info(
-            #     "[DEBUG] cloud forward: seg_c_graph=%s capturing=%s "
-            #     "entries=%d use_graph=%s bd=(%s,%s,%s,%s)",
-            #     seg_c_graph, fc.capturing if fc else "N/A",
-            #     num_entries, use_graph,
-            #     bd.num_tokens if bd else "N/A",
-            #     bd.num_reqs if bd else "N/A",
-            #     bd.uniform if bd else "N/A",
-            #     "lora" if (bd and bd.has_lora) else "no_lora",
-            # )
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2985,6 +3009,24 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
+
+        # [DIAG] 检查输出 hidden_states 统计量（仅首次非 warmup 请求）
+        if not in_warmup and not getattr(self, '_diag_cloud_output_done', False):
+            hs = hidden_states["hidden_states"]
+            logger.info(
+                "[DIAG] Cloud seg_c output hidden_states: "
+                "shape=%s mean=%f std=%f min=%f max=%f",
+                list(hs.shape), hs.mean().item(), hs.std().item(),
+                hs.min().item(), hs.max().item(),
+            )
+            rs = hidden_states["residual"]
+            logger.info(
+                "[DIAG] Cloud seg_c output residual: "
+                "shape=%s mean=%f std=%f min=%f max=%f",
+                list(rs.shape), rs.mean().item(), rs.std().item(),
+                rs.min().item(), rs.max().item(),
+            )
+            self._diag_cloud_output_done = True
 
         # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
         assert isinstance(hidden_states, IntermediateTensors)
