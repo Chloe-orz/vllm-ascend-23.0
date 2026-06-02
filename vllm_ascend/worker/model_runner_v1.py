@@ -2158,26 +2158,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
-       
-        # If ngram_gpu is used, we need to copy the scheduler_output to avoid
-        # the modification has influence on the scheduler_output in engine core process.
-        # The replace is much faster than deepcopy.
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.use_ngram_gpu()
-        ):
-            num_scheduled_tokens_copy = scheduler_output.num_scheduled_tokens.copy()
-            spec_decode_tokens_copy = (
-                scheduler_output.scheduled_spec_decode_tokens.copy()
-            )
-            scheduler_output = replace(
-                scheduler_output,
-                num_scheduled_tokens=num_scheduled_tokens_copy,
-                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
-            )
 
-        self._start_dump_data()
-        
         # --- Layer slice: non-first slice fast path ---
         # For slices 1..N-1, the batch state (requests, attention metadata,
         # positions, etc.) was already set up by slice 0.  We only need to
@@ -2197,6 +2178,24 @@ class NPUModelRunner(GPUModelRunner):
             )
         # --- End layer slice fast path ---
 
+        # If ngram_gpu is used, we need to copy the scheduler_output to avoid
+        # the modification has influence on the scheduler_output in engine core process.
+        # The replace is much faster than deepcopy.
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        ):
+            num_scheduled_tokens_copy = scheduler_output.num_scheduled_tokens.copy()
+            spec_decode_tokens_copy = (
+                scheduler_output.scheduled_spec_decode_tokens.copy()
+            )
+            scheduler_output = replace(
+                scheduler_output,
+                num_scheduled_tokens=num_scheduled_tokens_copy,
+                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
+            )
+
+        self._start_dump_data()
         # self._draft_token_ids is None when `input_fits_in_drafter=False`
         # and there is no draft tokens scheduled. so it need to update the
         # spec_decoding info in scheduler_output with async_scheduling.
@@ -2346,7 +2345,7 @@ class NPUModelRunner(GPUModelRunner):
                     should_ubatch,
                     num_tokens_across_dp,
                 )
-                
+
                 # Layerwise chunked execution requires eager mode because
                 # each chunk is a separate execute_model call with a
                 # different layer range, which is incompatible with a
@@ -2515,6 +2514,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
+
         # Save per-step state for layer slice continuation.
         if layer_slice_info is not None and not layer_slice_info.is_last_slice:
             self._layerwise_positions = positions
@@ -2528,6 +2528,7 @@ class NPUModelRunner(GPUModelRunner):
             self._layerwise_spec_decode_common_attn_metadata = spec_decode_common_attn_metadata
             self._layerwise_ec_connector_output = ec_connector_output
             self._layerwise_cudagraph_stats = cudagraph_stats
+
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2572,7 +2573,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
-                    
+
             # --- Layer slice: save intermediate state for non-last ---
             if (
                 layer_slice_info is not None

@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
+
 from enum import Enum
 from typing import Any
 import copy
@@ -76,11 +77,13 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
 class SchedulerBatchType(Enum):
     """Enum for the batch type of a SchedulerOutput step."""
     ALL_PREFILL = "ALL_PREFILL"
     ALL_DECODE = "ALL_DECODE"
     PREFILL_DECODE_MIXED = "PREFILL_DECODE_MIXED"
+
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -697,13 +700,13 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
-        intermediate_tensors = None
-        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-
         # Only receive intermediate tensors on the first slice.
         is_first_slice = (
             layer_slice_info is None or layer_slice_info.is_first_slice
         )
+
+        intermediate_tensors = None
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass:
             if is_cloud_device():
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
@@ -736,10 +739,8 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
-        output = self.model_runner.execute_model(
-            scheduler_output, intermediate_tensors,
- 	        layer_slice_info=layer_slice_info,
-        )
+        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors,
+                                                 layer_slice_info=layer_slice_info)
 
         # For non-last slices, the model_runner saves intermediate state
         # and returns None — skip PP send and return immediately.

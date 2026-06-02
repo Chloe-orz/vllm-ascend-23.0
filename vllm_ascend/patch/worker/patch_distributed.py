@@ -118,6 +118,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         # is a collective on the default group and must be called by
         # every rank, even for subgroups it does not belong to.
         self._all_group_ranks = group_ranks
+
         self.backend = _normalize_backend(torch_distributed_backend)
         self._acquired_hccl_keys: list[HcclPgKey] = []
         self._unshared_hccl_groups: list[object] = []
@@ -126,14 +127,6 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self.mq_broadcaster = None
         self.cpu_group = None
         self.device_group = None
-
-        # Alternate device/cpu groups for dual-channel PP communication.
-        # When set, these provide a second independent communication channel
-        # over the same ranks. Used in PP to separate decode from
-        # non-decode traffic.
-        self.alt_device_group: torch.distributed.ProcessGroup | None = None
-        self.alt_cpu_group: torch.distributed.ProcessGroup | None = None
-
         self.device = None
         self.use_custom_op_call = True
         self.use_cpu_custom_send_recv = False
@@ -145,7 +138,21 @@ class GroupCoordinatorPatch(GroupCoordinator):
             assert self.cpu_group is not None
             assert self.device_group is not None
 
-            self._init_device_communicator()
+            # Alternate device/cpu groups for dual-channel PP communication.
+            # When set, these provide a second independent communication channel
+            # over the same ranks. Used in PP to separate decode from
+            # non-decode traffic.
+            self.alt_device_group: torch.distributed.ProcessGroup | None = None
+            self.alt_cpu_group: torch.distributed.ProcessGroup | None = None
+
+            self.device = torch.npu.current_device()
+            if use_device_communicator and self.world_size > 1:
+                self.device_communicator = NPUCommunicator(
+                    cpu_group=self.cpu_group,
+                    device=self.device,
+                    device_group=self.device_group,
+                    unique_name=self.unique_name,
+                )
 
             from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 

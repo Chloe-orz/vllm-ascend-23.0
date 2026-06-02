@@ -265,7 +265,7 @@ def init_ascend_model_parallel(
             # For standard tp, use global tp group_ranks
             tp_group_ranks = all_ranks.view(-1, global_tp_size)
             _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
-            
+
     # Create alternate PP groups for dual-channel communication.
     # Primary (device_group/cpu_group): used for non-ALL_DECODE batches
     #   (ALL_PREFILL + PREFILL_DECODE_MIXED).
