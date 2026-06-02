@@ -43,12 +43,22 @@ def _forward_edge_cloud_segment_qwen3_5(
     if is_last_segment is None:
         is_last_segment = end_layer == num_layers and get_pp_group().is_last_rank
 
+    import logging
+    _diag_logger = logging.getLogger(__name__)
+
     if is_first_segment:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
             hidden_states = self.embed_input_ids(input_ids)
         residual = None
+        _diag_logger.info(
+            "[DIAG_LAYER] After embedding (before any layer): "
+            "shape=%s mean=%f std=%f min=%f max=%f",
+            list(hidden_states.shape), hidden_states.mean().item(),
+            hidden_states.std().item(), hidden_states.min().item(),
+            hidden_states.max().item(),
+        )
     else:
         assert intermediate_tensors is not None, (
             "intermediate_tensors is None in edge-cloud segment; "
@@ -57,13 +67,31 @@ def _forward_edge_cloud_segment_qwen3_5(
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
 
-    for layer in islice(self.layers, start_layer, end_layer):
+    for layer_idx_in_segment, layer in enumerate(islice(self.layers, start_layer, end_layer)):
+        if is_first_segment and layer_idx_in_segment == 0:
+            _diag_logger.info(
+                "[DIAG_LAYER] Before layer %d (first layer in seg): "
+                "hidden_states shape=%s mean=%f std=%f min=%f max=%f",
+                start_layer,
+                list(hidden_states.shape), hidden_states.mean().item(),
+                hidden_states.std().item(), hidden_states.min().item(),
+                hidden_states.max().item(),
+            )
         hidden_states, residual = layer(
             hidden_states=hidden_states,
             residual=residual,
             positions=positions,
             **extra_layer_kwargs,
         )
+        if is_first_segment and layer_idx_in_segment == 0:
+            _diag_logger.info(
+                "[DIAG_LAYER] After layer %d (first layer in seg): "
+                "hidden_states shape=%s mean=%f std=%f min=%f max=%f",
+                start_layer,
+                list(hidden_states.shape), hidden_states.mean().item(),
+                hidden_states.std().item(), hidden_states.min().item(),
+                hidden_states.max().item(),
+            )
 
     if not is_last_segment:
         if residual is None:
