@@ -104,7 +104,7 @@ def init_ascend_model_parallel(
     group_ranks = [x.tolist() for x in group_ranks]
 
     global _MC2
-    _MC2 = init_model_parallel_group(group_ranks, get_world_group().local_rank, backend, group_name="mc2")
+    _MC2 = init_model_parallel_group([[0,1], [2,3,4,5,6,7,8,9]], get_world_group().local_rank, backend, group_name="mc2")
 
     if get_ascend_config().eplb_config.dynamic_eplb:
         global _DYNAMIC_EPLB
