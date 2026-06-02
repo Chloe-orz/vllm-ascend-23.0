@@ -447,6 +447,12 @@ class NPUPlatform(Platform):
             **********************************************************************************\033[0m
             """
             logger.warning(warning_message)
+            logger.info(
+                "[DEBUG] platform FULL/FULL_DECODE_ONLY branch: "
+                "cudagraph_mode=%s mode=%s",
+                compilation_config.cudagraph_mode,
+                compilation_config.mode,
+            )
         else:
             logger.info(
                 "%s cudagraph_mode is not support on NPU. falling back to NONE", compilation_config.cudagraph_mode

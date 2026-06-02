@@ -46,7 +46,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
-from vllm.distributed.parallel_state import is_edge_device
+from vllm.distributed.parallel_state import is_edge_device, is_edge_cloud_pp_mode
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -476,6 +476,16 @@ class NPUModelRunner(GPUModelRunner):
         self.decode_threshold = 1 + (self.speculative_config.num_speculative_tokens if self.speculative_config else 0)
 
         self.use_aclgraph = self._use_aclgraph()
+        logger.info(
+            "[DEBUG] model_runner __init__: use_aclgraph=%s "
+            "cudagraph_mode=%s mode=%s enforce_eager=%s "
+            "cudagraph_capture_sizes=%s",
+            self.use_aclgraph,
+            self.compilation_config.cudagraph_mode,
+            self.compilation_config.mode,
+            self.model_config.enforce_eager,
+            self.compilation_config.cudagraph_capture_sizes,
+        )
 
         eplb_config = self.ascend_config.eplb_config
         self.dynamic_eplb = eplb_config.dynamic_eplb
@@ -592,7 +602,9 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_a_wrapper: Any = None
             self.segment_e_wrapper: Any = None
             self.segment_c_wrapper: Any = None
+            self._cloud_graph_call_count: int = 0
         else:
+            self._cloud_graph_call_count: int = 0
             self.head_k = 0
             self.tail_k = 0
             self._is_qwen3_5 = False
@@ -777,7 +789,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
-        model = self.model
         if self.edge_cloud_cfg.role == "edge":
             self.segment_a = self._create_segment_callable(
                 self.model, 0, self.head_k, is_first_segment=True, is_last_segment=False
@@ -2166,6 +2177,18 @@ class NPUModelRunner(GPUModelRunner):
                         self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
+            
+            # 边云场景：当 hidden_states 为 IntermediateTensors 时，说明当前段计算已完成，
+            # 需要把结果返回给 NPUWorker 进行跨节点通信（isend_tensor_dict）。
+            # 此处提前 return，跳过标准 PP 的 logits/sampling 流程。
+
+            if is_edge_cloud_pp_mode() and isinstance(hidden_states, IntermediateTensors) and not is_edge_device():
+                hidden_states.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+                if self.debugger is not None:
+                    self.debugger.stop()
+                    self.debugger.step()
+                return hidden_states
 
             if not self.broadcast_pp_output:
                 # Common case.
@@ -2655,11 +2678,22 @@ class NPUModelRunner(GPUModelRunner):
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
         if hasattr(cudagraph_runtime_mode, "decode_mode"):
             cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
+        # logger.info(
+        #     "[DEBUG] update_full_graph_params_if_needed: mode=%s capturing=%s "
+        #     "use_sparse=%s",
+        #     cudagraph_runtime_mode,
+        #     forward_context.capturing,
+        #     self.use_sparse,
+        # )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
             and not self.use_sparse
         ):
+            # logger.info(
+            #     "[DEBUG] update_full_graph_params_if_needed: WILL EXECUTE "
+            #     "update_full_graph_params"
+            # )
             assert positions is not None
             if graph_wrapper is not None:
                 assert graph_wrapper.graph_params is not None
@@ -2886,9 +2920,19 @@ class NPUModelRunner(GPUModelRunner):
         **model_kwargs: dict[str, Any],
     ):
         """Cloud 侧分段执行：segment_c（中段）。"""
+        if use_graph:
+            self._cloud_graph_call_count += 1
+            # logger.info(
+            #     "[DEBUG] cloud graph call #%d",
+            #     self._cloud_graph_call_count,
+            # )
         assert self.edge_cloud_cfg.role == "cloud", (
             "Cloud segment_c should only be executed when role == 'cloud'"
         )
+        # 确保 HCCL PP 接收的数据在 NPU 上已完成写入，避免首次跨节点
+        # 传输时模型 forward 读到未同步的 garbage（NaN）。
+        if intermediate_tensors is not None:
+            torch.npu.synchronize()
         # Warmup（profile_run）期间，Cloud 通过 PP non-first rank 路径自行构造
         # minimal intermediate_tensors（仅含 shape 信息）用于图捕获，此时 intermediate_tensors
         # 不为 None 但也是 dummy。运行时 real inference 时，intermediate_tensors 由
@@ -2912,8 +2956,6 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
         try:
-            # if seg_c_graph:
-            #     torch.npu.current_stream().synchronize()
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2925,6 +2967,13 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
+        except BaseException:
+            logger.exception(
+                "[DIAG] Cloud seg_c FAILED with exception "
+                "(in_warmup=%s, use_graph=%s, num_tokens=%s)",
+                in_warmup, use_graph, num_tokens_padded,
+            )
+            raise
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
@@ -3689,51 +3738,51 @@ class NPUModelRunner(GPUModelRunner):
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
 
-            need_dummy_logits = not is_profile and lmhead_tp_enable()
-            max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-            dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
+                need_dummy_logits = not is_profile and lmhead_tp_enable()
+                max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
+                dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
 
-            with set_ascend_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens_padded,
-                num_tokens_across_dp=num_tokens_across_dp,
-                in_profile_run=is_profile,
-                num_actual_tokens=num_tokens_padded,
-                aclgraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_desc,
-                model_instance=self.model,
-            ):
-                outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
-                )
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
-            elif isinstance(outputs, IntermediateTensors):
-                hidden_states = outputs["hidden_states"]
-            else:
-                hidden_states = outputs
-            dummy_compute_logits(hidden_states)
-
-            if self.drafter:
-                self.drafter.dummy_run(
+                with set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
                     num_tokens=num_tokens_padded,
-                    with_prefill=with_prefill,
-                    num_reqs=num_reqs_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    in_profile_run=is_profile,
+                    num_actual_tokens=num_tokens_padded,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
-                    dummy_compute_logits=dummy_drafter_compute_logits,
-                    in_graph_capturing=not force_attention,
-                    is_profile=is_profile,
-                )
-            if is_profile and self.dynamic_eplb:
-                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
-                target.clear_all_moe_loads()
-            if self.dynamic_eplb:
-                self.eplb_updator.forward_end()
+                    model_instance=self.model,
+                ):
+                    outputs = self._model_forward(
+                        num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    )
+                if self.use_aux_hidden_state_outputs:
+                    hidden_states, _ = outputs
+                elif isinstance(outputs, IntermediateTensors):
+                    hidden_states = outputs["hidden_states"]
+                else:
+                    hidden_states = outputs
+                dummy_compute_logits(hidden_states)
 
-            self._finalize_dump_data(dump=False)
+                if self.drafter:
+                    self.drafter.dummy_run(
+                        num_tokens=num_tokens_padded,
+                        with_prefill=with_prefill,
+                        num_reqs=num_reqs_padded,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        aclgraph_runtime_mode=cudagraph_runtime_mode,
+                        batch_descriptor=batch_desc,
+                        dummy_compute_logits=dummy_drafter_compute_logits,
+                        in_graph_capturing=not force_attention,
+                        is_profile=is_profile,
+                    )
+                if is_profile and self.dynamic_eplb:
+                    target = self.model.language_model if hasattr(self.model, "language_model") else self.model
+                    target.clear_all_moe_loads()
+                if self.dynamic_eplb:
+                    self.eplb_updator.forward_end()
+
+                self._finalize_dump_data(dump=False)
             return hidden_states, hidden_states
 
 
@@ -4067,17 +4116,17 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache for all shared layers
                         kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors.keys(
-                ):
-                    if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-                    else:
-                        cache_size_aligned = kv_cache_tensor.size + alignment
-                        tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
-                        tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
-                        kv_cache_raw_tensors[layer_name_inner] = tensor
+                # elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors.keys(
+                # ):
+                #     if self.vllm_config.kv_transfer_config is None:
+                #         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                #     else:
+                #         cache_size_aligned = kv_cache_tensor.size + alignment
+                #         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                #         tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+                #     for layer_name_inner in kv_cache_tensor.shared_by:
+                #         # shared the kvcache between the self_attn specs in the same group
+                #         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors and not use_mamba:
                     # NOTE: We need to init k cache tensor (nope cache tensor in mla) and
                     # v cache tensor (rope cache tensor in mla) separately to support prefill disaggregation,
@@ -4746,9 +4795,22 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
+        # logger.info(
+        #     "[DEBUG] _check_and_update_cudagraph_mode BEFORE: "
+        #     "cudagraph_mode=%s mode=%s use_aclgraph=%s",
+        #     self.compilation_config.cudagraph_mode,
+        #     self.compilation_config.mode,
+        #     self.use_aclgraph,
+        # )
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
-
+        # logger.info(
+        #     "[DEBUG] _check_and_update_cudagraph_mode AFTER: "
+        #     "cudagraph_mode=%s mode=%s use_aclgraph=%s",
+        #     self.compilation_config.cudagraph_mode,
+        #     self.compilation_config.mode,
+        #     self.use_aclgraph,
+        # )
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
@@ -4775,7 +4837,28 @@ class NPUModelRunner(GPUModelRunner):
                         if self.speculative_config:
                             wrapper.init_draft_graph_params(self.cudagraph_batch_sizes)
 
+    def _get_aclgraph_wrappers(self) -> list[ACLGraphWrapper]:
+        """返回所有可能残留 profile 阶段图捕获结果的 ACLGraphWrapper。"""
+        wrappers: list[ACLGraphWrapper] = []
+        if isinstance(self.model, ACLGraphWrapper):
+            wrappers.append(self.model)
+        for attr in ("segment_a_wrapper", "segment_e_wrapper", "segment_c_wrapper"):
+            wrapper = getattr(self, attr, None)
+            if isinstance(wrapper, ACLGraphWrapper):
+                wrappers.append(wrapper)
+        return wrappers
+
     def capture_model(self) -> int:
+        # logger.info(
+        #     "[DEBUG] capture_model entry: "
+        #     "cudagraph_mode=%s mode=%s use_aclgraph=%s "
+        #     "cudagraph_batch_sizes=%s enforce_eager=%s",
+        #     self.compilation_config.cudagraph_mode,
+        #     self.compilation_config.mode,
+        #     self.use_aclgraph,
+        #     self.cudagraph_batch_sizes,
+        #     self.model_config.enforce_eager,
+        # )
         # 边云模式的 ACL Graph 仍依赖父类 capture 循环触发 _dummy_run。
         # 实际捕获发生在 segment 级 ACLGraphWrapper 内，通信保持在图外。
         if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
@@ -4785,8 +4868,35 @@ class NPUModelRunner(GPUModelRunner):
         if gpu_model_runner_cls is None:
             raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
         parent_module_name = gpu_model_runner_cls.__module__
+        # logger.info(
+        #     "[DEBUG] capture_model calling GPUModelRunner.capture_model "
+        #     "with %d sizes via module %s",
+        #     len(self.cudagraph_batch_sizes),
+        #     parent_module_name,
+        # )
+        # profile_cudagraph_memory 阶段 ACLGraphWrapper 已捕获过图，
+        # 但 CUDAGraphWrapper.clear_all_graphs() 不清除 ACLGraphWrapper
+        # 的 concrete_aclgraph_entries。保留的 entry 会导致 capture_model
+        # 中 _warmup_and_capture 走 REPLAY 而非 CAPTURE 路径，
+        # REPLAY 时 forward_context.capturing 保持 False，
+        # 使得 _update_full_graph_params_if_needed 错误执行 → 挂死。
+        # 因此这里手动清空，强制重新 capture。
+        for wrapper in self._get_aclgraph_wrappers():
+            wrapper.concrete_aclgraph_entries.clear()
+        self._cloud_graph_call_count = 0
+        # for wrapper in self._get_aclgraph_wrappers():
+        #     logger.info(
+        #         "[DEBUG] capture_model: wrapper=%s entries=%d",
+        #         type(wrapper).__name__,
+        #         len(wrapper.concrete_aclgraph_entries),
+        #     )
+        # logger.info(
+        #     "[DEBUG] capture_model: about to call GPUModelRunner.capture_model"
+        # )
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            return GPUModelRunner.capture_model(self)
+            result = GPUModelRunner.capture_model(self)
+        logger.info("[DEBUG] capture_model returned: %d bytes", result)
+        return result
 
     def _prepare_multimodal_fields(self):
         """
