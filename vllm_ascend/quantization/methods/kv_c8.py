@@ -5,8 +5,6 @@ from vllm.logger import logger
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
-
 from .base import AscendAttentionScheme
 from .registry import register_scheme
 
