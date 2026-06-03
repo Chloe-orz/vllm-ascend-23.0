@@ -72,10 +72,10 @@ def token_bin_counts_and_mask_kernel(
     )
 
     local_token = token - vocab_start_idx
-
     token_in_range = pos_mask & (token >= vocab_start_idx) & (local_token < vocab_size)
 
-    count_ptr = batch_counts_start + local_token * counts_vocab_stride
+    safe_local_token = tl.where(token_in_range, local_token, 0)
+    count_ptr = batch_counts_start + safe_local_token * counts_vocab_stride
     tl.atomic_add(count_ptr, 1, mask=token_in_range)
 
 
@@ -119,8 +119,11 @@ def get_token_bin_counts_and_mask_triton(
     total_blocks = n_rows * n_seq_blocks
     grid_size = min(core_num, total_blocks)
 
-    tp_group = get_tp_group()
-    tp_rank = tp_group.rank_in_group
+    if get_ascend_config().enable_reduce_sample:
+        tp_group = get_tp_group()
+        tp_rank = tp_group.rank_in_group
+    else:
+        tp_rank = 0
     token_bin_counts_and_mask_kernel[grid](
         tokens,
         tokens.stride(0),
