@@ -337,6 +337,13 @@ async def _wrapped_chat_completion_stream_generator(
     reasoning_parser=None,
     **extra_kwargs: Any,
 ):
+    num_choices = 1 if request.n is None else request.n
+    state = _create_usage_tracking_state(
+        num_choices,
+        reasoning_parser,
+        enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+    )
+
     original_stream_generator = self._ascend_original_chat_completion_stream_generator
     num_choices = 1 if request.n is None else request.n
     state = _create_usage_tracking_state(
@@ -374,6 +381,13 @@ async def _wrapped_chat_completion_full_generator(
     request_metadata: engine_protocol.RequestResponseMetadata,
     reasoning_parser=None,
 ):
+    num_choices = 1 if request.n is None else request.n
+    state = _create_usage_tracking_state(
+        num_choices,
+        reasoning_parser,
+        enable_prompt_tokens_details=self.enable_prompt_tokens_details,
+    )
+
     original_full_generator = self._ascend_original_chat_completion_full_generator
     num_choices = 1 if request.n is None else request.n
     state = _create_usage_tracking_state(

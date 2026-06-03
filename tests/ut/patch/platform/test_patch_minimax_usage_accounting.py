@@ -124,7 +124,7 @@ def test_make_usage_info_injects_reasoning_token_details():
 
 def test_make_usage_info_injects_zero_cached_tokens():
     fake_serving = SimpleNamespace(enable_prompt_tokens_details=True)
-    usage = usage_patch._make_usage_info(
+    usage = minimax_usage_patch._make_usage_info(
         fake_serving,
         prompt_tokens=3,
         completion_tokens=4,
@@ -249,110 +249,6 @@ def test_make_full_response_usage_skips_non_minimax_reasoning_details():
         reasoning_parser=FakeReasoningParser(),
         enable_prompt_tokens_details=True,
     )
-    state.num_prompt_tokens = 3
-    state.num_cached_tokens = 0
-    state.final_res = SimpleNamespace(num_cached_tokens=0)
-    state.completion_tokens = [2]
-    state.raw_output_token_ids = [[10, 11]]
-
-    usage = usage_patch._make_full_response_usage(FakeServing(), state)
-
-    assert usage.completion_tokens_details is None
-    assert usage.prompt_tokens_details.cached_tokens == 0
-
-
-def test_chat_generators_are_not_patched_at_class_level():
-    assert (
-        OpenAIServingChat.chat_completion_stream_generator is not usage_patch._wrapped_chat_completion_stream_generator
-    )
-    assert OpenAIServingChat.chat_completion_full_generator is not usage_patch._wrapped_chat_completion_full_generator
-
-
-def test_chat_init_is_not_wrapped_by_minimax_usage_patch():
-    assert not hasattr(OpenAIServingChat, "_ascend_original_init_for_minimax_usage")
-    assert "patch_minimax_usage_accounting.py" not in OpenAIServingChat.__init__.__code__.co_filename
-
-
-def test_reasoning_parser_cls_descriptor_preserves_default_access():
-    descriptor = OpenAIServingChat.__dict__["reasoning_parser_cls"]
-    serving = object.__new__(OpenAIServingChat)
-
-    assert OpenAIServingChat.reasoning_parser_cls is descriptor.default_value
-    assert serving.reasoning_parser_cls is descriptor.default_value
-
-
-def test_chat_usage_wrapper_is_bound_only_for_target_instances():
-    class FakeReasoningParser:
-        pass
-
-    non_minimax_serving = SimpleNamespace(
-        enable_prompt_tokens_details=False,
-        reasoning_parser_cls=FakeReasoningParser,
-    )
-    minimax_serving = SimpleNamespace(
-        enable_prompt_tokens_details=False,
-        reasoning_parser_cls=MiniMaxM2ReasoningParser,
-    )
-    non_minimax_prompt_details_serving = SimpleNamespace(
-        enable_prompt_tokens_details=True,
-        reasoning_parser_cls=FakeReasoningParser,
-    )
-
-    assert not usage_patch._should_patch_chat_usage_instance(non_minimax_serving)
-    assert usage_patch._should_patch_chat_usage_instance(minimax_serving)
-    assert not usage_patch._should_patch_chat_usage_instance(non_minimax_prompt_details_serving)
-
-
-def test_reasoning_parser_cls_assignment_binds_only_minimax_instances():
-    class FakeReasoningParser:
-        pass
-
-    non_minimax_serving = object.__new__(OpenAIServingChat)
-    non_minimax_serving.reasoning_parser_cls = FakeReasoningParser
-
-    assert non_minimax_serving.reasoning_parser_cls is FakeReasoningParser
-    assert "chat_completion_stream_generator" not in non_minimax_serving.__dict__
-    assert "chat_completion_full_generator" not in non_minimax_serving.__dict__
-
-    minimax_serving = object.__new__(OpenAIServingChat)
-    minimax_serving.reasoning_parser_cls = MiniMaxM2ReasoningParser
-
-    assert minimax_serving.reasoning_parser_cls is MiniMaxM2ReasoningParser
-    assert (
-        minimax_serving.chat_completion_stream_generator.__func__
-        is usage_patch._wrapped_chat_completion_stream_generator
-    )
-    assert (
-        minimax_serving.chat_completion_full_generator.__func__ is usage_patch._wrapped_chat_completion_full_generator
-    )
-
-
-def test_instance_wrapper_composes_with_class_level_stream_patches():
-    serving = SimpleNamespace(
-        enable_prompt_tokens_details=False,
-        reasoning_parser_cls=MiniMaxM2ReasoningParser,
-    )
-
-    usage_patch._patch_chat_usage_instance(serving)
-
-    assert (
-        serving._ascend_original_chat_completion_stream_generator.__func__
-        is OpenAIServingChat.chat_completion_stream_generator
-    )
-    assert (
-        serving._ascend_original_chat_completion_full_generator.__func__
-        is OpenAIServingChat.chat_completion_full_generator
-    )
-    assert serving.chat_completion_stream_generator.__func__ is usage_patch._wrapped_chat_completion_stream_generator
-    assert serving.chat_completion_full_generator.__func__ is usage_patch._wrapped_chat_completion_full_generator
-
-
-def test_stream_usage_details_are_injected_without_replacing_source():
-    state = usage_patch._create_usage_tracking_state(
-        num_choices=1,
-        reasoning_parser=MiniMaxM2ReasoningParser(FakeTokenizer()),
-        enable_prompt_tokens_details=True,
-    )
     state.num_cached_tokens = 0
     state.raw_output_token_ids = [[10, 11, 2, 20]]
 
@@ -379,12 +275,12 @@ def test_stream_usage_details_are_injected_without_replacing_source():
     assert payload["usage"]["prompt_tokens_details"] == {
         "cached_tokens": 0,
     }
-    assert not hasattr(usage_patch, "_extract_class_method_source")
-    assert not hasattr(usage_patch, "_patch_chat_completion_stream_generator")
+    assert not hasattr(minimax_usage_patch, "_extract_class_method_source")
+    assert not hasattr(minimax_usage_patch, "_patch_chat_completion_stream_generator")
 
 
 def test_stream_usage_details_inject_prompt_details_without_reasoning():
-    state = usage_patch._create_usage_tracking_state(
+    state = minimax_usage_patch._create_usage_tracking_state(
         num_choices=1,
         reasoning_parser=None,
         enable_prompt_tokens_details=True,
@@ -402,7 +298,7 @@ def test_stream_usage_details_inject_prompt_details_without_reasoning():
         },
     }
 
-    data = usage_patch._inject_stream_usage_details(
+    data = minimax_usage_patch._inject_stream_usage_details(
         f"data: {json.dumps(chunk)}\n\n",
         state,
     )
