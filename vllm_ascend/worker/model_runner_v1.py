@@ -2750,29 +2750,6 @@ class NPUModelRunner(GPUModelRunner):
                     # Edge-cloud head segment always returns IntermediateTensors,
                     # regardless of is_last_rank, so the worker can send them to
                     # the cloud side and receive results back for the tail segment.
-                    # For embedding_only edge, the output tensors have actual
-                    # batch size (no cudagraph padding on edge), but cloud's
-                    # pre-allocated buffer is sized to max_num_tokens. Pad here
-                    # so that cloud's sync_and_slice copy_ succeeds.
-                    if (
-                        self.edge_cloud_cfg.mode == "embedding_only"
-                        and self.edge_cloud_cfg.role == "edge"
-                    ):
-                        padded_tensors: dict[str, torch.Tensor] = {}
-                        for k, v in hidden_states.items():
-                            if v.shape[0] < self.max_num_tokens:
-                                pad = torch.zeros(
-                                    self.max_num_tokens - v.shape[0],
-                                    *v.shape[1:],
-                                    dtype=v.dtype,
-                                    device=v.device,
-                                )
-                                v = torch.cat([v, pad], dim=0)
-                            padded_tensors[k] = v
-                        hidden_states = IntermediateTensors(
-                            padded_tensors,
-                            kv_connector_output=hidden_states.kv_connector_output,
-                        )
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
@@ -4016,14 +3993,13 @@ class NPUModelRunner(GPUModelRunner):
             )
             for k, v in intermediate_tensors.items():
                 copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
-                if k not in self.intermediate_tensors.tensors:
-                    base_tensor = self.intermediate_tensors["hidden_states"]
-                    self.intermediate_tensors[k] = v.new_empty(
-                        (base_tensor.shape[0], *v.shape[1:])
-                    )
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
-                )
+                dst = self.intermediate_tensors[k][:copy_len]
+                # Senders may transmit only real tokens; fill graph padding locally.
+                recv_len = min(v.shape[0], copy_len)
+                if recv_len:
+                    dst[:recv_len].copy_(v[:recv_len], non_blocking=True)
+                if recv_len < copy_len:
+                    dst[recv_len:].zero_()
 
         return IntermediateTensors(
             {
