@@ -2913,10 +2913,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.edge_cloud_cfg.role == "cloud", (
             "Cloud segment_c should only be executed when role == 'cloud'"
         )
-        # 确保 HCCL PP 接收的数据在 NPU 上已完成写入，避免首次跨节点
-        # 传输时模型 forward 读到未同步的 garbage（NaN）。
-        if intermediate_tensors is not None:
-            torch.npu.synchronize()
         # Warmup（profile_run）期间，Cloud 通过 PP non-first rank 路径自行构造
         # minimal intermediate_tensors（仅含 shape 信息）用于图捕获，此时 intermediate_tensors
         # 不为 None 但也是 dummy。运行时 real inference 时，intermediate_tensors 由
