@@ -22,6 +22,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.distributed import get_ep_group
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 

@@ -21,6 +21,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.distributed import get_ep_group
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
