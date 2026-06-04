@@ -1957,6 +1957,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                 non_blocking=True,
             )
+            # Fast path skips _update_states, so no deferred corrections.
+            deferred_state_corrections_fn = None
 
         self._pp_timing("state_setup_done", sync_npu=True)
         with record_function_or_nullcontext("prepare input"):
