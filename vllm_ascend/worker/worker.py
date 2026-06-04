@@ -486,6 +486,7 @@ class NPUWorker(WorkerBase):
             self.profiler.step()
 
         if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+            torch.npu.synchronize()
             print(f"[PP_TIMING][{role}][runner_entry] {time.perf_counter()}")
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
         if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
@@ -500,7 +501,8 @@ class NPUWorker(WorkerBase):
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-                    print(f"[PP_TIMING][edge][send_to_cloud] {time.perf_counter()}")
+                    torch.npu.synchronize()
+                    print(f"[PP_TIMING][edge][send_to_cloud done] {time.perf_counter()}")
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -514,6 +516,7 @@ class NPUWorker(WorkerBase):
             # 确保 HCCL 回传数据在 NPU 上可用后再启动 segment_e forward
             torch.npu.synchronize()
             if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+                torch.npu.synchronize()
                 print(f"[PP_TIMING][{role}][runner_entry_e] {time.perf_counter()}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
             if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
