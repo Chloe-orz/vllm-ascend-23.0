@@ -18,6 +18,7 @@
 #
 
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -618,6 +619,17 @@ class NPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         torch.npu.synchronize()
+
+    def _pp_timing(self, stage: str, sync_npu: bool = False) -> None:
+        if os.environ.get("PP_TIMING_ENABLE", "0") != "1":
+            return
+        if sync_npu:
+            torch.npu.synchronize()
+        if self._edge_cloud_enabled:
+            role = self.edge_cloud_cfg.role
+        else:
+            role = "standard"
+        print(f"[PP_TIMING][{role}][{stage}] {time.perf_counter()}")
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -1857,6 +1869,12 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "edge":
+            stage = "runner_entry_e" if intermediate_tensors is not None else "runner_entry_a"
+        else:
+            stage = "runner_entry"
+        self._pp_timing(stage)
+
         if self.vllm_config.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
                 capturer = RoutedExpertsCapturer.get_instance()
@@ -2116,6 +2134,8 @@ class NPUModelRunner(GPUModelRunner):
             # update global cos, sin
             update_cos_sin(positions)
 
+        self._pp_timing("prepare_done", sync_npu=True)
+
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB weight D2D"):
                 self.eplb_updator.forward_before()
@@ -2244,6 +2264,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
+                self._pp_timing("logits_done", sync_npu=True)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2474,6 +2495,7 @@ class NPUModelRunner(GPUModelRunner):
             if not self._edge_cloud_enabled and pp.world_size > 1 and pp.is_last_rank:
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
+        self._pp_timing("sample_done", sync_npu=True)
         if not self.use_async_scheduling:
             return model_runner_output
         async_output = AsyncGPUModelRunnerOutput(
@@ -2737,6 +2759,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # ==================== 标准非边云路径（原逻辑完全保留，不做任何修改） ====================
         assert self.model is not None
+        self._pp_timing("forward_entry")
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -2744,6 +2767,7 @@ class NPUModelRunner(GPUModelRunner):
             inputs_embeds=inputs_embeds,
             **model_kwargs,
         )
+        self._pp_timing("forward_done", sync_npu=True)
         forward_context = get_forward_context()
         assert forward_context is not None
         if (
@@ -2844,6 +2868,7 @@ class NPUModelRunner(GPUModelRunner):
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
                     )
+                self._pp_timing("segment_a_entry")
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
@@ -2859,6 +2884,7 @@ class NPUModelRunner(GPUModelRunner):
                     _EXTRA_CTX.layer_idx = old_layer_idx
 
             assert isinstance(hidden_states, IntermediateTensors)
+            self._pp_timing("segment_a_done", sync_npu=True)
             return hidden_states
 
         # Step 2：执行 Segment E（尾 tail_k 层 + norm）
@@ -2886,6 +2912,7 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
+            self._pp_timing("segment_e_entry")
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2896,6 +2923,7 @@ class NPUModelRunner(GPUModelRunner):
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
 
+        self._pp_timing("segment_e_done", sync_npu=True)
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
@@ -2945,6 +2973,7 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
+            self._pp_timing("segment_c_entry")
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2956,6 +2985,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
         assert isinstance(hidden_states, IntermediateTensors)
+        self._pp_timing("segment_c_done", sync_npu=True)
         return hidden_states
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
