@@ -485,7 +485,12 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
+        if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+            print(f"[PP_TIMING][{role}][runner_entry] {time.perf_counter()}")
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+            torch.npu.synchronize()
+            print(f"[PP_TIMING][{role}][runner_done] {time.perf_counter()}")
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -508,7 +513,12 @@ class NPUWorker(WorkerBase):
                 print(f"[PP_TIMING][edge][recv_from_cloud] {time.perf_counter()}")
             # 确保 HCCL 回传数据在 NPU 上可用后再启动 segment_e forward
             torch.npu.synchronize()
+            if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+                print(f"[PP_TIMING][{role}][runner_entry_e] {time.perf_counter()}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+                torch.npu.synchronize()
+                print(f"[PP_TIMING][{role}][runner_done_e] {time.perf_counter()}")
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
