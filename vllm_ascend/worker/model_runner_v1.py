@@ -1869,12 +1869,6 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
-        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "edge":
-            stage = "runner_entry_e" if intermediate_tensors is not None else "runner_entry_a"
-        else:
-            stage = "runner_entry"
-        self._pp_timing(stage)
-
         if self.vllm_config.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
                 capturer = RoutedExpertsCapturer.get_instance()
@@ -2133,8 +2127,6 @@ class NPUModelRunner(GPUModelRunner):
 
             # update global cos, sin
             update_cos_sin(positions)
-
-        self._pp_timing("prepare_done", sync_npu=True)
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB weight D2D"):
