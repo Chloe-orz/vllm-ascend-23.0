@@ -1927,7 +1927,7 @@ class NPUModelRunner(GPUModelRunner):
         )):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        self._pp_timing("state_setup_done")
+        self._pp_timing("state_setup_done", sync_npu=True)
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 # Fix up prev_req_id_to_index for requests that were discarded
@@ -2739,7 +2739,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # ==================== 标准非边云路径（原逻辑完全保留，不做任何修改） ====================
         assert self.model is not None
-        self._pp_timing("forward_entry")
+        self._pp_timing("forward_entry", sync_npu=True)
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -2848,7 +2848,7 @@ class NPUModelRunner(GPUModelRunner):
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
                     )
-                self._pp_timing("segment_a_entry")
+                self._pp_timing("segment_a_entry", sync_npu=True)
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
@@ -2892,7 +2892,7 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            self._pp_timing("segment_e_entry")
+            self._pp_timing("segment_e_entry", sync_npu=True)
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2953,7 +2953,7 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
-            self._pp_timing("segment_c_entry")
+            self._pp_timing("segment_c_entry", sync_npu=True)
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,

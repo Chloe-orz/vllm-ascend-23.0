@@ -446,6 +446,7 @@ class NPUWorker(WorkerBase):
                 role = "cloud"
             else:
                 role = "standard"
+            torch.npu.synchronize()
             print(f"[PP_TIMING][{role}][worker_entry] {time.perf_counter()}")
 
         intermediate_tensors = None
