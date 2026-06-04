@@ -1951,6 +1951,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 # Update persistent batch states.
                 deferred_state_corrections_fn = self._update_states(scheduler_output)
+                self._pp_timing("update_states_done", sync_npu=True)
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
@@ -1998,6 +1999,7 @@ class NPUModelRunner(GPUModelRunner):
                     scheduler_output,
                     num_scheduled_tokens_np,
                 )
+                self._pp_timing("prepare_inputs_done", sync_npu=True)
 
                 num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
                 if self.pcp_size > 1:
@@ -2027,6 +2029,7 @@ class NPUModelRunner(GPUModelRunner):
                     force_eager=self.model_config.enforce_eager,
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
+                self._pp_timing("determine_batch_done", sync_npu=True)
 
                 logger.debug(
                     "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -2110,6 +2113,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
+                self._pp_timing("build_attn_metadata_done", sync_npu=True)
 
             (
                 input_ids,
@@ -2125,6 +2129,7 @@ class NPUModelRunner(GPUModelRunner):
                 else total_num_scheduled_tokens,
                 intermediate_tensors,
             )
+            self._pp_timing("preprocess_done", sync_npu=True)
 
             # update global cos, sin
             update_cos_sin(positions)
