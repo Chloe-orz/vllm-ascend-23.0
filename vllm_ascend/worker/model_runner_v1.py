@@ -598,6 +598,8 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_a_wrapper: Any = None
             self.segment_e_wrapper: Any = None
             self.segment_c_wrapper: Any = None
+            # Cache segment_a prepare results for segment_e reuse (edge-cloud only)
+            self._cached_prepare_state: dict | None = None
         else:
             self.head_k = 0
             self.tail_k = 0
@@ -1927,193 +1929,230 @@ class NPUModelRunner(GPUModelRunner):
         )):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # ---- segment_e fast path: reuse segment_a's cached prepare results ----
+        _fast_path = (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and intermediate_tensors is not None
+            and self._cached_prepare_state is not None
+        )
+        if _fast_path:
+            cache = self._cached_prepare_state
+            self._cached_prepare_state = None  # consumed, clear for next iteration
+            total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
+            num_tokens_padded = cache["num_tokens_padded"]
+            num_tokens_across_dp = cache["num_tokens_across_dp"]
+            attn_metadata = cache["attn_metadata"]
+            logits_indices = cache["logits_indices"]
+            spec_decode_metadata = cache["spec_decode_metadata"]
+            spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
+            cudagraph_mode = cache["cudagraph_mode"]
+            batch_desc = cache["batch_desc"]
+            cudagraph_stats = cache["cudagraph_stats"]
+            # Re-sync num_computed_tokens from CPU: segment_a forward or
+            # async state update may have modified the GPU buffer.
+            num_reqs = self.input_batch.num_reqs
+            self.num_computed_tokens[:num_reqs].copy_(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                non_blocking=True,
+            )
+
         self._pp_timing("state_setup_done", sync_npu=True)
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
-                # Fix up prev_req_id_to_index for requests that were discarded
-                # in the previous sample_tokens step. If a request has
-                # prev_num_draft_len > 0 but is missing from
-                # prev_req_id_to_index, the parent _update_states would
-                # hit a KeyError. Reset prev_num_draft_len to 0 for such
-                # requests so they fall through safely.
-                if (
-                    self.use_async_scheduling
-                    and self.num_spec_tokens
-                    and self.input_batch.prev_req_id_to_index is not None
-                ):
-                    for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                        if (
-                            req_id not in self.input_batch.prev_req_id_to_index
-                            and (req_state := self.requests.get(req_id)) is not None
-                            and req_state.prev_num_draft_len
-                        ):
-                            req_state.prev_num_draft_len = 0
-
-                # Update persistent batch states.
-                deferred_state_corrections_fn = self._update_states(scheduler_output)
-                self._pp_timing("update_states_done", sync_npu=True)
-
-                if has_ec_transfer() and get_ec_transfer().is_producer:
-                    with self.maybe_get_ec_connector_output(
-                        scheduler_output,
-                        encoder_cache=self.encoder_cache,
-                    ) as ec_connector_output:
-                        self._execute_mm_encoder(scheduler_output)
-                        self._finalize_dump_data()
-                        return make_empty_encoder_model_runner_output(scheduler_output)
-
-                if not num_scheduled_tokens:
+                if not _fast_path:
+                    # Fix up prev_req_id_to_index for requests that were discarded
+                    # in the previous sample_tokens step. If a request has
+                    # prev_num_draft_len > 0 but is missing from
+                    # prev_req_id_to_index, the parent _update_states would
+                    # hit a KeyError. Reset prev_num_draft_len to 0 for such
+                    # requests so they fall through safely.
                     if (
-                        self.parallel_config.distributed_executor_backend == "external_launcher"
-                        and self.parallel_config.data_parallel_size > 1
+                        self.use_async_scheduling
+                        and self.num_spec_tokens
+                        and self.input_batch.prev_req_id_to_index is not None
                     ):
-                        # this is a corner case when both external launcher
-                        # and DP are enabled, num_scheduled_tokens could be
-                        # 0, and has_unfinished_requests in the outer loop
-                        # returns True. before returning early here we call
-                        # dummy run to ensure coordinate_batch_across_dp
-                        # is called into to avoid out of sync issues.
-                        self._dummy_run(1)
-                    if not has_kv_transfer_group():
-                        # Return empty ModelRunnerOutput if no work to do.
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-                if self.cache_config.kv_sharing_fast_prefill:
-                    assert not self.num_prompt_logprobs, (
-                        "--kv-sharing-fast-prefill produces incorrect "
-                        "logprobs for prompt tokens, tokens, please disable "
-                        "it when the requests need prompt logprobs"
-                    )
+                        for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                            if (
+                                req_id not in self.input_batch.prev_req_id_to_index
+                                and (req_state := self.requests.get(req_id)) is not None
+                                and req_state.prev_num_draft_len
+                            ):
+                                req_state.prev_num_draft_len = 0
 
-                num_reqs = self.input_batch.num_reqs
-                req_ids = self.input_batch.req_ids
-                tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-                num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
-                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+                    # Update persistent batch states.
+                    deferred_state_corrections_fn = self._update_states(scheduler_output)
+                    self._pp_timing("update_states_done", sync_npu=True)
 
-                (
-                    logits_indices,
-                    spec_decode_metadata,
-                    total_num_scheduled_tokens,
-                ) = self._prepare_inputs(
-                    scheduler_output,
-                    num_scheduled_tokens_np,
-                )
-                self._pp_timing("prepare_inputs_done", sync_npu=True)
+                    if has_ec_transfer() and get_ec_transfer().is_producer:
+                        with self.maybe_get_ec_connector_output(
+                            scheduler_output,
+                            encoder_cache=self.encoder_cache,
+                        ) as ec_connector_output:
+                            self._execute_mm_encoder(scheduler_output)
+                            self._finalize_dump_data()
+                            return make_empty_encoder_model_runner_output(scheduler_output)
 
-                num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-                if self.pcp_size > 1:
-                    num_tokens_unpadded = self.pcp_manager.total_num_sampled_tokens_pcp
-                cascade_attn_prefix_lens = None
-                # Disable cascade attention when using microbatching (DBO)
-                if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
-                    # Pre-compute cascade attention prefix lengths
-                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
-                        num_scheduled_tokens_np,
-                        self.input_batch.num_computed_tokens_cpu[:num_reqs],
-                        scheduler_output.num_common_prefix_blocks,
-                    )
+                    if not num_scheduled_tokens:
+                        if (
+                            self.parallel_config.distributed_executor_backend == "external_launcher"
+                            and self.parallel_config.data_parallel_size > 1
+                        ):
+                            # this is a corner case when both external launcher
+                            # and DP are enabled, num_scheduled_tokens could be
+                            # 0, and has_unfinished_requests in the outer loop
+                            # returns True. before returning early here we call
+                            # dummy run to ensure coordinate_batch_across_dp
+                            # is called into to avoid out of sync issues.
+                            self._dummy_run(1)
+                        if not has_kv_transfer_group():
+                            # Return empty ModelRunnerOutput if no work to do.
+                            return EMPTY_MODEL_RUNNER_OUTPUT
+                        return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                    if self.cache_config.kv_sharing_fast_prefill:
+                        assert not self.num_prompt_logprobs, (
+                            "--kv-sharing-fast-prefill produces incorrect "
+                            "logprobs for prompt tokens, tokens, please disable "
+                            "it when the requests need prompt logprobs"
+                        )
 
-                (
-                    cudagraph_mode,
-                    batch_desc,
-                    should_ubatch,
-                    num_tokens_across_dp,
-                    cudagraph_stats,
-                ) = self._determine_batch_execution_and_padding(
-                    num_tokens=num_tokens_unpadded,
-                    num_reqs=num_reqs,
-                    num_scheduled_tokens_np=num_scheduled_tokens_np,
-                    max_num_scheduled_tokens=max_num_scheduled_tokens,
-                    use_cascade_attn=cascade_attn_prefix_lens is not None,
-                    force_eager=self.model_config.enforce_eager,
-                    num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
-                )
-                self._pp_timing("determine_batch_done", sync_npu=True)
+                    num_reqs = self.input_batch.num_reqs
+                    req_ids = self.input_batch.req_ids
+                    tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                    num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+                    max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
-                logger.debug(
-                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
-                    "should_ubatch: %s, num_tokens_across_dp: %s",
-                    cudagraph_mode,
-                    batch_desc,
-                    should_ubatch,
-                    num_tokens_across_dp,
-                )
-
-                num_tokens_padded = batch_desc.num_tokens
-                num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
-                ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-                    should_ubatch,
-                    num_scheduled_tokens_np,
-                    num_tokens_padded,
-                    num_reqs_padded,
-                    self.parallel_config.num_ubatches,
-                )
-
-                pad_attn = cudagraph_mode == CUDAGraphMode.FULL
-
-                # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
-                # there should be a corresponding 'postprocess_mamba'. However, it is called inside
-                # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
-                # We simply utilize the implementation in vLLM.
-                if self.cache_config.mamba_cache_mode == "align":
-                    # preprocess_mamba reads req_state.num_computed_tokens (CPU)
-                    # to decide copy operations, so we must apply deferred
-                    # corrections before it runs.
-                    if deferred_state_corrections_fn:
-                        deferred_state_corrections_fn()
-                        deferred_state_corrections_fn = None
-                    mamba_utils.preprocess_mamba(
+                    (
+                        logits_indices,
+                        spec_decode_metadata,
+                        total_num_scheduled_tokens,
+                    ) = self._prepare_inputs(
                         scheduler_output,
-                        self.kv_cache_config,
-                        self.cache_config,
-                        self.mamba_state_idx,
-                        self.input_batch,
-                        self.requests,
-                        self.compilation_config.static_forward_context,
-                        self.model.get_mamba_state_copy_func(),
-                        self._get_mamba_copy_bufs(),
+                        num_scheduled_tokens_np,
                     )
-                    # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                    # for requests whose state was copied to a new block.
-                    # Re-sync to GPU so the mamba kernel reads from the
-                    # correct initial state slot (init_token_idx = 0).
-                    self.num_accepted_tokens.np[:num_reqs] = (
-                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                    self._pp_timing("prepare_inputs_done", sync_npu=True)
+
+                    num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+                    if self.pcp_size > 1:
+                        num_tokens_unpadded = self.pcp_manager.total_num_sampled_tokens_pcp
+                    cascade_attn_prefix_lens = None
+                    # Disable cascade attention when using microbatching (DBO)
+                    if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
+                        # Pre-compute cascade attention prefix lengths
+                        cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                            num_scheduled_tokens_np,
+                            self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                            scheduler_output.num_common_prefix_blocks,
+                        )
+
+                    (
+                        cudagraph_mode,
+                        batch_desc,
+                        should_ubatch,
+                        num_tokens_across_dp,
+                        cudagraph_stats,
+                    ) = self._determine_batch_execution_and_padding(
+                        num_tokens=num_tokens_unpadded,
+                        num_reqs=num_reqs,
+                        num_scheduled_tokens_np=num_scheduled_tokens_np,
+                        max_num_scheduled_tokens=max_num_scheduled_tokens,
+                        use_cascade_attn=cascade_attn_prefix_lens is not None,
+                        force_eager=self.model_config.enforce_eager,
+                        num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                     )
-                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                    self._pp_timing("determine_batch_done", sync_npu=True)
 
-                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
-
-                if (
-                    cudagraph_mode == CUDAGraphMode.FULL
-                    or (enable_sp() and not self.model_config.use_mla)
-                    and self.pcp_size * self.dcp_size == 1
-                ):
-                    # Currently, Graph Mode and SP will both pad num_tokens,
-                    # Another possible condition is num_tokens_padded != num_tokens_unpadded
-                    # but this scope is way too big and the consequences are unpredictable
-                    num_reqs_padded = self._pad_query_start_loc_for_fia(
-                        num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_mode, batch_desc.num_reqs
+                    logger.debug(
+                        "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                        "should_ubatch: %s, num_tokens_across_dp: %s",
+                        cudagraph_mode,
+                        batch_desc,
+                        should_ubatch,
+                        num_tokens_across_dp,
                     )
 
-                (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded
-                    if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
-                    else total_num_scheduled_tokens,
-                    num_tokens_padded=num_tokens_padded,
-                    num_reqs=num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    max_query_len=max_num_scheduled_tokens,
-                    ubatch_slices=ubatch_slices_attn,
-                    logits_indices=logits_indices,
-                    use_spec_decode=use_spec_decode,
-                    num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
-                    num_scheduled_tokens_np=num_scheduled_tokens_np,
-                    cascade_attn_prefix_lens=cascade_attn_prefix_lens,
-                )
-                self._pp_timing("build_attn_metadata_done", sync_npu=True)
+                    num_tokens_padded = batch_desc.num_tokens
+                    num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+                    ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+                        should_ubatch,
+                        num_scheduled_tokens_np,
+                        num_tokens_padded,
+                        num_reqs_padded,
+                        self.parallel_config.num_ubatches,
+                    )
+
+                    pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+                    # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
+                    # there should be a corresponding 'postprocess_mamba'. However, it is called inside
+                    # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
+                    # We simply utilize the implementation in vLLM.
+                    if self.cache_config.mamba_cache_mode == "align":
+                        # preprocess_mamba reads req_state.num_computed_tokens (CPU)
+                        # to decide copy operations, so we must apply deferred
+                        # corrections before it runs.
+                        if deferred_state_corrections_fn:
+                            deferred_state_corrections_fn()
+                            deferred_state_corrections_fn = None
+                        mamba_utils.preprocess_mamba(
+                            scheduler_output,
+                            self.kv_cache_config,
+                            self.cache_config,
+                            self.mamba_state_idx,
+                            self.input_batch,
+                            self.requests,
+                            self.compilation_config.static_forward_context,
+                            self.model.get_mamba_state_copy_func(),
+                            self._get_mamba_copy_bufs(),
+                        )
+                        # preprocess_mamba resets num_accepted_tokens_cpu to 1
+                        # for requests whose state was copied to a new block.
+                        # Re-sync to GPU so the mamba kernel reads from the
+                        # correct initial state slot (init_token_idx = 0).
+                        self.num_accepted_tokens.np[:num_reqs] = (
+                            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                        )
+                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
+
+                    use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                    ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+
+                    if (
+                        cudagraph_mode == CUDAGraphMode.FULL
+                        or (enable_sp() and not self.model_config.use_mla)
+                        and self.pcp_size * self.dcp_size == 1
+                    ):
+                        # Currently, Graph Mode and SP will both pad num_tokens,
+                        # Another possible condition is num_tokens_padded != num_tokens_unpadded
+                        # but this scope is way too big and the consequences are unpredictable
+                        num_reqs_padded = self._pad_query_start_loc_for_fia(
+                            num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_mode, batch_desc.num_reqs
+                        )
+
+                    (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
+                        num_tokens=num_tokens_unpadded
+                        if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
+                        else total_num_scheduled_tokens,
+                        num_tokens_padded=num_tokens_padded,
+                        num_reqs=num_reqs,
+                        num_reqs_padded=num_reqs_padded,
+                        max_query_len=max_num_scheduled_tokens,
+                        ubatch_slices=ubatch_slices_attn,
+                        logits_indices=logits_indices,
+                        use_spec_decode=use_spec_decode,
+                        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                        num_scheduled_tokens_np=num_scheduled_tokens_np,
+                        cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    )
+                    self._pp_timing("build_attn_metadata_done", sync_npu=True)
+
+                if _fast_path:
+                    # Placeholder timings for segment_e fast path (all work skipped)
+                    self._pp_timing("update_states_done", sync_npu=True)
+                    self._pp_timing("prepare_inputs_done", sync_npu=True)
+                    self._pp_timing("determine_batch_done", sync_npu=True)
+                    self._pp_timing("build_attn_metadata_done", sync_npu=True)
 
             (
                 input_ids,
@@ -2153,6 +2192,27 @@ class NPUModelRunner(GPUModelRunner):
                 head_dim=self.model_config.get_vocab_size(),
                 generators=self.input_batch.sampling_metadata.generators,
             )
+
+        # Cache segment_a prepare results so segment_e can skip redundant work.
+        # Placed AFTER KV scales / async_exponential checks so cached cudagraph_mode
+        # reflects the actual value used by the forward pass.
+        # intermediate_tensors is None only for the first call (segment_a);
+        # segment_e always receives cloud data via intermediate_tensors.
+        if (self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and intermediate_tensors is None):
+            self._cached_prepare_state = {
+                "num_tokens_padded": num_tokens_padded,
+                "num_tokens_across_dp": num_tokens_across_dp,
+                "attn_metadata": attn_metadata,
+                "logits_indices": logits_indices,
+                "spec_decode_metadata": spec_decode_metadata,
+                "spec_decode_common_attn_metadata": spec_decode_common_attn_metadata,
+                "cudagraph_mode": cudagraph_mode,
+                "batch_desc": batch_desc,
+                "cudagraph_stats": cudagraph_stats,
+                "total_num_scheduled_tokens": total_num_scheduled_tokens,
+            }
 
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
