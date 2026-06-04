@@ -590,6 +590,7 @@ class NPUModelRunner(GPUModelRunner):
             self._is_qwen3_5 = "qwen3_5" in model_type
             self._is_deepseek_v2 = "deepseek" in model_type
             self._is_kimi_k25 = "kimi_k25" in outer_model_type or "kimi_k25" in model_type
+            self._is_glm4_moe = "glm4_moe" in model_type
             self.num_layers = 0
             self.segment_a: Any = None
             self.segment_e: Any = None
@@ -603,6 +604,7 @@ class NPUModelRunner(GPUModelRunner):
             self._is_qwen3_5 = False
             self._is_deepseek_v2 = False
             self._is_kimi_k25 = False
+            self._is_glm4_moe = False
             if self.parallel_config.enable_edge_cloud:
                 raise ValueError(
                     "--enable-edge-cloud requires "
@@ -726,10 +728,10 @@ class NPUModelRunner(GPUModelRunner):
             dist_utils.get_pp_indices = orig_get_pp_indices
 
     def _load_model_edge_cloud(self) -> None:
-        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25):
+        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25 or self._is_glm4_moe):
             raise NotImplementedError(
                 "edge-cloud mode currently supports Qwen3.5, DeepseekV2/V3, "
-                "and Kimi-K2.5/K2.6 models."
+                "Kimi-K2.5/K2.6, and GLM-4/GLM-5 models."
             )
 
         logger.info(
@@ -745,6 +747,8 @@ class NPUModelRunner(GPUModelRunner):
             import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
         if self._is_kimi_k25:
             import vllm_ascend.patch.models.kimi_k25_edge_cloud  # noqa: F401
+        if self._is_glm4_moe:
+            import vllm_ascend.patch.models.glm4_moe_edge_cloud  # noqa: F401
 
         device_config = self.vllm_config.device_config
         load_config = self.vllm_config.load_config
