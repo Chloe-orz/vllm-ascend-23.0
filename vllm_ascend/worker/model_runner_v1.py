@@ -18,7 +18,6 @@
 #
 
 import math
-import os
 import sys
 import time
 from collections import defaultdict
@@ -181,7 +180,6 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -191,14 +189,11 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
-
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
-
 
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
-
 
 @contextmanager
 def graph_capture(device: torch.device):
@@ -230,10 +225,8 @@ def graph_capture(device: torch.device):
     with torch.npu.stream(stream), maybe_ca_context:
         yield graph_capture_context
 
-
 def get_tp_context(drafter):
     return getattr(drafter, "tp_group_context", nullcontext())
-
 
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
@@ -251,9 +244,6 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
-
-
-
 
 class EdgeCloudSegment(torch.nn.Module):
     """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
@@ -621,17 +611,6 @@ class NPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         torch.npu.synchronize()
-
-    def _pp_timing(self, stage: str, sync_npu: bool = False) -> None:
-        if os.environ.get("PP_TIMING_ENABLE", "0") != "1":
-            return
-        if sync_npu:
-            torch.npu.synchronize()
-        if self._edge_cloud_enabled:
-            role = self.edge_cloud_cfg.role
-        else:
-            role = "standard"
-        print(f"[PP_TIMING][{role}][{stage}] {time.perf_counter()}")
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -1113,7 +1092,6 @@ class NPUModelRunner(GPUModelRunner):
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
             self.gdn_query_start_loc.np[num_reqs + 1 :].fill(cu_num_tokens[-1])
             self.gdn_query_start_loc.copy_to_gpu()
-
 
         # Compute optimistic seq_lens (assumes all draft tokens from previous
         # iteration accepted). Store in optimistic_seq_lens_cpu for use by
@@ -1959,8 +1937,6 @@ class NPUModelRunner(GPUModelRunner):
             )
             # Fast path skips _update_states, so no deferred corrections.
             deferred_state_corrections_fn = None
-
-        self._pp_timing("state_setup_done", sync_npu=True)
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 if not _fast_path:
@@ -1985,7 +1961,6 @@ class NPUModelRunner(GPUModelRunner):
 
                     # Update persistent batch states.
                     deferred_state_corrections_fn = self._update_states(scheduler_output)
-                    self._pp_timing("update_states_done", sync_npu=True)
 
                     if has_ec_transfer() and get_ec_transfer().is_producer:
                         with self.maybe_get_ec_connector_output(
@@ -2033,7 +2008,6 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output,
                         num_scheduled_tokens_np,
                     )
-                    self._pp_timing("prepare_inputs_done", sync_npu=True)
 
                     num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
                     if self.pcp_size > 1:
@@ -2063,7 +2037,6 @@ class NPUModelRunner(GPUModelRunner):
                         force_eager=self.model_config.enforce_eager,
                         num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                     )
-                    self._pp_timing("determine_batch_done", sync_npu=True)
 
                     logger.debug(
                         "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -2147,14 +2120,6 @@ class NPUModelRunner(GPUModelRunner):
                         num_scheduled_tokens_np=num_scheduled_tokens_np,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
-                    self._pp_timing("build_attn_metadata_done", sync_npu=True)
-
-                if _fast_path:
-                    # Placeholder timings for segment_e fast path (all work skipped)
-                    self._pp_timing("update_states_done", sync_npu=True)
-                    self._pp_timing("prepare_inputs_done", sync_npu=True)
-                    self._pp_timing("determine_batch_done", sync_npu=True)
-                    self._pp_timing("build_attn_metadata_done", sync_npu=True)
 
             (
                 input_ids,
@@ -2170,12 +2135,9 @@ class NPUModelRunner(GPUModelRunner):
                 else total_num_scheduled_tokens,
                 intermediate_tensors,
             )
-            self._pp_timing("preprocess_done", sync_npu=True)
 
             # update global cos, sin
             update_cos_sin(positions)
-
-        self._pp_timing("prepare_done", sync_npu=True)
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB weight D2D"):
@@ -2221,8 +2183,6 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
-        self._pp_timing("pre_forward_done", sync_npu=True)
-
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
         with (
@@ -2246,11 +2206,9 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
-            self._pp_timing("model_forward_entry", sync_npu=True)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-            self._pp_timing("model_forward_done", sync_npu=True)
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2311,7 +2269,6 @@ class NPUModelRunner(GPUModelRunner):
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
-                self._pp_timing("logits_done", sync_npu=True)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2541,8 +2498,6 @@ class NPUModelRunner(GPUModelRunner):
             pp = get_pp_group()
             if not self._edge_cloud_enabled and pp.world_size > 1 and pp.is_last_rank:
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
-
-        self._pp_timing("sample_done", sync_npu=True)
         if not self.use_async_scheduling:
             return model_runner_output
         async_output = AsyncGPUModelRunnerOutput(
@@ -2806,7 +2761,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # ==================== 标准非边云路径（原逻辑完全保留，不做任何修改） ====================
         assert self.model is not None
-        self._pp_timing("forward_entry", sync_npu=True)
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -2814,7 +2768,6 @@ class NPUModelRunner(GPUModelRunner):
             inputs_embeds=inputs_embeds,
             **model_kwargs,
         )
-        self._pp_timing("forward_done", sync_npu=True)
         forward_context = get_forward_context()
         assert forward_context is not None
         if (
@@ -2915,7 +2868,6 @@ class NPUModelRunner(GPUModelRunner):
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
                     )
-                self._pp_timing("segment_a_entry", sync_npu=True)
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
@@ -2931,7 +2883,6 @@ class NPUModelRunner(GPUModelRunner):
                     _EXTRA_CTX.layer_idx = old_layer_idx
 
             assert isinstance(hidden_states, IntermediateTensors)
-            self._pp_timing("segment_a_done", sync_npu=True)
             return hidden_states
 
         # Step 2：执行 Segment E（尾 tail_k 层 + norm）
@@ -2959,7 +2910,6 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            self._pp_timing("segment_e_entry", sync_npu=True)
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2969,8 +2919,6 @@ class NPUModelRunner(GPUModelRunner):
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
-
-        self._pp_timing("segment_e_done", sync_npu=True)
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
@@ -3020,7 +2968,6 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
-            self._pp_timing("segment_c_entry", sync_npu=True)
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -3032,7 +2979,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
         assert isinstance(hidden_states, IntermediateTensors)
-        self._pp_timing("segment_c_done", sync_npu=True)
         return hidden_states
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -3230,7 +3176,6 @@ class NPUModelRunner(GPUModelRunner):
             max_seq_len = self.max_model_len
         else:
             max_seq_len = self.optimistic_seq_lens_cpu.numpy()[:num_reqs].max().item()
-
 
         kv_cache_groups = self.kv_cache_config.kv_cache_groups
 
@@ -3841,7 +3786,6 @@ class NPUModelRunner(GPUModelRunner):
 
                 self._finalize_dump_data(dump=False)
             return hidden_states, hidden_states
-
 
     @torch.inference_mode()
     def _dummy_sampler_run(
@@ -4866,7 +4810,6 @@ class NPUModelRunner(GPUModelRunner):
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
-
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
             desc.num_tokens
@@ -4951,7 +4894,6 @@ class NPUModelRunner(GPUModelRunner):
                     if isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
                         mm_data[field] = tensor.cpu()
 
-
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     """
     Synchronize cudagraph_mode across DP ranks by taking the minimum.
@@ -4959,7 +4901,6 @@ def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
     This ensures all ranks send consistent values (all padded or all unpadded).
     """
     return int(tensor[1, :].min().item())
-
 
 def _get_gpu_model_runner_module_name(model_runner) -> str:
     """Return the module name of GPUModelRunner found in the MRO."""
@@ -4973,7 +4914,6 @@ def _get_gpu_model_runner_module_name(model_runner) -> str:
             "The class hierarchy may have changed."
         )
     return gpu_model_runner_cls.__module__
-
 
 @contextmanager
 def _torch_cuda_wrapper():
@@ -5016,7 +4956,6 @@ def _torch_cuda_wrapper():
         torch.cuda.synchronize = torch.npu.synchronize
         torch.cuda.mem_get_info = torch.npu.mem_get_info
 
-
 # TODO: This method will be removed subsequently and implemented in platform.
 @contextmanager
 def _replace_gpu_model_runner_function_wrapper(target_module_name):
@@ -5028,7 +4967,6 @@ def _replace_gpu_model_runner_function_wrapper(target_module_name):
         raise RuntimeError(f"NPUModelRunner failed, error is {e}")
     finally:
         setattr(target_module, "graph_capture", graph_capture)  # noqa: B010
-
 
 # TODO: remove it when flash_comm1 is removed
 @contextmanager
