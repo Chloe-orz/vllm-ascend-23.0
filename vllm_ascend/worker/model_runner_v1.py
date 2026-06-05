@@ -927,6 +927,8 @@ class NPUModelRunner(GPUModelRunner):
             self._is_qwen3_5 = "qwen3_5" in model_type
             self._is_deepseek_v2 = "deepseek" in model_type
             self._is_kimi_k25 = "kimi_k25" in outer_model_type or "kimi_k25" in model_type
+            self._is_glm4_moe = "glm4_moe" in model_type or "glm_moe_dsa" in model_type
+            self._is_minimax_m2 = "minimax_m2" in model_type
             self.num_layers = 0
             self.segment_a: Any = None
             self.segment_e: Any = None
@@ -945,6 +947,8 @@ class NPUModelRunner(GPUModelRunner):
             self._is_qwen3_5 = False
             self._is_deepseek_v2 = False
             self._is_kimi_k25 = False
+            self._is_glm4_moe = False
+            self._is_minimax_m2 = False
             if self.parallel_config.enable_edge_cloud:
                 raise ValueError(
                     "--enable-edge-cloud requires "
@@ -1110,10 +1114,11 @@ class NPUModelRunner(GPUModelRunner):
           2. get_model → BaseModelLoader.load_model（标准 NPU 上初始化+加载）
           3. 创建分段 callable 并按需包装 ACLGraphWrapper
         """
-        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25):
+        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25 
+                or self._is_glm4_moe or self._is_minimax_m2):
             raise NotImplementedError(
                 "edge-cloud mode currently supports Qwen3.5, DeepseekV2/V3, "
-                "and Kimi-K2.5/K2.6 models."
+                "Kimi-K2.5/K2.6, GLM-4/GLM-5 models, and MiniMax-M2 models."
             )
 
         logger.info(
@@ -1131,6 +1136,13 @@ class NPUModelRunner(GPUModelRunner):
             import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
         if self._is_kimi_k25:
             import vllm_ascend.patch.models.kimi_k25_edge_cloud  # noqa: F401
+        if self._is_glm4_moe:
+            hf_text_config = getattr(self.model_config, "hf_text_config", None)
+            text_model_type = getattr(hf_text_config, "model_type", "")
+            if "glm_moe_dsa" in text_model_type:
+                import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
+        if self._is_minimax_m2:
+            import vllm_ascend.patch.models.minimax_m2_edge_cloud  # noqa: F401
 
         # 1. 存储 head_k / tail_k 到 parallel_state 全局变量，
         #    使 make_layers() 在模型 __init__ 中能直接读取并创建正确的
