@@ -50,7 +50,7 @@ class MemcacheBackend(Backend):
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def _ensure_initialized(self):
+    def ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -58,7 +58,7 @@ class MemcacheBackend(Backend):
             if self._store_initialized:
                 return
 
-            logger.info("Initializing Memcache store on first put.")
+            logger.info("Initializing Memcache store lazily.")
             self.store = self._setup_store()
             self._store_initialized = True
             self._register_buffers_if_needed()
@@ -194,8 +194,6 @@ class MemcacheBackend(Backend):
         self.ensure_initialized()
         assert self.store is not None
         try:
-            self._ensure_initialized()
-            assert self.store is not None
             res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
             for value in res:
                 if value != 0:
