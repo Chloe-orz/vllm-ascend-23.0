@@ -101,6 +101,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self.kv_caches: dict[str, torch.Tensor] = {}
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
+        self.sended_but_unfinished_reqs: set[str] = set()
         self._current_step_has_real_forward = False
 
         if role == KVConnectorRole.SCHEDULER:
