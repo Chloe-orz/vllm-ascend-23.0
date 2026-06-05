@@ -2136,8 +2136,9 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors,
             )
 
-            # update global cos, sin
-            update_cos_sin(positions)
+            if not self.edge_cloud_cfg.role == "edge":
+                # update global cos, sin
+                update_cos_sin(positions)
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB weight D2D"):
