@@ -722,10 +722,12 @@ class NPUWorker(WorkerBase):
                     all_gather_group = None
                 else:
                     all_gather_group = get_tp_group()
+                print(f"Received intermediate tensors from edge before",flush=True)
                 tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
                     all_gather_group=all_gather_group,
                     use_alt_group=use_alt_group,
                 )
+                print(f"Received intermediate tensors from edge after",flush=True)
                 assert tensor_dict is not None, (
                     "worker irecv_tensor_dict returned None, "
                     "previous stage may have failed to send."
@@ -758,6 +760,7 @@ class NPUWorker(WorkerBase):
         if is_edge_device():
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                print(f"Send intermediate tensors to cloud",flush=True)
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -774,6 +777,7 @@ class NPUWorker(WorkerBase):
         if is_cloud_device():
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                print(f"Send intermediate tensors to edge",flush=True)
         else:
             assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
