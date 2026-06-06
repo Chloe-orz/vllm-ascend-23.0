@@ -1291,6 +1291,8 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self._seq_lens_cpu_event_pending = False
 
+        self._pp_timing("prep_positions_gpu", sync_npu=True)
+
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
         if self.pcp_size <= 1:
@@ -1299,6 +1301,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.query_start_loc.gpu[: num_reqs + 1],
                 self.positions[:total_num_scheduled_tokens],
             )
+        self._pp_timing("prep_slot_mapping", sync_npu=True)
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
@@ -1382,6 +1385,8 @@ class NPUModelRunner(GPUModelRunner):
                 num_reqs=base_num_reqs,
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
             )
+
+        self._pp_timing("prep_logits_indices", sync_npu=True)
 
         return (
             logits_indices,
