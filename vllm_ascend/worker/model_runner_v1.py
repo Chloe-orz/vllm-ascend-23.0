@@ -1291,6 +1291,7 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self._seq_lens_cpu_event_pending = False
 
+        self._pp_timing("prep_gpu_launch_done", sync_npu=False)
         self._pp_timing("prep_positions_gpu", sync_npu=True)
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
