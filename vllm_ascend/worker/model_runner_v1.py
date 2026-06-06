@@ -2753,6 +2753,18 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        if self._edge_cloud_enabled and not self.parallel_config.is_edge_node:
+            # Cloud workers do not own segment_e / LM head / sampler in the
+            # edge-cloud PD-separation topology. When the edge EngineCore
+            # issues sample_tokens via collective_rpc, every worker dequeues
+            # the request, but only the edge (rank 0) actually samples and
+            # writes back to the executor's reply mq. Cloud workers must
+            # return a no-op output immediately so the broadcast protocol
+            # converges and no PP/HCCL primitive is touched here.
+            self.execute_model_state = None
+            self.kv_connector_output = None
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
         pp = get_pp_group()
