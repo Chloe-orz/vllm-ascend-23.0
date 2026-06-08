@@ -3611,7 +3611,7 @@ class NPUModelRunner(GPUModelRunner):
                 "PL/DL scheduler_output must carry head_token from cloud"
             )
 
-        token_tensor = intermediate_tensors.tensors.get("_head_token")
+        token_tensor = intermediate_tensors.tensors.pop("_head_token", None)
         if token_tensor is None:
             raise RuntimeError(
                 "intermediate_tensors missing '_head_token'; "
