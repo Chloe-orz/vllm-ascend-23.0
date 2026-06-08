@@ -67,7 +67,7 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -307,6 +307,19 @@ class EdgeCloudSegment(torch.nn.Module):
             **extra_layer_kwargs,
         )
 
+@dataclass
+class HeadState:
+    """Minimal suspended state for an edge-cloud head-segment batch.
+
+    The heavy intermediate tensors (hidden states) are sent to the cloud
+    immediately; we only keep enough metadata to correlate the tail-segment
+    batch with its head segment via ``head_token``.
+    """
+    head_token: str
+    scheduler_output: "SchedulerOutput"
+    req_ids: tuple[str, ...]
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -363,6 +376,11 @@ class NPUModelRunner(GPUModelRunner):
         self._layerwise_spec_decode_common_attn_metadata: Any = None
         self._layerwise_ec_connector_output: Any = None
         self._layerwise_cudagraph_stats: Any = None
+
+        # Edge-cloud PD-separation: suspended head-segment states keyed by
+        # head_token.  Each entry holds the minimal context needed to verify
+        # that a later tail-segment batch matches its head segment.
+        self._pending_head_states: dict[str, "HeadState"] = {}
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -1916,6 +1934,21 @@ class NPUModelRunner(GPUModelRunner):
             )
         # --- End layer slice fast path ---
 
+        # Edge-cloud tail-segment validation: ensure the control-plane
+        # head_token matches the data-plane head_token embedded in the
+        # intermediate tensors received from the cloud.
+        if (
+            self._edge_cloud_enabled
+            and is_edge_device()
+            and scheduler_output.batch_type in (
+                BatchType.PREFILL_LAST, BatchType.DECODE_LAST
+            )
+            and intermediate_tensors is not None
+        ):
+            self._resume_and_validate_head_state(
+                scheduler_output, intermediate_tensors
+            )
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -2311,6 +2344,7 @@ class NPUModelRunner(GPUModelRunner):
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
+                    self.suspend_head_state(scheduler_output)
                     return hidden_states
                 if not get_pp_group().is_last_rank:
                     # Return the intermediate tensors.
@@ -3144,6 +3178,89 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.kv_connector_output = kv_connector_output
             return None
+
+    def suspend_head_state(self, scheduler_output: SchedulerOutput) -> None:
+        """Suspend the minimal head-segment context for later tail-segment pairing.
+
+        Called just before the edge head-segment returns IntermediateTensors
+        to the worker for cross-node transmission.
+        """
+        token = scheduler_output.head_token
+        if not token:
+            return
+        if token in self._pending_head_states:
+            raise RuntimeError(
+                f"head_token={token} already suspended; "
+                "previous tail did not consume it"
+            )
+        self._pending_head_states[token] = HeadState(
+            head_token=token,
+            scheduler_output=scheduler_output,
+            req_ids=tuple(self.input_batch.req_ids),
+        )
+
+    def _resume_and_validate_head_state(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: IntermediateTensors,
+    ) -> None:
+        """Validate control-plane / data-plane alignment for a tail segment.
+
+        The EngineCore sends the head_token over ZMQ (control plane); the
+        cloud worker echoes it back inside the intermediate tensors payload
+        (data plane).  Both must match before we execute the tail segment.
+        """
+        token_ctrl = scheduler_output.head_token
+        if not token_ctrl:
+            raise RuntimeError(
+                "PL/DL scheduler_output must carry head_token from cloud"
+            )
+
+        token_tensor = intermediate_tensors.tensors.get("_head_token")
+        if token_tensor is None:
+            raise RuntimeError(
+                "intermediate_tensors missing '_head_token'; "
+                "cloud worker must embed it"
+            )
+        token_pp = bytes(token_tensor.cpu().numpy().tolist()).decode("utf-8")
+
+        if token_ctrl != token_pp:
+            raise RuntimeError(
+                f"Control-plane vs data-plane head_token mismatch: "
+                f"ZMQ={token_ctrl}, PP={token_pp}"
+            )
+
+        head_state = self._pending_head_states.pop(token_ctrl, None)
+        if head_state is None:
+            raise RuntimeError(
+                f"No suspended HeadState for head_token={token_ctrl}; "
+                f"tail dispatched without matching head or already consumed"
+            )
+
+        expected = self._expected_tail_batch_type(
+            head_state.scheduler_output.batch_type
+        )
+        if scheduler_output.batch_type != expected:
+            raise RuntimeError(
+                f"HeadState batch_type mismatch: head was "
+                f"{head_state.scheduler_output.batch_type}, "
+                f"tail is {scheduler_output.batch_type}"
+            )
+
+        if tuple(self.input_batch.req_ids) != head_state.req_ids:
+            raise RuntimeError(
+                f"HeadState req_ids mismatch: head had "
+                f"{head_state.req_ids}, current batch has "
+                f"{tuple(self.input_batch.req_ids)}"
+            )
+
+    @staticmethod
+    def _expected_tail_batch_type(head_bt: BatchType) -> BatchType:
+        return {
+            BatchType.PREFILL_FIRST: BatchType.PREFILL_LAST,
+            BatchType.DECODE_FIRST: BatchType.DECODE_LAST,
+        }[head_bt]
+
     def _edge_cloud_forward_cloud(
         self,
         num_tokens_padded: int,
