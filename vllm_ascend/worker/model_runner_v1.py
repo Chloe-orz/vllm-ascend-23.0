@@ -18,6 +18,7 @@
 #
 
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -619,6 +620,15 @@ class NPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         torch.npu.synchronize()
 
+    def _pp_timing(self, name: str) -> None:
+        if os.environ.get("PP_TIMING_ENABLE") != "1":
+            return
+        torch.npu.synchronize()
+        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+        t = time.perf_counter()
+        node = "edge" if is_edge_device() else "cloud"
+        print(f"[PP_TIMING] node={node} rank={rank} name={name} time={t:.6f}")
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: (
@@ -925,6 +935,7 @@ class NPUModelRunner(GPUModelRunner):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
+        self._pp_timing("prep_copy_gpu")
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
@@ -1138,6 +1149,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True,
             )
+        self._pp_timing("prep_mrope_done")
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
@@ -1160,7 +1172,9 @@ class NPUModelRunner(GPUModelRunner):
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
+        self._pp_timing("prep_discard_cpu_done")
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
+        self._pp_timing("prep_h2d_discard_done")
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
@@ -1217,14 +1231,18 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                 non_blocking=True,
             )
+        self._pp_timing("prep_h2d_num_comp_done")
 
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
+        self._pp_timing("prep_h2d_req_idx_done")
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
 
         self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
+        self._pp_timing("prep_h2d_query_pos_done")
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
+        self._pp_timing("prep_h2d_num_sched_done")
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
         # fix prefix cache ci test
         if self.pcp_size > 1:
@@ -1247,6 +1265,7 @@ class NPUModelRunner(GPUModelRunner):
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
+        self._pp_timing("prep_positions_gpu")
 
         # In async spec decode mode, num_computed_tokens was corrected on GPU
         # by update_num_computed_tokens_for_batch_change, so seq_lens (GPU) is
@@ -1857,6 +1876,15 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        if self._edge_cloud_enabled:
+            if is_edge_device():
+                seg = "seg_e" if intermediate_tensors is not None else "seg_a"
+            else:
+                seg = "seg_c"
+        else:
+            seg = "seg"
+        self._pp_timing(f"runner_exec_entry_{seg}")
+
         if self.vllm_config.model_config.enable_return_routed_experts:
             if vllm_version_is("0.20.2"):
                 capturer = RoutedExpertsCapturer.get_instance()
@@ -2140,6 +2168,7 @@ class NPUModelRunner(GPUModelRunner):
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
         # Run forward pass
+        self._pp_timing(f"runner_forward_start_{seg}")
         clear_kv_metadata = self.speculative_config is None
         with (
             record_function_or_nullcontext("forward"),
@@ -2165,6 +2194,7 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+        self._pp_timing(f"runner_forward_done_{seg}")
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2184,6 +2214,7 @@ class NPUModelRunner(GPUModelRunner):
             # 此处提前 return，跳过标准 PP 的 logits/sampling 流程。
 
             if is_edge_cloud_pp_mode() and isinstance(hidden_states, IntermediateTensors) and not is_edge_device():
+                self._pp_timing(f"runner_exec_done_{seg}")
                 hidden_states.kv_connector_output = kv_connector_output
                 self.kv_connector_output = kv_connector_output
                 if self.debugger is not None:
@@ -2199,6 +2230,7 @@ class NPUModelRunner(GPUModelRunner):
                     # Edge-cloud head segment always returns IntermediateTensors,
                     # regardless of is_last_rank, so the worker can send them to
                     # the cloud side and receive results back for the tail segment.
+                    self._pp_timing(f"runner_exec_done_{seg}")
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
@@ -2263,6 +2295,7 @@ class NPUModelRunner(GPUModelRunner):
         # previous model forward without breaking async scheduling.
         if deferred_state_corrections_fn:
             deferred_state_corrections_fn()
+        self._pp_timing(f"runner_exec_done_{seg}")
         return None
 
     @torch.inference_mode()

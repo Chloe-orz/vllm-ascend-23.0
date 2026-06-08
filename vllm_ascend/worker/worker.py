@@ -20,6 +20,8 @@
 import copy
 import gc
 import logging
+import os
+import time
 from types import NoneType
 
 import torch
@@ -437,6 +439,13 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        need_timing = os.environ.get("PP_TIMING_ENABLE") == "1"
+        if need_timing:
+            torch.npu.synchronize()
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            node = "edge" if is_edge_device() else "cloud"
+            print(f"[PP_TIMING] node={node} rank={rank} name=worker_entry time={time.perf_counter():.6f}")
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass:
@@ -470,7 +479,15 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
+        if need_timing:
+            torch.npu.synchronize()
+            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+            node = "edge" if is_edge_device() else "cloud"
+            print(f"[PP_TIMING] node={node} rank={rank} name=runner_entry time={time.perf_counter():.6f}")
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if need_timing:
+            torch.npu.synchronize()
+            print(f"[PP_TIMING] node={node} rank={rank} name=runner_done time={time.perf_counter():.6f}")
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -478,16 +495,33 @@ class NPUWorker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         if is_edge_device():
             if get_pp_group().world_size == 2:
+                if need_timing:
+                    torch.npu.synchronize()
+                    print(f"[PP_TIMING] node={node} rank={rank} name=send_to_cloud_start time={time.perf_counter():.6f}")
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                if need_timing:
+                    torch.npu.synchronize()
+                    print(f"[PP_TIMING] node={node} rank={rank} name=send_to_cloud_done time={time.perf_counter():.6f}")
+            if need_timing:
+                torch.npu.synchronize()
+                print(f"[PP_TIMING] node={node} rank={rank} name=recv_from_cloud_start time={time.perf_counter():.6f}")
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+            if need_timing:
+                torch.npu.synchronize()
+                print(f"[PP_TIMING] node={node} rank={rank} name=recv_from_cloud_done time={time.perf_counter():.6f}")
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
-            # 确保 HCCL 回传数据在 NPU 上可用后再启动 segment_e forward
+            # ensure HCCL recv data is available on NPU before launching segment_e forward
             torch.npu.synchronize()
+            if need_timing:
+                print(f"[PP_TIMING] node={node} rank={rank} name=runner_entry_e time={time.perf_counter():.6f}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            if need_timing:
+                torch.npu.synchronize()
+                print(f"[PP_TIMING] node={node} rank={rank} name=runner_done_e time={time.perf_counter():.6f}")
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
