@@ -35,7 +35,6 @@ from vllm.distributed import ensure_model_parallel_initialized, init_distributed
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import (
-    Handle,
     get_pp_group,
     get_tp_group,
     is_cloud_device,
@@ -152,7 +151,6 @@ class NPUWorker(WorkerBase):
         if self.use_v2_model_runner and vllm_version_is("0.20.2"):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.20.2; falling back to v1 model runner.")
             self.use_v2_model_runner = False
-        self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -442,11 +440,6 @@ class NPUWorker(WorkerBase):
             else:
                 role = "standard"
 
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-
         if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
             torch.npu.synchronize()
             print(f"[PP_TIMING][{role}][worker_entry] {time.perf_counter()}")
@@ -517,7 +510,7 @@ class NPUWorker(WorkerBase):
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
                     torch.npu.synchronize()
                     print(f"[PP_TIMING][edge][send_to_cloud_start] {time.perf_counter()}")
-                self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                get_pp_group().send_tensor_dict(output.tensors)
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
                     torch.npu.synchronize()
                     print(f"[PP_TIMING][edge][send_to_cloud_done] {time.perf_counter()}")
@@ -544,7 +537,7 @@ class NPUWorker(WorkerBase):
 
         if is_cloud_device():
             if get_pp_group().world_size == 2:
-                self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                get_pp_group().send_tensor_dict(output.tensors)
         else:
             assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
@@ -553,7 +546,7 @@ class NPUWorker(WorkerBase):
                 all_gather_group = None
             else:
                 all_gather_group = get_tp_group()
-            self._pp_send_work = get_pp_group().isend_tensor_dict(
+            get_pp_group().send_tensor_dict(
                 output.tensors,
                 all_gather_group=all_gather_group,
             )
