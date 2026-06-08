@@ -2337,13 +2337,18 @@ class NPUModelRunner(GPUModelRunner):
                 # established by their head segment (PF/DF).  Skipping
                 # _update_states prevents interleaving bugs when multiple
                 # prefills are in flight (2P1D) and avoids double-counting.
-                skip_update_states = (
+                is_edge_tail_segment = (
                     self._edge_cloud_enabled
                     and is_edge_device()
                     and scheduler_output.batch_type in (
                         BatchType.PREFILL_LAST,
                         BatchType.DECODE_LAST,
                     )
+                )
+                scheduled_req_ids = tuple(scheduler_output.num_scheduled_tokens)
+                skip_update_states = (
+                    is_edge_tail_segment
+                    and tuple(self.input_batch.req_ids) == scheduled_req_ids
                 )
                 if skip_update_states:
                     deferred_state_corrections_fn = None
@@ -3637,11 +3642,12 @@ class NPUModelRunner(GPUModelRunner):
                 f"tail is {scheduler_output.batch_type}"
             )
 
-        if tuple(self.input_batch.req_ids) != head_state.req_ids:
+        tail_req_ids = tuple(scheduler_output.num_scheduled_tokens)
+        if tail_req_ids != head_state.req_ids:
             raise RuntimeError(
                 f"HeadState req_ids mismatch: head had "
-                f"{head_state.req_ids}, current batch has "
-                f"{tuple(self.input_batch.req_ids)}"
+                f"{head_state.req_ids}, tail scheduler_output has "
+                f"{tail_req_ids}"
             )
 
     @staticmethod
