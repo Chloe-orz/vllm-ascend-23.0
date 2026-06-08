@@ -2333,10 +2333,24 @@ class NPUModelRunner(GPUModelRunner):
                         ):
                             req_state.prev_num_draft_len = 0
 
-                # Update persistent batch states.
-                deferred_state_corrections_fn = self._update_states(
-                    scheduler_output
+                # Edge-cloud tail segments (PL/DL) reuse the batch state
+                # established by their head segment (PF/DF).  Skipping
+                # _update_states prevents interleaving bugs when multiple
+                # prefills are in flight (2P1D) and avoids double-counting.
+                skip_update_states = (
+                    self._edge_cloud_enabled
+                    and is_edge_device()
+                    and scheduler_output.batch_type in (
+                        BatchType.PREFILL_LAST,
+                        BatchType.DECODE_LAST,
+                    )
                 )
+                if skip_update_states:
+                    deferred_state_corrections_fn = None
+                else:
+                    deferred_state_corrections_fn = self._update_states(
+                        scheduler_output
+                    )
 
                 if has_ec_transfer() and get_ec_transfer().is_producer:
                     with self.maybe_get_ec_connector_output(
