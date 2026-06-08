@@ -889,25 +889,50 @@ class DeepseekV4Model(nn.Module):
         # this buffer with the MTP draft via attribute replacement.
         self.topk_indices_buffer = topk_indices_buffer
 
-        if get_pp_group().is_first_rank:
+        # 边云模式下跳过 PP 占位逻辑，由 patch 中的 forward_edge_cloud_segment
+        # 控制执行范围，由 LayerShardLoader.apply_sharding 控制权重加载。
+        additional_config = getattr(vllm_config, 'additional_config', None) or {}
+        edge_cloud_enabled = additional_config.get('edge_cloud_config', {}).get('enabled', False)
+
+        if edge_cloud_enabled:
+            # 边云模式下先在 CPU 上创建全部层，apply_sharding 裁剪后再统一移到 NPU，
+            # 避免初始化阶段全部层直接分配到 NPU 导致 OOM。
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens",
             )
-        else:
-            self.embed_tokens = PPMissingLayer()
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda prefix: DeepseekV2DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
-            prefix=f"{prefix}.layers",
-        )
-
-        if get_pp_group().is_last_rank:
+            self.start_layer = 0
+            self.end_layer = config.num_hidden_layers
+            self.layers = nn.ModuleList([
+                DeepseekV2DecoderLayer(
+                    vllm_config, f"{prefix}.layers.{idx}",
+                    topk_indices_buffer=topk_indices_buffer)
+                for idx in range(config.num_hidden_layers)
+            ])
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
-            self.norm = PPMissingLayer()
+            if get_pp_group().is_first_rank:
+                self.embed_tokens = VocabParallelEmbedding(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.embed_tokens",
+                )
+            else:
+                self.embed_tokens = PPMissingLayer()
+            self.start_layer, self.end_layer, self.layers = make_layers(
+                config.num_hidden_layers,
+                lambda prefix: DeepseekV2DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
+                prefix=f"{prefix}.layers",
+            )
+
+            if get_pp_group().is_last_rank:
+                self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            else:
+                self.norm = PPMissingLayer()
+
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -1060,7 +1085,9 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         self.quant_config = quant_config
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-        if get_pp_group().is_last_rank:
+        additional_config = getattr(vllm_config, 'additional_config', None) or {}
+        edge_cloud_enabled = additional_config.get('edge_cloud_config', {}).get('enabled', False)
+        if edge_cloud_enabled or get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,

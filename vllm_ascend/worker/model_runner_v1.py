@@ -982,6 +982,9 @@ class NPUModelRunner(GPUModelRunner):
             outer_model_type = getattr(
                 getattr(self.model_config, "hf_config", None), "model_type", ""
             )
+            self._is_deepseek_v4 = (
+                    model_type == "deepseek_v4" or hasattr(hf_config, "hc_mult")
+                )
             self._is_qwen3_5 = "qwen3_5" in model_type
             self._is_deepseek_v2 = "deepseek" in model_type
             self._is_kimi_k25 = "kimi_k25" in outer_model_type or "kimi_k25" in model_type
@@ -995,6 +998,7 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self.head_k = 0
             self.tail_k = 0
+            self._is_deepseek_v4  = False
             self._is_qwen3_5 = False
             self._is_deepseek_v2 = False
             self._is_kimi_k25 = False
@@ -1155,6 +1159,8 @@ class NPUModelRunner(GPUModelRunner):
             self.head_k,
             self.tail_k,
         )
+        if self._is_deepseek_v4:
+            import vllm_ascend.patch.models.deepseek_v4_edge_cloud
         if self._is_qwen3_5:
             import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
         if self._is_deepseek_v2:
