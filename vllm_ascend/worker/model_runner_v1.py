@@ -1231,18 +1231,14 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                 non_blocking=True,
             )
-        self._pp_timing("prep_h2d_num_comp_done")
 
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
-        self._pp_timing("prep_h2d_req_idx_done")
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
 
         self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
-        self._pp_timing("prep_h2d_query_pos_done")
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
-        self._pp_timing("prep_h2d_num_sched_done")
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
         # fix prefix cache ci test
         if self.pcp_size > 1:
@@ -2042,6 +2038,7 @@ class NPUModelRunner(GPUModelRunner):
                     force_eager=self.model_config.enforce_eager,
                     num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                 )
+                self._pp_timing("prep_det_batch_done")
 
                 logger.debug(
                     "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -2125,6 +2122,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
+                self._pp_timing("prep_attn_metadata_done")
 
             (
                 input_ids,
@@ -2140,13 +2138,16 @@ class NPUModelRunner(GPUModelRunner):
                 else total_num_scheduled_tokens,
                 intermediate_tensors,
             )
+            self._pp_timing("prep_preprocess_done")
 
             # update global cos, sin
             update_cos_sin(positions)
+            self._pp_timing("prep_cos_sin_done")
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB weight D2D"):
                 self.eplb_updator.forward_before()
+            self._pp_timing("prep_eplb_done")
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
