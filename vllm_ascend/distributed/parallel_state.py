@@ -457,7 +457,7 @@ def edge_cloud_broadcast_recv() -> tuple[
 # first ``send_object(metadata_list)`` (a synchronous CPU pickle round-trip)
 # and only then ``isend`` each tensor. On a cross-WAN edge-cloud link, the
 # extra synchronous metadata round-trip happens right after ``_model_forward``
-# completes ¡ª exactly the moment we want hidden_states to start flowing.
+# completes ï¿½ï¿½ exactly the moment we want hidden_states to start flowing.
 #
 # Because every per-step PP tensor's dtype/shape is fully determined before
 # ``_model_forward`` runs (it only depends on ``num_tokens_padded`` and the
@@ -483,7 +483,7 @@ def edge_cloud_send_metadata(
     afterwards carries no metadata overhead.
 
     Only the PP boundary rank (the one whose ``pp_group.world_size == 2``,
-    i.e. global rank 0 on edge or rank ``edge_npu_count`` on cloud ¡ª the
+    i.e. global rank 0 on edge or rank ``edge_npu_count`` on cloud - the
     same rank that ``isend_tensor_dict`` would have used) actually puts the
     payload on the wire; every other rank is a no-op. The TP-side fan-out
     is the receiver's responsibility (see ``edge_cloud_recv_metadata``).
@@ -517,7 +517,7 @@ def edge_cloud_recv_metadata(
     TP-internal ``broadcast_object``. Every other rank on the same side
     just takes that broadcast.
 
-    This split is critical for correctness ¡ª TP is a collective, so all
+    This split is critical for correctness ï¿½ï¿½ TP is a collective, so all
     TP ranks MUST enter the broadcast together. Using
     ``tp_group.rank_in_group == 0`` as the selector would happen to match
     the PP boundary in the standard layout, but it also makes non-boundary
