@@ -723,10 +723,12 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Edge head segment (PF/DF): segment_a -> isend -> suspend -> return EMPTY."""
+        print("model_runner.execute_model edge head before.", flush=True)
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors=None,
             layer_slice_info=layer_slice_info,
         )
+        print("model_runner.execute_model edge head after.", flush=True)
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -766,10 +768,12 @@ class NPUWorker(WorkerBase):
         )
         torch.npu.synchronize()
 
+        print("model_runner.execute_model edge tail before.", flush=True)
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
         )
+        print("model_runner.execute_model edge tail after.", flush=True)
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -805,10 +809,12 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
+        print("model_runner.execute_model cloud before.", flush=True)
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
         )
+        print("model_runner.execute_model cloud after.", flush=True)
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -830,8 +836,9 @@ class NPUWorker(WorkerBase):
                 device="npu",
             )
         if get_pp_group().world_size == 2:
+            print("Send intermediate tensors to edge before", flush=True)
             self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
-            print("Send intermediate tensors to edge", flush=True)
+            print("Send intermediate tensors to edge after", flush=True)
         return output
 
     def _execute_model_legacy(
