@@ -1177,6 +1177,7 @@ class NPUModelRunner(GPUModelRunner):
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
+        self._pp_timing("prep_discard_cpu_done", sync_npu=False)
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
         self._pp_timing("prep_h2d_discard_done", sync_npu=True)
 
