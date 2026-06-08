@@ -941,7 +941,6 @@ class NPUModelRunner(GPUModelRunner):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
-        self._pp_timing("prep_block_table", sync_npu=True)
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
@@ -973,7 +972,6 @@ class NPUModelRunner(GPUModelRunner):
             self.query_pos.np[: cu_num_tokens[-1]],
             out=positions_np,
         )
-        self._pp_timing("prep_positions", sync_npu=True)
 
         # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
         # Use blocking .to(device) to ensure data lands on GPU before PCP
@@ -1032,7 +1030,6 @@ class NPUModelRunner(GPUModelRunner):
             self.query_lens = torch.from_numpy(self.pcp_manager.num_scheduled_tokens_padded)
         else:
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
-        self._pp_timing("prep_pcp_done", sync_npu=True)
 
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -1055,8 +1052,6 @@ class NPUModelRunner(GPUModelRunner):
             torch.index_select(
                 is_token_ids, 0, token_indices_tensor, out=self.is_token_ids.cpu[:total_num_scheduled_tokens]
             )
-
-        self._pp_timing("prep_token_ids", sync_npu=True)
 
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
         # the InputBatch, we need to fill in the prompt embeds into the expected
@@ -1183,6 +1178,7 @@ class NPUModelRunner(GPUModelRunner):
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
+        self._pp_timing("prep_h2d_discard_done", sync_npu=True)
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
@@ -1240,13 +1236,18 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
 
+        self._pp_timing("prep_h2d_num_comp_done", sync_npu=True)
+
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
+        self._pp_timing("prep_h2d_req_idx_done", sync_npu=True)
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
 
         self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
+        self._pp_timing("prep_h2d_query_pos_done", sync_npu=True)
         self.num_scheduled_tokens.np[:num_reqs] = num_scheduled_tokens
         self.num_scheduled_tokens.copy_to_gpu(num_reqs)
+        self._pp_timing("prep_h2d_num_sched_done", sync_npu=True)
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
         # fix prefix cache ci test
         if self.pcp_size > 1:
@@ -1293,7 +1294,6 @@ class NPUModelRunner(GPUModelRunner):
         else:
             self._seq_lens_cpu_event_pending = False
 
-        self._pp_timing("prep_gpu_launch_done", sync_npu=False)
         self._pp_timing("prep_positions_gpu", sync_npu=True)
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
@@ -1304,7 +1304,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.query_start_loc.gpu[: num_reqs + 1],
                 self.positions[:total_num_scheduled_tokens],
             )
-        self._pp_timing("prep_slot_mapping", sync_npu=True)
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
@@ -1389,7 +1388,6 @@ class NPUModelRunner(GPUModelRunner):
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
             )
 
-        self._pp_timing("prep_logits_indices", sync_npu=True)
 
         return (
             logits_indices,
@@ -2020,7 +2018,6 @@ class NPUModelRunner(GPUModelRunner):
 
                     # Update persistent batch states.
                     deferred_state_corrections_fn = self._update_states(scheduler_output)
-                    self._pp_timing("update_states_done", sync_npu=True)
 
                     if has_ec_transfer() and get_ec_transfer().is_producer:
                         with self.maybe_get_ec_connector_output(
@@ -2098,7 +2095,6 @@ class NPUModelRunner(GPUModelRunner):
                         force_eager=self.model_config.enforce_eager,
                         num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                     )
-                    self._pp_timing("determine_batch_done", sync_npu=True)
 
                     logger.debug(
                         "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -2182,14 +2178,6 @@ class NPUModelRunner(GPUModelRunner):
                         num_scheduled_tokens_np=num_scheduled_tokens_np,
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
-                    self._pp_timing("build_attn_metadata_done", sync_npu=True)
-
-                if _fast_path:
-                    # Placeholder timings for segment_e fast path (all work skipped)
-                    self._pp_timing("update_states_done", sync_npu=True)
-                    self._pp_timing("prepare_inputs_done", sync_npu=True)
-                    self._pp_timing("determine_batch_done", sync_npu=True)
-                    self._pp_timing("build_attn_metadata_done", sync_npu=True)
 
             (
                 input_ids,
@@ -2256,7 +2244,6 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
 
-        self._pp_timing("pre_forward_done", sync_npu=True)
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None

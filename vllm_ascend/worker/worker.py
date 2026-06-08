@@ -460,13 +460,13 @@ class NPUWorker(WorkerBase):
                 # _determine_batch_execution_and_padding, and
                 # _build_attention_metadata with edge's segment_a forward.
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-                    print(f"[PP_TIMING][cloud][prepare_early_start] {time.time()}")
+                    torch.npu.synchronize()
+                    print(f"[PP_TIMING][cloud][prepare_early_start] {time.perf_counter()}")
                 self.model_runner.cloud_prepare_early(scheduler_output)
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
                     torch.npu.synchronize()
-                    print(f"[PP_TIMING][cloud][prepare_early_end] {time.time()}")
-                if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-                    print(f"[PP_TIMING][cloud][recv_start] {time.time()}")
+                    print(f"[PP_TIMING][cloud][prepare_early_end] {time.perf_counter()}")
+                    print(f"[PP_TIMING][cloud][recv_start] {time.perf_counter()}")
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
@@ -476,7 +476,7 @@ class NPUWorker(WorkerBase):
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
                     intermediate_tensors.wait_for_comm()
                     torch.npu.synchronize()
-                    print(f"[PP_TIMING][cloud][pp_recv_done] {time.time()}")
+                    print(f"[PP_TIMING][cloud][recv_done] {time.perf_counter()}")
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
                 # it will conflict with the all-gather operation in flashcomm1.
@@ -515,11 +515,12 @@ class NPUWorker(WorkerBase):
         if is_edge_device():
             if get_pp_group().world_size == 2:
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-                    print(f"[PP_TIMING][edge][send_to_cloud_start] {time.time()}")
+                    torch.npu.synchronize()
+                    print(f"[PP_TIMING][edge][send_to_cloud_start] {time.perf_counter()}")
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
                     torch.npu.synchronize()
-                    print(f"[PP_TIMING][edge][send_to_cloud_done] {time.time()}")
+                    print(f"[PP_TIMING][edge][send_to_cloud_done] {time.perf_counter()}")
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -530,8 +531,6 @@ class NPUWorker(WorkerBase):
                 intermediate_tensors.wait_for_comm()
                 torch.npu.synchronize()
                 print(f"[PP_TIMING][edge][recv_from_cloud] {time.perf_counter()}")
-            # 确保 HCCL 回传数据在 NPU 上可用后再启动 segment_e forward
-            torch.npu.synchronize()
             if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
                 torch.npu.synchronize()
                 print(f"[PP_TIMING][{role}][runner_entry_e] {time.perf_counter()}")
