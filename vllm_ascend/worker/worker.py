@@ -738,14 +738,6 @@ class NPUWorker(WorkerBase):
             return output
 
         assert isinstance(output, IntermediateTensors)
-        # Embed head_token into the payload so the cloud can echo it back.
-        token = scheduler_output.head_token
-        if token:
-            output.tensors["_head_token"] = torch.tensor(
-                list(bytearray(token, "utf-8")),
-                dtype=torch.uint8,
-                device="npu",
-            )
         if get_pp_group().world_size == 2:
             self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
             print("Send intermediate tensors to cloud", flush=True)
@@ -828,6 +820,15 @@ class NPUWorker(WorkerBase):
             return output
 
         assert isinstance(output, IntermediateTensors)
+        # Echo the head_token back to the edge so the tail segment can
+        # correlate the data-plane tensor with the control-plane scheduler output.
+        token = scheduler_output.head_token
+        if token:
+            output.tensors["_head_token"] = torch.tensor(
+                list(bytearray(token, "utf-8")),
+                dtype=torch.uint8,
+                device="npu",
+            )
         if get_pp_group().world_size == 2:
             self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
             print("Send intermediate tensors to edge", flush=True)
