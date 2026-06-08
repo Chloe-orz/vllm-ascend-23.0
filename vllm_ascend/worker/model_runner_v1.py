@@ -1179,12 +1179,13 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
         self._pp_timing("prep_discard_cpu_done", sync_npu=False)
         if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-            _h2d_start = torch.npu.Event()
-            _h2d_end = torch.npu.Event()
+            _h2d_start = torch.npu.Event(enable_timing=True)
+            _h2d_end = torch.npu.Event(enable_timing=True)
             _h2d_start.record()
         self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
         if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
             _h2d_end.record()
+            _h2d_start.synchronize()
             _h2d_end.synchronize()
             _npu_ms = _h2d_start.elapsed_time(_h2d_end)
             _role = self.edge_cloud_cfg.role if self._edge_cloud_enabled else "standard"
