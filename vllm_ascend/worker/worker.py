@@ -871,8 +871,22 @@ class NPUWorker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and is_first_slice:
-            if not get_pp_group().is_first_rank:
+        if forward_pass:
+            if is_cloud_device():
+                # Pre-compute input preparation while edge runs segment_a.
+                # This overlaps cloud's _update_states, _prepare_inputs,
+                # _determine_batch_execution_and_padding, and
+                # _build_attention_metadata with edge's segment_a forward.
+                self.model_runner.cloud_prepare_early(scheduler_output)
+                tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
+            elif not get_pp_group().is_first_rank:
+                # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
+                # it will conflict with the all-gather operation in flashcomm1.
                 if enable_sp():
                     all_gather_group = None
                 else:
@@ -908,8 +922,7 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
-            # 确保 HCCL 回传数据在 NPU 上可用后再启动 segment_e forward
-            torch.npu.synchronize()
+           
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
