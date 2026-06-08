@@ -72,7 +72,7 @@ def init_edge_cloud_tensor_meta(
         hidden_dtype: torch.dtype derived directly from model_config.dtype
             (equivalent to MindIE's config.torch_dtype from config.json),
             eliminating the need for a separate user-configured dtype string.
-        has_residual: dynamically detected ¡ª True if the model produces a
+        has_residual: dynamically detected  True if the model produces a
             residual tensor in IntermediateTensors (most decoder models do).
     """
     global _EDGE_CLOUD_TENSOR_META
@@ -462,7 +462,7 @@ def edge_cloud_isend_tensor_dict(
 ) -> list[Handle]:
     """Send tensor dict without metadata sync (edge-cloud optimized).
 
-    Skips send_object(metadata_list) ¡ª the receiver already knows the
+    Skips send_object(metadata_list) ï¿½ï¿½ the receiver already knows the
     tensor structure from init_edge_cloud_tensor_meta() and computes
     shapes locally from SchedulerOutput.total_num_scheduled_tokens.
 
@@ -568,7 +568,7 @@ def edge_cloud_broadcast_recv(
 
     if is_pp_npu0:
         # PP rank 0: receive tensor data from the other side (edge/cloud)
-        # without metadata sync ¡ª shapes are computed locally
+        # without metadata sync ï¿½ï¿½ shapes are computed locally
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_irecv_tensor_dict(
             num_tokens=num_tokens,
         )
