@@ -578,8 +578,8 @@ def edge_cloud_broadcast_recv(
 
         # Broadcast locally-computed metadata + num_tokens to other TP ranks
         # so they can allocate tensors (this is intra-node, fast)
-        metadata_list = ec_meta.metadata_list
-        tp_group.broadcast_object([num_tokens, metadata_list], src=0)
+        ###metadata_list = ec_meta.metadata_list
+        ###tp_group.broadcast_object([num_tokens, metadata_list], src=0)
 
         def broadcast_postprocess():
             _, tensor_list = _split_tensor_dict(tensor_dict) if tensor_dict else (None, [])
@@ -601,9 +601,11 @@ def edge_cloud_broadcast_recv(
 
     # Non-PP-NPU0 ranks: receive metadata from NPU 0 via TP broadcast,
     # allocate tensors, then broadcast-recv actual data
-    broadcast_data = tp_group.broadcast_object(None, src=0)
-    recv_num_tokens = broadcast_data[0]
-    metadata_list = broadcast_data[1]
+    ###broadcast_data = tp_group.broadcast_object(None, src=0)
+    #recv_num_tokens = broadcast_data[0]
+    #metadata_list = broadcast_data[1]
+    metadata_list = ec_meta.metadata_list
+    recv_num_tokens = num_tokens
     if metadata_list is None:
         metadata_list = []
 
