@@ -380,6 +380,11 @@ class NPUWorker(WorkerBase):
         if forward_pass:
             # Cloud side in edge-cloud mode: unified broadcast receive for NPU0 and non-NPU0
             if is_cloud_device():
+                # Pre-compute input preparation while edge runs segment_a.
+                # This overlaps cloud's _update_states, _prepare_inputs,
+                # _determine_batch_execution_and_padding, and
+                # _build_attention_metadata with edge's segment_a forward.
+                self.model_runner.cloud_prepare_early(scheduler_output)
                 tensor_dict, handles, postprocess = edge_cloud_broadcast_recv()
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
