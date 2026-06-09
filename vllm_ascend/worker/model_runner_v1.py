@@ -1474,13 +1474,6 @@ class NPUModelRunner(GPUModelRunner):
             batch_desc = cache["batch_desc"]
             cudagraph_stats = cache["cudagraph_stats"]
             num_scheduled_tokens_compressed_list = cache.get("num_scheduled_tokens_compressed_list")
-            # Re-sync num_computed_tokens from CPU: segment_a forward or
-            # async state update may have modified the GPU buffer.
-            num_reqs = self.input_batch.num_reqs
-            self.num_computed_tokens[:num_reqs].copy_(
-                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
-                non_blocking=True,
-            )
             # Fast path skips _update_states, so no deferred corrections.
             deferred_state_corrections_fn = None
         elif _cloud_fast_path:
@@ -1497,6 +1490,7 @@ class NPUModelRunner(GPUModelRunner):
             batch_desc = cache["batch_desc"]
             cudagraph_stats = cache["cudagraph_stats"]
             num_scheduled_tokens_compressed_list = cache.get("num_scheduled_tokens_compressed_list")
+            deferred_state_corrections_fn = None
 
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
