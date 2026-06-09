@@ -45,12 +45,16 @@ class EdgeCloudTensorMeta:
     metadata_list: list[tuple[str, Any]]
     # Ordered list of tensor keys (same order as metadata_list, only tensor entries)
     tensor_keys: list[str]
+    # HC multiplier: DeepSeek V4 uses hc_mult > 1 (intermediate tensors are 3D);
+    # standard models (Qwen3.5, Llama, etc.) use hc_mult = 1 (2D tensors).
+    hc_mult: int
 
 
 def init_edge_cloud_tensor_meta(
     hidden_size: int,
     hidden_dtype: torch.dtype = torch.bfloat16,
     has_residual: bool = True,
+    hc_mult: int = 1,
 ):
     """Initialize the pre-computed tensor metadata for edge-cloud transfers.
 
@@ -65,32 +69,48 @@ def init_edge_cloud_tensor_meta(
             eliminating the need for a separate user-configured dtype string.
         has_residual: dynamically detected  True if the model produces a
             residual tensor in IntermediateTensors (most decoder models do).
+        hc_mult: HC multiplier for DeepSeek V4's Hash Compression mechanism.
+            When hc_mult > 1, intermediate tensors are 3D
+            ``(num_tokens, hc_mult, hidden_size)`` instead of the standard 2D
+            ``(num_tokens, hidden_size)``.  Defaults to 1 (standard models like
+            Qwen3.5, Llama, etc.).
     """
     global _EDGE_CLOUD_TENSOR_META
 
     dtype = hidden_dtype
     device = "npu"
 
+    # Determine shape template based on hc_mult:
+    #   hc_mult == 1: standard 2D shape (Qwen3.5, Llama, etc.)
+    #   hc_mult >  1: 3D shape with hc_mult dimension (DeepSeek V4)
+    if hc_mult > 1:
+        tensor_shape: tuple[int, ...] = (0, hc_mult, hidden_size)
+    else:
+        tensor_shape = (0, hidden_size)
+
     metadata_list: list[tuple[str, Any]] = [
-        ("hidden_states", TensorMetadata(device, dtype, (0, hidden_size))),
+        ("hidden_states", TensorMetadata(device, dtype, tensor_shape)),
     ]
     tensor_keys = ["hidden_states"]
 
     if has_residual:
         metadata_list.append(
-            ("residual", TensorMetadata(device, dtype, (0, hidden_size)))
+            ("residual", TensorMetadata(device, dtype, tensor_shape))
         )
         tensor_keys.append("residual")
 
     _EDGE_CLOUD_TENSOR_META = EdgeCloudTensorMeta(
         metadata_list=metadata_list,
         tensor_keys=tensor_keys,
+        hc_mult=hc_mult,
     )
     logger.info(
-        "[EdgeCloud] Initialized tensor meta: keys=%s, dtype=%s, hidden_size=%d",
+        "[EdgeCloud] Initialized tensor meta: keys=%s, dtype=%s, "
+        "hidden_size=%d, hc_mult=%d",
         tensor_keys,
         dtype,
         hidden_size,
+        hc_mult,
     )
 
 
@@ -474,6 +494,28 @@ def edge_cloud_isend_tensor_dict(
         f"expected={ec_meta.tensor_keys}. If this is a new model, extend "
         "init_edge_cloud_tensor_meta() so both sides agree."
     )
+
+    # Guard against silent shape drift (e.g. DeepSeek V4's 3D tensors vs
+    # a 2D EdgeCloudTensorMeta).  When num_tokens is provided, validate
+    # that each tensor's non-dim-0 shape matches the pre-computed metadata.
+    # Dim-0 is allowed to differ when the sender has cudagraph/SP/DP padding
+    # (which is sliced off below).
+    for key, value in tensor_dict.items():
+        if not isinstance(value, torch.Tensor) or value.numel() == 0:
+            continue
+        for meta_key, meta_val in ec_meta.metadata_list:
+            if meta_key == key and isinstance(meta_val, TensorMetadata):
+                if value.shape[1:] != meta_val.size[1:]:
+                    assert False, (
+                        f"edge_cloud_isend_tensor_dict: shape mismatch for "
+                        f"'{key}'. got shape {value.shape} (non-dim0 "
+                        f"{value.shape[1:]}), expected non-dim0 "
+                        f"{meta_val.size[1:]} from EdgeCloudTensorMeta "
+                        f"(hc_mult={ec_meta.hc_mult}). If this is a new "
+                        f"model, update init_edge_cloud_tensor_meta() with "
+                        f"the correct hc_mult."
+                    )
+                break
 
     handles: list[Handle] = []
     for _, value in tensor_dict.items():

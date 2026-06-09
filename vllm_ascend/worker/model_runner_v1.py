@@ -691,6 +691,23 @@ class NPUModelRunner(GPUModelRunner):
             self.model: nn.Module = initialize_model(self.vllm_config)
         self.num_layers = len(self.model.model.layers)
 
+        # Validate DeepSeek V4 Hash MoE constraint: all hash MoE layers
+        # (layer_idx < num_hash_layers) must reside on the edge side
+        # (segment A).  The cloud side does not carry tid2eid parameters
+        # and cannot perform hash-based expert routing.
+        if self._is_deepseek_v4:
+            num_hash_layers = getattr(
+                self.model_config.hf_config, 'num_hash_layers', 0
+            )
+            if num_hash_layers > self.head_k:
+                raise ValueError(
+                    f"DeepSeek V4 Hash MoE layers (num_hash_layers="
+                    f"{num_hash_layers}) exceed edge head_k ({self.head_k}). "
+                    f"The cloud side cannot handle Hash MoE routing because "
+                    f"it lacks the tid2eid parameter. Increase head_k or use "
+                    f"a model with fewer hash layers."
+                )
+
         # 2. 复用 LayerShardLoader 进行层裁剪（替代手写逻辑）
         layer_plan = EdgeCloudLayerPlan(
             role=self.edge_cloud_cfg.role,

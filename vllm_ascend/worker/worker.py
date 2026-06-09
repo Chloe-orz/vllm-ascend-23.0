@@ -87,14 +87,17 @@ def _detect_has_residual(model_config) -> bool:
     while models without residual output only {"hidden_states": ...}.
 
     Detection strategy: check the model's architecture class for the
-    presence of residual stream handling. For Qwen3.5 (currently the
-    only supported edge-cloud model), residual is always present.
+    presence of residual stream handling.
     """
     hf_config = getattr(model_config, "hf_text_config", None)
     model_type = getattr(hf_config, "model_type", "") if hf_config else ""
-    # Currently supported edge-cloud models all produce residual
     # Qwen3.5 / Qwen3.5-MoE use residual connections
     if "qwen3" in model_type:
+        return True
+    # DeepSeek V4 uses hc_pre/hc_post which is equivalent to a residual
+    # stream; its IntermediateTensors always contain both hidden_states
+    # and residual.
+    if model_type == "deepseek_v4":
         return True
     # Default: most modern decoder models produce residual
     # Can be made more specific as more models are supported
@@ -361,10 +364,15 @@ class NPUWorker(WorkerBase):
             # model's config.json torch_dtype field by _get_and_verify_dtype().
             hidden_dtype = self.model_config.dtype
             has_residual = _detect_has_residual(self.model_config)
+            # DeepSeek V4 uses hc_mult > 1 (HC mechanism produces 3D
+            # intermediate tensors).  Standard models (Qwen3.5, Llama,
+            # etc.) do not have hc_mult, defaulting to 1 (2D tensors).
+            hc_mult = getattr(self.model_config.hf_text_config, 'hc_mult', 1)
             init_edge_cloud_tensor_meta(
                 hidden_size=hidden_size,
                 hidden_dtype=hidden_dtype,
                 has_residual=has_residual,
+                hc_mult=hc_mult,
             )
 
     @torch.inference_mode()
