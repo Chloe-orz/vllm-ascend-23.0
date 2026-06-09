@@ -495,8 +495,27 @@ def edge_cloud_isend_tensor_dict(
 
     group = pp_group.device_group
 
+    # Guard against silent key/order drift between sender and receiver.
+    # The receiver iterates ec_meta.metadata_list in a fixed order; if the
+    # sender's tensor_dict adds, drops, or reorders keys (e.g. a future
+    # model patch starts returning an extra entry in IntermediateTensors),
+    # the wire payload no longer matches the receiver's pre-allocated
+    # buffers �� and because there is no metadata exchange anymore, the
+    # mismatch would corrupt data silently or only surface as an HCCL
+    # crash. Fail fast here with a precise message instead.
+    ec_meta = get_edge_cloud_tensor_meta()
+    sender_tensor_keys = [
+        k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)
+    ]
+    assert sender_tensor_keys == ec_meta.tensor_keys, (
+        "edge_cloud_isend_tensor_dict: tensor key set/order does not match "
+        f"the pre-computed EdgeCloudTensorMeta. sender={sender_tensor_keys}, "
+        f"expected={ec_meta.tensor_keys}. If this is a new model, extend "
+        "init_edge_cloud_tensor_meta() so both sides agree."
+    )
+
     handles: list[Handle] = []
-    for key, value in tensor_dict.items():
+    for _, value in tensor_dict.items():
         if not isinstance(value, torch.Tensor):
             continue
         if value.numel() == 0:
