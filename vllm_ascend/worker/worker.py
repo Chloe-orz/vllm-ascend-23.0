@@ -431,7 +431,6 @@ class NPUWorker(WorkerBase):
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                 )
                 self.model_runner.cloud_prepare_early(scheduler_output)
-                tensor_dict, handles, postprocess = edge_cloud_broadcast_recv()
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
                     comm_handles=handles,
