@@ -36,7 +36,7 @@ vllm server Qwen3.6-27B \
     --additional-config '{"edge_cloud_config":{"enble":true, "role":"edge", "edge_head_tail_layers":1}}' \
     --compilation-config '{"cudagraph_mode":"NONE", "cudagraph_capture_sizes":[2,4,6,8,10,12,14,16,18,20,22,24,32,36,40]}' 
 
-**云侧(rank0)：**  
+**云侧(rank1)：**  
 vllm server Qwen3.6-27B \
     --host 0.0.0.0 \
     --port 8060 \
@@ -83,7 +83,7 @@ vllm仓与vllm-ascend仓（已同步vllm-pdmix仓和vllm-ascend-pdmix仓）已�
 |phase 3|边侧P尾请求下发执行成功并发送SchedulerOutput与hidden state|-|流程正确，正确输出日志信息|✅|
 |phase 4|边侧D首请求下发执行成功、云测D中请求下发执行成功、边侧D尾请求下发执行成功|-|流程正确，正确输出日志信息|✅|
 |phase 4|单请求执行过程打通|-|打curl能够正常输出|✅|
-|phase 5|边侧实现1P1D batch调度算法|-|benchmark打多请求能够正常执行，无异常卡死、报错、精度问题|❌|
-|phase 5|云侧实现PD batch 穿插调度算法|-|benchmark打多请求能够正常执行，无异常卡死、报错、精度问题|❌|
+|phase 5|边侧实现1P1D batch调度算法|-|benchmark打多请求能够正常执行，无异常卡死、报错、精度问题|✅|
+|phase 5|云侧实现PD batch 穿插调度算法|-|benchmark打多请求能够正常执行，无异常卡死、报错、精度问题|✅|
 |phase 6|PP双通道通信组拓展为三通道通信组，传输Prefill hidden state使用双通道，传输Decode hidden state使用单通道|-|benchmark打多请求能够正常执行，无异常卡死、报错、精度问题|❌|
-|phase 7|边侧实现2P1D batch调度算法|-|benchmark打多请求能够正常执行，无异常卡死、报错、精度问题，吞吐性能相比1P1D有所提升|❌|
+|phase 7|边侧实现2P1D batch调度算法|-|benchmark打多请求能够正常执行，无异常卡死、报错、精度问题，吞吐性能相比1P1D有所提升|✅|
