@@ -32,7 +32,6 @@ from vllm.distributed import ensure_model_parallel_initialized, init_distributed
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, is_cloud_device, is_edge_device
-from vllm_ascend.distributed.parallel_state import edge_cloud_broadcast_recv
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
@@ -52,7 +51,12 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import (
+    edge_cloud_broadcast_recv,
+    edge_cloud_isend_tensor_dict,
+    init_ascend_model_parallel,
+    init_edge_cloud_tensor_meta,
+)
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.utils import (
     AscendDeviceType,
@@ -73,6 +77,28 @@ torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+
+def _detect_has_residual(model_config) -> bool:
+    """Detect whether the model produces a residual tensor in IntermediateTensors.
+
+    Models with residual connections (most decoder-only LLMs) output
+    {"hidden_states": ..., "residual": ...} in IntermediateTensors,
+    while models without residual output only {"hidden_states": ...}.
+
+    Detection strategy: check the model's architecture class for the
+    presence of residual stream handling. For Qwen3.5 (currently the
+    only supported edge-cloud model), residual is always present.
+    """
+    hf_config = getattr(model_config, "hf_text_config", None)
+    model_type = getattr(hf_config, "model_type", "") if hf_config else ""
+    # Currently supported edge-cloud models all produce residual
+    # Qwen3.5 / Qwen3.5-MoE use residual connections
+    if "qwen3" in model_type:
+        return True
+    # Default: most modern decoder models produce residual
+    # Can be made more specific as more models are supported
+    return True
 
 
 class NPUWorker(WorkerBase):
@@ -324,6 +350,23 @@ class NPUWorker(WorkerBase):
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
+        # Initialize edge-cloud tensor metadata for optimized communication
+        # (skips inter-node metadata sync in irecv_tensor_dict/isend_tensor_dict)
+        if getattr(self.model_runner, '_edge_cloud_enabled', False):
+            hidden_size = self.model_config.hf_text_config.hidden_size
+            # Derive dtype directly from model config (same as MindIE's
+            # self.config.torch_dtype from config.json), instead of
+            # requiring a separate user-configured hidden_dtype.
+            # model_config.dtype is a torch.dtype resolved from the
+            # model's config.json torch_dtype field by _get_and_verify_dtype().
+            hidden_dtype = self.model_config.dtype
+            has_residual = _detect_has_residual(self.model_config)
+            init_edge_cloud_tensor_meta(
+                hidden_size=hidden_size,
+                hidden_dtype=hidden_dtype,
+                has_residual=has_residual,
+            )
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -384,6 +427,9 @@ class NPUWorker(WorkerBase):
                 # This overlaps cloud's _update_states, _prepare_inputs,
                 # _determine_batch_execution_and_padding, and
                 # _build_attention_metadata with edge's segment_a forward.
+                tensor_dict, handles, postprocess = edge_cloud_broadcast_recv(
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                )
                 self.model_runner.cloud_prepare_early(scheduler_output)
                 tensor_dict, handles, postprocess = edge_cloud_broadcast_recv()
                 intermediate_tensors = AsyncIntermediateTensors(
@@ -423,10 +469,18 @@ class NPUWorker(WorkerBase):
         if is_edge_device():
             # Edge NPU0 sends first stage output before recv (async)
             if get_pp_group().world_size == 2:
-                # logger.info(f"[Edge] PP stage: first (send), rank={self.rank}, local_rank={self.local_rank}")
-                self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                # Pass scheduler total so the sender slices off any
+                # cudagraph / SP / DP padding, letting the cloud receiver
+                # allocate buffers from SchedulerOutput.total_num_scheduled_tokens
+                # without an inter-node metadata exchange.
+                self._pp_send_work = edge_cloud_isend_tensor_dict(
+                    output.tensors,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                )
             # Unified broadcast receive
-            tensor_dict, handles, postprocess = edge_cloud_broadcast_recv()
+            tensor_dict, handles, postprocess = edge_cloud_broadcast_recv(
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+            )
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=handles,
@@ -444,8 +498,16 @@ class NPUWorker(WorkerBase):
         # Cloud NPU0: send result back to Edge NPU0 (async)
         elif is_cloud_device():
             if get_pp_group().world_size == 2:
-                # logger.info(f"[Cloud] PP stage: last (send back to Edge), rank={self.rank}, local_rank={self.local_rank}")
-                self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                # Cloud segment_c runs through full transformer layers and
+                # almost always with cudagraph / SP / DP padding enabled, so
+                # output.tensors[k].shape[0] >= scheduler_output.total. Slice
+                # back to the unpadded length on the sender side so the edge
+                # receiver can keep allocating buffers from scheduler total
+                # alone (no metadata wire transfer needed).
+                self._pp_send_work = edge_cloud_isend_tensor_dict(
+                    output.tensors,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                )
         # Non-edge-cloud PP: original async send
         else:
             assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
