@@ -450,7 +450,21 @@ class NPUWorker(WorkerBase):
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass:
             if is_cloud_device():
+                if need_timing:
+                    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    print(f"[PP_TIMING] node=cloud rank={rank} name=recv_wait_start time={time.perf_counter():.6f}")
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+                # Touch received tensor data to confirm HCCL transfer is complete
+                torch.npu.synchronize()
+                if need_timing:
+                    total_bytes = 0
+                    for k, v in tensor_dict.items():
+                        if isinstance(v, torch.Tensor) and v.numel() > 0:
+                            total_bytes += v.numel() * v.element_size()
+                            # Force read first element to ensure data is on device
+                            _ = v.flatten()[0].item()
+                    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+                    print(f"[PP_TIMING] node=cloud rank={rank} name=recv_data_ready total_bytes={total_bytes} time={time.perf_counter():.6f}")
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
                     comm_handles=comm_handles,
