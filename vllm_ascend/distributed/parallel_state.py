@@ -459,6 +459,7 @@ def destroy_ascend_model_parallel():
 def edge_cloud_isend_tensor_dict(
     tensor_dict: dict[str, torch.Tensor | Any],
     dst: int | None = None,
+    num_tokens: int | None = None,
 ) -> list[Handle]:
     """Send tensor dict without metadata sync (edge-cloud optimized).
 
@@ -468,6 +469,22 @@ def edge_cloud_isend_tensor_dict(
 
     This eliminates the inter-node pickle+Gloo metadata exchange that
     the standard GroupCoordinator.isend_tensor_dict performs.
+
+    Args:
+        tensor_dict: tensors to send. Non-tensor / zero-numel entries are
+            skipped, matching the receiver's allocation logic.
+        dst: destination rank in PP group (default: next rank).
+        num_tokens: when provided, each tensor is sliced to
+            ``tensor[:num_tokens]`` along dim-0 before send. This pushes the
+            sender/receiver shape-alignment responsibility to the sender so
+            that the receiver can safely allocate buffers based on
+            ``SchedulerOutput.total_num_scheduled_tokens`` alone (no
+            metadata wire transfer needed). The slice is a zero-copy view
+            and adds negligible overhead. Must be set whenever the model
+            forward may produce padded outputs (cudagraph / SP / DP padding,
+            etc.). When ``None``, tensors are sent as-is preserving the
+            previous behavior for callers that already guarantee unpadded
+            output.
     """
     pp_group = get_pp_group()
     if pp_group.world_size <= 1:
@@ -484,6 +501,18 @@ def edge_cloud_isend_tensor_dict(
             continue
         if value.numel() == 0:
             continue
+        # Slice to the receiver-expected length so the wire shape exactly
+        # matches the buffer the receiver pre-allocates from num_tokens.
+        # This is a view (no copy) and is the cheapest way to defeat
+        # cudagraph / SP / DP padding mismatches without a metadata
+        # exchange.
+        if num_tokens is not None and value.shape[0] > num_tokens:
+            value = value[:num_tokens]
+        if not value.is_contiguous():
+            # isend requires contiguous storage; a non-contiguous slice
+            # only happens when upstream code returned a non-standard
+            # layout, in which case we materialize once.
+            value = value.contiguous()
         handle = torch.distributed.isend(
             value, dst=pp_group.ranks[dst], group=group
         )
