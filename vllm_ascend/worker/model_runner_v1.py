@@ -2448,7 +2448,7 @@ class NPUModelRunner(GPUModelRunner):
         num_input_tokens = num_tokens_padded
         if self.use_cp and self.pcp_manager.pcp_use_hybrid_attn:
             num_input_tokens = total_num_scheduled_tokens
-        update_cos_sin(self.positions[:num_input_tokens])
+        update_cos_sin(self.positions.gpu[:num_input_tokens])
 
         # --- Cache all results ---
         self._cloud_prepare_cache = {
