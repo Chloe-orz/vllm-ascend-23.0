@@ -4280,6 +4280,13 @@ class NPUModelRunner(GPUModelRunner):
             # CacheOnlyAttentionLayer uses MLAAttentionSpec but isn't MLAAttention
             if isinstance(attn_layer, CacheOnlyAttentionLayer):
                 return kv_cache_spec.head_size, kv_cache_spec.head_size
+            # DeepseekV4IndexerCache (and its ascend subclass) is also cache-only
+            # but does not inherit CacheOnlyAttentionLayer.
+            if type(attn_layer).__name__ in (
+                "DeepseekV4IndexerCache",
+                "AscendDeepseekV4IndexerCache",
+            ):
+                return kv_cache_spec.head_size, kv_cache_spec.head_size
             raise TypeError(
                 f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
             )
