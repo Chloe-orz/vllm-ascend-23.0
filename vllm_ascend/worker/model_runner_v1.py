@@ -4785,6 +4785,9 @@ class NPUModelRunner(GPUModelRunner):
                 "AscendDeepseekV4IndexerCache",
             ):
                 return kv_cache_spec.head_size, kv_cache_spec.head_size
+            # DSAAttention uses MLAAttentionSpec with unified head_size for K and V.
+            if type(attn_layer).__name__ == "DSAAttention":
+                return kv_cache_spec.head_size, kv_cache_spec.head_size
             raise TypeError(
                 f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
             )
