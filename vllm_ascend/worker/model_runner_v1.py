@@ -1505,7 +1505,6 @@ class NPUModelRunner(GPUModelRunner):
             num_scheduled_tokens_compressed_list = cache.get("num_scheduled_tokens_compressed_list")
             deferred_state_corrections_fn = None
 
-        self._pp_timing("state_setup_done", sync_npu=True)
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 if not _fast_path and not _cloud_fast_path:
@@ -1694,8 +1693,6 @@ class NPUModelRunner(GPUModelRunner):
             if not (self._edge_cloud_enabled and self.edge_cloud_cfg.role == "edge"):
                 # update global cos, sin
                 update_cos_sin(positions)
-
-        self._pp_timing("prepare_done", sync_npu=True)
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB weight D2D"):
