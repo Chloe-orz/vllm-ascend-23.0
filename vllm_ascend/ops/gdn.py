@@ -188,10 +188,8 @@ def update_conv1d_graph_params(
                 meta = attn_metadata
                 if isinstance(meta, dict):
                     meta = meta.get(layer_prefix, None)
-                    assert isinstance(meta, GDNAttentionMetadata)
-
-                if meta is None:
-                    continue
+                    if meta is None or not isinstance(meta, GDNAttentionMetadata):
+                        continue
 
                 cap_x_dim0 = int(mixed_qkv.size(0))
                 if branch == "spec" and meta.spec_sequence_masks is not None:
