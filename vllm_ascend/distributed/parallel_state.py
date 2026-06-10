@@ -339,6 +339,15 @@ def init_ascend_model_parallel(
             group_name="mc2",
         )
 
+        # Phase6 hidden data-plane channels are still required in edge-cloud
+        # mode.  The default PP group is PREFILL_1, the alternate PP group is
+        # DECODE, and the extra hidden-channel group is PREFILL_2.
+        pp_group = get_pp_group()
+        if pp_group.world_size > 1:
+            pp_group.create_alternate_groups(backend)
+            if hasattr(pp_group, "create_hidden_channel_groups"):
+                pp_group.create_hidden_channel_groups(backend)
+
         # Ascend-specific groups that are currently disabled by default
         # in edge-cloud mode. If enabled in the future, they must follow
         # the same edge/cloud separation principle:
