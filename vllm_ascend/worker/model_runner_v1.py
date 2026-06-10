@@ -1518,7 +1518,6 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn = None
                     else:
                         deferred_state_corrections_fn = self._update_states(scheduler_output)
-                    self._pp_timing("update_states_done", sync_npu=True)
 
                     if has_ec_transfer() and get_ec_transfer().is_producer:
                         with self.maybe_get_ec_connector_output(
@@ -1566,7 +1565,6 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output,
                         num_scheduled_tokens_np,
                     )
-                    self._pp_timing("prepare_inputs_done", sync_npu=True)
 
                     num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
                     if self.pcp_size > 1:
@@ -1596,7 +1594,6 @@ class NPUModelRunner(GPUModelRunner):
                         force_eager=self.model_config.enforce_eager,
                         num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
                     )
-                    self._pp_timing("determine_batch_done", sync_npu=True)
 
                     logger.debug(
                         "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
@@ -1672,7 +1669,6 @@ class NPUModelRunner(GPUModelRunner):
                         cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                         num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list,
                     )
-                    self._pp_timing("build_attn_metadata_done", sync_npu=True)
 
                 if _fast_path:
                     self._pp_timing("edge_prepare_reuse_done", sync_npu=True)
@@ -1694,7 +1690,6 @@ class NPUModelRunner(GPUModelRunner):
                 else total_num_scheduled_tokens,
                 intermediate_tensors,
             )
-            self._pp_timing("preprocess_done", sync_npu=True)
 
             if not (self._edge_cloud_enabled and self.edge_cloud_cfg.role == "edge"):
                 # update global cos, sin
@@ -1754,8 +1749,6 @@ class NPUModelRunner(GPUModelRunner):
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
         has_encoder_input = self.model_config.is_encoder_decoder and num_encoder_reqs > 0
-
-        self._pp_timing("pre_forward_done", sync_npu=True)
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
@@ -1836,7 +1829,6 @@ class NPUModelRunner(GPUModelRunner):
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
-                self._pp_timing("logits_done", sync_npu=True)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -1930,7 +1922,6 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
-        self._pp_timing("sample_done", sync_npu=True)
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -2293,7 +2284,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # ==================== 标准非边云路径（原逻辑完全保留，不做任何修改） ====================
         assert self.model is not None
-        self._pp_timing("forward_entry", sync_npu=True)
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -2301,7 +2291,6 @@ class NPUModelRunner(GPUModelRunner):
             inputs_embeds=inputs_embeds,
             **model_kwargs,
         )
-        self._pp_timing("forward_done", sync_npu=True)
         forward_context = get_forward_context()
         assert forward_context is not None
         if (
