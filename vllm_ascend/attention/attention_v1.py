@@ -424,6 +424,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     graph_params.handles[num_tokens],
                     graph_params.events[num_tokens],
                 ):
+                    if forward_context.attn_metadata[key] is None:
+                        continue
                     (
                         query,
                         key_cache,
@@ -512,10 +514,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
+                        if attn_metadata[draft_step].get(key) is None:
+                            attn_count = attn_count + 1
+                            continue
                         seq_lens = attn_metadata[draft_step][key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                         attn_count = attn_count + 1
                     else:
+                        if attn_metadata.get(key) is None:
+                            continue
                         seq_lens = attn_metadata[key].seq_lens_list
                         actual_seq_lengths_q = attn_metadata[key].actual_seq_lengths_q
 

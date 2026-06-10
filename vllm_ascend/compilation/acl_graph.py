@@ -341,6 +341,9 @@ def _filter_attn_metadata_for_layers(
         matched_keys = [k for k in attn_metadata if needle in k]
         if not matched_keys:
             skipped_no_key_layers.append(idx)
+            # 插入 None 占位符，保持与 graph_params handles 的 1:1 对齐，
+            # 防止 zip 遍历导致 handle 与 metadata 错位。
+            result[f".layers.{idx}.skipped"] = None
             continue
         # 边云流程要求每层恰好一个 attention metadata key，
         # 以确保 graph_params.attn_params 的追加顺序与过滤后顺序 1:1 对齐。

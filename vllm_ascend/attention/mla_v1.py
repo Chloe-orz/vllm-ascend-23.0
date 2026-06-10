@@ -836,6 +836,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 else:
                     attn_metadata_current = attn_metadata
 
+                if attn_metadata_current.get(key) is None:
+                    continue
                 seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
                 if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
