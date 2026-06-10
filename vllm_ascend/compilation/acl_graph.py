@@ -334,6 +334,16 @@ def update_full_graph_params(
                 num_dcp_pcp_tokens,
                 draft_attn_metadatas,
             )
+            # For GDN Attention: AscendC operate(conv1d update) update graph params
+            from vllm_ascend.ops.gdn import update_conv1d_graph_params
+            update_conv1d_graph_params(
+                update_stream,
+                forward_context,
+                num_tokens,
+                vllm_config,
+                _EXTRA_CTX.is_draft_model,
+                draft_attn_metadatas,
+            )
         finally:
             if original_metadata is not None:
                 forward_context.attn_metadata = original_metadata
@@ -375,19 +385,6 @@ def _filter_attn_metadata_for_layers(
         result[matched_keys[0]] = attn_metadata[matched_keys[0]]
 
     return result
-
-    from vllm_ascend.ops.gdn import update_conv1d_graph_params
-
-    # For GDN Attention: AscendC operate(conv1d update) update graph params
-    # No patch can be loaded, update method call is temporarily placed here
-    update_conv1d_graph_params(
-        update_stream,
-        forward_context,
-        num_tokens,
-        vllm_config,
-        _EXTRA_CTX.is_draft_model,
-        draft_attn_metadatas,
-    )
 
 
 @dataclass
