@@ -48,7 +48,12 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.sched.output import BatchType, GrammarOutput, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    BatchType,
+    GrammarOutput,
+    HiddenChannelType,
+    SchedulerOutput,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
@@ -62,6 +67,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
+    edge_cloud_send_tensor_dict,
     init_ascend_model_parallel,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
@@ -160,6 +166,7 @@ class NPUWorker(WorkerBase):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.20.2; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
+        self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -487,6 +494,29 @@ class NPUWorker(WorkerBase):
         )
         return batch_type
 
+    def _record_pp_send_work(
+        self, handles: list[Handle], channel: HiddenChannelType | None = None
+    ) -> None:
+        if channel is None:
+            self._pp_send_work = handles
+        else:
+            self._pp_send_work_by_channel[channel.value] = handles
+
+    def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
+        if channel is None:
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+            for handles in self._pp_send_work_by_channel.values():
+                for handle in handles:
+                    handle.wait()
+            self._pp_send_work_by_channel.clear()
+            return
+
+        handles = self._pp_send_work_by_channel.pop(channel.value, [])
+        for handle in handles:
+            handle.wait()
+
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -498,10 +528,22 @@ class NPUWorker(WorkerBase):
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
 
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
+        # Edge-cloud PD separation can keep one outstanding send per hidden
+        # channel.  Only wait on the channel about to be reused; legacy PP waits
+        # for all outstanding sends to preserve the original behavior.
+        if self.model_runner._edge_cloud_enabled:
+            bt = scheduler_output.batch_type
+            if bt in (
+                BatchType.PREFILL_FIRST,
+                BatchType.DECODE_FIRST,
+                BatchType.PREFILL_LAST,
+                BatchType.DECODE_LAST,
+            ):
+                self._wait_pp_send_work(self._hidden_channel_for(scheduler_output))
+            else:
+                self._wait_pp_send_work()
+        else:
+            self._wait_pp_send_work()
 
         # Edge-cloud PD-separation: dispatch by batch_type and role.
         if self.model_runner._edge_cloud_enabled:
@@ -523,6 +565,17 @@ class NPUWorker(WorkerBase):
         return self._execute_model_legacy(
             scheduler_output, layer_slice_info, use_alt_group
         )
+
+    def _hidden_channel_for(self, scheduler_output: "SchedulerOutput") -> HiddenChannelType:
+        channel = scheduler_output.hidden_channel
+        if channel is not None:
+            return channel
+        bt = scheduler_output.batch_type
+        if bt in (BatchType.PREFILL_FIRST, BatchType.PREFILL_LAST):
+            return HiddenChannelType.PREFILL_1
+        if bt in (BatchType.DECODE_FIRST, BatchType.DECODE_LAST):
+            return HiddenChannelType.DECODE
+        raise RuntimeError(f"No hidden channel for batch_type={bt}")
 
     def _execute_model_edge_head(
         self,
@@ -548,8 +601,15 @@ class NPUWorker(WorkerBase):
 
         assert isinstance(output, IntermediateTensors)
         if get_pp_group().world_size == 2:
-            self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
-            print("Send intermediate tensors to cloud", flush=True)
+            channel = self._hidden_channel_for(scheduler_output)
+            self._record_pp_send_work(
+                edge_cloud_send_tensor_dict(output.tensors, channel=channel),
+                channel=channel,
+            )
+            print(
+                f"Send intermediate tensors to cloud, hidden_channel={channel.value}",
+                flush=True,
+            )
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
         # because sampling happens in the tail segment (PL/DL).
@@ -565,8 +625,14 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Edge tail segment (PL/DL): recv -> segment_e -> return output."""
-        print("Receive intermediate tensors from cloud before", flush=True)
-        tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+        channel = self._hidden_channel_for(scheduler_output)
+        print(
+            f"Receive intermediate tensors from cloud before, hidden_channel={channel.value}",
+            flush=True,
+        )
+        tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+            channel=channel
+        )
         print("Receive intermediate tensors from cloud after", flush=True)
         intermediate_tensors = AsyncIntermediateTensors(
             tensor_dict,
@@ -604,8 +670,14 @@ class NPUWorker(WorkerBase):
         )
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and is_first_slice:
-            print("Received intermediate tensors from edge before", flush=True)
-            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+            channel = self._hidden_channel_for(scheduler_output)
+            print(
+                f"Received intermediate tensors from edge before, hidden_channel={channel.value}",
+                flush=True,
+            )
+            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+                channel=channel
+            )
             print("Received intermediate tensors from edge after", flush=True)
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
@@ -643,8 +715,15 @@ class NPUWorker(WorkerBase):
                 device="npu",
             )
         if get_pp_group().world_size == 2:
-            print("Send intermediate tensors to edge before", flush=True)
-            self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+            channel = self._hidden_channel_for(scheduler_output)
+            print(
+                f"Send intermediate tensors to edge before, hidden_channel={channel.value}",
+                flush=True,
+            )
+            self._record_pp_send_work(
+                edge_cloud_send_tensor_dict(output.tensors, channel=channel),
+                channel=channel,
+            )
             print("Send intermediate tensors to edge after", flush=True)
         return output
 
