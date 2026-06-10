@@ -2976,7 +2976,6 @@ class NPUModelRunner(GPUModelRunner):
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
                     )
-                    self.update_stream.synchronize()
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
@@ -3019,7 +3018,6 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-                self.update_stream.synchronize()
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -3079,7 +3077,6 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
-                self.update_stream.synchronize()
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
