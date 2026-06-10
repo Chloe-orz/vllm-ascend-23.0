@@ -353,14 +353,9 @@ class AscendMlaCPImpl(AscendMLAImpl):
 
                 if _EXTRA_CTX.is_draft_model:
                     draft_step = attn_count // num_layers
-                    if attn_metadata[draft_step].get(key) is None:
-                        attn_count = attn_count + 1
-                        continue
                     decode_meta = attn_metadata[draft_step][key].decode
                     attn_count = attn_count + 1
                 else:
-                    if attn_metadata.get(key) is None:
-                        continue
                     decode_meta = attn_metadata[key].decode
 
                 seq_len = decode_meta.cp_seq_len

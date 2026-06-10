@@ -357,9 +357,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
 
                 if _EXTRA_CTX.is_draft_model:
                     draft_step = attn_count // num_layers
-                    if attn_metadata[draft_step].get(key) is None:
-                        attn_count = attn_count + 1
-                        continue
                     actual_seq_lengths_kv = attn_metadata[draft_step][key].decode_meta.num_computed_tokens_of_pcp_dcp[
                         :, pcp_rank, dcp_rank
                     ]
@@ -371,8 +368,6 @@ class AscendAttentionCPImpl(AscendAttentionBackendImpl):
                     actual_seq_lengths_q = attn_metadata[draft_step][key].actual_seq_lengths_q
                     attn_count = attn_count + 1
                 else:
-                    if attn_metadata.get(key) is None:
-                        continue
                     actual_seq_lengths_kv = attn_metadata[key].decode_meta.num_computed_tokens_of_pcp_dcp[
                         :, pcp_rank, dcp_rank
                     ]
