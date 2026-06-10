@@ -369,6 +369,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
     def send_object_on_hidden_channel(
         self, obj: Any, dst: int, channel: Any
     ) -> None:
+        """Synchronous send of a pickled object (used by tests/fallback)."""
         _, cpu_group = self._hidden_channel_groups(channel)
         object_tensor = torch.frombuffer(
             bytearray(pickle.dumps(obj)), dtype=torch.uint8
@@ -378,6 +379,25 @@ class GroupCoordinatorPatch(GroupCoordinator):
         )
         torch.distributed.send(size_tensor, dst=self.ranks[dst], group=cpu_group)
         torch.distributed.send(object_tensor, dst=self.ranks[dst], group=cpu_group)
+
+    def send_object_on_hidden_channel_async(
+        self, obj: Any, dst: int, channel: Any
+    ) -> list[Any]:
+        """Asynchronous send of a pickled object; returns isend handles."""
+        _, cpu_group = self._hidden_channel_groups(channel)
+        object_tensor = torch.frombuffer(
+            bytearray(pickle.dumps(obj)), dtype=torch.uint8
+        )
+        size_tensor = torch.tensor(
+            [object_tensor.numel()], dtype=torch.long, device="cpu"
+        )
+        h1 = torch.distributed.isend(
+            size_tensor, dst=self.ranks[dst], group=cpu_group
+        )
+        h2 = torch.distributed.isend(
+            object_tensor, dst=self.ranks[dst], group=cpu_group
+        )
+        return [h1, h2]
 
     def recv_object_on_hidden_channel(self, src: int, channel: Any) -> Any:
         _, cpu_group = self._hidden_channel_groups(channel)
@@ -394,7 +414,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         tensor_dict: dict[str, torch.Tensor | Any],
         channel: Any,
         dst: int | None = None,
-    ):
+    ) -> list[Any]:
         if self.world_size <= 1:
             return []
         if dst is None:
@@ -402,11 +422,15 @@ class GroupCoordinatorPatch(GroupCoordinator):
         assert dst < self.world_size, f"Invalid dst rank ({dst})"
         device_group, cpu_group = self._hidden_channel_groups(channel)
         metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
-        self.send_object_on_hidden_channel(metadata_list, dst, channel)
+        # Use async send for metadata so the edge head segment can return
+        # immediately even when the cloud worker has not yet reached the
+        # matching recv (e.g. it is still executing earlier prefill slices).
+        handles = self.send_object_on_hidden_channel_async(
+            metadata_list, dst, channel
+        )
 
         tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
         assert len(tensor_keys) == len(tensor_list)
-        handles = []
         for tensor in tensor_list:
             if tensor.numel() == 0:
                 continue
