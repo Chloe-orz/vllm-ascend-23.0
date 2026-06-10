@@ -17,7 +17,6 @@
 
 ## 3 基于PDmix的边云协同推理版本
 
-
 vllm-pdmix仓和vllm-ascend-pdmix仓已基于PDmix实现了边云协同推理，vllm服务启动命令参考如下：   
 
 **边侧(rank0)：**  

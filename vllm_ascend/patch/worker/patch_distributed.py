@@ -16,13 +16,20 @@
 from __future__ import annotations
 
 import logging
+import pickle
 from functools import wraps
-from typing import Any, cast
+from typing import Any, Callable, cast
 
 import torch
 import vllm
 from torch.distributed import Backend
-from vllm.distributed.parallel_state import GroupCoordinator, _get_unique_name, _register_group
+from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    TensorMetadata,
+    _get_unique_name,
+    _register_group,
+    _split_tensor_dict,
+)
 
 from vllm_ascend.distributed.device_communicators.npu_communicator import NPUCommunicator
 from vllm_ascend.patch.worker._hccl_pg_registry import HcclPgKey, HcclPgRegistry, make_hccl_pg_key
@@ -144,6 +151,11 @@ class GroupCoordinatorPatch(GroupCoordinator):
             # non-decode traffic.
             self.alt_device_group: torch.distributed.ProcessGroup | None = None
             self.alt_cpu_group: torch.distributed.ProcessGroup | None = None
+            # Phase6 hidden data-plane channels. The default device/cpu groups
+            # are PREFILL_1, the legacy alt groups are DECODE, and the extra
+            # hidden groups below are PREFILL_2.
+            self.prefill2_device_group: torch.distributed.ProcessGroup | None = None
+            self.prefill2_cpu_group: torch.distributed.ProcessGroup | None = None
 
             self.device = torch.npu.current_device()
             if use_device_communicator and self.world_size > 1:
@@ -247,23 +259,28 @@ class GroupCoordinatorPatch(GroupCoordinator):
         if hasattr(self, "cpu_group"):
             del self.cpu_group
 
-    def destroy_hccl(self) -> bool:
-        """Release the HCCL process group."""
-        destroyed = self._release_hccl_resources()
+        alt_cpu_group = getattr(self, "alt_cpu_group", None)
+        if alt_cpu_group is not None:
+            torch.distributed.destroy_process_group(alt_cpu_group)
+            self.alt_cpu_group = None
 
-        if hasattr(self, "device_group"):
-            self.device_group = None
-        return destroyed
+        alt_device_group = getattr(self, "alt_device_group", None)
+        if alt_device_group is not None:
+            torch.distributed.destroy_process_group(alt_device_group)
+            self.alt_device_group = None
 
-    def restore_hccl(self) -> bool:
-        """Recreate the HCCL process group in place after sleep mode."""
-        if self.device_group is not None:
-            return False
+        prefill2_cpu_group = getattr(self, "prefill2_cpu_group", None)
+        if prefill2_cpu_group is not None:
+            torch.distributed.destroy_process_group(prefill2_cpu_group)
+            self.prefill2_cpu_group = None
 
-        self._init_device_groups(create_cpu_group=False)
-        assert self.device_group is not None
-        self._init_device_communicator()
-        return True
+        prefill2_device_group = getattr(self, "prefill2_device_group", None)
+        if prefill2_device_group is not None:
+            torch.distributed.destroy_process_group(prefill2_device_group)
+            self.prefill2_device_group = None
+
+        if getattr(self, "mq_broadcaster", None) is not None:
+            self.mq_broadcaster = None
 
     def create_alternate_groups(
         self,
@@ -303,6 +320,130 @@ class GroupCoordinatorPatch(GroupCoordinator):
         assert self_alt_cpu_group is not None
         self.alt_device_group = self_alt_device_group
         self.alt_cpu_group = self_alt_cpu_group
+
+    def create_hidden_channel_groups(
+        self,
+        torch_distributed_backend: str | Backend,
+    ) -> None:
+        """Create the extra Phase6 PREFILL_2 group.
+
+        The default pp group is PREFILL_1 and the existing alternate group is
+        DECODE.  This method adds PREFILL_2 as the third independent data-plane
+        channel over the same ranks.
+        """
+        assert self.prefill2_device_group is None, (
+            "PREFILL_2 hidden channel group already created"
+        )
+        hccl_pg_options = create_hccl_pg_options("pp_prefill2")
+        prefill2_device_group = None
+        prefill2_cpu_group = None
+        for ranks in self._all_group_ranks:
+            device_group = torch.distributed.new_group(
+                ranks,
+                backend=torch_distributed_backend,
+                pg_options=hccl_pg_options,
+            )
+            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            if self.rank in ranks:
+                prefill2_device_group = device_group
+                prefill2_cpu_group = cpu_group
+        assert prefill2_device_group is not None
+        assert prefill2_cpu_group is not None
+        self.prefill2_device_group = prefill2_device_group
+        self.prefill2_cpu_group = prefill2_cpu_group
+
+    def _hidden_channel_groups(self, channel: Any):
+        value = getattr(channel, "value", channel)
+        if value == "prefill_1":
+            return self.device_group, self.cpu_group
+        if value == "decode":
+            assert self.alt_device_group is not None
+            assert self.alt_cpu_group is not None
+            return self.alt_device_group, self.alt_cpu_group
+        if value == "prefill_2":
+            assert self.prefill2_device_group is not None
+            assert self.prefill2_cpu_group is not None
+            return self.prefill2_device_group, self.prefill2_cpu_group
+        raise ValueError(f"Unknown hidden channel: {channel}")
+
+    def send_object_on_hidden_channel(
+        self, obj: Any, dst: int, channel: Any
+    ) -> None:
+        _, cpu_group = self._hidden_channel_groups(channel)
+        object_tensor = torch.frombuffer(
+            bytearray(pickle.dumps(obj)), dtype=torch.uint8
+        )
+        size_tensor = torch.tensor(
+            [object_tensor.numel()], dtype=torch.long, device="cpu"
+        )
+        torch.distributed.send(size_tensor, dst=self.ranks[dst], group=cpu_group)
+        torch.distributed.send(object_tensor, dst=self.ranks[dst], group=cpu_group)
+
+    def recv_object_on_hidden_channel(self, src: int, channel: Any) -> Any:
+        _, cpu_group = self._hidden_channel_groups(channel)
+        size_tensor = torch.empty(1, dtype=torch.long, device="cpu")
+        torch.distributed.recv(size_tensor, src=self.ranks[src], group=cpu_group)
+        object_tensor = torch.empty(
+            size_tensor.item(), dtype=torch.uint8, device="cpu"
+        )
+        torch.distributed.recv(object_tensor, src=self.ranks[src], group=cpu_group)
+        return pickle.loads(object_tensor.numpy().tobytes())
+
+    def isend_tensor_dict_on_hidden_channel(
+        self,
+        tensor_dict: dict[str, torch.Tensor | Any],
+        channel: Any,
+        dst: int | None = None,
+    ):
+        if self.world_size <= 1:
+            return []
+        if dst is None:
+            dst = (self.rank_in_group + 1) % self.world_size
+        assert dst < self.world_size, f"Invalid dst rank ({dst})"
+        device_group, cpu_group = self._hidden_channel_groups(channel)
+        metadata_list, tensor_list = _split_tensor_dict(tensor_dict)
+        self.send_object_on_hidden_channel(metadata_list, dst, channel)
+
+        tensor_keys = [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)]
+        assert len(tensor_keys) == len(tensor_list)
+        handles = []
+        for tensor in tensor_list:
+            if tensor.numel() == 0:
+                continue
+            group = cpu_group if tensor.is_cpu else device_group
+            handles.append(torch.distributed.isend(
+                tensor, dst=self.ranks[dst], group=group
+            ))
+        return handles
+
+    def irecv_tensor_dict_on_hidden_channel(
+        self,
+        channel: Any,
+        src: int | None = None,
+    ) -> tuple[dict[str, torch.Tensor | Any] | None,
+               list[Any], list[Callable[[], None]]]:
+        if not torch.distributed.is_initialized() or self.world_size == 1:
+            return None, [], []
+        if src is None:
+            src = (self.rank_in_group - 1) % self.world_size
+        assert src < self.world_size, f"Invalid src rank ({src})"
+        device_group, cpu_group = self._hidden_channel_groups(channel)
+        recv_metadata_list = self.recv_object_on_hidden_channel(src, channel)
+        tensor_dict: dict[str, Any] = {}
+        handles = []
+        for key, value in recv_metadata_list:
+            if isinstance(value, TensorMetadata):
+                tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
+                tensor_dict[key] = tensor
+                if tensor.numel() == 0:
+                    continue
+                group = cpu_group if tensor.is_cpu else device_group
+                handles.append(torch.distributed.irecv(
+                    tensor, src=self.ranks[src], group=group
+                ))
+            else:
+                tensor_dict[key] = value
+        return tensor_dict, handles, []
 
     def all_to_all(
         self,
