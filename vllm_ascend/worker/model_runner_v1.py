@@ -317,9 +317,17 @@ class EdgeCloudSegment(torch.nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         **extra_layer_kwargs: Any,
     ) -> torch.Tensor | IntermediateTensors:
+        # Layer-sliced execution (non-ACLGraph mode): allow dynamic override
+        # of the layer range via kwargs from PassiveScheduler slice dispatch.
+        start_layer = extra_layer_kwargs.pop(
+            "layer_slice_start", self._start_layer
+        )
+        end_layer = extra_layer_kwargs.pop(
+            "layer_slice_end", self._end_layer
+        )
         return self._edge_model.forward_edge_cloud_segment(
-            self._start_layer,
-            self._end_layer,
+            start_layer,
+            end_layer,
             input_ids,
             positions,
             intermediate_tensors,
@@ -2667,6 +2675,26 @@ class NPUModelRunner(GPUModelRunner):
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
             
+            # --- Layer slice: save intermediate state for non-last ---
+            # Must happen BEFORE the edge-cloud early return below;
+            # otherwise cloud non-last slices would return IntermediateTensors
+            # to the worker immediately without saving continuation state,
+            # causing all subsequent slices to see _layerwise_intermediate=None.
+            if (
+                layer_slice_info is not None
+                and not layer_slice_info.is_last_slice
+            ):
+                # The model returns IntermediateTensors for non-last PP
+                # ranks.  Detach the hidden/residual so they serve as
+                # fresh inputs for the next slice's forward pass.
+                assert isinstance(hidden_states, IntermediateTensors)
+                self._layerwise_intermediate = hidden_states
+                if self.debugger is not None:
+                    self.debugger.stop()
+                    self.debugger.step()
+                return None
+            # --- End layerwise chunk save ---
+
             # 边云场景：当 hidden_states 为 IntermediateTensors 时，说明当前段计算已完成，
             # 需要把结果返回给 NPUWorker 进行跨节点通信（isend_tensor_dict）。
             # 此处提前 return，跳过标准 PP 的 logits/sampling 流程。
@@ -3338,6 +3366,49 @@ class NPUModelRunner(GPUModelRunner):
             and self.edge_cloud_cfg.enable_decode_graph
         )
 
+        model_inputs: dict[str, Any] = {
+            "input_ids": input_ids,
+            "positions": positions,
+            "intermediate_tensors": intermediate_tensors,
+            "inputs_embeds": inputs_embeds,
+            **model_kwargs,
+        }
+
+        # Layer-sliced execution: inject the layer range for the current
+        # slice so the model forward only runs those layers.
+        if layer_slice_info is not None:
+            slice_start = layer_slice_info.start_layer
+            slice_end = layer_slice_info.end_layer
+            # Edge-cloud cloud: the slice indices from PassiveScheduler are
+            # relative to the cloud's local middle layers (0..num_local_layers).
+            # forward_edge_cloud_segment operates on the *global* layer list
+            # (0..num_hidden_layers) because the model keeps all layers
+            # (non-local ones are PPMissingLayer).  Add head_k offset so the
+            # slice covers the correct global range.
+            if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+                slice_start += self.head_k
+                slice_end += self.head_k
+            model_inputs["layer_slice_start"] = slice_start
+            model_inputs["layer_slice_end"] = slice_end
+            # Non-last slices, and the last slice on a non-final PP rank,
+            # must return IntermediateTensors.  The last slice on the last
+            # PP rank should run norm + lm_head and return logits.
+            if not layer_slice_info.is_last_slice or not get_pp_group().is_last_rank:
+                model_inputs["layer_slice_return_intermediate"] = True
+
+        if self._edge_cloud_enabled:
+            if self.edge_cloud_cfg.role == "edge":
+                segment = (
+                    self.segment_a_wrapper
+                    if intermediate_tensors is None
+                    else self.segment_e_wrapper
+                )
+            else:
+                segment = self.segment_c_wrapper
+            run_model = partial(segment, **model_inputs)
+        else:
+            run_model = partial(self.model, **model_inputs)
+
         if self.edge_cloud_cfg.role == "edge":
             return self._edge_cloud_forward_edge(
                 num_tokens_padded, input_ids, positions, intermediate_tensors,
@@ -3346,7 +3417,8 @@ class NPUModelRunner(GPUModelRunner):
         else:
             return self._edge_cloud_forward_cloud(
                 num_tokens_padded, positions, intermediate_tensors,
-                use_graph, forward_context, **model_kwargs,
+                use_graph, forward_context, layer_slice_info=layer_slice_info,
+                **model_kwargs,
             )
 
     def _edge_cloud_forward_edge(
@@ -3436,6 +3508,212 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
+    def _execute_layerwise_continuation(
+        self,
+        layer_slice_info: Any,
+    ) -> IntermediateTensors | None:
+        """Run model forward for a non-first layer slice.
+
+        On the first slice, execute_model set up all the batch state
+        (requests, attention metadata, positions, etc.) and saved the
+        intermediate hidden_states/residual in
+        ``self._layerwise_intermediate``.  Subsequent slices only need to
+        feed that intermediate state back into the model for the current
+        slice's layer range.
+        """
+        assert self._layerwise_intermediate is not None, (
+            "Layer slice continuation requires saved intermediate state from "
+            "the previous slice.  Was slice 0 executed first?"
+        )
+
+        intermediate_tensors = self._layerwise_intermediate
+        self._layerwise_intermediate = None
+
+        # Re-use the positions and attention metadata that slice 0 prepared.
+        positions = self._layerwise_positions
+        attn_metadata = self._layerwise_attn_metadata
+        num_tokens_padded = self._layerwise_num_tokens_padded
+        num_tokens_across_dp = self._layerwise_num_tokens_across_dp
+        batch_desc = self._layerwise_batch_desc
+
+        has_encoder_input = False
+        clear_kv_metadata = self.speculative_config is None
+
+        with (
+            record_function_or_nullcontext("layerwise forward"),
+            set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens_padded,
+                num_tokens_across_dp=num_tokens_across_dp,
+                aclgraph_runtime_mode=CUDAGraphMode.NONE,
+                batch_descriptor=batch_desc,
+                num_actual_tokens=num_tokens_padded,
+                model_instance=self.model,
+                max_tokens_across_pcp=0,
+                skip_compiled=has_encoder_input,
+            ),
+            self.maybe_get_kv_connector_output(
+                self._layerwise_scheduler_output,
+                **({"defer_finalize": not clear_kv_metadata}),
+            ) as kv_connector_output,
+        ):
+            hidden_states = self._model_forward(
+                num_tokens_padded,
+                None,               # input_ids
+                positions,
+                intermediate_tensors,
+                None,               # inputs_embeds
+                layer_slice_info=layer_slice_info,
+            )
+
+        with record_function_or_nullcontext("layerwise post process"):
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, _ = hidden_states
+            if self.pcp_size > 1:
+                hidden_states = self.pcp_manager.get_restore_hidden_states(
+                    hidden_states
+                )
+
+            # Non-last slice: save intermediate and return None.
+            if not layer_slice_info.is_last_slice:
+                assert isinstance(hidden_states, IntermediateTensors)
+                self._layerwise_intermediate = hidden_states
+                return None
+
+            # Edge-cloud cloud segment: always returns IntermediateTensors
+            # regardless of PP rank, because logits are computed on the edge
+            # side (segment_e) not on the cloud side (segment_c).
+            if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+                assert isinstance(hidden_states, IntermediateTensors)
+                hidden_states.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+                return hidden_states
+
+            # Last slice on a non-final PP rank: return IntermediateTensors
+            # so NPUWorker performs the PP send.
+            if not get_pp_group().is_last_rank:
+                assert isinstance(hidden_states, IntermediateTensors)
+                hidden_states.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+                return hidden_states
+
+            # Last slice on the last PP rank: the model returned logits
+            # (after norm + lm_head).  Replicate the post-processing from
+            # execute_model() so that sample_tokens() can produce the
+            # final ModelRunnerOutput.
+            assert not isinstance(hidden_states, IntermediateTensors)
+            assert not self.broadcast_pp_output, (
+                "Layerwise chunking with broadcast_pp_output is not yet "
+                "supported on the last PP rank."
+            )
+            assert not self.is_pooling_model, (
+                "Layerwise chunking with pooling models is not yet "
+                "supported on the last PP rank."
+            )
+            logits_indices = self._layerwise_logits_indices
+            sample_hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states)
+            self.execute_model_state = ExecuteModelState(
+                self._layerwise_scheduler_output,
+                logits,
+                self._layerwise_spec_decode_metadata,
+                self._layerwise_spec_decode_common_attn_metadata,
+                hidden_states,
+                sample_hidden_states,
+                None,   # aux_hidden_states
+                self._layerwise_attn_metadata,
+                self._layerwise_positions,
+                self._layerwise_ec_connector_output,
+                self._layerwise_cudagraph_stats,
+                self._layerwise_batch_desc,
+            )
+            self.kv_connector_output = kv_connector_output
+            return None
+
+    def suspend_head_state(self, scheduler_output: SchedulerOutput) -> None:
+        """Suspend the minimal head-segment context for later tail-segment pairing.
+
+        Called just before the edge head-segment returns IntermediateTensors
+        to the worker for cross-node transmission.
+        """
+        token = scheduler_output.head_token
+        if not token:
+            return
+        if token in self._pending_head_states:
+            raise RuntimeError(
+                f"head_token={token} already suspended; "
+                "previous tail did not consume it"
+            )
+        self._pending_head_states[token] = HeadState(
+            head_token=token,
+            scheduler_output=scheduler_output,
+            req_ids=tuple(self.input_batch.req_ids),
+        )
+
+    def _resume_and_validate_head_state(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: IntermediateTensors,
+    ) -> None:
+        """Validate control-plane / data-plane alignment for a tail segment.
+
+        The EngineCore sends the head_token over ZMQ (control plane); the
+        cloud worker echoes it back inside the intermediate tensors payload
+        (data plane).  Both must match before we execute the tail segment.
+        """
+        token_ctrl = scheduler_output.head_token
+        if not token_ctrl:
+            raise RuntimeError(
+                "PL/DL scheduler_output must carry head_token from cloud"
+            )
+
+        token_tensor = intermediate_tensors.tensors.pop("_head_token", None)
+        if token_tensor is None:
+            raise RuntimeError(
+                "intermediate_tensors missing '_head_token'; "
+                "cloud worker must embed it"
+            )
+        token_pp = bytes(token_tensor.cpu().numpy().tolist()).decode("utf-8")
+
+        if token_ctrl != token_pp:
+            raise RuntimeError(
+                f"Control-plane vs data-plane head_token mismatch: "
+                f"ZMQ={token_ctrl}, PP={token_pp}"
+            )
+
+        head_state = self._pending_head_states.pop(token_ctrl, None)
+        if head_state is None:
+            raise RuntimeError(
+                f"No suspended HeadState for head_token={token_ctrl}; "
+                f"tail dispatched without matching head or already consumed"
+            )
+
+        expected = self._expected_tail_batch_type(
+            head_state.scheduler_output.batch_type
+        )
+        if scheduler_output.batch_type != expected:
+            raise RuntimeError(
+                f"HeadState batch_type mismatch: head was "
+                f"{head_state.scheduler_output.batch_type}, "
+                f"tail is {scheduler_output.batch_type}"
+            )
+
+        tail_req_ids = tuple(scheduler_output.num_scheduled_tokens)
+        if tail_req_ids != head_state.req_ids:
+            raise RuntimeError(
+                f"HeadState req_ids mismatch: head had "
+                f"{head_state.req_ids}, tail scheduler_output has "
+                f"{tail_req_ids}"
+            )
+
+    @staticmethod
+    def _expected_tail_batch_type(head_bt: BatchType) -> BatchType:
+        return {
+            BatchType.PREFILL_FIRST: BatchType.PREFILL_LAST,
+            BatchType.DECODE_FIRST: BatchType.DECODE_LAST,
+        }[head_bt]
+
     def _edge_cloud_forward_cloud(
         self,
         num_tokens_padded: int,
@@ -3443,6 +3721,7 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None,
         use_graph: bool,
         forward_context,
+        layer_slice_info: Any = None,
         **model_kwargs: dict[str, Any],
     ):
         """Cloud 侧分段执行：segment_c（中段）。"""
@@ -3462,33 +3741,47 @@ class NPUModelRunner(GPUModelRunner):
         seg_c_graph = isinstance(seg_c, ACLGraphWrapper)
 
         if seg_c_graph:
-            cloud_layer_indices = list(range(
-                self.head_k,
-                self.num_layers - self.tail_k,
-            ))
+            if layer_slice_info is not None:
+                cloud_layer_indices = list(range(
+                    layer_slice_info.start_layer + self.head_k,
+                    layer_slice_info.end_layer + self.head_k,
+                ))
+            else:
+                cloud_layer_indices = list(range(
+                    self.head_k,
+                    self.num_layers - self.tail_k,
+                ))
         # intermediate_tensors 已由 NPUWorker 从 Edge 侧接收
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
         old_layer_idx = _EXTRA_CTX.layer_idx
         if _EXTRA_CTX.layer_idx is not None:
-            _EXTRA_CTX.layer_idx = self.head_k
-        try:
-            # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
-            # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
-            # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
-            if seg_c_graph and not forward_context.capturing:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions,
-                    layer_indices=cloud_layer_indices,
-                    graph_wrapper=seg_c,
+            if layer_slice_info is not None:
+                # Layer-sliced execution: each slice starts at a different
+                # local layer.  Add head_k offset to get the global layer
+                # index so that weight_prefetch / EPLB route to the correct
+                # layer weights for this slice.
+                _EXTRA_CTX.layer_idx = (
+                    layer_slice_info.start_layer + self.head_k
                 )
-            hidden_states = seg_c(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
+            else:
+                _EXTRA_CTX.layer_idx = self.head_k
+
+        # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
+        # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
+        # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
+        if seg_c_graph and not forward_context.capturing:
+            self._update_full_graph_params_if_needed(
+                forward_context, num_tokens_padded, positions,
+                layer_indices=cloud_layer_indices,
+                graph_wrapper=seg_c,
             )
-        finally:
-            if old_layer_idx is not None:
-                _EXTRA_CTX.layer_idx = old_layer_idx
+        hidden_states = seg_c(
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            **model_kwargs,
+        )
+        if old_layer_idx is not None:
+            _EXTRA_CTX.layer_idx = old_layer_idx
 
         # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
         assert isinstance(hidden_states, IntermediateTensors)

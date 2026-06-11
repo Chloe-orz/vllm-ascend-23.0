@@ -873,6 +873,7 @@ class NPUWorker(WorkerBase):
                 channel=channel
             )
             print("Received intermediate tensors from edge after", flush=True)
+            torch.npu.synchronize()
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
