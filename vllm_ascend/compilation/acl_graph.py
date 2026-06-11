@@ -223,7 +223,7 @@ class ACLGraphWrapper:
                 entry.input_addresses is not None,
                 entry.output is not None,
             )
-            logger.info_once("Replaying aclgraph")
+            print("[DEBUG][aclgraph] Replaying aclgraph START")
             # In async scheduling or multi-threaded (MT) scenarios, it is possible that
             # the CPU's record event (from update_attn_params) for the iteration i completes
             # before the grph replay of iteration i-1.
@@ -236,8 +236,12 @@ class ACLGraphWrapper:
             is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle	 
             need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle	 
             if not self.enable_enpu and need_sync:
+                print("[DEBUG][aclgraph] synchronizing current stream before replay...")
                 torch.npu.current_stream().synchronize()
+                print("[DEBUG][aclgraph] synchronize done")
+            print("[DEBUG][aclgraph] calling entry.aclgraph.replay()...")
             entry.aclgraph.replay()
+            print("[DEBUG][aclgraph] entry.aclgraph.replay() DONE")
             return entry.output
 
 

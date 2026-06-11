@@ -472,30 +472,40 @@ class NPUWorker(WorkerBase):
             self.profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        print("[DEBUG][worker] model_runner.execute_model returned, output type=%s" % (type(output),))
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         if is_edge_device():
+            print("[DEBUG][worker] edge device, sending output to cloud...")
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                print("[DEBUG][worker] isend_tensor_dict done")
+            print("[DEBUG][worker] edge device, waiting for cloud response...")
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+            print("[DEBUG][worker] edge_cloud_broadcast_recv done")
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
             # 确保 HCCL 回传数据在 NPU 上可用后再启动 segment_e forward
+            print("[DEBUG][worker] edge device, synchronizing NPU...")
             torch.npu.synchronize()
+            print("[DEBUG][worker] edge device, NPU sync done, executing segment_e...")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            print("[DEBUG][worker] segment_e done, output type=%s" % (type(output),))
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
 
         if is_cloud_device():
+            print("[DEBUG][worker] cloud device, sending output to edge...")
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+                print("[DEBUG][worker] cloud isend_tensor_dict done")
         else:
             assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
             # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
