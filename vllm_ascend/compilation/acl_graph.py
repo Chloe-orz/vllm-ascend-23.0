@@ -138,6 +138,7 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
+            logger.warning("[DEBUG][aclgraph] direct run (no capture/replay) for %s", self._runnable_str)
             return self.runnable(*args, **kwargs)
         with graph_params_scope(self.graph_params, self.draft_graph_params):
             if batch_descriptor not in self.concrete_aclgraph_entries:
@@ -147,6 +148,10 @@ class ACLGraphWrapper:
             entry = self.concrete_aclgraph_entries[batch_descriptor]
 
             if entry.aclgraph is None:
+                logger.warning(
+                    "[DEBUG][aclgraph] START capture for %s mode=%s batch_descriptor=%s",
+                    self._runnable_str, self.runtime_mode.name, batch_descriptor,
+                )
                 if self.aclgraph_options.debug_log_enable:
                     # Since we capture aclgraph for many different shapes and
                     # capturing is fast, we don't need to log it for every
@@ -175,9 +180,12 @@ class ACLGraphWrapper:
                     old_capturing = forward_context.capturing
                     forward_context.capturing = True
                     try:
+                        logger.warning("[DEBUG][aclgraph] entering torch.npu.graph capture")
                         with torch.npu.graph(aclgraph, pool=self.graph_pool):
                             # `output` is managed by pytorch's aclgraph pool
+                            logger.warning("[DEBUG][aclgraph] inside graph, calling runnable...")
                             raw_output = self.runnable(*args, **kwargs)
+                            logger.warning("[DEBUG][aclgraph] runnable returned, output type=%s", type(raw_output))
                             # NPU graph tracer may not correctly discover tensors
                             # nested inside a custom class (e.g. IntermediateTensors).
                             # Flatten to a plain tensor tuple during capture so the
@@ -196,6 +204,7 @@ class ACLGraphWrapper:
                     finally:
                         forward_context.capturing = old_capturing
 
+                logger.warning("[DEBUG][aclgraph] END capture for %s", self._runnable_str)
                 # here we always use weak ref for the workspaces
                 # to save memory
                 weak_ref_workspaces(get_graph_params())

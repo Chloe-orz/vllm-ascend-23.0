@@ -46,6 +46,15 @@ def _forward_edge_cloud_segment_qwen3_5(
     if is_last_segment is None:
         is_last_segment = end_layer == num_layers and get_pp_group().is_last_rank
 
+    logger.warning(
+        "[DEBUG][edge_cloud_seg] enter segment [%d, %d), first=%s last=%s "
+        "input_ids=%s positions=%s intermediate_tensors=%s",
+        start_layer, end_layer, is_first_segment, is_last_segment,
+        input_ids.shape if input_ids is not None else None,
+        positions.shape if positions is not None else None,
+        intermediate_tensors is not None,
+    )
+
     if is_first_segment:
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
@@ -60,22 +69,43 @@ def _forward_edge_cloud_segment_qwen3_5(
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
 
-    for layer in islice(self.layers, start_layer, end_layer):
+    for idx, layer in enumerate(islice(self.layers, start_layer, end_layer)):
+        actual_layer_idx = start_layer + idx
+        logger.warning(
+            "[DEBUG][edge_cloud_seg] before layer %d, hidden_states shape=%s device=%s dtype=%s",
+            actual_layer_idx,
+            hidden_states.shape,
+            hidden_states.device,
+            hidden_states.dtype,
+        )
         hidden_states, residual = layer(
             hidden_states=hidden_states,
             residual=residual,
             positions=positions,
             **extra_layer_kwargs,
         )
+        logger.warning(
+            "[DEBUG][edge_cloud_seg] after layer %d, hidden_states shape=%s",
+            actual_layer_idx,
+            hidden_states.shape,
+        )
 
     if not is_last_segment:
         if residual is None:
             residual = torch.zeros_like(hidden_states)
+        logger.warning(
+            "[DEBUG][edge_cloud_seg] exit segment [%d, %d) with IntermediateTensors",
+            start_layer, end_layer,
+        )
         return IntermediateTensors(
             {"hidden_states": hidden_states, "residual": residual}
         )
 
     hidden_states, _ = self.norm(hidden_states, residual)
+    logger.warning(
+        "[DEBUG][edge_cloud_seg] exit segment [%d, %d) with hidden_states shape=%s",
+        start_layer, end_layer, hidden_states.shape,
+    )
     return hidden_states
 
 
