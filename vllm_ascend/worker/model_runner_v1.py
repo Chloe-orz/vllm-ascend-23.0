@@ -24,7 +24,6 @@ from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
-from functools import partial
 from multiprocessing import Manager
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
@@ -46,7 +45,7 @@ from vllm.distributed.parallel_state import (
     get_tp_group,
 )
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
-from vllm.distributed.parallel_state import is_edge_device
+from vllm.distributed.parallel_state import is_edge_cloud_pp_mode, is_edge_device
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -257,6 +256,61 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+
+
+class EdgeCloudSegment(torch.nn.Module):
+    """Lightweight nn.Module that executes a specified layer range [start_layer, end_layer).
+
+    Wraps the base model's ``forward_edge_cloud_segment`` (injected via
+    monkey-patch during model loading) as a standard nn.Module so that
+    ACLGraphWrapper can wrap a segment just like it wraps the full model::
+
+        ACLGraphWrapper(EdgeCloudSegment(model, N-1, N), ...)
+
+    Using nn.Module instead of a function closure ensures ``torch.npu.graph``
+    parameter tracing, buffer management, and module dispatch are identical
+    to the standard (non-edge-cloud) flow.
+
+    Note: the model is registered as a submodule, so torch.npu.graph captures
+    parameters statically through the module hierarchy. The model has already
+    been pruned with PPMissingLayer before being passed in, so registering it
+    as a submodule does not introduce extra memory.
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        start_layer: int,
+        end_layer: int,
+        is_first_segment: bool | None = None,
+        is_last_segment: bool | None = None,
+    ):
+        super().__init__()
+        self._edge_model = model
+        self._start_layer = start_layer
+        self._end_layer = end_layer
+        self._is_first_segment = is_first_segment
+        self._is_last_segment = is_last_segment
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **extra_layer_kwargs: Any,
+    ) -> torch.Tensor | IntermediateTensors:
+        return self._edge_model.forward_edge_cloud_segment(
+            self._start_layer,
+            self._end_layer,
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            is_first_segment=self._is_first_segment,
+            is_last_segment=self._is_last_segment,
+            **extra_layer_kwargs,
+        )
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -649,26 +703,14 @@ class NPUModelRunner(GPUModelRunner):
         is_first_segment: bool | None = None,
         is_last_segment: bool | None = None,
     ) -> Any:
-        def _segment_forward(
-            input_ids: torch.Tensor | None = None,
-            positions: torch.Tensor | None = None,
-            intermediate_tensors: IntermediateTensors | None = None,
-            inputs_embeds: torch.Tensor | None = None,
-            **extra_layer_kwargs: Any,
-        ) -> torch.Tensor | IntermediateTensors:
-            return model.forward_edge_cloud_segment(
-                start_layer,
-                end_layer,
-                input_ids,
-                positions,
-                intermediate_tensors,
-                inputs_embeds,
-                is_first_segment=is_first_segment,
-                is_last_segment=is_last_segment,
-                **extra_layer_kwargs,
-            )
+        """Create an nn.Module that executes the specified layer range.
 
-        return _segment_forward
+        Returns EdgeCloudSegment (nn.Module subclass) instead of a function
+        closure, ensuring ACLGraphWrapper wraps a standard nn.Module aligned
+        with the standard graph capture flow (torch.npu.graph captures
+        nn.Module.forward()).
+        """
+        return EdgeCloudSegment(model, start_layer, end_layer, is_first_segment, is_last_segment)
 
     def _wrap_segment_if_needed(
         self,
@@ -2251,6 +2293,18 @@ class NPUModelRunner(GPUModelRunner):
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
 
+            # Edge-cloud scenario: when hidden_states is IntermediateTensors,
+            # the current segment computation is complete. Return the result to
+            # NPUWorker for cross-node communication (isend_tensor_dict).
+            # This early return skips the standard PP logits/sampling flow.
+            if is_edge_cloud_pp_mode() and isinstance(hidden_states, IntermediateTensors) and not is_edge_device():
+                hidden_states.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+                if self.debugger is not None:
+                    self.debugger.stop()
+                    self.debugger.step()
+                return hidden_states
+
             if not self.broadcast_pp_output:
                 # Common case.
                 if self._edge_cloud_enabled and isinstance(
@@ -2734,7 +2788,83 @@ class NPUModelRunner(GPUModelRunner):
         forward_context: ForwardContext,
         num_tokens_padded: int,
         positions: torch.Tensor | None,
+        layer_indices: list[int] | None = None,
+        graph_wrapper: ACLGraphWrapper | None = None,
     ) -> None:
+        """Update ACL full-graph parameters (only effective in FULL graph mode).
+
+        In edge-cloud mode each segment wrapper holds independent GraphParams
+        to avoid different segments' attention task handles / events / params
+        sharing the same global list.
+        """
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        if hasattr(cudagraph_runtime_mode, "decode_mode"):
+            cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
+        if (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and not forward_context.capturing
+            and not self.use_sparse
+        ):
+            assert positions is not None
+            if graph_wrapper is not None:
+                assert graph_wrapper.graph_params is not None
+            # Edge-cloud segments may contain mixed DSA+FIA layers.
+            # DSA layers do not append entries to graph_params during capture,
+            # so update_graph_params' zip over attn_keys vs attn_params would
+            # misalign if DSA keys are present. Filter them out temporarily.
+            original_attn_metadata = forward_context.attn_metadata
+            if original_attn_metadata:
+                filtered_metadata = {
+                    k: v for k, v in original_attn_metadata.items()
+                    if not getattr(v, 'skip_graph_params_update', False)
+                }
+                if len(filtered_metadata) != len(original_attn_metadata):
+                    forward_context.attn_metadata = filtered_metadata
+            try:
+                update_full_graph_params(
+                    self.attn_backend,
+                    self.update_stream,
+                    forward_context,
+                    num_tokens_padded,
+                    self.vllm_config,
+                    self.speculative_config,
+                    positions.shape[0],
+                    layer_indices=layer_indices,
+                    graph_params=graph_wrapper.graph_params if graph_wrapper is not None else None,
+                    draft_graph_params=(
+                        graph_wrapper.draft_graph_params if graph_wrapper is not None else None
+                    ),
+                )
+            finally:
+                forward_context.attn_metadata = original_attn_metadata
+
+    def _model_forward(
+        self,
+        num_tokens_padded: int,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs: dict[str, Any],
+    ):
+        """Model forward entry. Standard path and edge-cloud path are fully separated."""
+        if self._edge_cloud_enabled:
+            return self._edge_cloud_forward(
+                num_tokens_padded, input_ids, positions, intermediate_tensors,
+                inputs_embeds, **model_kwargs,
+            )
+
+        # ==================== Standard non-edge-cloud path ====================
+        assert self.model is not None
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **model_kwargs,
+        )
+        forward_context = get_forward_context()
+        assert forward_context is not None
         if (
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
@@ -2753,8 +2883,11 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
                 positions.shape[0],
             )
+        if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
+            hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
+        return hidden_states
 
-    def _model_forward(
+    def _edge_cloud_forward(
         self,
         num_tokens_padded: int,
         input_ids: torch.Tensor | None = None,
@@ -2763,44 +2896,172 @@ class NPUModelRunner(GPUModelRunner):
         inputs_embeds: torch.Tensor | None = None,
         **model_kwargs: dict[str, Any],
     ):
+        """Edge-cloud segmented forward execution.
+
+        Core design: each segment is wrapped by a standard ACLGraphWrapper
+        (runtime_mode=FULL), and the capture/replay mechanism is identical
+        to the standard flow; the only difference is that the wrapped object
+        changes from the full model to an EdgeCloudSegment (partial layer range).
+
+        Segment routing logic:
+          - Edge role:
+              • intermediate_tensors is None  → run segment_a (head, outputs IntermediateTensors)
+              • intermediate_tensors is not None → run segment_e (tail, outputs hidden_states)
+          - Cloud role: always run segment_c (middle, outputs IntermediateTensors)
+        """
         assert self.model is not None
         forward_context = get_forward_context()
         assert forward_context is not None
 
-        model_inputs: dict[str, Any] = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "intermediate_tensors": intermediate_tensors,
-            "inputs_embeds": inputs_embeds,
-            **model_kwargs,
-        }
-        if self._edge_cloud_enabled:
-            if self.edge_cloud_cfg.role == "edge":
-                segment = (
-                    self.segment_a_wrapper
-                    if intermediate_tensors is None
-                    else self.segment_e_wrapper
-                )
-            else:
-                segment = self.segment_c_wrapper
-            run_model = partial(segment, **model_inputs)
-        else:
-            run_model = partial(self.model, **model_inputs)
+        # Determine whether ACL Graph should be used (decode stage only)
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        if hasattr(cudagraph_runtime_mode, "decode_mode"):
+            cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
+        use_graph = (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.edge_cloud_cfg.enable_decode_graph
+        )
 
-        if self.enable_enpu:
-            # The soft segmentation scenario requires event.record first, then event.wait
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
+        if self.edge_cloud_cfg.role == "edge":
+            return self._edge_cloud_forward_edge(
+                num_tokens_padded, input_ids, positions, intermediate_tensors,
+                inputs_embeds, use_graph, forward_context, **model_kwargs,
             )
-            hidden_states = run_model()
         else:
-            hidden_states = run_model()
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
+            return self._edge_cloud_forward_cloud(
+                num_tokens_padded, positions, intermediate_tensors,
+                use_graph, forward_context, **model_kwargs,
             )
+
+    def _edge_cloud_forward_edge(
+        self,
+        num_tokens_padded: int,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+        use_graph: bool,
+        forward_context,
+        **model_kwargs: dict[str, Any],
+    ):
+        """Edge-side segmented execution: segment_a (head) or segment_e (tail)."""
+        seg_a = self.segment_a_wrapper if use_graph else self.segment_a
+        seg_e = self.segment_e_wrapper if use_graph else self.segment_e
+        seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
+        seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
+
+        if intermediate_tensors is None:
+            # Step 1: run Segment A (embedding + first head_k layers)
+            # input_ids is valid here; output is IntermediateTensors for cross-node transfer
+            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+            old_layer_idx = _EXTRA_CTX.layer_idx
+            if _EXTRA_CTX.layer_idx is not None:
+                _EXTRA_CTX.layer_idx = 0
+            try:
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
+                hidden_states = seg_a(
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
+            finally:
+                if old_layer_idx is not None:
+                    _EXTRA_CTX.layer_idx = old_layer_idx
+
+            assert isinstance(hidden_states, IntermediateTensors)
+            return hidden_states
+
+        # Step 2: run Segment E (last tail_k layers + norm)
+        # intermediate_tensors has been received from Cloud side by NPUWorker
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+        old_layer_idx = _EXTRA_CTX.layer_idx
+        if _EXTRA_CTX.layer_idx is not None:
+            _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
+
+        try:
+            if seg_e_graph:
+                tail_layer_indices = list(range(
+                    self.num_layers - self.tail_k,
+                    self.num_layers,
+                ))
+            if seg_e_graph and not forward_context.capturing:
+                self._update_full_graph_params_if_needed(
+                    forward_context, num_tokens_padded, positions,
+                    layer_indices=tail_layer_indices,
+                    graph_wrapper=seg_e,
+                )
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
+        finally:
+            if old_layer_idx is not None:
+                _EXTRA_CTX.layer_idx = old_layer_idx
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
+        return hidden_states
+
+    def _edge_cloud_forward_cloud(
+        self,
+        num_tokens_padded: int,
+        positions: torch.Tensor | None,
+        intermediate_tensors: IntermediateTensors | None,
+        use_graph: bool,
+        forward_context,
+        **model_kwargs: dict[str, Any],
+    ):
+        """Cloud-side segmented execution: segment_c (middle)."""
+        assert self.edge_cloud_cfg.role == "cloud", (
+            "Cloud segment_c should only be executed when role == 'cloud'"
+        )
+        # During warmup (profile_run), Cloud constructs minimal intermediate_tensors
+        # via the PP non-first rank path for graph capture. At runtime,
+        # intermediate_tensors are received from Edge side by the Worker layer.
+        in_warmup = getattr(forward_context, "in_profile_run", False)
+        assert intermediate_tensors is not None or in_warmup, (
+            "Cloud segment_c requires intermediate_tensors from Edge side"
+        )
+
+        seg_c = self.segment_c_wrapper if use_graph else self.segment_c
+        seg_c_graph = isinstance(seg_c, ACLGraphWrapper)
+
+        if seg_c_graph:
+            cloud_layer_indices = list(range(
+                self.head_k,
+                self.num_layers - self.tail_k,
+            ))
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+        old_layer_idx = _EXTRA_CTX.layer_idx
+        if _EXTRA_CTX.layer_idx is not None:
+            _EXTRA_CTX.layer_idx = self.head_k
+        try:
+            # Pre-update attention params before graph replay to avoid using
+            # stale warmup params (which would cause KV cache out-of-bounds).
+            if seg_c_graph and not forward_context.capturing:
+                self._update_full_graph_params_if_needed(
+                    forward_context, num_tokens_padded, positions,
+                    layer_indices=cloud_layer_indices,
+                    graph_wrapper=seg_c,
+                )
+            hidden_states = seg_c(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
+        finally:
+            if old_layer_idx is not None:
+                _EXTRA_CTX.layer_idx = old_layer_idx
+
+        # Cloud must return IntermediateTensors for Worker to send back to Edge
+        assert isinstance(hidden_states, IntermediateTensors)
         return hidden_states
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -3632,7 +3893,6 @@ class NPUModelRunner(GPUModelRunner):
                     max_actual_tokens = self.max_num_tokens
                     if enable_sp():
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
-                        # 调用模型方法创建空的中间张量
                     self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
                         batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
                     )
@@ -3641,49 +3901,45 @@ class NPUModelRunner(GPUModelRunner):
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
                 )
 
-            need_dummy_logits = not is_profile and lmhead_tp_enable()
-            max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
-            dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
-
-            with set_ascend_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_tokens_padded,
-                num_tokens_across_dp=num_tokens_across_dp,
-                in_profile_run=is_profile,
-                num_actual_tokens=num_tokens_padded,
-                aclgraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_desc,
-                model_instance=self.model,
-            ):
-                outputs = self._model_forward(
-                    num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
-                )
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
-            elif isinstance(outputs, IntermediateTensors):
-                hidden_states = outputs["hidden_states"]
-            else:
-                hidden_states = outputs
-            dummy_compute_logits(hidden_states)
-
-            if self.drafter:
-                self.drafter.dummy_run(
+                with set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
                     num_tokens=num_tokens_padded,
-                    with_prefill=with_prefill,
-                    num_reqs=num_reqs_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    in_profile_run=is_profile,
+                    num_actual_tokens=num_tokens_padded,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
-                    dummy_compute_logits=dummy_drafter_compute_logits,
-                    in_graph_capturing=not force_attention,
-                    is_profile=is_profile,
-                )
-            if is_profile and self.dynamic_eplb:
-                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
-                target.clear_all_moe_loads()
-            if self.dynamic_eplb:
-                self.eplb_updator.forward_end()
+                    model_instance=self.model,
+                ):
+                    outputs = self._model_forward(
+                        num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    )
+                if self.use_aux_hidden_state_outputs:
+                    hidden_states, _ = outputs
+                elif isinstance(outputs, IntermediateTensors):
+                    hidden_states = outputs["hidden_states"]
+                else:
+                    hidden_states = outputs
+                dummy_compute_logits(hidden_states)
+
+                if self.drafter:
+                    self.drafter.dummy_run(
+                        num_tokens=num_tokens_padded,
+                        with_prefill=with_prefill,
+                        num_reqs=num_reqs_padded,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        aclgraph_runtime_mode=cudagraph_runtime_mode,
+                        batch_descriptor=batch_desc,
+                        dummy_compute_logits=dummy_drafter_compute_logits,
+                        in_graph_capturing=not force_attention,
+                        is_profile=is_profile,
+                    )
+                if is_profile and self.dynamic_eplb:
+                    target = self.model.language_model if hasattr(self.model, "language_model") else self.model
+                    target.clear_all_moe_loads()
+                if self.dynamic_eplb:
+                    self.eplb_updator.forward_end()
 
             self._finalize_dump_data(dump=False)
             if self.use_compress and force_attention:
@@ -4808,14 +5064,50 @@ class NPUModelRunner(GPUModelRunner):
             set_graph_params(capture_sizes)
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
+            if self._edge_cloud_enabled:
+                wrappers = []
+                if self.edge_cloud_cfg.role == "edge":
+                    wrappers = [self.segment_a_wrapper, self.segment_e_wrapper]
+                elif self.edge_cloud_cfg.role == "cloud":
+                    wrappers = [self.segment_c_wrapper]
+                for wrapper in wrappers:
+                    if isinstance(wrapper, ACLGraphWrapper):
+                        wrapper.init_graph_params(self.cudagraph_batch_sizes)
+                        if self.speculative_config:
+                            wrapper.init_draft_graph_params(self.cudagraph_batch_sizes)
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
-        if self._edge_cloud_enabled:
+        # Edge-cloud ACL Graph still relies on the parent class capture loop
+        # to trigger _dummy_run. Actual capture happens inside segment-level
+        # ACLGraphWrapper, with communication kept outside the graph.
+        if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
             return 0
         parent_module_name = _get_gpu_model_runner_module_name(self)
+        # During profile_cudagraph_memory, ACLGraphWrapper may have already
+        # captured graphs, but CUDAGraphWrapper.clear_all_graphs() does not
+        # clear ACLGraphWrapper's concrete_aclgraph_entries. Retained entries
+        # would cause capture_model's _warmup_and_capture to take the REPLAY
+        # path instead of CAPTURE. During REPLAY, forward_context.capturing
+        # stays False, causing _update_full_graph_params_if_needed to execute
+        # incorrectly and hang. Therefore we manually clear entries here to
+        # force re-capture.
+        for wrapper in self._get_aclgraph_wrappers():
+            wrapper.concrete_aclgraph_entries.clear()
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            return GPUModelRunner.capture_model(self)
+            result = GPUModelRunner.capture_model(self)
+        return result
+
+    def _get_aclgraph_wrappers(self) -> list[ACLGraphWrapper]:
+        """Return all ACLGraphWrappers that may retain profile-stage capture results."""
+        wrappers: list[ACLGraphWrapper] = []
+        if isinstance(self.model, ACLGraphWrapper):
+            wrappers.append(self.model)
+        for attr in ("segment_a_wrapper", "segment_e_wrapper", "segment_c_wrapper"):
+            wrapper = getattr(self, attr, None)
+            if isinstance(wrapper, ACLGraphWrapper):
+                wrappers.append(wrapper)
+        return wrappers
 
     def _prepare_multimodal_fields(self):
         """

@@ -486,6 +486,9 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
+            # Ensure HCCL received data is available on NPU before starting
+            # segment_e forward.
+            torch.npu.synchronize()
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output

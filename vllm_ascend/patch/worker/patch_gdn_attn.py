@@ -734,6 +734,12 @@ def _patched_build(
     if attn_metadata.num_decodes > 0:
         _patched_build_decode(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
 
+    # GDN layers do not participate in update_full_graph_params (no
+    # attn_params/handles/events). Set the skip_graph_params_update flag so
+    # that the outer filter in _update_full_graph_params_if_needed skips this
+    # metadata, avoiding AttributeError when update_graph_params accesses
+    # FlashAttention-specific attributes on GDNAttentionMetadata.
+    attn_metadata.skip_graph_params_update = True
     if (
         self.use_full_cuda_graph
         and attn_metadata.num_prefills == 0
