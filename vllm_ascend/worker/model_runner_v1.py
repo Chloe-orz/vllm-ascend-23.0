@@ -50,18 +50,14 @@ from vllm.distributed.parallel_state import is_edge_device, is_edge_cloud_pp_mod
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.model_loader import get_model, get_model_loader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model,
-    process_weights_after_loading,
-)
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import get_dtype_size, set_default_torch_dtype
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -159,10 +155,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
-from vllm_ascend.model_loader.layer_shard_loader import (
-    EdgeCloudLayerPlan,
-    LayerShardLoader,
-)
+
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -250,10 +243,6 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
-
-
-
-
 class EdgeCloudSegment(torch.nn.Module):
     """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
 
@@ -708,28 +697,25 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_options=None,
         )
 
-    def _initialize_edge_cloud_model_structure(self) -> nn.Module:
-        """Build the full model tree before edge-cloud layer sharding.
-
-        Edge-cloud mode uses PP groups for runtime communication, but model
-        construction must not apply normal PP layer slicing. The layer sharder
-        below decides which layers are local on edge/cloud.
-        """
-        import vllm.distributed.utils as dist_utils
-
-        orig_get_pp_indices = dist_utils.get_pp_indices
-
-        def _full_layer_range(num_hidden_layers: int, pp_rank: int, pp_size: int):
-            return 0, num_hidden_layers
-
-        dist_utils.get_pp_indices = _full_layer_range
-        try:
-            with set_default_torch_dtype(self.vllm_config.model_config.dtype):
-                return initialize_model(self.vllm_config)
-        finally:
-            dist_utils.get_pp_indices = orig_get_pp_indices
-
     def _load_model_edge_cloud(self) -> None:
+        """边云场景的模型加载流程（复用 vLLM 标准 PP 初始化，直接加载到 NPU）。
+
+        核心思路：
+          通过 set_edge_cloud_layer_range() 存储 head_k/tail_k 到全局变量，
+          在模型 __init__ 阶段 make_layers() → get_edge_cloud_layer_range()
+          读取后直接按边云非连续层范围创建 PPMissingLayer 占位，
+          使非本地层在初始化时就是占位层，权重加载阶段自动跳过。
+
+        与旧方案的关键区别：
+          - 旧方案：CPU 创建全部层 → 替换占位 → CPU load_weights → to(NPU)
+          - 新方案：直接 NPU 上创建模型（占位+真实层）→ load_weights 直接到 NPU
+          - 消除了 CPU→NPU 搬移步骤，避免潜在的精度损失
+
+        流程：
+          1. set_edge_cloud_layer_range(head_k, tail_k) 存储层范围
+          2. get_model → BaseModelLoader.load_model（标准 NPU 上初始化+加载）
+          3. 创建分段 callable 并按需包装 ACLGraphWrapper
+        """
         if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25):
             raise NotImplementedError(
                 "edge-cloud mode currently supports Qwen3.5, DeepseekV2/V3, "
@@ -743,6 +729,8 @@ class NPUModelRunner(GPUModelRunner):
             self.head_k,
             self.tail_k,
         )
+
+        # monkey-patch forward_edge_cloud_segment BEFORE model init
         if self._is_qwen3_5:
             import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
         if self._is_deepseek_v2:
@@ -750,47 +738,51 @@ class NPUModelRunner(GPUModelRunner):
         if self._is_kimi_k25:
             import vllm_ascend.patch.models.kimi_k25_edge_cloud  # noqa: F401
 
-        device_config = self.vllm_config.device_config
-        load_config = self.vllm_config.load_config
-        load_device = (
-            device_config.device if load_config.device is None else load_config.device
+        # 1. 存储 head_k / tail_k 到 parallel_state 全局变量，
+        #    使 make_layers() 在模型 __init__ 中能直接读取并创建正确的
+        #    PPMissingLayer 占位（非本地层）和真实层（本地层）。
+        from vllm.distributed.parallel_state import (
+            set_edge_cloud_layer_range,
         )
-        target_device = torch.device(load_device)
-
-        self.model = self._initialize_edge_cloud_model_structure()
-
-        transformer_model = LayerShardLoader._get_transformer_model(self.model)
-        self.num_layers = len(transformer_model.layers)
-
-        layer_plan = EdgeCloudLayerPlan(
-            role=self.edge_cloud_cfg.role,
-            total_layers=self.num_layers,
-            k=[self.head_k, self.tail_k],
-            mode=self.edge_cloud_cfg.mode,
+        total_layers = (
+            self.vllm_config.model_config.get_total_num_hidden_layers()
         )
-        LayerShardLoader.apply_sharding(
-            self.model, layer_plan, self.vllm_config.compilation_config
+        logger.info(
+            "[EdgeCloud] set_edge_cloud_layer_range(head_k=%d, tail_k=%d, total=%d)",
+            self.head_k, self.tail_k, total_layers,
         )
+        set_edge_cloud_layer_range(self.head_k, self.tail_k)
 
-        if hasattr(self.model, "set_moe_parameters"):
+        # 2. 复用标准 vLLM 加载流程：init on device + load_weights on device
+        #    BaseModelLoader.load_model 内部：
+        #      with target_device: initialize_model()  → 模型创建在 NPU
+        #      load_weights()                          → 权重直接到 NPU（跳过占位层）
+        #      process_weights_after_loading()        → 量化/格式调整在 NPU
+        #      return model.eval()
+        #
+        #    make_layers() → _get_edge_cloud_local_indices()
+        #    → get_edge_cloud_layer_range() 读取 head_k/tail_k
+        #    → 根据 is_edge_device() 计算本侧本地层索引
+        #    → 非本地层初始化为 PPMissingLayer（无参数，不占显存）。
+        self.model = get_model(vllm_config=self.vllm_config)
+
+        self.num_layers = len(self.model.model.layers)
+
+        # set_moe_parameters() 在 __init__ 中只遍历到本地层，因此不存在
+        # 非本地层 stale 引用问题。但为确保 moe_layers/moe_mlp_layers
+        # 引用正确，重新收集一次（与标准 PP 行为对齐）。
+        if hasattr(self.model, 'set_moe_parameters'):
             self.model.set_moe_parameters()
 
-        model_loader = get_model_loader(self.vllm_config.load_config)
-        model_loader.load_weights(self.model, self.vllm_config.model_config)
-        self.model.to(target_device)
-        with torch.device(target_device):
-            process_weights_after_loading(
-                self.model, self.vllm_config.model_config, target_device
+        # 打印每层最终状态（诊断用）
+        layer_states = []
+        for idx, layer in enumerate(self.model.model.layers):
+            layer_states.append(
+                f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
             )
-        self.model = self.model.eval()
-
-        layer_states = [
-            f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
-            for idx, layer in enumerate(transformer_model.layers)
-        ]
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
 
-        # 创建分段 callable 并按需包装 ACLGraphWrapper
+        # 3. 创建分段 callable 并按需包装 ACLGraphWrapper
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream = torch.npu.Stream()
 
@@ -4939,11 +4931,17 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 import re
 
+                # Locate transformer layers (handle CausalLM and
+                # multimodal wrappers).
+                transformer = (
+                    self.model.model
+                    if hasattr(self.model, "model")
+                    and hasattr(self.model.model, "layers")
+                    else self.model.language_model.model
+                )
                 local_layer_indices = {
                     idx
-                    for idx, layer in enumerate(
-                        LayerShardLoader._get_transformer_model(self.model).layers
-                    )
+                    for idx, layer in enumerate(transformer.layers)
                     if not isinstance(layer, PPMissingLayer)
                 }
                 filtered_spec: dict[str, KVCacheSpec] = {}
