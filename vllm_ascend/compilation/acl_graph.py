@@ -206,6 +206,10 @@ class ACLGraphWrapper:
                 entry.output = weak_ref_tensors(output)
                 entry.aclgraph = aclgraph
 
+                # DEBUG: print capture-time output tensor addresses
+                capture_ptrs = _get_tensor_ptrs(entry.output)
+                print("[DEBUG][aclgraph] CAPTURE output ptrs: %s" % (capture_ptrs,))
+
                 compilation_counter.num_cudagraph_captured += 1
 
                 # important: we need to return the output, rather than
@@ -230,6 +234,9 @@ class ACLGraphWrapper:
                 entry.input_addresses is not None,
                 entry.output is not None,
             )
+            # DEBUG: print replay-time output tensor addresses (before replay)
+            replay_ptrs_before = _get_tensor_ptrs(entry.output)
+            print("[DEBUG][aclgraph] REPLAY  output ptrs BEFORE replay: %s" % (replay_ptrs_before,))
             print("[DEBUG][aclgraph] Replaying aclgraph START")
             # In async scheduling or multi-threaded (MT) scenarios, it is possible that
             # the CPU's record event (from update_attn_params) for the iteration i completes
@@ -249,7 +256,32 @@ class ACLGraphWrapper:
             print("[DEBUG][aclgraph] calling entry.aclgraph.replay()...")
             entry.aclgraph.replay()
             print("[DEBUG][aclgraph] entry.aclgraph.replay() DONE")
+            # DEBUG: print replay-time output tensor addresses (after replay)
+            replay_ptrs_after = _get_tensor_ptrs(entry.output)
+            print("[DEBUG][aclgraph] REPLAY  output ptrs AFTER  replay: %s" % (replay_ptrs_after,))
             return entry.output
+
+
+def _get_tensor_ptrs(value: Any) -> dict[str, int]:
+    """Recursively collect tensor data_ptrs with their path keys."""
+    ptrs: dict[str, int] = {}
+
+    def _visit(v, prefix: str):
+        if isinstance(v, torch.Tensor):
+            ptrs[prefix] = v.data_ptr()
+        elif isinstance(v, (list, tuple)):
+            for i, item in enumerate(v):
+                _visit(item, f"{prefix}[{i}]")
+        elif hasattr(v, "tensors") and isinstance(v.tensors, dict):
+            # IntermediateTensors
+            for k, item in v.tensors.items():
+                _visit(item, f"{prefix}.tensors[{k!r}]")
+        elif isinstance(v, dict):
+            for k, item in v.items():
+                _visit(item, f"{prefix}[{k!r}]")
+
+    _visit(value, "output")
+    return ptrs
 
 
 def _collect_tensor_addresses(*values) -> list[int]:
