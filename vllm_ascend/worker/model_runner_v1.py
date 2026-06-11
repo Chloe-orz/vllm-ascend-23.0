@@ -5134,6 +5134,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
+            and not _monitor.cudagraph_capturing_enabled
             and not self.use_sparse
         ):
             assert positions is not None
@@ -5201,6 +5202,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
+            and not _monitor.cudagraph_capturing_enabled
             and not self.use_sparse and not self.use_compress
         ):
             if self.enable_enpu:
