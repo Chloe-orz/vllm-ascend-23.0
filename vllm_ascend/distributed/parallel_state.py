@@ -48,6 +48,22 @@ class EdgeCloudTensorMeta:
     # HC multiplier: DeepSeek V4 uses hc_mult > 1 (intermediate tensors are 3D);
     # standard models (Qwen3.5, Llama, etc.) use hc_mult = 1 (2D tensors).
     hc_mult: int
+    # --- Fused broadcast info ---
+    # Number of TensorMetadata entries (all share the same shape & dtype).
+    # For DeepSeek V4: 2 (hidden_states + residual).
+    num_bcast_tensors: int = 0
+    # Shape of each broadcast tensor excluding dim-0:
+    #   hc_mult > 1 ¡ú (hc_mult, hidden_size)
+    #   hc_mult == 1 ¡ú (hidden_size,)
+    per_tensor_tail_shape: tuple[int, ...] = ()
+    # --- Pre-allocated buffers (eliminate per-iteration torch.empty) ---
+    # Fused receive buffer for non-NPU0 ranks:
+    #   shape (max_tokens * num_bcast_tensors, *per_tensor_tail_shape)
+    fused_recv_buffer: torch.Tensor | None = None
+    fused_recv_max_tokens: int = 0
+    # Individual irecv buffers for NPU0 ranks: key ¡ú pre-allocated tensor
+    irecv_buffers: dict[str, torch.Tensor] | None = None
+    irecv_max_tokens: int = 0
 
 
 def init_edge_cloud_tensor_meta(
@@ -55,12 +71,16 @@ def init_edge_cloud_tensor_meta(
     hidden_dtype: torch.dtype = torch.bfloat16,
     has_residual: bool = True,
     hc_mult: int = 1,
+    max_num_tokens: int = 0,
 ):
     """Initialize the pre-computed tensor metadata for edge-cloud transfers.
 
     Called once during worker initialization. The metadata is used by
     edge_cloud_irecv_tensor_dict to allocate receive buffers without
     requiring an inter-node metadata exchange.
+
+    When ``max_num_tokens > 0``, pre-allocates persistent receive buffers
+    so that per-iteration ``torch.empty`` calls are eliminated.
 
     Args:
         hidden_size: model hidden dimension (from hf_text_config.hidden_size)
@@ -74,6 +94,9 @@ def init_edge_cloud_tensor_meta(
             ``(num_tokens, hc_mult, hidden_size)`` instead of the standard 2D
             ``(num_tokens, hidden_size)``.  Defaults to 1 (standard models like
             Qwen3.5, Llama, etc.).
+        max_num_tokens: maximum number of scheduled tokens per iteration.
+            When > 0, pre-allocates fused broadcast receive buffers and
+            individual irecv buffers to eliminate per-iteration allocation.
     """
     global _EDGE_CLOUD_TENSOR_META
 
@@ -85,8 +108,10 @@ def init_edge_cloud_tensor_meta(
     #   hc_mult >  1: 3D shape with hc_mult dimension (DeepSeek V4)
     if hc_mult > 1:
         tensor_shape: tuple[int, ...] = (0, hc_mult, hidden_size)
+        per_tensor_tail_shape: tuple[int, ...] = (hc_mult, hidden_size)
     else:
         tensor_shape = (0, hidden_size)
+        per_tensor_tail_shape = (hidden_size,)
 
     metadata_list: list[tuple[str, Any]] = [
         ("hidden_states", TensorMetadata(device, dtype, tensor_shape)),
@@ -99,18 +124,49 @@ def init_edge_cloud_tensor_meta(
         )
         tensor_keys.append("residual")
 
+    num_bcast_tensors = len(tensor_keys)
+
+    # Pre-allocate persistent buffers when max_num_tokens is known.
+    # These buffers are reused across iterations, eliminating per-iteration
+    # torch.empty() allocation overhead.
+    fused_recv_buffer = None
+    irecv_buffers = None
+
+    if max_num_tokens > 0:
+        # Fused buffer for non-NPU0 broadcast receive:
+        # all NPU tensors concatenated along dim-0 ¡ú single broadcast.
+        fused_size = (max_num_tokens * num_bcast_tensors,) + per_tensor_tail_shape
+        fused_recv_buffer = torch.empty(fused_size, dtype=dtype, device=device)
+
+        # Individual buffers for NPU0 irecv (cannot fuse the wire format
+        # because the sender transmits individual tensors via isend).
+        irecv_buffers = {}
+        for key in tensor_keys:
+            buf_size = (max_num_tokens,) + per_tensor_tail_shape
+            irecv_buffers[key] = torch.empty(buf_size, dtype=dtype, device=device)
+
     _EDGE_CLOUD_TENSOR_META = EdgeCloudTensorMeta(
         metadata_list=metadata_list,
         tensor_keys=tensor_keys,
         hc_mult=hc_mult,
+        num_bcast_tensors=num_bcast_tensors,
+        per_tensor_tail_shape=per_tensor_tail_shape,
+        fused_recv_buffer=fused_recv_buffer,
+        fused_recv_max_tokens=max_num_tokens,
+        irecv_buffers=irecv_buffers,
+        irecv_max_tokens=max_num_tokens,
     )
     logger.info(
         "[EdgeCloud] Initialized tensor meta: keys=%s, dtype=%s, "
-        "hidden_size=%d, hc_mult=%d",
+        "hidden_size=%d, hc_mult=%d, num_bcast=%d, "
+        "max_num_tokens=%d, pre_allocated=%s",
         tensor_keys,
         dtype,
         hidden_size,
         hc_mult,
+        num_bcast_tensors,
+        max_num_tokens,
+        max_num_tokens > 0,
     )
 
 
@@ -579,9 +635,17 @@ def edge_cloud_irecv_tensor_dict(
         if isinstance(value, TensorMetadata):
             # Replace the placeholder dim-0 with actual num_tokens
             actual_size = (num_tokens,) + value.size[1:]
-            full_tensor = torch.empty(
-                actual_size, dtype=value.dtype, device=value.device
-            )
+
+            # Use pre-allocated buffer if available and large enough,
+            # otherwise fall back to per-iteration allocation.
+            if (ec_meta.irecv_buffers is not None
+                    and key in ec_meta.irecv_buffers
+                    and ec_meta.irecv_max_tokens >= num_tokens):
+                full_tensor = ec_meta.irecv_buffers[key][:num_tokens]
+            else:
+                full_tensor = torch.empty(
+                    actual_size, dtype=value.dtype, device=value.device
+                )
 
             if full_tensor.numel() == 0:
                 tensor_dict[key] = full_tensor
@@ -639,12 +703,10 @@ def edge_cloud_broadcast_recv(
 
         # Define broadcast postprocess function (broadcast tensors only, metadata already sent)
         #
-        # Fire-and-forget pattern: launch TP broadcast on a dedicated NPU stream
-        # (ec_broadcast_stream) so that NPU0 can immediately start computing on
-        # the default stream.  The broadcast must complete before any TP
-        # all-reduce; this is ensured by ec_ensure_broadcast_if_needed() called
-        # from NPUCommunicator.all_reduce() at the first TP all-reduce in the
-        # model forward path.
+        # Fire-and-forget fused broadcast: concatenate all NPU tensors into a
+        # single fused buffer and issue one HCCL broadcast instead of N, reducing
+        # per-launch overhead.  The broadcast runs on ec_broadcast_stream so
+        # NPU0 can immediately start computing on the default stream.
         def broadcast_postprocess():
             from vllm_ascend.utils import (
                 ec_broadcast_stream,
@@ -654,22 +716,26 @@ def edge_cloud_broadcast_recv(
             # Ensure broadcast starts after irecv data is ready on the default stream
             bcast_stream.wait_stream(torch.npu.current_stream())
             _, tensor_list = _split_tensor_dict(tensor_dict) if tensor_dict else (None, [])
+
+            # Separate NPU tensors (fused) from CPU tensors (individual, rare)
+            npu_tensors = [t for t in tensor_list if t.numel() > 0 and not t.is_cpu]
+            cpu_tensors = [t for t in tensor_list if t.numel() > 0 and t.is_cpu]
+
             with torch.npu.stream(bcast_stream):
-                for tensor in tensor_list:
-                    if tensor.numel() == 0:
-                        continue
-                    if tensor.is_cpu:
-                        torch.distributed.broadcast(
-                            tensor, src=tp_group.ranks[0],
-                            group=tp_group.cpu_group, async_op=False,
-                        )
-                    else:
-                        torch.distributed.broadcast(
-                            tensor, src=tp_group.ranks[0],
-                            group=tp_group.device_group, async_op=False,
-                        )
-                    # Prevent the NPU memory allocator from reusing tensor
-                    # memory while the broadcast stream still references it.
+                # Fused broadcast: cat all NPU tensors along dim-0 ¡ú single broadcast
+                if npu_tensors:
+                    fused = torch.cat(npu_tensors, dim=0)
+                    torch.distributed.broadcast(
+                        fused, src=tp_group.ranks[0],
+                        group=tp_group.device_group, async_op=False,
+                    )
+                    fused.record_stream(bcast_stream)
+                # CPU tensors: broadcast individually (rare in edge-cloud)
+                for tensor in cpu_tensors:
+                    torch.distributed.broadcast(
+                        tensor, src=tp_group.ranks[0],
+                        group=tp_group.cpu_group, async_op=False,
+                    )
                     tensor.record_stream(bcast_stream)
             # Signal that a lazy sync is needed before the first TP all-reduce
             ec_mark_broadcast_pending()
@@ -677,8 +743,21 @@ def edge_cloud_broadcast_recv(
         comm_postprocess.append(broadcast_postprocess)
         return tensor_dict, comm_handles, comm_postprocess
     else:
-        # Non-NPU0: async broadcast receive via TP group
-        # Receive metadata sync first
+        # Non-NPU0: fused async broadcast receive via TP group
+        #
+        # Optimization over the per-tensor approach:
+        #   1. Fused broadcast: concatenate all NPU tensors into a single
+        #      buffer and issue ONE broadcast instead of N, reducing HCCL
+        #      per-launch overhead (especially significant for small decode
+        #      batches where launch overhead dominates).
+        #   2. Pre-allocated buffer: reuse a persistent fused receive buffer
+        #      across iterations, eliminating per-iteration torch.empty()
+        #      allocation overhead.
+        #
+        # After the single broadcast completes, the fused buffer is split
+        # into individual tensor views (torch.chunk) that are returned in
+        # tensor_dict.  The views share storage with the fused buffer and
+        # are safe to read after the broadcast handle is waited.
         metadata_list = ec_meta.metadata_list
         recv_num_tokens = num_tokens
         recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
@@ -686,24 +765,57 @@ def edge_cloud_broadcast_recv(
         group = tp_group.device_group
         metadata_group = tp_group.cpu_group
 
+        # Separate NPU tensor keys from non-tensor / CPU entries
+        npu_keys: list[str] = []
         for key, value in metadata_list:
             if isinstance(value, TensorMetadata):
-                # Replace placeholder dim-0 with actual num_tokens
-                actual_size = (recv_num_tokens,) + value.size[1:]
-                tensor = torch.empty(actual_size, dtype=value.dtype, device=value.device)
-                if tensor.numel() == 0:
-                    recv_tensor_dict[key] = tensor
-                    continue
-                if tensor.is_cpu:
-                    handle = torch.distributed.broadcast(
-                        tensor, src=tp_group.ranks[0], group=metadata_group, async_op=True
-                    )
+                if value.device != "cpu":
+                    npu_keys.append(key)
                 else:
-                    handle = torch.distributed.broadcast(
-                        tensor, src=tp_group.ranks[0], group=group, async_op=True
+                    # CPU tensor: broadcast individually (rare in edge-cloud)
+                    actual_size = (recv_num_tokens,) + value.size[1:]
+                    tensor = torch.empty(
+                        actual_size, dtype=value.dtype, device=value.device
                     )
-                handles.append(handle)
-                recv_tensor_dict[key] = tensor
+                    if tensor.numel() > 0:
+                        handle = torch.distributed.broadcast(
+                            tensor, src=tp_group.ranks[0],
+                            group=metadata_group, async_op=True,
+                        )
+                        handles.append(handle)
+                    recv_tensor_dict[key] = tensor
             else:
                 recv_tensor_dict[key] = value
+
+        # Fused broadcast for all NPU tensors
+        if npu_keys:
+            num_bcast = len(npu_keys)
+            tail_shape = ec_meta.per_tensor_tail_shape
+            # Derive dtype from metadata (all NPU tensors share the same dtype)
+            first_meta = next(
+                v for k, v in metadata_list
+                if k == npu_keys[0] and isinstance(v, TensorMetadata)
+            )
+            fused_size = (recv_num_tokens * num_bcast,) + tail_shape
+
+            # Use pre-allocated fused buffer if available and large enough
+            if (ec_meta.fused_recv_buffer is not None
+                    and ec_meta.fused_recv_max_tokens >= recv_num_tokens):
+                fused = ec_meta.fused_recv_buffer[:recv_num_tokens * num_bcast]
+            else:
+                fused = torch.empty(
+                    fused_size, dtype=first_meta.dtype, device=first_meta.device
+                )
+
+            if fused.numel() > 0:
+                handle = torch.distributed.broadcast(
+                    fused, src=tp_group.ranks[0], group=group, async_op=True
+                )
+                handles.append(handle)
+
+            # Split fused buffer into individual tensor views
+            chunks = fused.chunk(num_bcast, dim=0)
+            for i, key in enumerate(npu_keys):
+                recv_tensor_dict[key] = chunks[i]
+
         return recv_tensor_dict, handles, []

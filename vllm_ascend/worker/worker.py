@@ -368,11 +368,15 @@ class NPUWorker(WorkerBase):
             # intermediate tensors).  Standard models (Qwen3.5, Llama,
             # etc.) do not have hc_mult, defaulting to 1 (2D tensors).
             hc_mult = getattr(self.model_config.hf_text_config, 'hc_mult', 1)
+            # Pass max_num_tokens so that persistent receive buffers can be
+            # pre-allocated, eliminating per-iteration torch.empty() overhead.
+            max_num_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
             init_edge_cloud_tensor_meta(
                 hidden_size=hidden_size,
                 hidden_dtype=hidden_dtype,
                 has_residual=has_residual,
                 hc_mult=hc_mult,
+                max_num_tokens=max_num_tokens,
             )
 
     @torch.inference_mode()
