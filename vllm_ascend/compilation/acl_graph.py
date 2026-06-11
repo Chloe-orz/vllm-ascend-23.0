@@ -37,12 +37,6 @@ class ACLGraphEntry:
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
 
-    # When the captured runnable returns IntermediateTensors, we flatten it
-    # to a plain tensor tuple during capture so that the NPU graph tracer
-    # can see every output tensor.  These keys let us reconstruct the
-    # IntermediateTensors after capture / for replay.
-    _output_keys: tuple[str, ...] | None = None
-
 
 class ACLGraphWrapper:
     """Wraps a runnable to add acl graph capturing and replaying ability. And
@@ -184,18 +178,7 @@ class ACLGraphWrapper:
                         with torch.npu.graph(aclgraph, pool=self.graph_pool):
                             # `output` is managed by pytorch's aclgraph pool
                             print("[DEBUG][aclgraph] inside graph, calling runnable...")
-                            raw_output = self.runnable(*args, **kwargs)
-
-                            # NPU graph tracer may not discover tensors nested
-                            # inside custom containers (e.g. IntermediateTensors).
-                            # Flatten to a plain tensor tuple so the tracer sees
-                            # every output tensor and replays update them.
-                            if isinstance(raw_output, IntermediateTensors):
-                                entry._output_keys = tuple(raw_output.tensors.keys())
-                                output = tuple(raw_output.tensors.values())
-                            else:
-                                output = raw_output
-
+                            output = self.runnable(*args, **kwargs)
                             if self.aclgraph_options.weak_ref_output:
                                 # by converting it to weak ref,
                                 # the original `output` will immediately be released
@@ -213,14 +196,16 @@ class ACLGraphWrapper:
                 weak_ref_workspaces(get_draft_graph_prefill_params())
 
                 # here we always use weak ref for the output
-                # to save memory
-                entry.output = weak_ref_tensors(output)
-                # If we flattened IntermediateTensors during capture, reconstruct
-                # it now so replay returns the original structure.
-                if entry._output_keys is not None:
-                    entry.output = IntermediateTensors(
-                        dict(zip(entry._output_keys, entry.output))
-                    )
+                # to save memory.
+                # Edge-cloud segments return IntermediateTensors whose internal
+                # tensors may not be held by any strong ref after capture.
+                # Using weak_ref would allow PyTorch to free the NPU memory,
+                # making the addresses stale on replay → NPU state corruption.
+                # Keep a strong ref for IntermediateTensors to pin the memory.
+                if isinstance(output, IntermediateTensors):
+                    entry.output = output  # strong ref, do NOT weak-ref
+                else:
+                    entry.output = weak_ref_tensors(output)
                 entry.aclgraph = aclgraph
 
                 # DEBUG: print capture-time output tensor addresses and content checksum
@@ -232,10 +217,8 @@ class ACLGraphWrapper:
 
                 # important: we need to return the output, rather than
                 # the weak ref of the output, so that pytorch can correctly
-                # manage the memory during acl graph capture.
-                # If we flattened IntermediateTensors, return the reconstructed
-                # object so callers see the original return type.
-                return entry.output if entry._output_keys is not None else output
+                # manage the memory during acl graph capture
+                return output
 
             if self.is_debugging_mode:
                 # check if the input addresses are the same
