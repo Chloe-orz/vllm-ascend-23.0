@@ -207,6 +207,14 @@ class ACLGraphWrapper:
                     f"got {new_input_addresses}"
                 )
 
+            logger.warning(
+                "[DEBUG] Replaying aclgraph: mode=%s, batch_desc=%s, "
+                "input_addrs=%s, has_output=%s",
+                self.runtime_mode.name,
+                batch_descriptor,
+                entry.input_addresses is not None,
+                entry.output is not None,
+            )
             logger.info_once("Replaying aclgraph")
             # In async scheduling or multi-threaded (MT) scenarios, it is possible that
             # the CPU's record event (from update_attn_params) for the iteration i completes
@@ -297,6 +305,16 @@ def update_full_graph_params(
             )
 
         try:
+            if layer_indices is not None:
+                graph_params = get_graph_params()
+                logger.warning(
+                    "[DEBUG] edge-cloud update: layer_indices=%s, "
+                    "filtered_keys=%s, attn_params_len=%d, handles_len=%d",
+                    layer_indices,
+                    list(forward_context.attn_metadata.keys()),
+                    len(graph_params.attn_params[num_tokens]),
+                    len(graph_params.handles[num_tokens]),
+                )
             impl_cls.update_graph_params(
                 update_stream,
                 forward_context,

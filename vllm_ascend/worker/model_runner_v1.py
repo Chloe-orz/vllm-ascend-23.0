@@ -2973,6 +2973,12 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
+                logger.warning(
+                    "[DEBUG] seg_a: seg_a_graph=%s, capturing=%s, entries=%d",
+                    seg_a_graph,
+                    forward_context.capturing,
+                    len(self.segment_a_wrapper.concrete_aclgraph_entries) if seg_a_graph else 0,
+                )
                 if seg_a_graph and not forward_context.capturing:
                     self._update_full_graph_params_if_needed(
                         forward_context, num_tokens_padded, positions,
@@ -3010,6 +3016,12 @@ class NPUModelRunner(GPUModelRunner):
             _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
         try:
+            logger.warning(
+                "[DEBUG] seg_e: seg_e_graph=%s, capturing=%s, entries=%d",
+                seg_e_graph,
+                forward_context.capturing,
+                len(self.segment_e_wrapper.concrete_aclgraph_entries) if seg_e_graph else 0,
+            )
             if seg_e_graph:
                 tail_layer_indices = list(range(
                     self.num_layers - self.tail_k,
@@ -3071,6 +3083,12 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
         try:
+            logger.warning(
+                "[DEBUG] seg_c: seg_c_graph=%s, capturing=%s, entries=%d",
+                seg_c_graph,
+                forward_context.capturing,
+                len(self.segment_c_wrapper.concrete_aclgraph_entries) if seg_c_graph else 0,
+            )
             # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
             # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
             # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
