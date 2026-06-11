@@ -82,14 +82,13 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         positions: torch.Tensor = None,
         **kwargs: object,
     ):
-        from vllm.logger import logger
-        logger.warning(
+        print(
             "[DEBUG][qwen3_5_layer] enter layer_idx=%s layer_type=%s "
-            "hidden_states=%s residual=%s positions=%s",
-            self.layer_idx, self.layer_type,
-            hidden_states.shape if hidden_states is not None else None,
-            residual.shape if residual is not None else None,
-            positions.shape if positions is not None else None,
+            "hidden_states=%s residual=%s positions=%s"
+            % (self.layer_idx, self.layer_type,
+               hidden_states.shape if hidden_states is not None else None,
+               residual.shape if residual is not None else None,
+               positions.shape if positions is not None else None)
         )
         if residual is None:
             residual = hidden_states
@@ -141,11 +140,11 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
                 )
                 hidden_states = hidden_states * (self.ffn_layer_scale.to(hidden_states.dtype) + 1)
 
-        logger.warning(
-            "[DEBUG][qwen3_5_layer] exit layer_idx=%s output hidden_states=%s residual=%s",
-            self.layer_idx,
-            hidden_states.shape if hidden_states is not None else None,
-            residual.shape if residual is not None else None,
+        print(
+            "[DEBUG][qwen3_5_layer] exit layer_idx=%s output hidden_states=%s residual=%s"
+            % (self.layer_idx,
+               hidden_states.shape if hidden_states is not None else None,
+               residual.shape if residual is not None else None)
         )
         return hidden_states, residual
 

@@ -688,10 +688,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: torch.Tensor,
         layer=None,
     ) -> torch.Tensor:
-        logger.warning(
-            "[DEBUG][attn] full_graph_fia enter layerIndex=%s num_tokens=%s query=%s",
-            self.layerIndex, attn_metadata.actual_seq_lengths_q[-1] if len(attn_metadata.actual_seq_lengths_q) else None,
-            query.shape,
+        print(
+            "[DEBUG][attn] full_graph_fia enter layerIndex=%s num_tokens=%s query=%s"
+            % (self.layerIndex, attn_metadata.actual_seq_lengths_q[-1] if len(attn_metadata.actual_seq_lengths_q) else None,
+               query.shape)
         )
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
@@ -825,7 +825,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
-        logger.warning("[DEBUG][attn] full_graph_fia exit layerIndex=%s num_tokens=%s", self.layerIndex, num_tokens)
+        print("[DEBUG][attn] full_graph_fia exit layerIndex=%s num_tokens=%s" % (self.layerIndex, num_tokens))
         return output, num_tokens
 
     def full_graph_fia_v2(
@@ -1057,22 +1057,22 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # we inherit ForwardContext in model runner v2, when enable model
         # runner v2, there is not capturing attribute in forward_context,
         # just use getattr to avoid attribute error.
-        logger.warning(
-            "[DEBUG][attn] forward_fused_infer_attention capturing=%s layerIndex=%s attn_state=%s",
-            _EXTRA_CTX.capturing, self.layerIndex, attn_metadata.attn_state,
+        print(
+            "[DEBUG][attn] forward_fused_infer_attention capturing=%s layerIndex=%s attn_state=%s"
+            % (_EXTRA_CTX.capturing, self.layerIndex, attn_metadata.attn_state)
         )
         if _EXTRA_CTX.capturing:
             if self.sinks is not None:
-                logger.warning("[DEBUG][attn] calling full_graph_fia_v2")
+                print("[DEBUG][attn] calling full_graph_fia_v2")
                 attn_output, num_tokens = self.full_graph_fia_v2(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
-                logger.warning("[DEBUG][attn] full_graph_fia_v2 done")
+                print("[DEBUG][attn] full_graph_fia_v2 done")
                 return output
             else:
-                logger.warning("[DEBUG][attn] calling full_graph_fia")
+                print("[DEBUG][attn] calling full_graph_fia")
                 attn_output, num_tokens = self.full_graph_fia(query, key, value, attn_metadata, output)
                 output[:num_tokens] = attn_output[:num_tokens]
-                logger.warning("[DEBUG][attn] full_graph_fia done")
+                print("[DEBUG][attn] full_graph_fia done")
                 return output
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(

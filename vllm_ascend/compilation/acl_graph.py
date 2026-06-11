@@ -131,7 +131,7 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
-            logger.warning("[DEBUG][aclgraph] direct run (no capture/replay) for %s", self._runnable_str)
+            print("[DEBUG][aclgraph] direct run (no capture/replay) for %s" % (self._runnable_str,))
             return self.runnable(*args, **kwargs)
         with graph_params_scope(self.graph_params, self.draft_graph_params):
             if batch_descriptor not in self.concrete_aclgraph_entries:
@@ -141,9 +141,9 @@ class ACLGraphWrapper:
             entry = self.concrete_aclgraph_entries[batch_descriptor]
 
             if entry.aclgraph is None:
-                logger.warning(
-                    "[DEBUG][aclgraph] START capture for %s mode=%s batch_descriptor=%s",
-                    self._runnable_str, self.runtime_mode.name, batch_descriptor,
+                print(
+                    "[DEBUG][aclgraph] START capture for %s mode=%s batch_descriptor=%s"
+                    % (self._runnable_str, self.runtime_mode.name, batch_descriptor)
                 )
                 if self.aclgraph_options.debug_log_enable:
                     # Since we capture aclgraph for many different shapes and
@@ -173,10 +173,10 @@ class ACLGraphWrapper:
                     old_capturing = forward_context.capturing
                     forward_context.capturing = True
                     try:
-                        logger.warning("[DEBUG][aclgraph] entering torch.npu.graph capture")
+                        print("[DEBUG][aclgraph] entering torch.npu.graph capture")
                         with torch.npu.graph(aclgraph, pool=self.graph_pool):
                             # `output` is managed by pytorch's aclgraph pool
-                            logger.warning("[DEBUG][aclgraph] inside graph, calling runnable...")
+                            print("[DEBUG][aclgraph] inside graph, calling runnable...")
                             output = self.runnable(*args, **kwargs)
                             if self.aclgraph_options.weak_ref_output:
                                 # by converting it to weak ref,
@@ -187,7 +187,7 @@ class ACLGraphWrapper:
                     finally:
                         forward_context.capturing = old_capturing
 
-                logger.warning("[DEBUG][aclgraph] END capture for %s", self._runnable_str)
+                print("[DEBUG][aclgraph] END capture for %s" % (self._runnable_str,))
                 # here we always use weak ref for the workspaces
                 # to save memory
                 weak_ref_workspaces(get_graph_params())
