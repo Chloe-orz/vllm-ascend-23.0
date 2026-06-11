@@ -232,8 +232,10 @@ class ACLGraphWrapper:
 
                 # important: we need to return the output, rather than
                 # the weak ref of the output, so that pytorch can correctly
-                # manage the memory during acl graph capture
-                return output
+                # manage the memory during acl graph capture.
+                # If we flattened IntermediateTensors, return the reconstructed
+                # object so callers see the original return type.
+                return entry.output if entry._output_keys is not None else output
 
             if self.is_debugging_mode:
                 # check if the input addresses are the same
