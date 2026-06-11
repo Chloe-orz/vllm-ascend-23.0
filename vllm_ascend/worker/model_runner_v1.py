@@ -812,6 +812,9 @@ class NPUModelRunner(GPUModelRunner):
         ]
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
 
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
+
         if self.edge_cloud_cfg.role == "edge":
             self.segment_a = self._create_segment_callable(
                 self.model, 0, self.head_k, is_first_segment=True, is_last_segment=False
