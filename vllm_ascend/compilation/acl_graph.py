@@ -20,6 +20,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
@@ -35,6 +36,12 @@ class ACLGraphEntry:
     # for aclgraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
+
+    # when the captured runnable returns IntermediateTensors, we flatten it
+    # to a plain tensor tuple during capture so that the NPU graph tracer
+    # can see every output tensor.  These keys let us reconstruct the
+    # IntermediateTensors after capture / for replay.
+    _output_keys: tuple[str, ...] | None = None
 
 
 class ACLGraphWrapper:
@@ -170,7 +177,16 @@ class ACLGraphWrapper:
                     try:
                         with torch.npu.graph(aclgraph, pool=self.graph_pool):
                             # `output` is managed by pytorch's aclgraph pool
-                            output = self.runnable(*args, **kwargs)
+                            raw_output = self.runnable(*args, **kwargs)
+                            # NPU graph tracer may not correctly discover tensors
+                            # nested inside a custom class (e.g. IntermediateTensors).
+                            # Flatten to a plain tensor tuple during capture so the
+                            # tracer sees every output tensor.
+                            if isinstance(raw_output, IntermediateTensors):
+                                entry._output_keys = tuple(raw_output.tensors.keys())
+                                output = tuple(raw_output.tensors.values())
+                            else:
+                                output = raw_output
                             if self.aclgraph_options.weak_ref_output:
                                 # by converting it to weak ref,
                                 # the original `output` will immediately be released
@@ -189,6 +205,12 @@ class ACLGraphWrapper:
                 # here we always use weak ref for the output
                 # to save memory
                 entry.output = weak_ref_tensors(output)
+                # Reconstruct IntermediateTensors after capture so replay returns
+                # the original structure instead of a bare tuple.
+                if entry._output_keys is not None:
+                    entry.output = IntermediateTensors(
+                        dict(zip(entry._output_keys, entry.output))
+                    )
                 entry.aclgraph = aclgraph
 
                 compilation_counter.num_cudagraph_captured += 1
