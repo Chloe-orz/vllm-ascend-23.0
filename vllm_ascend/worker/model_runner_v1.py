@@ -566,8 +566,6 @@ class NPUModelRunner(GPUModelRunner):
     def _pp_timing(self, stage: str, sync_npu: bool = False) -> None:
         if os.environ.get("PP_TIMING_ENABLE", "0") != "1":
             return
-        if sync_npu:
-            torch.npu.synchronize()
         if self._edge_cloud_enabled:
             role = self.edge_cloud_cfg.role
         else:
@@ -1771,11 +1769,11 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
-            # self._pp_timing("model_forward_entry", sync_npu=True)
+            self._pp_timing("model_forward_entry")
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-            self._pp_timing("model_forward_done", sync_npu=True)
+            self._pp_timing("model_forward_done")
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2028,6 +2026,7 @@ class NPUModelRunner(GPUModelRunner):
 
         if not self.use_async_scheduling:
             return model_runner_output
+        self._pp_timing("async_output_created")
         return AsyncGPUModelRunnerOutput(
             model_runner_output=model_runner_output,
             sampled_token_ids=sampler_output.sampled_token_ids,
