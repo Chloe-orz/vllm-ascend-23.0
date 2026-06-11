@@ -225,6 +225,17 @@ class ACLGraphWrapper:
             return entry.output
 
 
+@dataclass
+class GraphParams:
+    events: dict[int, list[torch.npu.ExternalEvent]]
+    workspaces: dict[int, torch.Tensor]
+    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[int, list[tuple]]
+    conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
+    conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
+    conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
+
+
 def _collect_tensor_addresses(*values) -> list[int]:
     addresses: list[int] = []
     visited: set[int] = set()
@@ -366,17 +377,6 @@ def _filter_attn_metadata_for_layers(
         result[matched_keys[0]] = attn_metadata[matched_keys[0]]
 
     return result
-
-
-@dataclass
-class GraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
-    conv1d_params: dict[int, list[tuple]]  # for causal conv1d params
-    conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]  # for causal conv1d params handles
-    conv1d_events: dict[int, list[torch.npu.ExternalEvent]]  # for causal conv1d params events
 
 
 _graph_params: GraphParams | None = None
