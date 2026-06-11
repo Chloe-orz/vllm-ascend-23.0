@@ -184,7 +184,18 @@ class ACLGraphWrapper:
                         with torch.npu.graph(aclgraph, pool=self.graph_pool):
                             # `output` is managed by pytorch's aclgraph pool
                             print("[DEBUG][aclgraph] inside graph, calling runnable...")
-                            output = self.runnable(*args, **kwargs)
+                            raw_output = self.runnable(*args, **kwargs)
+
+                            # NPU graph tracer may not discover tensors nested
+                            # inside custom containers (e.g. IntermediateTensors).
+                            # Flatten to a plain tensor tuple so the tracer sees
+                            # every output tensor and replays update them.
+                            if isinstance(raw_output, IntermediateTensors):
+                                entry._output_keys = tuple(raw_output.tensors.keys())
+                                output = tuple(raw_output.tensors.values())
+                            else:
+                                output = raw_output
+
                             if self.aclgraph_options.weak_ref_output:
                                 # by converting it to weak ref,
                                 # the original `output` will immediately be released
@@ -204,6 +215,12 @@ class ACLGraphWrapper:
                 # here we always use weak ref for the output
                 # to save memory
                 entry.output = weak_ref_tensors(output)
+                # If we flattened IntermediateTensors during capture, reconstruct
+                # it now so replay returns the original structure.
+                if entry._output_keys is not None:
+                    entry.output = IntermediateTensors(
+                        dict(zip(entry._output_keys, entry.output))
+                    )
                 entry.aclgraph = aclgraph
 
                 # DEBUG: print capture-time output tensor addresses and content checksum
