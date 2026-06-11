@@ -37,6 +37,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
+import vllm.compilation.monitor as _monitor
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
@@ -3417,6 +3418,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
+            and not _monitor.cudagraph_capturing_enabled
             and not self.use_sparse
         ):
             assert positions is not None
@@ -3484,6 +3486,7 @@ class NPUModelRunner(GPUModelRunner):
         if (
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
+            and not _monitor.cudagraph_capturing_enabled
             and not self.use_sparse and not self.use_compress
         ):
             if self.enable_enpu:
