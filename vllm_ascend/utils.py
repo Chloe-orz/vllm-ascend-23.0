@@ -447,6 +447,74 @@ def attention_calculation_stream() -> torch.npu.Stream:
         _ATNN_CALCULATION_STREAM = torch_npu.npu.Stream()
     return _ATNN_CALCULATION_STREAM
 
+
+# ---------------------------------------------------------------------------
+# Edge-cloud TP broadcast overlap utilities
+# ---------------------------------------------------------------------------
+# When NPU0 receives data from the remote side (Edge↔Cloud) via irecv, it
+# must broadcast to other TP ranks within the same node.  The broadcast
+# previously blocked the default stream, preventing NPU0 from starting
+# computation until every TP rank had received the data.
+#
+# The fire-and-forget pattern below launches the broadcast on a dedicated
+# stream so that NPU0 can immediately begin computing on the default stream.
+# The broadcast must still complete before any TP all-reduce (which requires
+# all ranks to participate); this is ensured by
+# ec_ensure_broadcast_if_needed() which is called from
+# NPUCommunicator.all_reduce() before the first TP all-reduce in the model
+# forward path.
+# ---------------------------------------------------------------------------
+
+_EC_BCAST_STREAM: torch.npu.Stream | None = None
+_EC_BCAST_PENDING: bool = False
+
+
+def ec_broadcast_stream() -> torch.npu.Stream:
+    """Dedicated NPU stream for edge-cloud TP broadcast.
+
+    Used by ``edge_cloud_broadcast_recv`` on NPU0 (the PP-connected rank)
+    to launch TP broadcasts asynchronously, overlapping with computation
+    on the default stream.
+    """
+    global _EC_BCAST_STREAM
+    if _EC_BCAST_STREAM is None:
+        _EC_BCAST_STREAM = torch_npu.npu.Stream()
+    return _EC_BCAST_STREAM
+
+
+def ec_mark_broadcast_pending():
+    """Mark that a fire-and-forget TP broadcast is in flight.
+
+    Called after launching the broadcast on ``ec_broadcast_stream``.
+    The next call to ``ec_ensure_broadcast_if_needed()`` will wait for
+    the broadcast stream to complete.
+    """
+    global _EC_BCAST_PENDING
+    _EC_BCAST_PENDING = True
+
+
+def ec_ensure_broadcast_if_needed():
+    """Ensure a pending edge-cloud TP broadcast has completed.
+
+    On NPU0: if a broadcast is pending (launched on ``ec_broadcast_stream``
+    by ``edge_cloud_broadcast_recv``), this waits for the broadcast stream
+    to finish by issuing ``default_stream.wait_stream(bcast_stream)``.
+    This guarantees that all TP ranks have the broadcast data before any
+    TP all-reduce proceeds.
+
+    On non-NPU0 ranks or when no broadcast is pending, this is a no-op
+    (those ranks already waited in ``AsyncIntermediateTensors.wait_for_comm``).
+
+    Called from ``NPUCommunicator.all_reduce()`` to lazily synchronize
+    at the first TP all-reduce in the model forward path, maximizing
+    the compute/communication overlap window.
+    """
+    global _EC_BCAST_PENDING
+    if not _EC_BCAST_PENDING:
+        return
+    torch.npu.current_stream().wait_stream(ec_broadcast_stream())
+    _EC_BCAST_PENDING = False
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401

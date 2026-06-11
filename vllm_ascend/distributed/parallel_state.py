@@ -604,9 +604,11 @@ def edge_cloud_broadcast_recv(
     """Edge-cloud mode broadcast receive.
 
     For NPU0 (pp_group.world_size == 2 and rank is Cloud/Edge NPU0):
-        - Async receive from PP peer via pp_group.irecv_tensor_dict()
-        - Sync broadcast metadata via broadcast_object
-        - postprocess broadcasts tensors only after handles complete
+        - Async receive from PP peer via edge_cloud_irecv_tensor_dict()
+        - Fire-and-forget TP broadcast on ec_broadcast_stream (non-blocking)
+          so NPU0 can start computing immediately.  The broadcast must
+          complete before any TP all-reduce; ec_ensure_broadcast_if_needed()
+          is called from NPUCommunicator.all_reduce() to lazily synchronize.
     For non-NPU0:
         - Async broadcast receive: receive metadata sync, then receive tensors async
 
@@ -636,23 +638,41 @@ def edge_cloud_broadcast_recv(
         #tp_group.broadcast_object(metadata_list, src=0)
 
         # Define broadcast postprocess function (broadcast tensors only, metadata already sent)
+        #
+        # Fire-and-forget pattern: launch TP broadcast on a dedicated NPU stream
+        # (ec_broadcast_stream) so that NPU0 can immediately start computing on
+        # the default stream.  The broadcast must complete before any TP
+        # all-reduce; this is ensured by ec_ensure_broadcast_if_needed() called
+        # from NPUCommunicator.all_reduce() at the first TP all-reduce in the
+        # model forward path.
         def broadcast_postprocess():
+            from vllm_ascend.utils import (
+                ec_broadcast_stream,
+                ec_mark_broadcast_pending,
+            )
+            bcast_stream = ec_broadcast_stream()
+            # Ensure broadcast starts after irecv data is ready on the default stream
+            bcast_stream.wait_stream(torch.npu.current_stream())
             _, tensor_list = _split_tensor_dict(tensor_dict) if tensor_dict else (None, [])
-            handles = []
-            for tensor in tensor_list:
-                if tensor.numel() == 0:
-                    continue
-                if tensor.is_cpu:
-                    handle = torch.distributed.broadcast(
-                        tensor, src=tp_group.ranks[0], group=tp_group.cpu_group, async_op=True
-                    )
-                else:
-                    handle = torch.distributed.broadcast(
-                        tensor, src=tp_group.ranks[0], group=tp_group.device_group, async_op=True
-                    )
-                handles.append(handle)
-            for handle in handles:
-                handle.wait()
+            with torch.npu.stream(bcast_stream):
+                for tensor in tensor_list:
+                    if tensor.numel() == 0:
+                        continue
+                    if tensor.is_cpu:
+                        torch.distributed.broadcast(
+                            tensor, src=tp_group.ranks[0],
+                            group=tp_group.cpu_group, async_op=False,
+                        )
+                    else:
+                        torch.distributed.broadcast(
+                            tensor, src=tp_group.ranks[0],
+                            group=tp_group.device_group, async_op=False,
+                        )
+                    # Prevent the NPU memory allocator from reusing tensor
+                    # memory while the broadcast stream still references it.
+                    tensor.record_stream(bcast_stream)
+            # Signal that a lazy sync is needed before the first TP all-reduce
+            ec_mark_broadcast_pending()
 
         comm_postprocess.append(broadcast_postprocess)
         return tensor_dict, comm_handles, comm_postprocess

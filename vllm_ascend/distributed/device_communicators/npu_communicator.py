@@ -33,6 +33,25 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # init device according to rank
         self.device = torch.npu.current_device()
 
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        """All-reduce with lazy edge-cloud broadcast synchronization.
+
+        When the edge-cloud fire-and-forget TP broadcast is in flight
+        (launched on ``ec_broadcast_stream`` by ``edge_cloud_broadcast_recv``
+        on NPU0), the first TP all-reduce in the model forward path must
+        wait for the broadcast to complete so that all TP ranks have the
+        data before participating in the collective operation.
+
+        ``ec_ensure_broadcast_if_needed()`` is a no-op when no broadcast
+        is pending (non-edge-cloud scenarios, non-NPU0 ranks, or after the
+        first all-reduce has already synchronized), adding negligible
+        overhead to the common case.
+        """
+        from vllm_ascend.utils import ec_ensure_broadcast_if_needed
+        ec_ensure_broadcast_if_needed()
+        dist.all_reduce(input_, group=self.device_group)
+        return input_
+
     def all_to_all(
         self,
         input_: torch.Tensor,

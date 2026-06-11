@@ -2588,6 +2588,11 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_layers - self.tail_k,
                     self.num_layers,
                 ))
+                # ACLGraph replay is atomic — no in-graph sync point is possible.
+                # Ensure the fire-and-forget TP broadcast (launched on
+                # ec_broadcast_stream) has completed before graph replay starts.
+                from vllm_ascend.utils import ec_ensure_broadcast_if_needed
+                ec_ensure_broadcast_if_needed()
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2636,6 +2641,11 @@ class NPUModelRunner(GPUModelRunner):
                 self.head_k,
                 self.num_layers - self.tail_k,
             ))
+            # ACLGraph replay is atomic — no in-graph sync point is possible.
+            # Ensure the fire-and-forget TP broadcast (launched on
+            # ec_broadcast_stream) has completed before graph replay starts.
+            from vllm_ascend.utils import ec_ensure_broadcast_if_needed
+            ec_ensure_broadcast_if_needed()
         # intermediate_tensors 已由 NPUWorker 从 Edge 侧接收
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
         old_layer_idx = _EXTRA_CTX.layer_idx
