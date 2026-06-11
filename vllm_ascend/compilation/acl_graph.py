@@ -20,6 +20,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
@@ -35,6 +36,12 @@ class ACLGraphEntry:
     # for aclgraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
     input_addresses: list[int] | None = None
+
+    # When the captured runnable returns IntermediateTensors, we flatten it
+    # to a plain tensor tuple during capture so that the NPU graph tracer
+    # can see every output tensor.  These keys let us reconstruct the
+    # IntermediateTensors after capture / for replay.
+    _output_keys: tuple[str, ...] | None = None
 
 
 class ACLGraphWrapper:
@@ -436,7 +443,9 @@ def graph_params_scope(
         # 在切回旧的 graph_params 之前，确保当前流上所有 attention 参数更新任务
         # 已全部完成，避免异步流仍在引用本段 graph_params 导致 task handle 错配
         if graph_params is not None:
+            print("[DEBUG][aclgraph] graph_params_scope __exit__ synchronizing...")
             torch.npu.current_stream().synchronize()
+            print("[DEBUG][aclgraph] graph_params_scope __exit__ synchronize done")
         _active_graph_params = old_graph_params
         _active_draft_graph_params = old_draft_graph_params
 
