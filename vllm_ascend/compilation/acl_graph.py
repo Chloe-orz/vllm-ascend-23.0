@@ -163,6 +163,7 @@ class ACLGraphWrapper:
 
                 input_addresses = _collect_tensor_addresses(args, kwargs)
                 entry.input_addresses = input_addresses
+                print("[DEBUG][aclgraph] CAPTURE input_addresses=%s for %s" % (input_addresses, self._runnable_str))
                 aclgraph = torch.npu.NPUGraph()
 
                 with ExitStack() as stack:
@@ -179,8 +180,14 @@ class ACLGraphWrapper:
                     # mind-exploding: carefully manage the reference and memory.
                     old_capturing = forward_context.capturing
                     forward_context.capturing = True
+                    # v1 model runner does not set _EXTRA_CTX.capturing like v2's
+                    # ModelWithContext does. FIA checks _EXTRA_CTX.capturing to decide
+                    # whether to call full_graph_fia. Sync it here so FIA captures
+                    # graph_task_group correctly.
+                    old_extra_capturing = _EXTRA_CTX.capturing
+                    _EXTRA_CTX.capturing = True
                     try:
-                        print("[DEBUG][aclgraph] entering torch.npu.graph capture")
+                        print("[DEBUG][aclgraph] entering torch.npu.graph capture, forward_context.capturing=True, _EXTRA_CTX.capturing=True")
                         with torch.npu.graph(aclgraph, pool=self.graph_pool):
                             # `output` is managed by pytorch's aclgraph pool
                             print("[DEBUG][aclgraph] inside graph, calling runnable...")
@@ -193,6 +200,8 @@ class ACLGraphWrapper:
                                 output = weak_ref_tensors(output)
                     finally:
                         forward_context.capturing = old_capturing
+                        _EXTRA_CTX.capturing = old_extra_capturing
+                        print("[DEBUG][aclgraph] capture done, restored capturing flags")
 
                 print("[DEBUG][aclgraph] END capture for %s" % (self._runnable_str,))
                 # here we always use weak ref for the workspaces
@@ -222,13 +231,15 @@ class ACLGraphWrapper:
                     f"got {new_input_addresses}"
                 )
 
+            new_input_addresses = _collect_tensor_addresses(args, kwargs)
             logger.warning(
                 "[DEBUG] Replaying aclgraph: mode=%s, batch_desc=%s, "
-                "input_addrs=%s, has_output=%s",
+                "input_addrs=%s, has_output=%s, new_addrs=%s",
                 self.runtime_mode.name,
                 batch_descriptor,
                 entry.input_addresses is not None,
                 entry.output is not None,
+                new_input_addresses,
             )
             # In async scheduling or multi-threaded (MT) scenarios, it is possible that
             # the CPU's record event (from update_attn_params) for the iteration i completes
@@ -242,8 +253,12 @@ class ACLGraphWrapper:
             is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
             need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
             if not self.enable_enpu and need_sync:
+                print("[DEBUG][aclgraph] replay sync start for %s" % (self._runnable_str,))
                 torch.npu.current_stream().synchronize()
+                print("[DEBUG][aclgraph] replay sync done for %s" % (self._runnable_str,))
+            print("[DEBUG][aclgraph] replay START for %s" % (self._runnable_str,))
             entry.aclgraph.replay()
+            print("[DEBUG][aclgraph] replay DONE for %s" % (self._runnable_str,))
             return entry.output
 
 
@@ -329,6 +344,11 @@ def update_full_graph_params(
             forward_context.attn_metadata = filtered_metadata
 
         try:
+            print(
+                "[DEBUG][update_full_graph_params] before update_graph_params: "
+                "layer_indices=%s attn_metadata_keys=%s num_tokens=%s"
+                % (layer_indices, list(forward_context.attn_metadata.keys()) if forward_context.attn_metadata else None, num_tokens)
+            )
             impl_cls.update_graph_params(
                 update_stream,
                 forward_context,
@@ -338,6 +358,7 @@ def update_full_graph_params(
                 num_dcp_pcp_tokens,
                 draft_attn_metadatas,
             )
+            print("[DEBUG][update_full_graph_params] update_graph_params done")
             # For GDN Attention: AscendC operate(conv1d update) update graph params
             # _filter_attn_metadata_for_layers drops GDN keys (they do not contain
             # ".layers.{idx}.self_attn" and are absent from attn_params), but
