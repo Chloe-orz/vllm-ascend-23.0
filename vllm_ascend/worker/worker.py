@@ -640,7 +640,6 @@ class NPUWorker(WorkerBase):
             comm_handles=comm_handles,
             comm_postprocess=comm_postprocess,
         )
-        torch.npu.synchronize()
 
         print("model_runner.execute_model edge tail before.", flush=True)
         output = self.model_runner.execute_model(
@@ -680,7 +679,6 @@ class NPUWorker(WorkerBase):
                 channel=channel
             )
             print("Received intermediate tensors from edge after", flush=True)
-            torch.npu.synchronize()
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
