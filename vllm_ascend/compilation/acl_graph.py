@@ -230,7 +230,6 @@ class ACLGraphWrapper:
                 entry.input_addresses is not None,
                 entry.output is not None,
             )
-            print("[DEBUG][aclgraph] Replaying aclgraph START")
             # In async scheduling or multi-threaded (MT) scenarios, it is possible that
             # the CPU's record event (from update_attn_params) for the iteration i completes
             # before the grph replay of iteration i-1.
@@ -242,18 +241,9 @@ class ACLGraphWrapper:
             # When FULL + EAGLE draft (merge path), replay does not need this barrier.
             is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
             need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
-            print(
-                "[DEBUG][aclgraph] replay detail: enable_enpu=%s, is_draft_eagle=%s, "
-                "need_sync=%s, runtime_mode=%s"
-                % (self.enable_enpu, is_draft_eagle, need_sync, self.runtime_mode.name)
-            )
             if not self.enable_enpu and need_sync:
-                print("[DEBUG][aclgraph] synchronizing current stream before replay...")
                 torch.npu.current_stream().synchronize()
-                print("[DEBUG][aclgraph] synchronize done")
-            print("[DEBUG][aclgraph] calling entry.aclgraph.replay()...")
             entry.aclgraph.replay()
-            print("[DEBUG][aclgraph] entry.aclgraph.replay() DONE")
             return entry.output
 
 
@@ -314,7 +304,10 @@ def update_full_graph_params(
     with graph_params_scope(graph_params, draft_graph_params):
         impl_cls = attn_backend.get_impl_cls()
 
-        original_metadata = None
+        # Preserve the unfiltered metadata so that GDN update_conv1d_graph_params
+        # can look up layer_prefix even after FIA filtering below.
+        unfiltered_metadata = forward_context.attn_metadata
+        filtered_metadata = None
 
         if layer_indices is not None:
             # 强制要求 layer_indices 为升序自然层号，与图捕获时 islice(self.layers)
@@ -323,22 +316,12 @@ def update_full_graph_params(
                 "layer_indices must be in ascending natural order to align with "
                 "graph_params.attn_params append order."
             )
-            original_metadata = forward_context.attn_metadata
-            forward_context.attn_metadata = _filter_attn_metadata_for_layers(
-                original_metadata, layer_indices
+            filtered_metadata = _filter_attn_metadata_for_layers(
+                unfiltered_metadata, layer_indices
             )
+            forward_context.attn_metadata = filtered_metadata
 
         try:
-            if layer_indices is not None:
-                graph_params = get_graph_params()
-                logger.warning(
-                    "[DEBUG] edge-cloud update: layer_indices=%s, "
-                    "filtered_keys=%s, attn_params_len=%d, handles_len=%d",
-                    layer_indices,
-                    list(forward_context.attn_metadata.keys()),
-                    len(graph_params.attn_params[num_tokens]),
-                    len(graph_params.handles[num_tokens]),
-                )
             impl_cls.update_graph_params(
                 update_stream,
                 forward_context,
@@ -349,20 +332,13 @@ def update_full_graph_params(
                 draft_attn_metadatas,
             )
             # For GDN Attention: AscendC operate(conv1d update) update graph params
-            # _filter_attn_metadata_for_layers above drops GDN keys (they do not
-            # contain ".layers.{idx}.self_attn" and are absent from attn_params),
-            # but update_conv1d_graph_params still needs the full metadata dict to
-            # look up layer_prefix.  Temporarily restore the original metadata.
+            # _filter_attn_metadata_for_layers drops GDN keys (they do not contain
+            # ".layers.{idx}.self_attn" and are absent from attn_params), but
+            # update_conv1d_graph_params still needs the full metadata dict to look
+            # up layer_prefix.  Temporarily restore the unfiltered metadata.
             from vllm_ascend.ops.gdn import update_conv1d_graph_params
-            print(
-                "[DEBUG][aclgraph] BEFORE update_conv1d_graph_params: "
-                "num_tokens=%s, is_draft=%s, attn_meta_keys=%s"
-                % (num_tokens, _EXTRA_CTX.is_draft_model,
-                   list(forward_context.attn_metadata.keys()) if isinstance(forward_context.attn_metadata, dict) else "N/A")
-            )
-            if layer_indices is not None and original_metadata is not None:
-                filtered_metadata = forward_context.attn_metadata
-                forward_context.attn_metadata = original_metadata
+            if filtered_metadata is not None and unfiltered_metadata is not None:
+                forward_context.attn_metadata = unfiltered_metadata
                 try:
                     update_conv1d_graph_params(
                         update_stream,
@@ -383,10 +359,9 @@ def update_full_graph_params(
                     _EXTRA_CTX.is_draft_model,
                     draft_attn_metadatas,
                 )
-            print("[DEBUG][aclgraph] AFTER update_conv1d_graph_params done")
         finally:
-            if original_metadata is not None:
-                forward_context.attn_metadata = original_metadata
+            if filtered_metadata is not None:
+                forward_context.attn_metadata = unfiltered_metadata
 
 def _filter_attn_metadata_for_layers(
     attn_metadata: dict,
@@ -474,17 +449,7 @@ def graph_params_scope(
         # 在切回旧的 graph_params 之前，确保当前流上所有 attention 参数更新任务
         # 已全部完成，避免异步流仍在引用本段 graph_params 导致 task handle 错配
         if graph_params is not None:
-            print(
-                "[DEBUG][aclgraph] graph_params_scope __exit__ synchronizing... "
-                "id(graph_params)=%s, has_attn=%s, has_conv1d=%s"
-                % (
-                    id(graph_params),
-                    len(graph_params.handles) > 0,
-                    len(graph_params.conv1d_handles) > 0,
-                )
-            )
             torch.npu.current_stream().synchronize()
-            print("[DEBUG][aclgraph] graph_params_scope __exit__ synchronize done")
         _active_graph_params = old_graph_params
         _active_draft_graph_params = old_draft_graph_params
 

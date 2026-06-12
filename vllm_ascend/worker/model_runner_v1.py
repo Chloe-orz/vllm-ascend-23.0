@@ -2961,7 +2961,11 @@ class NPUModelRunner(GPUModelRunner):
     ):
         """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
         seg_a = self.segment_a_wrapper if use_graph else self.segment_a
-        seg_e = self.segment_e_wrapper if use_graph else self.segment_e
+        # TODO: seg_e 的 FIA (full_attention) graph replay 存在死锁问题，
+        # 暂时只给 seg_a 启用 graph，seg_e 回退到 eager 模式。
+        # 后续需要 Ascend 底层团队调查 FIA kernel 在 edge-cloud segment graph
+        # 下的死锁根因。
+        seg_e = self.segment_e
         seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
         seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
 
@@ -2973,22 +2977,12 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                logger.warning(
-                    "[DEBUG] seg_a: seg_a_graph=%s, capturing=%s, entries=%d",
-                    seg_a_graph,
-                    forward_context.capturing,
-                    len(self.segment_a_wrapper.concrete_aclgraph_entries) if seg_a_graph else 0,
-                )
                 if seg_a_graph and not forward_context.capturing:
-                    print("[DEBUG][edge_cloud] BEFORE _update_full_graph_params_if_needed (seg_a)")
-                    torch.npu.current_stream().synchronize()
-                    print("[DEBUG][edge_cloud] pre-update sync done, calling update...")
                     self._update_full_graph_params_if_needed(
                         forward_context, num_tokens_padded, positions,
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
                     )
-                    print("[DEBUG][edge_cloud] AFTER _update_full_graph_params_if_needed (seg_a)")
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
@@ -3020,27 +3014,17 @@ class NPUModelRunner(GPUModelRunner):
             _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
         try:
-            logger.warning(
-                "[DEBUG] seg_e: seg_e_graph=%s, capturing=%s, entries=%d",
-                seg_e_graph,
-                forward_context.capturing,
-                len(self.segment_e_wrapper.concrete_aclgraph_entries) if seg_e_graph else 0,
-            )
             if seg_e_graph:
                 tail_layer_indices = list(range(
                     self.num_layers - self.tail_k,
                     self.num_layers,
                 ))
             if seg_e_graph and not forward_context.capturing:
-                print("[DEBUG][edge_cloud] BEFORE _update_full_graph_params_if_needed (seg_e)")
-                torch.npu.current_stream().synchronize()
-                print("[DEBUG][edge_cloud] pre-update sync done (seg_e), calling update...")
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-                print("[DEBUG][edge_cloud] AFTER _update_full_graph_params_if_needed (seg_e)")
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -3606,14 +3590,6 @@ class NPUModelRunner(GPUModelRunner):
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
-        print(
-            "[DEBUG][_build_attention_metadata] returning keys=%s, num_kv_groups=%s, num_attn_groups=%s"
-            % (
-                list(attn_metadata.keys()) if isinstance(attn_metadata, dict) else "N/A",
-                len(self.kv_cache_config.kv_cache_groups),
-                sum(len(g) for g in self.attn_groups),
-            )
-        )
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
