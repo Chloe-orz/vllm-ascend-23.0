@@ -170,9 +170,9 @@ def update_conv1d_graph_params(
                 run_mode,
                 branch,
                 layer_prefix,
-                _,
-                _,
-                _,
+                captured_qsl_host,
+                captured_ci_host,
+                captured_nat_host,
                 q_per_seq,
             ) = param
 
@@ -186,7 +186,17 @@ def update_conv1d_graph_params(
                 if isinstance(meta, dict):
                     meta = meta.get(layer_prefix, None)
                     if meta is None or not isinstance(meta, GDNAttentionMetadata):
-                        continue
+                        # Fallback: use captured host args if runtime metadata is missing.
+                        # This should only trigger in exceptional edge cases; normally
+                        # the caller should supply unfiltered metadata containing the
+                        # GDN key (see update_full_graph_params).
+                        if captured_qsl_host:
+                            new_query_start_loc = captured_qsl_host
+                            new_cache_indices = captured_ci_host
+                            new_num_accepted = captured_nat_host
+                            use_captured_fallback = True
+                        else:
+                            continue
 
                 cap_x_dim0 = int(mixed_qkv.size(0))
                 if branch == "spec" and meta.spec_sequence_masks is not None:
