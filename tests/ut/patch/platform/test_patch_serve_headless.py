@@ -21,10 +21,6 @@ class FakeVllmEnvs(ModuleType):
         super().__init__("vllm.envs")
         self.cache_disabled = False
 
-    @property
-    def VLLM_PP_SCHEDULER_ZMQ_ADDR(self):
-        return os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR")
-
     def disable_envs_cache(self):
         self.cache_disabled = True
 
