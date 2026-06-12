@@ -25,19 +25,24 @@ _PATCH_PATH = (
 
 
 class FakeVllmEnvs(ModuleType):
-    def __init__(self):
+    def __init__(self, registry_name="env_variables"):
         super().__init__("vllm.envs")
-        self.env_variables = {}
+        self.registry_name = registry_name
+        setattr(self, registry_name, {})
+
+    @property
+    def registry(self):
+        return getattr(self, self.registry_name)
 
     def __getattr__(self, name):
-        if name in self.env_variables:
-            return self.env_variables[name]()
+        if name in self.registry:
+            return self.registry[name]()
         raise AttributeError(name)
 
 
-def _install_fake_vllm_envs(monkeypatch):
+def _install_fake_vllm_envs(monkeypatch, registry_name="env_variables"):
     fake_vllm = ModuleType("vllm")
-    fake_envs = FakeVllmEnvs()
+    fake_envs = FakeVllmEnvs(registry_name)
     fake_vllm.envs = fake_envs
     monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
     monkeypatch.setitem(sys.modules, "vllm.envs", fake_envs)
@@ -61,7 +66,7 @@ def test_layerwise_env_patch_registers_missing_vllm_envs(monkeypatch):
     patch_module.apply_layerwise_env_patch()
 
     for key in _LAYERWISE_ENV_KEYS:
-        assert key in fake_envs.env_variables
+        assert key in fake_envs.registry
 
     monkeypatch.setenv("VLLM_PP_NON_LEADER_ENGINE_CORE", "1")
     monkeypatch.setenv("VLLM_PP_SCHEDULER_ZMQ_ADDR", "tcp://127.0.0.1:6000")
@@ -81,10 +86,23 @@ def test_layerwise_env_patch_registers_missing_vllm_envs(monkeypatch):
 def test_layerwise_env_patch_keeps_existing_vllm_envs(monkeypatch):
     fake_envs = _install_fake_vllm_envs(monkeypatch)
     custom_reader = lambda: 99
-    fake_envs.env_variables["VLLM_LAYER_SLICE_SIZE"] = custom_reader
+    fake_envs.registry["VLLM_LAYER_SLICE_SIZE"] = custom_reader
 
     patch_module = _load_patch_module()
     patch_module.apply_layerwise_env_patch()
 
-    assert fake_envs.env_variables["VLLM_LAYER_SLICE_SIZE"] is custom_reader
+    assert fake_envs.registry["VLLM_LAYER_SLICE_SIZE"] is custom_reader
     assert fake_envs.VLLM_LAYER_SLICE_SIZE == 99
+
+
+def test_layerwise_env_patch_supports_environment_variables_registry(monkeypatch):
+    fake_envs = _install_fake_vllm_envs(monkeypatch, "environment_variables")
+
+    patch_module = _load_patch_module()
+    patch_module.apply_layerwise_env_patch()
+
+    for key in _LAYERWISE_ENV_KEYS:
+        assert key in fake_envs.environment_variables
+
+    monkeypatch.setenv("VLLM_LAYER_SLICE_SIZE", "8")
+    assert fake_envs.VLLM_LAYER_SLICE_SIZE == 8

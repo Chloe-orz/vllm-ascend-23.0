@@ -42,9 +42,16 @@ _LAYERWISE_ENV_VARIABLES: dict[str, Callable[[], Any]] = {
 }
 
 
+def _get_env_registry() -> dict[str, Callable[[], Any]]:
+    if hasattr(envs, "env_variables"):
+        return envs.env_variables
+    return envs.environment_variables
+
+
 def apply_layerwise_env_patch() -> None:
+    env_registry = _get_env_registry()
     for name, reader in _LAYERWISE_ENV_VARIABLES.items():
-        envs.env_variables.setdefault(name, reader)
+        env_registry.setdefault(name, reader)
 
 
 apply_layerwise_env_patch()
