@@ -1,7 +1,4 @@
 ## vLLM Ascend Ignore
-# Local git worktrees
-.worktrees/
-
 # VSCode
 .vscode/
 
