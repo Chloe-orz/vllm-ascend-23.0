@@ -287,6 +287,10 @@ class NPUPlatform(Platform):
 
         ascend_config = init_ascend_config(vllm_config)
 
+        from vllm_ascend.scheduler_conflicts import validate_pd_separation_scheduler_conflicts
+
+        validate_pd_separation_scheduler_conflicts(vllm_config, ascend_config)
+
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)
             if not getattr(vllm_config.kv_transfer_config, "_engine_id_patched", False):
