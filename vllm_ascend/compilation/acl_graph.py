@@ -301,18 +301,25 @@ def update_full_graph_params(
     layer_indices: list[int] | None = None,
     graph_params: GraphParams | None = None,
     draft_graph_params: GraphParams | None = None,
+    unfiltered_attn_metadata: dict | None = None,
 ):
     """更新 attention 图参数，供下一次图回放使用。
 
     标准流程使用全局 GraphParams；边云流程为每个 segment 传入独立
     GraphParams，避免 segment_a / segment_e 的 task handle 相互错配。
+
+    Args:
+        unfiltered_attn_metadata: 真正未过滤的原始 attn_metadata（含 GDN key）。
+            当上游代码（如 _update_full_graph_params_if_needed）为了 FIA update
+            提前过滤掉了 skip_graph_params_update=True 的 key 时，需要传入此参数
+            以保证 GDN 的 update_conv1d_graph_params 仍能按 layer_prefix 查找。
     """
     with graph_params_scope(graph_params, draft_graph_params):
         impl_cls = attn_backend.get_impl_cls()
 
-        # Preserve the unfiltered metadata so that GDN update_conv1d_graph_params
-        # can look up layer_prefix even after FIA filtering below.
-        unfiltered_metadata = forward_context.attn_metadata
+        # Use the caller-supplied unfiltered metadata if available;
+        # otherwise fall back to forward_context.attn_metadata (non-edge-cloud path).
+        unfiltered_metadata = unfiltered_attn_metadata or forward_context.attn_metadata
         filtered_metadata = None
 
         if layer_indices is not None:
@@ -323,7 +330,7 @@ def update_full_graph_params(
                 "graph_params.attn_params append order."
             )
             filtered_metadata = _filter_attn_metadata_for_layers(
-                unfiltered_metadata, layer_indices
+                forward_context.attn_metadata, layer_indices
             )
             forward_context.attn_metadata = filtered_metadata
 
@@ -343,7 +350,8 @@ def update_full_graph_params(
             # update_conv1d_graph_params still needs the full metadata dict to look
             # up layer_prefix.  Temporarily restore the unfiltered metadata.
             from vllm_ascend.ops.gdn import update_conv1d_graph_params
-            if filtered_metadata is not None and unfiltered_metadata is not None:
+            if unfiltered_metadata is not None and unfiltered_metadata is not forward_context.attn_metadata:
+                old_metadata = forward_context.attn_metadata
                 forward_context.attn_metadata = unfiltered_metadata
                 try:
                     update_conv1d_graph_params(
@@ -355,7 +363,7 @@ def update_full_graph_params(
                         draft_attn_metadatas,
                     )
                 finally:
-                    forward_context.attn_metadata = filtered_metadata
+                    forward_context.attn_metadata = old_metadata
             else:
                 update_conv1d_graph_params(
                     update_stream,
