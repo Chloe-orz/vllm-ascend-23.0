@@ -133,6 +133,10 @@ def _install_fake_modules(monkeypatch, context):
     fake_version = ModuleType("vllm.version")
     fake_version.__version__ = "test-version"
 
+    fake_ascend_core = ModuleType("vllm_ascend.core")
+    fake_passive_scheduler = ModuleType("vllm_ascend.core.passive_scheduler")
+    fake_ascend_core.passive_scheduler = fake_passive_scheduler
+
     module_names = {
         "vllm": fake_vllm,
         "vllm.envs": fake_envs,
@@ -147,6 +151,8 @@ def _install_fake_modules(monkeypatch, context):
         "vllm.v1.engine": ModuleType("vllm.v1.engine"),
         "vllm.v1.engine.core": fake_engine_core,
         "vllm.version": fake_version,
+        "vllm_ascend.core": fake_ascend_core,
+        "vllm_ascend.core.passive_scheduler": fake_passive_scheduler,
     }
     for name, module in module_names.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -178,7 +184,7 @@ def test_serve_patch_launches_passive_engine_core_for_non_leader_rank(monkeypatc
     assert len(context.processes) == 1
     proc = context.processes[0]
     assert proc.name == "PassiveEngineCore"
-    assert proc.target is fake_engine_core.PassiveEngineCoreProc.run_passive_engine_core
+    assert proc.target.__name__ == "_run_passive_engine_core_with_ascend_shims"
     assert proc.kwargs["ready_pipe"] is context.writer
     assert proc.started is True
     assert context.writer.closed is True
