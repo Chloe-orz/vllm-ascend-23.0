@@ -206,10 +206,9 @@ class ACLGraphWrapper:
                 entry.output = weak_ref_tensors(output)
                 entry.aclgraph = aclgraph
 
-                # DEBUG: print capture-time output tensor addresses and content checksum
+                # DEBUG: print capture-time output tensor addresses
                 capture_ptrs = _get_tensor_ptrs(entry.output)
                 print("[DEBUG][aclgraph] CAPTURE output ptrs: %s" % (capture_ptrs,))
-                _print_output_sample(entry.output, "CAPTURE")
 
                 compilation_counter.num_cudagraph_captured += 1
 
@@ -238,14 +237,6 @@ class ACLGraphWrapper:
             # DEBUG: print replay-time output tensor addresses (before replay)
             replay_ptrs_before = _get_tensor_ptrs(entry.output)
             print("[DEBUG][aclgraph] REPLAY  output ptrs BEFORE replay: %s" % (replay_ptrs_before,))
-            _print_output_sample(entry.output, "REPLAY-BEFORE")
-            # 手动修改 hidden_states[0,0] 为固定值，replay 后检查是否被覆盖
-            # 如果 graph 正确更新了 tensor，值会被覆盖回正确值
-            # 如果 graph 没有更新 tensor，值保持 99999.0
-            if hasattr(entry.output, "tensors") and "hidden_states" in entry.output.tensors:
-                old_val = entry.output.tensors["hidden_states"].view(-1)[0].item()
-                entry.output.tensors["hidden_states"].view(-1)[0] = 99999.0
-                print("[DEBUG][aclgraph] poisoned hidden_states[0,0] = 99999.0 (was %s)" % old_val)
             print("[DEBUG][aclgraph] Replaying aclgraph START")
             # In async scheduling or multi-threaded (MT) scenarios, it is possible that
             # the CPU's record event (from update_attn_params) for the iteration i completes
@@ -268,32 +259,7 @@ class ACLGraphWrapper:
             # DEBUG: print replay-time output tensor addresses (after replay)
             replay_ptrs_after = _get_tensor_ptrs(entry.output)
             print("[DEBUG][aclgraph] REPLAY  output ptrs AFTER  replay: %s" % (replay_ptrs_after,))
-            _print_output_sample(entry.output, "REPLAY")
             return entry.output
-
-
-def _print_output_sample(value: Any, tag: str) -> None:
-    """Print a sample value from the output tensor(s) for debugging."""
-    if hasattr(value, "tensors") and isinstance(value.tensors, dict):
-        # IntermediateTensors
-        for k, t in value.tensors.items():
-            if isinstance(t, torch.Tensor) and t.numel() > 0:
-                print(
-                    "[DEBUG][aclgraph] %s output['%s'][0,0] = %s"
-                    % (tag, k, t.view(-1)[0].item())
-                )
-    elif isinstance(value, torch.Tensor) and value.numel() > 0:
-        print(
-            "[DEBUG][aclgraph] %s output[0,0] = %s"
-            % (tag, value.view(-1)[0].item())
-        )
-    elif isinstance(value, (list, tuple)):
-        for i, t in enumerate(value):
-            if isinstance(t, torch.Tensor) and t.numel() > 0:
-                print(
-                    "[DEBUG][aclgraph] %s output[%d][0,0] = %s"
-                    % (tag, i, t.view(-1)[0].item())
-                )
 
 
 def _get_tensor_ptrs(value: Any) -> dict[str, int]:
