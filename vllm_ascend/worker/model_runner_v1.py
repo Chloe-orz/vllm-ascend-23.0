@@ -3452,6 +3452,7 @@ class NPUModelRunner(GPUModelRunner):
                     draft_graph_params=(
                         graph_wrapper.draft_graph_params if graph_wrapper is not None else None
                     ),
+                    unfiltered_attn_metadata=original_attn_metadata,
                 )
             finally:
                 forward_context.attn_metadata = original_attn_metadata
