@@ -3057,6 +3057,13 @@ class NPUModelRunner(GPUModelRunner):
                 **model_kwargs,
             )
             print("[DEBUG][seg_e] seg_e returned, type=%s" % (type(hidden_states),))
+            # Graph replay 返回的 tensor 底层内存由 NPU graph pool 管理，
+            # 部分 driver 版本下普通 eager kernel（如 compute_logits 的 matmul）
+            # 无法直接访问该内存，导致后续 hang。clone() 将其复制到普通内存。
+            if seg_e_graph and isinstance(hidden_states, torch.Tensor):
+                print("[DEBUG][seg_e] cloning hidden_states to escape graph pool memory")
+                hidden_states = hidden_states.clone()
+                print("[DEBUG][seg_e] clone done")
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
