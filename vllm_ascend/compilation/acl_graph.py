@@ -238,10 +238,15 @@ class ACLGraphWrapper:
             # so that update_attn_params only executes after the previous graph replay has fully completed.
             # If we do not in main model and in full-graph mode when using merge-eagle-graph,
             # we do not need to synchronize.
-            # When enable_enpu is on, model_runner orders update vs replay; skip here.	 
-            # When FULL + EAGLE draft (merge path), replay does not need this barrier.	 
-            is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle	 
-            need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle	 
+            # When enable_enpu is on, model_runner orders update vs replay; skip here.
+            # When FULL + EAGLE draft (merge path), replay does not need this barrier.
+            is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
+            need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+            print(
+                "[DEBUG][aclgraph] replay detail: enable_enpu=%s, is_draft_eagle=%s, "
+                "need_sync=%s, runtime_mode=%s"
+                % (self.enable_enpu, is_draft_eagle, need_sync, self.runtime_mode.name)
+            )
             if not self.enable_enpu and need_sync:
                 print("[DEBUG][aclgraph] synchronizing current stream before replay...")
                 torch.npu.current_stream().synchronize()
@@ -345,6 +350,12 @@ def update_full_graph_params(
             )
             # For GDN Attention: AscendC operate(conv1d update) update graph params
             from vllm_ascend.ops.gdn import update_conv1d_graph_params
+            print(
+                "[DEBUG][aclgraph] BEFORE update_conv1d_graph_params: "
+                "num_tokens=%s, is_draft=%s, attn_meta_keys=%s"
+                % (num_tokens, _EXTRA_CTX.is_draft_model,
+                   list(forward_context.attn_metadata.keys()) if isinstance(forward_context.attn_metadata, dict) else "N/A")
+            )
             update_conv1d_graph_params(
                 update_stream,
                 forward_context,
@@ -353,6 +364,7 @@ def update_full_graph_params(
                 _EXTRA_CTX.is_draft_model,
                 draft_attn_metadatas,
             )
+            print("[DEBUG][aclgraph] AFTER update_conv1d_graph_params done")
         finally:
             if original_metadata is not None:
                 forward_context.attn_metadata = original_metadata
@@ -443,7 +455,15 @@ def graph_params_scope(
         # 在切回旧的 graph_params 之前，确保当前流上所有 attention 参数更新任务
         # 已全部完成，避免异步流仍在引用本段 graph_params 导致 task handle 错配
         if graph_params is not None:
-            print("[DEBUG][aclgraph] graph_params_scope __exit__ synchronizing...")
+            print(
+                "[DEBUG][aclgraph] graph_params_scope __exit__ synchronizing... "
+                "id(graph_params)=%s, has_attn=%s, has_conv1d=%s"
+                % (
+                    id(graph_params),
+                    len(graph_params.handles) > 0,
+                    len(graph_params.conv1d_handles) > 0,
+                )
+            )
             torch.npu.current_stream().synchronize()
             print("[DEBUG][aclgraph] graph_params_scope __exit__ synchronize done")
         _active_graph_params = old_graph_params

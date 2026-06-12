@@ -144,11 +144,22 @@ def update_conv1d_graph_params(
 
     graph_params = get_draft_graph_params() if is_draft_model else get_graph_params()
 
+    conv1d_params_len = len(graph_params.conv1d_params.get(num_tokens, [])) if graph_params is not None else -1
+    print(
+        "[DEBUG][GDN_UPDATE] entry: num_tokens=%s, is_draft=%s, "
+        "graph_params=%s, conv1d_params_len=%s, attn_meta_type=%s"
+        % (num_tokens, is_draft_model,
+           graph_params is not None,
+           conv1d_params_len,
+           type(forward_context.attn_metadata).__name__)
+    )
+
     if (
         graph_params is None
         or num_tokens not in graph_params.conv1d_params
         or len(graph_params.conv1d_params[num_tokens]) == 0
     ):
+        print("[DEBUG][GDN_UPDATE] early return: no conv1d_params to update")
         return
 
     attn_metadata = forward_context.attn_metadata
@@ -156,11 +167,13 @@ def update_conv1d_graph_params(
         attn_metadata = draft_attn_metadatas
 
     with torch.npu.stream(update_stream):
-        for param, handle, event in zip(
+        total_handles = len(graph_params.conv1d_handles[num_tokens])
+        print("[DEBUG][GDN_UPDATE] starting update loop: total_handles=%s" % total_handles)
+        for idx, (param, handle, event) in enumerate(zip(
             graph_params.conv1d_params[num_tokens],
             graph_params.conv1d_handles[num_tokens],
             graph_params.conv1d_events[num_tokens],
-        ):
+        )):
             # Unpack parameters captured during graph capture
             (
                 output,
@@ -179,6 +192,12 @@ def update_conv1d_graph_params(
                 q_per_seq,
             ) = param
 
+            print(
+                "[DEBUG][GDN_UPDATE] handle_idx=%s/%s, layer_prefix=%s, "
+                "run_mode=%s, branch=%s, mixed_qkv_shape=%s"
+                % (idx, total_handles, layer_prefix, run_mode, branch, list(mixed_qkv.shape))
+            )
+
             new_query_start_loc: tuple[int, ...] = ()
             new_cache_indices: tuple[int, ...] = ()
             new_num_accepted: tuple[int, ...] = ()
@@ -188,7 +207,14 @@ def update_conv1d_graph_params(
                 meta = attn_metadata
                 if isinstance(meta, dict):
                     meta = meta.get(layer_prefix, None)
+                    print(
+                        "[DEBUG][GDN_UPDATE]   dict lookup layer_prefix=%s -> meta=%s, "
+                        "is_gdn=%s"
+                        % (layer_prefix, meta is not None,
+                           isinstance(meta, GDNAttentionMetadata))
+                    )
                     if meta is None or not isinstance(meta, GDNAttentionMetadata):
+                        print("[DEBUG][GDN_UPDATE]   SKIP: meta missing or wrong type")
                         continue
 
                 cap_x_dim0 = int(mixed_qkv.size(0))
@@ -214,6 +240,7 @@ def update_conv1d_graph_params(
                     )
                     new_num_accepted = ()
 
+            print("[DEBUG][GDN_UPDATE]   DO_UPDATE for handle_idx=%s" % idx)
             torch.npu.graph_task_update_begin(update_stream, handle)
             torch.ops._C_ascend.npu_causal_conv1d_custom(
                 output,
@@ -231,6 +258,8 @@ def update_conv1d_graph_params(
             )
             torch.npu.graph_task_update_end(update_stream)
             event.record(update_stream)
+            print("[DEBUG][GDN_UPDATE]   RECORD_EVENT done for handle_idx=%s" % idx)
+        print("[DEBUG][GDN_UPDATE] update loop finished")
 
 
 def get_non_spec_chunked_prefill_meta(attn_metadata):

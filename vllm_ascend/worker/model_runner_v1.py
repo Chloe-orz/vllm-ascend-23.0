@@ -2980,11 +2980,15 @@ class NPUModelRunner(GPUModelRunner):
                     len(self.segment_a_wrapper.concrete_aclgraph_entries) if seg_a_graph else 0,
                 )
                 if seg_a_graph and not forward_context.capturing:
+                    print("[DEBUG][edge_cloud] BEFORE _update_full_graph_params_if_needed (seg_a)")
+                    torch.npu.current_stream().synchronize()
+                    print("[DEBUG][edge_cloud] pre-update sync done, calling update...")
                     self._update_full_graph_params_if_needed(
                         forward_context, num_tokens_padded, positions,
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
                     )
+                    print("[DEBUG][edge_cloud] AFTER _update_full_graph_params_if_needed (seg_a)")
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
@@ -3028,11 +3032,15 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_layers,
                 ))
             if seg_e_graph and not forward_context.capturing:
+                print("[DEBUG][edge_cloud] BEFORE _update_full_graph_params_if_needed (seg_e)")
+                torch.npu.current_stream().synchronize()
+                print("[DEBUG][edge_cloud] pre-update sync done (seg_e), calling update...")
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
+                print("[DEBUG][edge_cloud] AFTER _update_full_graph_params_if_needed (seg_e)")
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
