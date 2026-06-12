@@ -3606,6 +3606,14 @@ class NPUModelRunner(GPUModelRunner):
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
+        print(
+            "[DEBUG][_build_attention_metadata] returning keys=%s, num_kv_groups=%s, num_attn_groups=%s"
+            % (
+                list(attn_metadata.keys()) if isinstance(attn_metadata, dict) else "N/A",
+                len(self.kv_cache_config.kv_cache_groups),
+                sum(len(g) for g in self.attn_groups),
+            )
+        )
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
