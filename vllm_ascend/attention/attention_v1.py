@@ -625,6 +625,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         c8_v_aq_scale,
                         c8_v_aq_offset,
                     ) = param
+                    print(
+                        "[DEBUG][attn_update] update handle_id=%s key=%s"
+                        % (id(handle), key)
+                    )
 
                     if _EXTRA_CTX.is_draft_model:
                         draft_step = attn_count // num_layers
@@ -701,9 +705,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         layer=None,
     ) -> torch.Tensor:
         print(
-            "[DEBUG][attn] full_graph_fia enter layerIndex=%s num_tokens=%s query=%s"
+            "[DEBUG][attn] full_graph_fia enter layerIndex=%s num_tokens=%s query=%s device=%s"
             % (self.layerIndex, attn_metadata.actual_seq_lengths_q[-1] if len(attn_metadata.actual_seq_lengths_q) else None,
-               query.shape)
+               query.shape, query.device)
         )
         passed_key = key
         key, value, block_size, block_table, actual_seq_lengths_kv = self._get_fia_params(key, value, attn_metadata)
@@ -837,7 +841,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         handle = torch.npu.graph_task_group_end(stream)
         graph_params.handles[num_tokens].append(handle)
-        print("[DEBUG][attn] full_graph_fia exit layerIndex=%s num_tokens=%s" % (self.layerIndex, num_tokens))
+        print(
+            "[DEBUG][attn] full_graph_fia exit layerIndex=%s num_tokens=%s handle_id=%s"
+            % (self.layerIndex, num_tokens, id(handle))
+        )
         return output, num_tokens
 
     def full_graph_fia_v2(
