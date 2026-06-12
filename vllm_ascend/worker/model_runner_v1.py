@@ -766,7 +766,14 @@ class NPUModelRunner(GPUModelRunner):
         #    → 非本地层初始化为 PPMissingLayer（无参数，不占显存）。
         self.model = get_model(vllm_config=self.vllm_config)
 
-        self.num_layers = len(self.model.model.layers)
+        # Locate the transformer layers — the model may be wrapped in a
+        # multimodal ConditionalGeneration (language_model.model.layers)
+        # or be a plain CausalLM (model.layers).
+        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+            transformer_layers = self.model.model.layers
+        else:
+            transformer_layers = self.model.language_model.model.layers
+        self.num_layers = len(transformer_layers)
 
         # set_moe_parameters() 在 __init__ 中只遍历到本地层，因此不存在
         # 非本地层 stale 引用问题。但为确保 moe_layers/moe_mlp_layers
@@ -776,7 +783,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # 打印每层最终状态（诊断用）
         layer_states = []
-        for idx, layer in enumerate(self.model.model.layers):
+        for idx, layer in enumerate(transformer_layers):
             layer_states.append(
                 f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
             )
