@@ -636,47 +636,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 graph_params = get_graph_params()
                 attn_metadata = forward_context.attn_metadata
                 attn_keys = list(attn_metadata.keys())
-                if not use_layer_aware_replay:
-                    # In some speculative methods (such as DFlash), the order of
-                    # attn_keys in the Target model will be disrupted instead of
-                    # increasing by layer index, so need regular expressions to
-                    # reorder the attn_keys and store the results in
-                    # _ATTN_KEYS_BUFFER.
-                    attn_keys_length = len(graph_params.attn_params[num_tokens])
-                    global _ATTN_KEYS_BUFFER
-                    if attn_keys_length == 0:
-                        return
-                    if not _ATTN_KEYS_BUFFER or len(_ATTN_KEYS_BUFFER) != attn_keys_length:
-                        import regex as re
+                # In some speculative methods (such as DFlash), the order of attn_keys in the Target model
+                # will be disrupted instead of increasing by layer index, so need regular expressions to
+                # reorder the attn_keys and stor the results in _ATTN_KEYS_BUFFER.
+                attn_keys_length = len(graph_params.attn_params[num_tokens])
+                global _ATTN_KEYS_BUFFER
+                # In edge-cloud mode, different segments have different attn_keys.
+                # Recompute the buffer when the current keys don't match the cached one.
+                current_keys = attn_keys[:attn_keys_length]
+                if _ATTN_KEYS_BUFFER is None or list(_ATTN_KEYS_BUFFER) != current_keys:
+                    import regex as re
 
                         def extract_layer_index(key: str) -> int:
                             match = re.search(r"(?:^|\.)layers\.(\d+)(?:\.|$)", key)
                             return int(match.group(1)) if match else 0
 
-                        def is_direct_target_attn_key(key: str) -> bool:
-                            return (
-                                re.search(
-                                    r"(?:^|\.)layers\.(\d+)\.self_attn\.attn$",
-                                    key,
-                                )
-                                is not None
-                            )
-
-                        attn_keys_to_order = attn_keys[:attn_keys_length]
-                        if getattr(speculative_config, "method", None) == "mtp":
-                            # Step3.5 MTP can expose draft KV-cache groups in the
-                            # target runtime metadata.  The target FULL graph only
-                            # captures direct base-model self-attention handles, so
-                            # select that target key domain instead of depending on
-                            # the current draft module name.
-                            direct_target_attn_keys = [key for key in attn_keys if is_direct_target_attn_key(key)]
-                            if len(direct_target_attn_keys) >= attn_keys_length:
-                                attn_keys_to_order = direct_target_attn_keys
-
-                        attn_keys_tmp = attn_keys_to_order
-                        attn_keys_tmp.sort(key=extract_layer_index)
-                        _ATTN_KEYS_BUFFER = attn_keys_tmp[:attn_keys_length]
-                    attn_keys[:attn_keys_length] = _ATTN_KEYS_BUFFER
+                    attn_keys_tmp = current_keys[:]
+                    attn_keys_tmp.sort(key=extract_layer_index)
+                    _ATTN_KEYS_BUFFER = attn_keys_tmp
+                attn_keys[:attn_keys_length] = _ATTN_KEYS_BUFFER
             # For Qwen3-next, since the kv_cache_config has already categorized
             # linear_attn and self_attn, the attn_metadata is first arranged with
             # self_attn followed by linear_attn. Therefore, using zip directly
