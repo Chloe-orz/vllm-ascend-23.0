@@ -18,10 +18,44 @@
 from typing import Any
 
 
+def _vllm_pd_scheduler_schema_available() -> bool:
+    try:
+        from vllm.v1.core.sched.output import BatchType, HiddenChannelType, SchedulerOutput
+    except ImportError:
+        return False
+
+    required_batch_types = (
+        "PD_MIX",
+        "PURE_PREFILL",
+        "PURE_DECODE",
+        "EMPTY",
+        "PREFILL_FIRST",
+        "PREFILL_LAST",
+        "DECODE_FIRST",
+        "DECODE_LAST",
+    )
+    if any(not hasattr(BatchType, name) for name in required_batch_types):
+        return False
+
+    required_channels = ("PREFILL_1", "PREFILL_2", "DECODE")
+    if any(not hasattr(HiddenChannelType, name) for name in required_channels):
+        return False
+
+    fields = getattr(SchedulerOutput, "__dataclass_fields__", {})
+    return all(name in fields for name in ("batch_type", "head_token", "hidden_channel"))
+
+
 def validate_pd_separation_scheduler_conflicts(vllm_config: Any, ascend_config: Any) -> None:
     scheduler_config = getattr(vllm_config, "scheduler_config", None)
     if not getattr(scheduler_config, "enable_pd_separation", False):
         return
+
+    if not _vllm_pd_scheduler_schema_available():
+        raise ValueError(
+            "scheduler_config.enable_pd_separation requires vLLM PD scheduler schema: "
+            "BatchType, HiddenChannelType, and "
+            "SchedulerOutput.batch_type/head_token/hidden_channel."
+        )
 
     if getattr(ascend_config, "recompute_scheduler_enable", False):
         raise ValueError(
