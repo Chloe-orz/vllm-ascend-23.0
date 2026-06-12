@@ -21,6 +21,10 @@ class FakeVllmEnvs(ModuleType):
         super().__init__("vllm.envs")
         self.cache_disabled = False
 
+    @property
+    def VLLM_PP_SCHEDULER_ZMQ_ADDR(self):
+        return os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR")
+
     def disable_envs_cache(self):
         self.cache_disabled = True
 
@@ -133,10 +137,6 @@ def _install_fake_modules(monkeypatch, context):
     fake_version = ModuleType("vllm.version")
     fake_version.__version__ = "test-version"
 
-    fake_ascend_core = ModuleType("vllm_ascend.core")
-    fake_passive_scheduler = ModuleType("vllm_ascend.core.passive_scheduler")
-    fake_ascend_core.passive_scheduler = fake_passive_scheduler
-
     module_names = {
         "vllm": fake_vllm,
         "vllm.envs": fake_envs,
@@ -151,8 +151,6 @@ def _install_fake_modules(monkeypatch, context):
         "vllm.v1.engine": ModuleType("vllm.v1.engine"),
         "vllm.v1.engine.core": fake_engine_core,
         "vllm.version": fake_version,
-        "vllm_ascend.core": fake_ascend_core,
-        "vllm_ascend.core.passive_scheduler": fake_passive_scheduler,
     }
     for name, module in module_names.items():
         monkeypatch.setitem(sys.modules, name, module)
@@ -172,19 +170,19 @@ def _load_patch_module():
 def test_serve_patch_launches_passive_engine_core_for_non_leader_rank(monkeypatch):
     context = FakeContext(response={"status": "READY"})
     fake_serve, fake_envs, fake_engine_core = _install_fake_modules(monkeypatch, context)
-    legacy_env_name = "VLLM_PP_" + "SCHEDULER_ZMQ_ADDR"
-    monkeypatch.delenv(legacy_env_name, raising=False)
+    monkeypatch.delenv("VLLM_PP_SCHEDULER_ZMQ_ADDR", raising=False)
+    monkeypatch.setenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "6000")
 
     _load_patch_module()
     fake_serve.run_headless(SimpleNamespace())
 
     assert fake_serve.run_headless_called is False
-    assert legacy_env_name not in os.environ
-    assert fake_envs.cache_disabled is False
+    assert os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"] == "tcp://10.0.0.1:6000"
+    assert fake_envs.cache_disabled is True
     assert len(context.processes) == 1
     proc = context.processes[0]
     assert proc.name == "PassiveEngineCore"
-    assert proc.target.__name__ == "_run_passive_engine_core_with_ascend_shims"
+    assert proc.target is fake_engine_core.PassiveEngineCoreProc.run_passive_engine_core
     assert proc.kwargs["ready_pipe"] is context.writer
     assert proc.started is True
     assert context.writer.closed is True

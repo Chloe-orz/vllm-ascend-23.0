@@ -407,7 +407,6 @@ class NPUPlatform(Platform):
         from vllm_ascend.scheduler_conflicts import validate_pd_separation_scheduler_conflicts
 
         validate_pd_separation_scheduler_conflicts(vllm_config, ascend_config)
-        cls._configure_pd_separation_scheduler(vllm_config, ascend_config)
 
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)

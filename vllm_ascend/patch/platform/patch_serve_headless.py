@@ -15,46 +15,33 @@
 # limitations under the License.
 #
 
+import os
+
 import vllm
+from vllm import envs
 from vllm.entrypoints.cli import serve
 from vllm.usage.usage_lib import UsageContext
 
 _original_run_headless = serve.run_headless
 
 
-def _install_ascend_passive_scheduler_shim() -> None:
-    import sys
-
-    import vllm_ascend.core.passive_scheduler as passive_scheduler
-
-    sys.modules["vllm.v1.core.sched.passive_scheduler"] = passive_scheduler
-
-
-def _run_passive_engine_core_with_ascend_shims(**kwargs):
-    _install_ascend_passive_scheduler_shim()
-    # Re-attach PassiveEngineCoreProc + ZMQ classes to the upstream
-    # ``vllm.v1.engine.core`` module path so the legacy import below
-    # resolves even when this code runs in a freshly-spawned subprocess
-    # (no ascend platform __init__ side-effects guaranteed yet).
-    from vllm_ascend.patch.platform.patch_pd_scheduler_shim import (
-        install_ascend_passive_engine_core_shims,
-    )
-    install_ascend_passive_engine_core_shims()
-
-    from vllm.v1.engine.core import PassiveEngineCoreProc
-
-    return PassiveEngineCoreProc.run_passive_engine_core(**kwargs)
-
-
 def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     from vllm.utils.system_utils import get_mp_context
-
-    _install_ascend_passive_scheduler_shim()
+    from vllm.v1.engine.core import PassiveEngineCoreProc
     from vllm.version import __version__ as VLLM_VERSION
 
     parallel_config = vllm_config.parallel_config
     host = parallel_config.master_addr
     head_node_address = f"{host}:{parallel_config.master_port}"
+
+    if envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is None:
+        pp_zmq_port = int(os.getenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "5558"))
+        os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"] = f"tcp://{host}:{pp_zmq_port}"
+        envs.disable_envs_cache()
+        serve.logger.info(
+            "PP scheduler ZMQ subscriber address: %s",
+            os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"],
+        )
 
     serve.logger.info(
         "Launching vLLM (v%s) headless passive EngineCore, "
@@ -67,7 +54,7 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     ready_reader, ready_writer = context.Pipe(duplex=False)
 
     proc = context.Process(
-        target=_run_passive_engine_core_with_ascend_shims,
+        target=PassiveEngineCoreProc.run_passive_engine_core,
         kwargs={
             "vllm_config": vllm_config,
             "ready_pipe": ready_writer,
