@@ -435,6 +435,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
             if tensor.numel() == 0:
                 continue
             group = cpu_group if tensor.is_cpu else device_group
+            if tensor.device.type == "npu":
+                tensor.record_stream(torch.npu.current_stream(tensor.device))
             handles.append(torch.distributed.isend(
                 tensor, dst=self.ranks[dst], group=group
             ))
