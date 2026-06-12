@@ -5488,7 +5488,11 @@ class NPUModelRunner(GPUModelRunner):
     ):
         """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
         seg_a = self.segment_a_wrapper if use_graph else self.segment_a
-        seg_e = self.segment_e_wrapper if use_graph else self.segment_e
+        # TODO: seg_e 的 FIA (full_attention) graph replay 存在死锁问题，
+        # 暂时只给 seg_a 启用 graph，seg_e 回退到 eager 模式。
+        # 后续需要 Ascend 底层团队调查 FIA kernel 在 edge-cloud segment graph
+        # 下的死锁根因。
+        seg_e = self.segment_e
         seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
         seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
 

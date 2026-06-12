@@ -310,7 +310,10 @@ def update_full_graph_params(
     with graph_params_scope(graph_params, draft_graph_params):
         impl_cls = attn_backend.get_impl_cls()
 
-        original_metadata = None
+        # Preserve the unfiltered metadata so that GDN update_conv1d_graph_params
+        # can look up layer_prefix even after FIA filtering below.
+        unfiltered_metadata = forward_context.attn_metadata
+        filtered_metadata = None
 
         if layer_indices is not None:
             # 强制要求 layer_indices 为升序自然层号，与图捕获时 islice(self.layers)
@@ -319,10 +322,10 @@ def update_full_graph_params(
                 "layer_indices must be in ascending natural order to align with "
                 "graph_params.attn_params append order."
             )
-            original_metadata = forward_context.attn_metadata
-            forward_context.attn_metadata = _filter_attn_metadata_for_layers(
-                original_metadata, layer_indices
+            filtered_metadata = _filter_attn_metadata_for_layers(
+                unfiltered_metadata, layer_indices
             )
+            forward_context.attn_metadata = filtered_metadata
 
         try:
             impl_cls.update_graph_params(
@@ -335,14 +338,13 @@ def update_full_graph_params(
                 draft_attn_metadatas,
             )
             # For GDN Attention: AscendC operate(conv1d update) update graph params
-            # _filter_attn_metadata_for_layers above drops GDN keys (they do not
-            # contain ".layers.{idx}.self_attn" and are absent from attn_params),
-            # but update_conv1d_graph_params still needs the full metadata dict to
-            # look up layer_prefix.  Temporarily restore the original metadata.
+            # _filter_attn_metadata_for_layers drops GDN keys (they do not contain
+            # ".layers.{idx}.self_attn" and are absent from attn_params), but
+            # update_conv1d_graph_params still needs the full metadata dict to look
+            # up layer_prefix.  Temporarily restore the unfiltered metadata.
             from vllm_ascend.ops.gdn import update_conv1d_graph_params
-            if layer_indices is not None and original_metadata is not None:
-                filtered_metadata = forward_context.attn_metadata
-                forward_context.attn_metadata = original_metadata
+            if filtered_metadata is not None and unfiltered_metadata is not None:
+                forward_context.attn_metadata = unfiltered_metadata
                 try:
                     update_conv1d_graph_params(
                         update_stream,
@@ -364,8 +366,8 @@ def update_full_graph_params(
                     draft_attn_metadatas,
                 )
         finally:
-            if original_metadata is not None:
-                forward_context.attn_metadata = original_metadata
+            if filtered_metadata is not None:
+                forward_context.attn_metadata = unfiltered_metadata
 
 def _filter_attn_metadata_for_layers(
     attn_metadata: dict,
