@@ -481,18 +481,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # correct after get by `zip` because of the new structure of the attn_metadata
             # when running with the merged full eagle-graph. Should check it with Qwen3-next.
             num_layers = len(attn_keys)
-            print(
-                "[DEBUG][attn_update] FIA update: num_layers=%s attn_keys=%s "
-                "attn_params_len=%s handles_len=%s events_len=%s num_tokens=%s"
-                % (
-                    num_layers,
-                    attn_keys,
-                    len(graph_params.attn_params.get(num_tokens, [])),
-                    len(graph_params.handles.get(num_tokens, [])),
-                    len(graph_params.events.get(num_tokens, [])),
-                    num_tokens,
-                )
-            )
             if num_layers == 0:
                 return
             if _EXTRA_CTX.is_draft_model:

@@ -2821,18 +2821,6 @@ class NPUModelRunner(GPUModelRunner):
             assert positions is not None
             if graph_wrapper is not None:
                 assert graph_wrapper.graph_params is not None
-            gp = graph_wrapper.graph_params if graph_wrapper is not None else None
-            if gp is not None:
-                print(
-                    "[DEBUG][update_params] layer_indices=%s attn_params_len=%s handles_len=%s events_len=%s num_tokens=%s"
-                    % (
-                        layer_indices,
-                        len(gp.attn_params.get(num_tokens_padded, [])),
-                        len(gp.handles.get(num_tokens_padded, [])),
-                        len(gp.events.get(num_tokens_padded, [])),
-                        num_tokens_padded,
-                    )
-                )
             # Edge-cloud segments may contain mixed DSA+FIA layers.
             # DSA layers do not append entries to graph_params during capture,
             # so update_graph_params' zip over attn_keys vs attn_params would
@@ -3032,31 +3020,17 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_layers - self.tail_k,
                     self.num_layers,
                 ))
-            # 打印 seg_e 输入 intermediate_tensors 的地址，用于 capture/replay 比对
-            if intermediate_tensors is not None:
-                print(
-                    "[DEBUG][seg_e] intermediate_tensors addrs: %s"
-                    % (
-                        {
-                            k: (v.data_ptr(), list(v.shape))
-                            for k, v in intermediate_tensors.items()
-                            if isinstance(v, torch.Tensor)
-                        }
-                    )
-                )
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            print("[DEBUG][seg_e] calling seg_e, graph=%s capturing=%s" % (seg_e_graph, forward_context.capturing))
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 **model_kwargs,
             )
-            print("[DEBUG][seg_e] seg_e returned, type=%s" % (type(hidden_states),))
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
