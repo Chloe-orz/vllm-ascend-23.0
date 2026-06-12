@@ -25,8 +25,18 @@ from vllm.usage.usage_lib import UsageContext
 _original_run_headless = serve.run_headless
 
 
+def _install_ascend_passive_scheduler_shim() -> None:
+    import sys
+
+    import vllm_ascend.core.passive_scheduler as passive_scheduler
+
+    sys.modules["vllm.v1.core.sched.passive_scheduler"] = passive_scheduler
+
+
 def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     from vllm.utils.system_utils import get_mp_context
+
+    _install_ascend_passive_scheduler_shim()
     from vllm.v1.engine.core import PassiveEngineCoreProc
     from vllm.version import __version__ as VLLM_VERSION
 

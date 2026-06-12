@@ -274,6 +274,20 @@ class NPUPlatform(Platform):
             raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
+    def _configure_pd_separation_scheduler(cls, vllm_config: VllmConfig) -> None:
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        if not getattr(scheduler_config, "enable_pd_separation", False):
+            return
+        if getattr(scheduler_config, "async_scheduling", False):
+            scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.pd_separated_scheduler.AsyncPDSeparatedScheduler"
+            )
+        else:
+            scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.pd_separated_scheduler.PDSeparatedScheduler"
+            )
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
 
@@ -290,6 +304,7 @@ class NPUPlatform(Platform):
         from vllm_ascend.scheduler_conflicts import validate_pd_separation_scheduler_conflicts
 
         validate_pd_separation_scheduler_conflicts(vllm_config, ascend_config)
+        cls._configure_pd_separation_scheduler(vllm_config)
 
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)
