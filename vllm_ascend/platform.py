@@ -346,105 +346,18 @@ class NPUPlatform(Platform):
             raise ValueError("additional_config.layer_sharding can only be enabled in PD-disaggregated's P node.")
 
     @classmethod
-    def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
-        parallel_config = vllm_config.parallel_config
-        if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
-            raise ValueError(
-                "PCP (Prefill Context Parallelism) and DP (Data Parallelism) "
-                "cannot be enabled simultaneously in the current version of vLLM Ascend. "
-                f"Got data_parallel_size={parallel_config.data_parallel_size} and "
-                f"prefill_context_parallel_size={parallel_config.prefill_context_parallel_size}. "
-                "Please set either --data-parallel-size 1 or --prefill-context-parallel-size 1."
+    def _configure_pd_separation_scheduler(cls, vllm_config: VllmConfig) -> None:
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        if not getattr(scheduler_config, "enable_pd_separation", False):
+            return
+        if getattr(scheduler_config, "async_scheduling", False):
+            scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.pd_separated_scheduler.AsyncPDSeparatedScheduler"
             )
-
-    @classmethod
-    def _validate_draft_decode_context_parallel_config(
-        cls,
-        vllm_config: VllmConfig,
-    ) -> None:
-        speculative_config = vllm_config.speculative_config
-        if speculative_config is None:
-            return
-
-        draft_model_config = speculative_config.draft_model_config
-        if draft_model_config is None:
-            return
-
-        parallel_config = vllm_config.parallel_config
-        decode_context_parallel_size = parallel_config.decode_context_parallel_size
-        if decode_context_parallel_size <= 1:
-            return
-
-        # MLA draft models do not use the GQA/MQA DCP head-sharding rule.
-        if draft_model_config.use_mla:
-            return
-
-        draft_parallel_config = speculative_config.draft_parallel_config
-        if draft_parallel_config is not None:
-            draft_tensor_parallel_size = draft_parallel_config.tensor_parallel_size
-        elif speculative_config.draft_tensor_parallel_size is not None:
-            draft_tensor_parallel_size = speculative_config.draft_tensor_parallel_size
         else:
-            draft_tensor_parallel_size = parallel_config.tensor_parallel_size
-
-        total_num_attention_heads = draft_model_config.model_arch_config.total_num_attention_heads
-        total_num_kv_heads = draft_model_config.get_total_num_kv_heads()
-
-        if draft_tensor_parallel_size <= total_num_kv_heads:
-            raise ValueError(
-                "Invalid draft model parallel config for speculative decoding: "
-                f"tensor parallel size {draft_tensor_parallel_size} must be "
-                f"greater than total num kv heads {total_num_kv_heads} when "
-                "enable decode context parallel for GQA/MQA draft model"
+            scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.pd_separated_scheduler.PDSeparatedScheduler"
             )
-
-        max_dcp_size = draft_tensor_parallel_size // total_num_kv_heads
-        if decode_context_parallel_size > max_dcp_size:
-            raise ValueError(
-                "Invalid draft model parallel config for speculative decoding: "
-                "decode context parallel size must less than or equal to "
-                f"(draft tensor parallel size {draft_tensor_parallel_size} // "
-                f"draft total num kv heads {total_num_kv_heads}) = "
-                f"{max_dcp_size}, but got {decode_context_parallel_size}"
-            )
-
-        num_q_per_kv = total_num_attention_heads // total_num_kv_heads
-        if num_q_per_kv % decode_context_parallel_size != 0:
-            raise ValueError(
-                "Invalid draft model parallel config for speculative decoding: "
-                f"total number of q per kv attn heads ({num_q_per_kv}) must "
-                "be divisible by dcp world size when enable decode context "
-                f"parallel for GQA draft model "
-                f"({decode_context_parallel_size})."
-            )
-
-    @staticmethod
-    def _is_mtp_speculative_config(speculative_config: Any | None) -> bool:
-        if speculative_config is None:
-            return False
-
-        method = getattr(speculative_config, "method", None)
-        return method is not None and "mtp" in str(method).lower()
-
-    @classmethod
-    def _validate_pd_pp_mtp_config(cls, vllm_config: VllmConfig) -> None:
-        speculative_config = getattr(vllm_config, "speculative_config", None)
-        if not cls._is_mtp_speculative_config(speculative_config):
-            return
-
-        parallel_config = vllm_config.parallel_config
-        if getattr(parallel_config, "pipeline_parallel_size", 1) <= 1:
-            return
-
-        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-        if kv_transfer_config is not None and getattr(kv_transfer_config, "kv_role", None) == "kv_producer":
-            return
-
-        raise ValueError(
-            "PP+MTP is only supported on PD-disaggregated P nodes "
-            "(kv_role='kv_producer'). D nodes must use "
-            "pipeline_parallel_size=1 and may combine data parallelism with MTP."
-        )
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -477,6 +390,7 @@ class NPUPlatform(Platform):
         from vllm_ascend.scheduler_conflicts import validate_pd_separation_scheduler_conflicts
 
         validate_pd_separation_scheduler_conflicts(vllm_config, ascend_config)
+        cls._configure_pd_separation_scheduler(vllm_config)
 
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)
