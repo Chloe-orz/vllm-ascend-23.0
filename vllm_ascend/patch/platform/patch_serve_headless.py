@@ -34,10 +34,11 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     host = parallel_config.master_addr
     head_node_address = f"{host}:{parallel_config.master_port}"
 
-    if envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is None:
+    if os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR") is None:
         pp_zmq_port = int(os.getenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "5558"))
         os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"] = f"tcp://{host}:{pp_zmq_port}"
-        envs.disable_envs_cache()
+        if hasattr(envs, "disable_envs_cache"):
+            envs.disable_envs_cache()
         serve.logger.info(
             "PP scheduler ZMQ subscriber address: %s",
             os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"],
