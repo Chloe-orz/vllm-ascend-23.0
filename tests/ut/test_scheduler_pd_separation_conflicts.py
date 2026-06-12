@@ -64,3 +64,12 @@ def test_scheduler_conflict_check_is_noop_when_pd_separation_disabled():
             profiling_chunk_enabled=True,
         ),
     )
+
+
+def test_pd_separation_requires_vllm_pd_scheduler_schema(monkeypatch):
+    import vllm_ascend.scheduler_conflicts as conflicts
+
+    monkeypatch.setattr(conflicts, "_vllm_pd_scheduler_schema_available", lambda: False)
+
+    with pytest.raises(ValueError, match="BatchType.*HiddenChannelType.*SchedulerOutput"):
+        conflicts.validate_pd_separation_scheduler_conflicts(_vllm_config(), _ascend_config())
