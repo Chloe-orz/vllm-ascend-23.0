@@ -33,11 +33,18 @@ def _install_ascend_passive_scheduler_shim() -> None:
     sys.modules["vllm.v1.core.sched.passive_scheduler"] = passive_scheduler
 
 
+def _run_passive_engine_core_with_ascend_shims(**kwargs):
+    _install_ascend_passive_scheduler_shim()
+
+    from vllm.v1.engine.core import PassiveEngineCoreProc
+
+    return PassiveEngineCoreProc.run_passive_engine_core(**kwargs)
+
+
 def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     from vllm.utils.system_utils import get_mp_context
 
     _install_ascend_passive_scheduler_shim()
-    from vllm.v1.engine.core import PassiveEngineCoreProc
     from vllm.version import __version__ as VLLM_VERSION
 
     parallel_config = vllm_config.parallel_config
@@ -65,7 +72,7 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     ready_reader, ready_writer = context.Pipe(duplex=False)
 
     proc = context.Process(
-        target=PassiveEngineCoreProc.run_passive_engine_core,
+        target=_run_passive_engine_core_with_ascend_shims,
         kwargs={
             "vllm_config": vllm_config,
             "ready_pipe": ready_writer,
