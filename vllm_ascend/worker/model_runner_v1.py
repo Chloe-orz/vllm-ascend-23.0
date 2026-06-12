@@ -5660,6 +5660,17 @@ class NPUModelRunner(GPUModelRunner):
                 layer_indices=cloud_layer_indices,
                 graph_wrapper=seg_c,
             )
+        if layer_slice_info is not None:
+            model_kwargs = dict(model_kwargs)
+            model_kwargs["layer_slice_start"] = (
+                layer_slice_info.start_layer + self.head_k
+            )
+            model_kwargs["layer_slice_end"] = (
+                layer_slice_info.end_layer + self.head_k
+            )
+            if not layer_slice_info.is_last_slice:
+                model_kwargs["layer_slice_return_intermediate"] = True
+
         hidden_states = seg_c(
             positions=positions,
             intermediate_tensors=intermediate_tensors,
