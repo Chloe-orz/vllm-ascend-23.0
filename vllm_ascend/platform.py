@@ -474,11 +474,9 @@ class NPUPlatform(Platform):
 
         ascend_config = init_ascend_config(vllm_config)
 
-        from vllm_ascend.logger import configure_ascend_file_logging
-        from vllm_ascend.logger import configure_ascend_logging
+        from vllm_ascend.scheduler_conflicts import validate_pd_separation_scheduler_conflicts
 
-        configure_ascend_file_logging()
-        configure_ascend_logging()
+        validate_pd_separation_scheduler_conflicts(vllm_config, ascend_config)
 
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)
