@@ -61,6 +61,8 @@ from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_sp,
     get_ascend_device_type,
+    pp_timing_enabled,
+    pp_timing_sync,
     register_ascend_customop,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -376,14 +378,13 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
-        if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+        role = "standard"  # default, may be overridden below
+        if pp_timing_enabled():
             if is_edge_device():
                 role = "edge"
             elif is_cloud_device():
                 role = "cloud"
-            else:
-                role = "standard"
-            torch.npu.synchronize()
+            pp_timing_sync()
             print(f"[PP_TIMING][{role}][worker_entry] {time.perf_counter()}")
 
         intermediate_tensors = None
@@ -403,9 +404,9 @@ class NPUWorker(WorkerBase):
                     comm_handles=handles,
                     comm_postprocess=postprocess,
                 )
-                if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+                if pp_timing_enabled():
                     intermediate_tensors.wait_for_comm()
-                    torch.npu.synchronize()
+                    pp_timing_sync()
                     print(f"[PP_TIMING][cloud][pp_recv_done] {time.perf_counter()}")
                 model = self.model_runner.model
                 num_layers = len(model.model.layers) if hasattr(model, 'model') and hasattr(model.model, 'layers') else 0
@@ -428,12 +429,12 @@ class NPUWorker(WorkerBase):
                     comm_postprocess=comm_postprocess,
                 )
 
-        if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-            torch.npu.synchronize()
+        if pp_timing_enabled():
+            pp_timing_sync()
             print(f"[PP_TIMING][{role}][runner_entry] {time.perf_counter()}")
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-            torch.npu.synchronize()
+        if pp_timing_enabled():
+            pp_timing_sync()
             print(f"[PP_TIMING][{role}][runner_done] {time.perf_counter()}")
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
@@ -447,8 +448,8 @@ class NPUWorker(WorkerBase):
             if get_pp_group().world_size == 2:
                 # logger.info(f"[Edge] PP stage: first (send), rank={self.rank}, local_rank={self.local_rank}")
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
-                if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-                    torch.npu.synchronize()
+                if pp_timing_enabled():
+                    pp_timing_sync()
                     print(f"[PP_TIMING][edge][send_to_cloud done] {time.perf_counter()}")
             # Unified broadcast receive
             tensor_dict, handles, postprocess = edge_cloud_broadcast_recv()
@@ -457,20 +458,20 @@ class NPUWorker(WorkerBase):
                 comm_handles=handles,
                 comm_postprocess=postprocess,
             )
-            if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
+            if pp_timing_enabled():
                 intermediate_tensors.wait_for_comm()
-                torch.npu.synchronize()
+                pp_timing_sync()
                 print(f"[PP_TIMING][edge][recv_from_cloud] {time.perf_counter()}")
             # Get model layer info for debug output
             model = self.model_runner.model
             num_layers = len(model.model.layers) if hasattr(model, 'model') and hasattr(model.model, 'layers') else 0
             # logger.info(f"[Edge] PP stage: last, rank={self.rank}, local_rank={self.local_rank}, num_layers={num_layers}")
-            if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-                torch.npu.synchronize()
+            if pp_timing_enabled():
+                pp_timing_sync()
                 print(f"[PP_TIMING][edge][runner_entry_e] {time.perf_counter()}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-            if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
-                torch.npu.synchronize()
+            if pp_timing_enabled():
+                pp_timing_sync()
                 print(f"[PP_TIMING][edge][runner_done_e] {time.perf_counter()}")
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output

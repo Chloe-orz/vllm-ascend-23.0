@@ -97,6 +97,7 @@ from vllm.v1.worker.utils import AttentionGroup
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import pp_timing_enabled, should_pp_timing_sync
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, using_paged_attention
 
 # yapf conflicts with isort for this block
@@ -564,9 +565,9 @@ class NPUModelRunner(GPUModelRunner):
         torch.npu.synchronize()
 
     def _pp_timing(self, stage: str, sync_npu: bool = False) -> None:
-        if os.environ.get("PP_TIMING_ENABLE", "0") != "1":
+        if not pp_timing_enabled():
             return
-        if sync_npu:
+        if sync_npu and should_pp_timing_sync():
             torch.npu.synchronize()
         if self._edge_cloud_enabled:
             role = self.edge_cloud_cfg.role
