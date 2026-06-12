@@ -335,15 +335,34 @@ def update_full_graph_params(
                 draft_attn_metadatas,
             )
             # For GDN Attention: AscendC operate(conv1d update) update graph params
+            # _filter_attn_metadata_for_layers above drops GDN keys (they do not
+            # contain ".layers.{idx}.self_attn" and are absent from attn_params),
+            # but update_conv1d_graph_params still needs the full metadata dict to
+            # look up layer_prefix.  Temporarily restore the original metadata.
             from vllm_ascend.ops.gdn import update_conv1d_graph_params
-            update_conv1d_graph_params(
-                update_stream,
-                forward_context,
-                num_tokens,
-                vllm_config,
-                _EXTRA_CTX.is_draft_model,
-                draft_attn_metadatas,
-            )
+            if layer_indices is not None and original_metadata is not None:
+                filtered_metadata = forward_context.attn_metadata
+                forward_context.attn_metadata = original_metadata
+                try:
+                    update_conv1d_graph_params(
+                        update_stream,
+                        forward_context,
+                        num_tokens,
+                        vllm_config,
+                        _EXTRA_CTX.is_draft_model,
+                        draft_attn_metadatas,
+                    )
+                finally:
+                    forward_context.attn_metadata = filtered_metadata
+            else:
+                update_conv1d_graph_params(
+                    update_stream,
+                    forward_context,
+                    num_tokens,
+                    vllm_config,
+                    _EXTRA_CTX.is_draft_model,
+                    draft_attn_metadatas,
+                )
         finally:
             if original_metadata is not None:
                 forward_context.attn_metadata = original_metadata
