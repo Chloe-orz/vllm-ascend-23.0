@@ -394,30 +394,61 @@ def _filter_attn_metadata_for_layers(
     result: dict = {}
     skipped_no_key_layers: list[int] = []
     for idx in layer_indices:
-        exact_key = f"model.layers.{idx}.self_attn"
-        if exact_key in attn_metadata:
-            # update_graph_params 的 zip(attn_keys, attn_params) 要求
-            # 两者对齐。只保留会向 graph_params.attn_params 追加参数的
-            # 标准 attention 层 key。
-            result[exact_key] = attn_metadata[exact_key]
-            continue
-
         needle = f".layers.{idx}."
         matched_keys = [k for k in attn_metadata if needle in k]
         if not matched_keys:
             skipped_no_key_layers.append(idx)
+            continue
+        if len(matched_keys) == 1:
+            # 保持原有单 key 路径不变，兼容 Qwen / MLA / FIA 等模型中
+            # 可能带不同前缀的 ``*.layers.{idx}.self_attn`` key。
+            result[matched_keys[0]] = attn_metadata[matched_keys[0]]
+            continue
+
+        base_keys = [k for k in matched_keys if k.endswith(f".layers.{idx}.self_attn")]
+        if len(base_keys) == 1:
+            result[base_keys[0]] = attn_metadata[base_keys[0]]
             continue
 
         # DeepSeekV4 DSA 会为同一层注册多个 KV-cache metadata key，
         # 如 ``self_attn.attn`` / ``self_attn.swa_cache`` / compressor / indexer。
         # 这些 key 供 DSA custom op 在 forward 时通过 prefix 过滤使用，
         # 不参与 full graph attention task update，也不会向
-        # graph_params.attn_params 追加条目。这里必须跳过，否则会把 DSA
-        # metadata 与 MLA/FIA graph params 错配。
-        skipped_no_key_layers.append(idx)
+        # graph_params.attn_params 追加条目。只有确认全部都是 DSA 子 key 时
+        # 才跳过，避免破坏原有多 key 防错逻辑。
+        if _is_dsa_kv_metadata_keys(matched_keys, idx):
+            skipped_no_key_layers.append(idx)
+            continue
 
+        # 边云流程要求每层恰好一个 attention graph-update metadata key，
+        # 以确保 graph_params.attn_params 的追加顺序与过滤后顺序 1:1 对齐。
+        # 未识别的多 key 仍然 fail-fast，避免静默错配导致挂死。
+        raise ValueError(
+            f"Layer {idx} has multiple attention metadata keys: {matched_keys}. "
+            f"This breaks the 1:1 alignment between attn_metadata and attn_params."
+        )
 
     return result
+
+
+def _is_dsa_kv_metadata_keys(keys: list[str], layer_idx: int) -> bool:
+    dsa_suffixes = {
+        "attn",
+        "swa_cache",
+        "compressor.state_cache",
+        "indexer.k_cache",
+        "indexer.compressor.state_cache",
+    }
+    prefix = f".layers.{layer_idx}.self_attn."
+    suffixes: set[str] = set()
+    for key in keys:
+        if prefix not in key:
+            return False
+        suffix = key.split(prefix, 1)[1]
+        if suffix not in dsa_suffixes:
+            return False
+        suffixes.add(suffix)
+    return bool(suffixes)
 
 
 @dataclass
