@@ -6923,6 +6923,14 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_heat_collection_status =  True
 
     def load_model(self) -> None:
+        # When the layer-slice runtime is enabled, install the qwen
+        # forward-method patches before the model is constructed so the
+        # rebound forward is what the loaded modules actually expose.
+        # Loaded on demand to keep upstream vLLM unmodified for users that
+        # don't enable this feature.
+        if envs.VLLM_LAYER_SLICE_SIZE > 0:
+            import vllm_ascend.patch.models.qwen_layer_slice  # noqa: F401
+
         if self._edge_cloud_enabled:
             with DeviceMemoryProfiler() as m:
                 self._load_model_edge_cloud()
