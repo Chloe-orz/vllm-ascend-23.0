@@ -243,120 +243,6 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
-def _log_edge_cloud_memory_breakdown(
-    model: torch.nn.Module,
-    transformer_layers: torch.nn.ModuleList,
-    edge_cloud_cfg: Any,
-) -> None:
-    """Log a memory breakdown after edge-cloud model loading.
-
-    Reports parameter counts and estimated memory for each major
-    component so that unexpected weight loading can be spotted quickly.
-    """
-
-    def _params_mib(module: torch.nn.Module) -> float:
-        n = sum(p.numel() for p in module.parameters(recurse=False))
-        return n * 2 / (1 << 20)  # assume bf16 = 2 bytes
-
-    real_layers = sum(
-        1 for layer in transformer_layers if not isinstance(layer, PPMissingLayer)
-    )
-    skip_layers = len(transformer_layers) - real_layers
-
-    # Transformer layers
-    layer_params = 0
-    for layer in transformer_layers:
-        if not isinstance(layer, PPMissingLayer):
-            layer_params += sum(p.numel() for p in layer.parameters())
-
-    # Other key modules
-    def _safe_mib(owner: torch.nn.Module, attr: str) -> float:
-        m = getattr(owner, attr, None)
-        if m is None or isinstance(m, PPMissingLayer):
-            return 0.0
-        return _params_mib(m)
-
-    embed_mb = 0.0
-    if hasattr(model, "model") and hasattr(model.model, "embed_tokens"):
-        embed_mb = _safe_mib(model.model, "embed_tokens")
-    elif hasattr(model, "language_model"):
-        embed_mb = _safe_mib(model.language_model.model, "embed_tokens")
-
-    lm_head_mb = 0.0
-    if hasattr(model, "lm_head") and not isinstance(model.lm_head, PPMissingLayer):
-        lm_head_mb = _params_mib(model.lm_head)
-    elif hasattr(model, "language_model"):
-        lm_head_mb = _safe_mib(model.language_model, "lm_head")
-
-    norm_mb = 0.0
-    if hasattr(model, "model"):
-        norm_mb = _safe_mib(model.model, "norm")
-    elif hasattr(model, "language_model"):
-        norm_mb = _safe_mib(model.language_model.model, "norm")
-
-    # Vision tower (VL models)
-    vis_mb = 0.0
-    for attr in ("visual", "vision_tower", "vision_model"):
-        v = getattr(model, attr, None)
-        if v is not None and not isinstance(v, PPMissingLayer):
-            vis_mb = _params_mib(v)
-            break
-
-    total_params = sum(p.numel() for p in model.parameters())
-    total_mib = total_params * 2 / (1 << 20)
-
-    logger.info(
-        "[EdgeCloud] Memory breakdown (bf16 est.): "
-        "total=%.0f MiB (%d params) | "
-        "layers: %d real + %d skip = %.0f MiB | "
-        "embed=%.0f MiB lm_head=%.0f MiB norm=%.0f MiB vision=%.0f MiB | "
-        "role=%s head_k=%d tail_k=%d",
-        total_mib, total_params,
-        real_layers, skip_layers, layer_params * 2 / (1 << 20),
-        embed_mb, lm_head_mb, norm_mb, vis_mb,
-        edge_cloud_cfg.role,
-        getattr(edge_cloud_cfg, "head_tail_k", (None, None))[0] or 0,
-        getattr(edge_cloud_cfg, "head_tail_k", (None, None))[1] or 0,
-    )
-
-
-def _log_kv_cache_allocation(
-    kv_cache_config: Any,
-    layer_kv_cache_spec: dict,
-) -> None:
-    """Log per-layer KV cache allocation sizes for edge-cloud diagnosis."""
-    GiB_div = 1 << 30  # float division
-
-    total_bytes = 0
-    tensor_count = 0
-    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-        size_bytes = kv_cache_tensor.size
-        total_bytes += size_bytes
-        tensor_count += 1
-
-    num_layers = len(layer_kv_cache_spec)
-    page_sizes = {
-        name: getattr(spec, "page_size_bytes", 0)
-        for name, spec in layer_kv_cache_spec.items()
-    }
-    max_page = max(page_sizes.values()) if page_sizes else 0
-
-    logger.info(
-        "[EdgeCloud] KV cache allocation: "
-        "total=%.1f GiB | num_blocks=%d | layers=%d | "
-        "tensors=%d | max_page_size=%d | "
-        "page_sizes: %s",
-        total_bytes / GiB_div,
-        kv_cache_config.num_blocks,
-        num_layers,
-        tensor_count,
-        max_page,
-        ", ".join(
-            f"{n}={s}" for n, s in sorted(page_sizes.items())
-        ) if page_sizes else "(none)",
-    )
-
-
 class EdgeCloudSegment(torch.nn.Module):
     """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
 
@@ -855,16 +741,7 @@ class NPUModelRunner(GPUModelRunner):
         # 1. 存储 head_k / tail_k 到 parallel_state 全局变量，
         #    使 make_layers() 在模型 __init__ 中能直接读取并创建正确的
         #    PPMissingLayer 占位（非本地层）和真实层（本地层）。
-        from vllm.distributed.parallel_state import (
-            set_edge_cloud_layer_range,
-        )
-        total_layers = (
-            self.vllm_config.model_config.get_total_num_hidden_layers()
-        )
-        logger.info(
-            "[EdgeCloud] set_edge_cloud_layer_range(head_k=%d, tail_k=%d, total=%d)",
-            self.head_k, self.tail_k, total_layers,
-        )
+        from vllm.distributed.parallel_state import set_edge_cloud_layer_range
         set_edge_cloud_layer_range(self.head_k, self.tail_k)
 
         # 2. 复用标准 vLLM 加载流程：init on device + load_weights on device
@@ -902,11 +779,6 @@ class NPUModelRunner(GPUModelRunner):
                 f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
             )
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
-
-        # 输出模型参数 / 显存占用分解，便于诊断是否加载了非预期权重
-        _log_edge_cloud_memory_breakdown(
-            self.model, transformer_layers, self.edge_cloud_cfg,
-        )
 
         # 3. 创建分段 callable 并按需包装 ACLGraphWrapper
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -4369,9 +4241,6 @@ class NPUModelRunner(GPUModelRunner):
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
 
-        # Log KV cache allocation plan for edge-cloud diagnosis
-        _log_kv_cache_allocation(kv_cache_config, layer_kv_cache_spec)
-
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
@@ -4804,24 +4673,13 @@ class NPUModelRunner(GPUModelRunner):
                 if self.cache_config.enable_prefix_caching:
                     mamba_blocks_per_req = max_num_blocks_per_req
                 else:
-                    # Mamba uses a large block_size (e.g. max_model_len)
-                    # because one block holds the full recurrent state.
-                    # Chunked prefill may split the sequence into multiple
-                    # chunks, each needing its own block.  Use the standard
-                    # cache block_size to bound the maximum chunk count.
                     max_chunks = cdiv(
                         max_model_len,
                         self.cache_config.block_size * get_total_cp_world_size(),
                     )
-                    mamba_blocks_per_req = max(max_num_blocks_per_req, max_chunks)
+                    mamba_blocks_per_req = max(max_num_blocks_per_req, min(max_chunks, 4))
                 mamba_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
-                logger.info(
-                    "[EdgeCloud] may_reinit Mamba group=%d: block_size=%d "
-                    "cache_block_size=%d max_blocks=%d",
-                    i, block_sizes[i], self.cache_config.block_size,
-                    max_num_blocks_per_req,
-                )
             max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or self.kernel_block_sizes != [[self.cache_config.block_size]]:
@@ -4975,12 +4833,6 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
-        logger.info(
-            "[EdgeCloud] get_kv_cache_spec: role=%s static_forward_ctx_layers=%d names=%s",
-            self.edge_cloud_cfg.role if self._edge_cloud_enabled else "none",
-            len(attn_layers),
-            sorted(attn_layers.keys()),
-        )
         # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
@@ -5074,21 +4926,10 @@ class NPUModelRunner(GPUModelRunner):
 
         # embedding_only edge has no local attention layers; the spec
         # is already empty (returned early above).  Cloud side keeps
-        # its real spec for the scheduler.
         # With the PP-reuse init path make_layers directly creates
         # PPMissingLayer for non-local indices — no stale entries
         # ever register in static_forward_context, so no filtering
         # is needed.
-        if self._edge_cloud_enabled:
-            for layer_name, spec in sorted(kv_cache_spec.items()):
-                logger.info(
-                    "[EdgeCloud] KV spec: layer=%s type=%s "
-                    "block_size=%d page_size=%d",
-                    layer_name,
-                    type(spec).__name__,
-                    getattr(spec, "block_size", 0),
-                    getattr(spec, "page_size_bytes", 0),
-                )
 
         return kv_cache_spec
 
