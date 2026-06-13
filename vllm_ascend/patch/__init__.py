@@ -1138,3 +1138,29 @@
 #    Future Plan:
 #       Remove this patch if/when vLLM core grows a generic layer-range
 #       forward hook compatible with our PD-mix runtime.
+# ** 30. File: platform/patch_qwen3_5_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.configs.qwen3_5.Qwen3_5Config`
+#   2. `vllm.transformers_utils.configs.qwen3_5_moe.Qwen3_5MoeConfig`
+#    Why:
+#       Qwen3.5 / Qwen3.5-MoE multimodal top-level configs only carry
+#       text-model fields (num_hidden_layers, hidden_size, vocab_size,
+#       layer_types, num_experts, ...) under the nested ``text_config``.
+#       Several places in vllm-ascend (and PD-mix runtime code) reach for
+#       those fields directly on the top-level ``hf_config`` object and
+#       would otherwise raise ``AttributeError``.
+#    How:
+#       Bind read-only ``@property`` descriptors on both config classes
+#       that delegate to ``self.text_config``.  Idempotent and respects
+#       any pre-existing real property on the class.  Loaded as a
+#       platform-stage patch so it's in place before any model config
+#       is constructed.
+#    Related PR (if no, explain why):
+#       No upstream PR; the missing-attribute symptom only matters for
+#       vllm-ascend code paths that read text fields off the top-level
+#       multimodal config.
+#    Future Plan:
+#       Remove this patch when upstream Qwen3.5 configs themselves expose
+#       these text-config proxies on the top-level multimodal config, or
+#       when all vllm-ascend call-sites are routed through
+#       ``hf_config.text_config`` / ``model_config.hf_text_config``.
