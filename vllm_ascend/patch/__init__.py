@@ -1061,65 +1061,34 @@
 #       Replace ops.* with the internal implementation of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+# ** 29. File: models/qwen_layer_slice.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.fused_moe.routed_experts_capturer.RoutedExpertsCapturer.capture`
+#   1. `vllm.model_executor.models.qwen2.Qwen2Model.forward`
+#   2. `vllm.model_executor.models.qwen3_next.Qwen3NextModel.forward`
+#   3. `vllm.model_executor.models.qwen2.Qwen2ForCausalLM.forward`
+#   4. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.forward`
+#   5. `vllm.model_executor.models.qwen3_next.Qwen3NextForCausalLM.forward`
+#   6. `vllm.model_executor.models.qwen3_5.Qwen3_5ForCausalLMBase.forward`
+#   7. `vllm.model_executor.models.qwen3_5.Qwen3_5ForConditionalGeneration.forward`
 #    Why:
-#       The upstream implementation doesn't support vllm-ascend specific MoE communication types
-#       (ALLTOALL and MC2). In the SP + modular-kernel path, the original code cannot correctly
-#       handle tensor splitting and all-gather operations on NPU, especially when tokens are
-#       unevenly distributed across TP ranks or padded to max_tokens in MC2 mode.
-#    How：
-#       Override the capture method to add support for vllm-ascend's MoECommType:
-#         - Check `_EXTRA_CTX.moe_comm_type` to determine if ALLTOALL or MC2 mode is active
-#         - Calculate correct gather_topk_ids_shape based on communication type:
-#           * ALLTOALL: uses actual token_num_per_dp for shape calculation
-#           * MC2: uses padded max_tokens * tp_size for shape calculation
-#         - Properly handle tensor_split and all_gather operations for NPU distributed communication
-#    Future Plan:
-#       Remove this patch when upstream vLLM supports MoE communication type abstraction that
-#       can be extended by hardware plugins like vllm-ascend.
-#
-# ** 29. File: platform/patch_mamba_manager.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.core.single_type_kv_cache_manager.MambaManager`
-#    Why:
-#       1. Upstream hybrid prefix cache lookup does not support PCP/DCP.
-#       2. Upstream MambaManager#get_num_blocks_to_allocate give the
-#          wrong number of blocks when an external cache hit occurred
+#       The PD-mix layer-slice runtime in vllm-ascend (passive_scheduler +
+#       model_runner_v1._edge_cloud_forward) drives a model.forward over a
+#       sub-range of decoder layers and may need IntermediateTensors returned
+#       even on the last PP rank so segments can be stitched together.
+#       Upstream vLLM forward signatures don't expose this.
 #    How:
-#       1. Replace MambaManager with AscendMambaManager for prefix cache hit lookup
-#          on hybrid Mamba paths (logical mamba block_size when caching is enabled).
-#       2. Override the get_num_blocks_to_allocate method to fix the number of blocks
-#          when hitting the external cache and loading synchronously
+#       Re-bind the listed forward methods to versions that accept three
+#       extra kwargs (layer_slice_start / layer_slice_end /
+#       layer_slice_return_intermediate) and propagate them into the inner
+#       model loop.  Loaded on demand from
+#       ``model_runner_v1.load_model`` only when ``envs.VLLM_LAYER_SLICE_SIZE
+#       > 0``, so users that don't enable layer slicing see no change.
+#       Patching the base classes (Qwen2Model, Qwen3NextModel) is enough —
+#       Qwen3Model and Qwen3_5Model inherit the new forward.
 #    Related PR (if no, explain why):
-#       1. https://github.com/vllm-project/vllm/pull/40996
-#       2. https://github.com/vllm-project/vllm/pull/46892
+#       No upstream PR yet; the layer-slice runtime is a vllm-ascend-only
+#       feature, so the forward extensions are kept in vllm-ascend rather
+#       than added to vLLM core.
 #    Future Plan:
-#       1. Upstream PR #40996 adds hybrid prefix cache lookup for DCP only; PCP is
-#          not supported yet. Remove this patch once upstream supports both PCP and DCP.
-#       2. Remove this patch once upstream accept 46892 pr or fixed the bug by other pr.
-#
-# ** 30. File: platform/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       Upstream vLLM enables the v2 model runner not only via the
-#       VLLM_USE_V2_MODEL_RUNNER env var but also based on model
-#       architecture whitelists, Triton availability, and feature
-#       compatibility checks. On Ascend the NPU v2 runner is not yet
-#       compatible with all upstream-defaulted models and features, so
-#       enabling by model architecture can crash. We override the
-#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
-#       model/framework checks to the NPU runner itself.
-#    How:
-#       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
-#       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
-#       patch so EngineCore and worker processes share the same behavior.
-#    Related PR (if no, explain why):
-#       1. https://github.com/vllm-project/vllm-ascend/pull/11389
-#    Future Plan:
-#       Remove this patch once vllm-ascend fully supports the v2 model
-#       runner and can rely on upstream's default enablement heuristics
-#       (model architecture, Triton, feature checks) without crashes or
-#       degraded functionality.
+#       Remove this patch if/when vLLM core grows a generic layer-range
+#       forward hook compatible with our PD-mix runtime.
