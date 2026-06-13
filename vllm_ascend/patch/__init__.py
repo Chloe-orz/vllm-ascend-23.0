@@ -715,3 +715,34 @@
 #       Replace ops.* with the internal implementation of vllm-ascend.
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
+# ** 29. File: models/qwen_layer_slice.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.qwen2.Qwen2Model.forward`
+#   2. `vllm.model_executor.models.qwen3_next.Qwen3NextModel.forward`
+#   3. `vllm.model_executor.models.qwen2.Qwen2ForCausalLM.forward`
+#   4. `vllm.model_executor.models.qwen3.Qwen3ForCausalLM.forward`
+#   5. `vllm.model_executor.models.qwen3_next.Qwen3NextForCausalLM.forward`
+#   6. `vllm.model_executor.models.qwen3_5.Qwen3_5ForCausalLMBase.forward`
+#   7. `vllm.model_executor.models.qwen3_5.Qwen3_5ForConditionalGeneration.forward`
+#    Why:
+#       The PD-mix layer-slice runtime in vllm-ascend (passive_scheduler +
+#       model_runner_v1._edge_cloud_forward) drives a model.forward over a
+#       sub-range of decoder layers and may need IntermediateTensors returned
+#       even on the last PP rank so segments can be stitched together.
+#       Upstream vLLM forward signatures don't expose this.
+#    How:
+#       Re-bind the listed forward methods to versions that accept three
+#       extra kwargs (layer_slice_start / layer_slice_end /
+#       layer_slice_return_intermediate) and propagate them into the inner
+#       model loop.  Loaded on demand from
+#       ``model_runner_v1.load_model`` only when ``envs.VLLM_LAYER_SLICE_SIZE
+#       > 0``, so users that don't enable layer slicing see no change.
+#       Patching the base classes (Qwen2Model, Qwen3NextModel) is enough —
+#       Qwen3Model and Qwen3_5Model inherit the new forward.
+#    Related PR (if no, explain why):
+#       No upstream PR yet; the layer-slice runtime is a vllm-ascend-only
+#       feature, so the forward extensions are kept in vllm-ascend rather
+#       than added to vLLM core.
+#    Future Plan:
+#       Remove this patch if/when vLLM core grows a generic layer-range
+#       forward hook compatible with our PD-mix runtime.
