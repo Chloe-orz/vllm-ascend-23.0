@@ -320,6 +320,40 @@ def _log_edge_cloud_memory_breakdown(
     )
 
 
+def _log_kv_cache_allocation(
+    kv_cache_config: Any,
+    layer_kv_cache_spec: dict,
+) -> None:
+    """Log per-layer KV cache allocation sizes for edge-cloud diagnosis."""
+    GiB_div = 1 << 30  # float division
+
+    total_bytes = 0
+    layer_bytes: dict[str, int] = {}
+    for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+        size_bytes = kv_cache_tensor.size
+        total_bytes += size_bytes
+        for layer_name in kv_cache_tensor.shared_by:
+            layer_bytes[layer_name] = layer_bytes.get(layer_name, 0) + size_bytes
+
+    num_layers = len(layer_kv_cache_spec)
+    block_size = getattr(
+        next(iter(layer_kv_cache_spec.values()), None), "block_size", 0
+    )
+    num_blocks = int(total_bytes / (block_size or 1)) if block_size else 0
+
+    logger.info(
+        "[EdgeCloud] KV cache allocation: "
+        "total=%.1f GiB (%d bytes) | "
+        "layers=%d | block_size=%d | blocks=%d | "
+        "per_layer: %s",
+        total_bytes / GiB_div, total_bytes,
+        num_layers, block_size, num_blocks,
+        ", ".join(
+            f"{name}={b / GiB_div:.1f}G" for name, b in sorted(layer_bytes.items())
+        ) if layer_bytes else "(none)",
+    )
+
+
 class EdgeCloudSegment(torch.nn.Module):
     """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
 
@@ -4331,6 +4365,10 @@ class NPUModelRunner(GPUModelRunner):
         # prefill disaggregation need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+
+        # Log KV cache allocation plan for edge-cloud diagnosis
+        _log_kv_cache_allocation(kv_cache_config, layer_kv_cache_spec)
+
         # If some tensors are shared by linear layers and attention layers,
         # the same tensor format must be maintained even if some layers
         # have only linear or attention layers, for example, the mtp layer.
