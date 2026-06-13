@@ -243,6 +243,83 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: "ECConnectorOutput | None"
     cudagraph_stats: CUDAGraphStat | None
     batch_desc: BatchDescriptor
+def _log_edge_cloud_memory_breakdown(
+    model: torch.nn.Module,
+    transformer_layers: torch.nn.ModuleList,
+    edge_cloud_cfg: Any,
+) -> None:
+    """Log a memory breakdown after edge-cloud model loading.
+
+    Reports parameter counts and estimated memory for each major
+    component so that unexpected weight loading can be spotted quickly.
+    """
+
+    def _params_mib(module: torch.nn.Module) -> float:
+        n = sum(p.numel() for p in module.parameters(recurse=False))
+        return n * 2 / (1 << 20)  # assume bf16 = 2 bytes
+
+    real_layers = sum(
+        1 for layer in transformer_layers if not isinstance(layer, PPMissingLayer)
+    )
+    skip_layers = len(transformer_layers) - real_layers
+
+    # Transformer layers
+    layer_params = 0
+    for layer in transformer_layers:
+        if not isinstance(layer, PPMissingLayer):
+            layer_params += sum(p.numel() for p in layer.parameters())
+
+    # Other key modules
+    def _safe_mib(owner: torch.nn.Module, attr: str) -> float:
+        m = getattr(owner, attr, None)
+        if m is None or isinstance(m, PPMissingLayer):
+            return 0.0
+        return _params_mib(m)
+
+    embed_mb = 0.0
+    if hasattr(model, "model") and hasattr(model.model, "embed_tokens"):
+        embed_mb = _safe_mib(model.model, "embed_tokens")
+    elif hasattr(model, "language_model"):
+        embed_mb = _safe_mib(model.language_model.model, "embed_tokens")
+
+    lm_head_mb = 0.0
+    if hasattr(model, "lm_head") and not isinstance(model.lm_head, PPMissingLayer):
+        lm_head_mb = _params_mib(model.lm_head)
+    elif hasattr(model, "language_model"):
+        lm_head_mb = _safe_mib(model.language_model, "lm_head")
+
+    norm_mb = 0.0
+    if hasattr(model, "model"):
+        norm_mb = _safe_mib(model.model, "norm")
+    elif hasattr(model, "language_model"):
+        norm_mb = _safe_mib(model.language_model.model, "norm")
+
+    # Vision tower (VL models)
+    vis_mb = 0.0
+    for attr in ("visual", "vision_tower", "vision_model"):
+        v = getattr(model, attr, None)
+        if v is not None and not isinstance(v, PPMissingLayer):
+            vis_mb = _params_mib(v)
+            break
+
+    total_params = sum(p.numel() for p in model.parameters())
+    total_mib = total_params * 2 / (1 << 20)
+
+    logger.info(
+        "[EdgeCloud] Memory breakdown (bf16 est.): "
+        "total=%.0f MiB (%d params) | "
+        "layers: %d real + %d skip = %.0f MiB | "
+        "embed=%.0f MiB lm_head=%.0f MiB norm=%.0f MiB vision=%.0f MiB | "
+        "role=%s head_k=%d tail_k=%d",
+        total_mib, total_params,
+        real_layers, skip_layers, layer_params * 2 / (1 << 20),
+        embed_mb, lm_head_mb, norm_mb, vis_mb,
+        edge_cloud_cfg.role,
+        getattr(edge_cloud_cfg, "head_tail_k", (None, None))[0] or 0,
+        getattr(edge_cloud_cfg, "head_tail_k", (None, None))[1] or 0,
+    )
+
+
 class EdgeCloudSegment(torch.nn.Module):
     """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
 
@@ -788,6 +865,11 @@ class NPUModelRunner(GPUModelRunner):
                 f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
             )
         logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
+
+        # 输出模型参数 / 显存占用分解，便于诊断是否加载了非预期权重
+        _log_edge_cloud_memory_breakdown(
+            self.model, transformer_layers, self.edge_cloud_cfg,
+        )
 
         # 3. 创建分段 callable 并按需包装 ACLGraphWrapper
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
