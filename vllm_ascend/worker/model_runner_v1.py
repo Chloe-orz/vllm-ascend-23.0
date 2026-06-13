@@ -4959,6 +4959,12 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        logger.info(
+            "[EdgeCloud] get_kv_cache_spec: role=%s static_forward_ctx_layers=%d names=%s",
+            self.edge_cloud_cfg.role if self._edge_cloud_enabled else "none",
+            len(attn_layers),
+            sorted(attn_layers.keys()),
+        )
         # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
@@ -5080,6 +5086,17 @@ class NPUModelRunner(GPUModelRunner):
                     if match is None or int(match.group(1)) in local_layer_indices:
                         filtered_spec[layer_name] = spec
                 kv_cache_spec = filtered_spec
+
+            # Log each layer's KV cache spec for edge-cloud diagnosis
+            for layer_name, spec in sorted(kv_cache_spec.items()):
+                logger.info(
+                    "[EdgeCloud] KV spec after filter: layer=%s type=%s "
+                    "block_size=%d page_size=%d",
+                    layer_name,
+                    type(spec).__name__,
+                    getattr(spec, "block_size", 0),
+                    getattr(spec, "page_size_bytes", 0),
+                )
 
         return kv_cache_spec
 
