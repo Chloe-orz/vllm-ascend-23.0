@@ -43,8 +43,17 @@ if (
 ):
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
-import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
+# EngineCore PD-separation / edge-cloud / passive-PP hooks. Only loaded when
+# the user opts in via env, so default (non-PD) startups are byte-equivalent
+# to upstream vLLM.
+if (
+    os.getenv("VLLM_PP_NON_LEADER_ENGINE_CORE", "0") in ("1", "true", "True")
+    or os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR") is not None
+    or os.getenv("VLLM_ASCEND_ENABLE_PD_SEPARATION", "0") in (
+        "1", "true", "True"
+    )
+):
+    import vllm_ascend.patch.platform.patch_engine_core  # noqa
 
-if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
-    import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
-    import vllm_ascend.patch.platform.patch_speculative_config  # noqa
+if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
+    import vllm_ascend.patch.platform.patch_balance_schedule  # noqa

@@ -23,7 +23,8 @@ This patch is the home of every line that the vllm-pdmix downstream fork
 used to maintain inside ``vllm/v1/engine/core.py`` of vLLM:
 
 * ``EngineCore.__init__`` — late-stage construction of the optional
-  edge-cloud PD-separation channel (``self._pp_pd_channel``).
+  PP-scheduler ZMQ publisher + edge-cloud PD-separation channel
+  (``self._pp_scheduler_zmq_publisher`` / ``self._pp_pd_channel``).
 * ``EngineCore.step`` / ``EngineCore.step_with_batch_queue`` — drain
   cloud-returned batches into the local PD scheduler, publish
   head-segment batches on PRE_OUT, skip ``sample_tokens`` for head
@@ -32,8 +33,10 @@ used to maintain inside ``vllm/v1/engine/core.py`` of vLLM:
   ``EngineCore._maybe_publish_pre_out`` /
   ``EngineCore._needs_sample_tokens`` — three new helper methods used by
   the two ``step*`` paths above.
-* ``EngineCore.shutdown`` — release the channel before the rest of the
-  engine resources.
+* ``EngineCore.shutdown`` — release the publisher / channel before the
+  rest of the engine resources.
+* ``EngineCoreProc.run_engine_core`` — auto-derive
+  ``VLLM_PP_SCHEDULER_ZMQ_ADDR`` for pp_size>1 + nnodes_within_dp>1.
 * ``EngineCoreProc._process_input_queue`` — force a blocking
   ``input_queue.get`` when the engine has nothing local to do, so the
   edge node never busy-spins while waiting for the next client request.
@@ -64,17 +67,22 @@ source and re-apply the dest-only inserts.
 from __future__ import annotations
 
 import functools
+import os
 from concurrent.futures import Future
 from typing import cast
 from uuid import uuid4
 
-from vllm.config import ParallelConfig
-from vllm.logger import init_logger, logger as vllm_logger
+from vllm import envs
+from vllm.config import ParallelConfig, VllmConfig
+from vllm.logger import init_logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 
-from vllm_ascend.v1.engine.passive_core import PPSchedulerZmqChannel
+from vllm_ascend.v1.engine.passive_core import (
+    PPSchedulerZmqChannel,
+    PPSchedulerZmqPublisher,
+)
 
 logger = init_logger(__name__)
 
@@ -101,72 +109,40 @@ def _patched_engine_core_init(self, *args, **kwargs):
 
     parallel_config: ParallelConfig = self.vllm_config.parallel_config
 
-    # PD-separation is owned by the ascend plugin and lives under
-    # ``additional_config.edge_cloud_config.pd_separation``. ``init_ascend_config``
-    # is idempotent and returns the cached singleton if already initialized
-    # in the main process; in a freshly-spawned subprocess it re-initializes
-    # from the ``vllm_config`` we hold.
-    from vllm_ascend.ascend_config import init_ascend_config
-    ascend_config = init_ascend_config(self.vllm_config)
-    edge_cloud = getattr(ascend_config, "edge_cloud_config", None)
-    pd_enabled = bool(
-        edge_cloud is not None
-        and getattr(edge_cloud, "enabled", False)
-        and getattr(edge_cloud, "pd_separation", None) is not None
-        and edge_cloud.pd_separation.enabled
-    )
-
     if getattr(parallel_config, "enable_edge_cloud", False):
         logger.info(
-            "Edge-cloud mode enabled (pd_separation=%s)",
-            pd_enabled,
+            "Edge-cloud mode enabled (enable_pd_separation=%s)",
+            getattr(parallel_config, "enable_pd_separation", False),
         )
 
-    # Load PD-separation configuration from environment variables
-    from vllm_ascend.pd_separation_config import PDSeparationConfig
-    pd_config = PDSeparationConfig.from_env()
+    # PP scheduler ZMQ publisher (pp rank0 → pp rank1 PassiveEngineCore).
+    self._pp_scheduler_zmq_publisher = None
+    if envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is not None:
+        self._pp_scheduler_zmq_publisher = PPSchedulerZmqPublisher(
+            envs.VLLM_PP_SCHEDULER_ZMQ_ADDR
+        )
 
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
     self._pp_pd_channel = None
-    if pd_enabled and getattr(parallel_config, "is_edge_node", False):
-        dp_rank = getattr(parallel_config, "data_parallel_rank", 0)
-
-        # Discover the cloud's IP via a one-shot TCPStore. The edge
-        # acts as store master on ``master_port + 1 + dp_rank`` so
-        # that each DP rank has its own store port (no EADDRINUSE).
-        # The cloud connects once per edge DP rank and writes its
-        # ``get_ip()`` result. See passive_core.py for the
-        # symmetric writer side.
-        import torch.distributed as dist
-        from datetime import timedelta
-        _addr_store = dist.TCPStore(
-            host_name=parallel_config.master_addr,
-            port=parallel_config.master_port + 1 + dp_rank,
-            world_size=2,
-            is_master=True,
-            timeout=timedelta(seconds=300),
+    if (
+        getattr(parallel_config, "enable_pd_separation", False)
+        and getattr(parallel_config, "is_edge_node", False)
+    ):
+        cloud_addr = (
+            getattr(parallel_config, "cloud_addr", None) or "127.0.0.1"
         )
-        cloud_addr = _addr_store.get("cloud_ip").decode()
-        del _addr_store
-
-        # Each DP rank needs its own ZMQ port pair to avoid bind
-        # conflicts within the same edge process. Offset by 2 per
-        # dp_rank: dp_rank 0 → {pre_out, post_out}, dp_rank 1 →
-        # {pre_out+2, post_out+2}, etc. The cloud side must mirror
-        # this offsetting in its own PPSchedulerZmqChannel setup.
-        pre_out_port = pd_config.pre_out_port + dp_rank * 2
-        post_out_port = pd_config.post_out_port + dp_rank * 2
-        pre_out = f"tcp://*:{pre_out_port}"
-        post_out = f"tcp://{cloud_addr}:{post_out_port}"
+        pre_out = f"tcp://*:{envs.VLLM_PP_PRE_OUT_ZMQ_PORT}"
+        post_out = (
+            f"tcp://{cloud_addr}:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
+        )
         self._pp_pd_channel = PPSchedulerZmqChannel(
             send_endpoint=pre_out,
             recv_endpoint=post_out,
-            name=f"pd-edge-dp{dp_rank}",
+            name="pd-edge",
         )
         logger.info(
-            "PD-separation edge channel: PRE_OUT=%s, POST_OUT=%s "
-            "(cloud_addr=%s auto-discovered)",
-            pre_out, post_out, cloud_addr,
+            "PD-separation edge channel: PRE_OUT=%s, POST_OUT=%s",
+            pre_out, post_out,
         )
 
 
@@ -187,7 +163,10 @@ def _drain_pd_channel_inbox(self) -> None:
     new_outputs = self._pp_pd_channel.consume_new_outputs()
     for _seq, so in new_outputs:
         bt = so.batch_type
-        logger.info(f"Received scheduler_output from cloud, batch_type: {bt}")
+        print(
+            f"Received scheduler_output from cloud, batch_type: {bt}",
+            flush=True,
+        )
         if bt == BatchType.PREFILL_LAST:
             self.scheduler.prefills_last_ready.append(so)
         elif bt == BatchType.DECODE_LAST:
@@ -203,25 +182,14 @@ def _drain_pd_channel_inbox(self) -> None:
 def _maybe_publish_pre_out(
     self, scheduler_output: SchedulerOutput
 ) -> None:
-    """Forward DECODE_FIRST batches on the edge → cloud channel immediately.
-
-    DECODE_FIRST is published synchronously at schedule time because its
-    cloud-side decode-middle segment must start as soon as possible to keep
-    the decode pipeline full.
-
-    PREFILL_FIRST is handled by _publish_pre_out_when_ready instead, which
-    delays the ZMQ notification until the prefill head segment becomes the
-    next batch to execute, preventing the cloud from blocking on irecv while
-    the edge prefill is still queued behind other batches.
-    """
+    """Forward head-segment batches on the edge → cloud channel."""
     if getattr(self, "_pp_pd_channel", None) is None:
         return
     bt = scheduler_output.batch_type
-    if bt == BatchType.DECODE_FIRST:
+    if bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST):
         self._pp_pd_channel.publish(scheduler_output)
     elif bt in (
         BatchType.EMPTY,
-        BatchType.PREFILL_FIRST,
         BatchType.PREFILL_LAST,
         BatchType.DECODE_LAST,
     ):
@@ -231,58 +199,6 @@ def _maybe_publish_pre_out(
             "PD-separation PRE_OUT skipping non-separated batch_type=%s",
             bt.value if bt is not None else "<none>",
         )
-
-
-def _publish_pre_out_when_ready(self) -> None:
-    """Publish the oldest PREFILL_FIRST batch in batch_queue only when it
-    becomes the next batch to execute (rightmost in the deque).
-
-    This delays the ZMQ PRE_OUT notification for prefill head segments until
-    the edge worker is about to actually execute them, preventing the cloud
-    from blocking on irecv while the edge prefill head segment is still
-    queued behind other batches.
-    """
-    ch = getattr(self, "_pp_pd_channel", None)
-    if ch is None:
-        return
-
-    batch_queue = self.batch_queue
-    if not batch_queue:
-        return
-
-    _, oldest_so, _ = batch_queue[-1]
-    if oldest_so.batch_type != BatchType.PREFILL_FIRST:
-        return
-
-    head_token = getattr(oldest_so, "head_token", None)
-    if not head_token:
-        return
-
-    published = getattr(self, "_published_pre_out_tokens", None)
-    if published is None:
-        published = set()
-        self._published_pre_out_tokens = published
-    if head_token in published:
-        return
-
-    ch.publish(oldest_so)
-    published.add(head_token)
-    logger.info(
-        "[PRE_OUT] Published PREFILL_FIRST (head_token=%s) when it became next to execute, "
-        "queue_len=%d",
-        head_token, len(batch_queue),
-    )
-
-
-def _clear_published_pre_out_token(self, scheduler_output: SchedulerOutput) -> None:
-    """Remove the head_token from published set after the batch completes,
-    preventing unbounded growth of the set."""
-    head_token = getattr(scheduler_output, "head_token", None)
-    if not head_token:
-        return
-    published = getattr(self, "_published_pre_out_tokens", None)
-    if published is not None:
-        published.discard(head_token)
 
 
 def _needs_sample_tokens(self, scheduler_output: SchedulerOutput) -> bool:
@@ -297,76 +213,6 @@ def _needs_sample_tokens(self, scheduler_output: SchedulerOutput) -> bool:
         return True
     bt = scheduler_output.batch_type
     return bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST)
-
-
-def _stash_empty_worker_cleanup(self, scheduler_output: SchedulerOutput) -> None:
-    """Keep worker-side cleanup from EMPTY batches for the next real batch."""
-    finished_req_ids = getattr(scheduler_output, "finished_req_ids", None)
-    free_encoder_mm_hashes = getattr(scheduler_output, "free_encoder_mm_hashes", None)
-    if not finished_req_ids and not free_encoder_mm_hashes:
-        return
-
-    pending_finished = getattr(self, "_pd_pending_finished_req_ids", None)
-    if pending_finished is None:
-        pending_finished = set()
-        self._pd_pending_finished_req_ids = pending_finished
-    pending_finished.update(finished_req_ids or ())
-
-    pending_mm_hashes = getattr(self, "_pd_pending_free_encoder_mm_hashes", None)
-    if pending_mm_hashes is None:
-        pending_mm_hashes = set()
-        self._pd_pending_free_encoder_mm_hashes = pending_mm_hashes
-    pending_mm_hashes.update(free_encoder_mm_hashes or ())
-
-
-def _merge_pending_worker_cleanup(self, scheduler_output: SchedulerOutput) -> None:
-    """Attach cleanup skipped with EMPTY batches to the next worker batch."""
-    pending_finished = getattr(self, "_pd_pending_finished_req_ids", None)
-    if pending_finished:
-        scheduler_output.finished_req_ids = set(
-            scheduler_output.finished_req_ids
-        ).union(pending_finished)
-        pending_finished.clear()
-
-    pending_mm_hashes = getattr(self, "_pd_pending_free_encoder_mm_hashes", None)
-    if pending_mm_hashes:
-        scheduler_output.free_encoder_mm_hashes = list(
-            dict.fromkeys([
-                *scheduler_output.free_encoder_mm_hashes,
-                *pending_mm_hashes,
-            ])
-        )
-        pending_mm_hashes.clear()
-
-
-def _finish_empty_batch(self, scheduler_output: SchedulerOutput):
-    """Complete an EMPTY SchedulerOutput without broadcasting to workers."""
-    self._stash_empty_worker_cleanup(scheduler_output)
-    self._process_aborts_queue()
-    with (
-        self.log_error_detail(scheduler_output),
-        self.log_iteration_details(scheduler_output),
-    ):
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT
-        )
-    return engine_core_outputs, False
-
-
-def _defer_empty_batch(self, scheduler_output: SchedulerOutput) -> None:
-    """Defer an EMPTY batch when queued model work must complete first."""
-    deferred = getattr(self, "_pd_deferred_empty_batches", None)
-    if deferred is None:
-        deferred = []
-        self._pd_deferred_empty_batches = deferred
-    deferred.append(scheduler_output)
-
-
-def _pop_deferred_empty_batch(self) -> SchedulerOutput | None:
-    deferred = getattr(self, "_pd_deferred_empty_batches", None)
-    if not deferred:
-        return None
-    return deferred.pop(0)
 
 
 # =======================================================================#
@@ -389,14 +235,18 @@ def _patched_step(self):
 
     scheduler_output = self.scheduler.schedule()
 
+    # [ascend insert] Publish SchedulerOutput to pp rank1 if ZMQ is
+    # configured.
+    bt = scheduler_output.batch_type
+    pub = getattr(self, "_pp_scheduler_zmq_publisher", None)
+    if pub is not None and bt in (
+        BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST
+    ):
+        pub.publish(scheduler_output)
+
     # [ascend insert] Forward head-segment batches on the PRE_OUT
     # (edge → cloud) channel.
     self._maybe_publish_pre_out(scheduler_output)
-
-    if scheduler_output.batch_type == BatchType.EMPTY:
-        return self._finish_empty_batch(scheduler_output)
-
-    self._merge_pending_worker_cleanup(scheduler_output)
 
     future = self.model_executor.execute_model(
         scheduler_output, non_block=True
@@ -455,82 +305,60 @@ def _patched_step_with_batch_queue(self):
         ):
             scheduler_output.head_token = uuid4().hex
 
-        # [ascend insert] DECODE_FIRST is published immediately to keep the
-        # decode pipeline full; PREFILL_FIRST is delayed via
-        # _publish_pre_out_when_ready until it becomes next to execute.
-        if scheduler_output.batch_type == BatchType.DECODE_FIRST:
-            self._maybe_publish_pre_out(scheduler_output)
+        # [ascend insert] Publish SchedulerOutput to pp rank1 if ZMQ is
+        # configured.
+        pub = getattr(self, "_pp_scheduler_zmq_publisher", None)
+        if pub is not None and scheduler_output.batch_type in (
+            BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST
+        ):
+            pub.publish(scheduler_output)
 
-        if scheduler_output.batch_type == BatchType.EMPTY:
-            if batch_queue:
-                self._defer_empty_batch(scheduler_output)
-                scheduler_output = None
+        # [ascend insert] Forward head-segment batches on PRE_OUT.
+        self._maybe_publish_pre_out(scheduler_output)
+
+        with self.log_error_detail(scheduler_output):
+            exec_future = self.model_executor.execute_model(
+                scheduler_output, non_block=True
+            )
+        if self.is_ec_consumer:
+            model_executed = (
+                scheduler_output.total_num_scheduled_tokens > 0
+            )
+
+        if self.is_pooling_model or not model_executed:
+            # No sampling required (no requests scheduled).
+            future = cast(Future[ModelRunnerOutput], exec_future)
+        elif not self._needs_sample_tokens(scheduler_output):
+            # [ascend insert] Edge-cloud head segment (PF/DF): sampling is
+            # done in the tail segment (PL/DL) after the cloud returns
+            # intermediate tensors. Skip sample_tokens for the head
+            # segment.
+            future = cast(Future[ModelRunnerOutput], exec_future)
+        else:
+            if not scheduler_output.pending_structured_output_tokens:
+                grammar_output = self.scheduler.get_grammar_bitmask(
+                    scheduler_output
+                )
+                future = self.model_executor.sample_tokens(
+                    grammar_output, non_block=True
+                )
             else:
-                return self._finish_empty_batch(scheduler_output)
+                deferred_scheduler_output = scheduler_output
 
-        if scheduler_output is not None:
-            self._merge_pending_worker_cleanup(scheduler_output)
-
-            with self.log_error_detail(scheduler_output):
-                exec_future = self.model_executor.execute_model(
-                    scheduler_output, non_block=True
-                )
-            if self.is_ec_consumer:
-                model_executed = (
-                    scheduler_output.total_num_scheduled_tokens > 0
-                )
-
-            if self.is_pooling_model or not model_executed:
-                # No sampling required (no requests scheduled).
-                future = cast(Future[ModelRunnerOutput], exec_future)
-            elif not self._needs_sample_tokens(scheduler_output):
-                # [ascend insert] Edge-cloud head segment (PF/DF): sampling is
-                # done in the tail segment (PL/DL) after the cloud returns
-                # intermediate tensors. Skip sample_tokens for the head
-                # segment.
-                future = cast(Future[ModelRunnerOutput], exec_future)
-            else:
-                if not scheduler_output.pending_structured_output_tokens:
-                    grammar_output = self.scheduler.get_grammar_bitmask(
-                        scheduler_output
-                    )
-                    future = self.model_executor.sample_tokens(
-                        grammar_output, non_block=True
-                    )
-                else:
-                    deferred_scheduler_output = scheduler_output
-
-            if not deferred_scheduler_output:
-                batch_queue.appendleft((future, scheduler_output, exec_future))
-                # [ascend insert] Log batch_queue contents for debugging.
-                queue_types = [
-                    so.batch_type.value
-                    for _, so, _ in batch_queue
-                ]
-                vllm_logger.info(
-                    "[BATCH_QUEUE] Enqueued %s, queue_len=%d, types=%s",
-                    scheduler_output.batch_type.value,
-                    len(batch_queue),
-                    queue_types,
-                )
-                if (
-                    model_executed
-                    and len(batch_queue) < self.batch_queue_size
-                    and not batch_queue[-1][0].done()
-                ):
-                    return None, True
+        if not deferred_scheduler_output:
+            batch_queue.appendleft((future, scheduler_output, exec_future))
+            if (
+                model_executed
+                and len(batch_queue) < self.batch_queue_size
+                and not batch_queue[-1][0].done()
+            ):
+                return None, True
 
     elif not batch_queue:
         return None, False
 
     # Block until the next result is available.
-    # [ascend insert] Publish PRE_OUT for the head segment that is about
-    # to execute (rightmost in deque).  FIFO guarantees every PREFILL_FIRST
-    # eventually becomes batch_queue[-1] before pop().
-    self._publish_pre_out_when_ready()
     future, scheduler_output, exec_model_fut = batch_queue.pop()
-    # [ascend insert] Clean up PRE_OUT tracking for completed batch.
-    self._clear_published_pre_out_token(scheduler_output)
     with (
         self.log_error_detail(scheduler_output),
         self.log_iteration_details(scheduler_output),
@@ -544,22 +372,6 @@ def _patched_step_with_batch_queue(self):
     engine_core_outputs = self.scheduler.update_from_output(
         scheduler_output, model_output
     )
-
-    if deferred_empty_batch := self._pop_deferred_empty_batch():
-        empty_outputs, _ = self._finish_empty_batch(deferred_empty_batch)
-        if empty_outputs:
-            if engine_core_outputs:
-                for client_index, output in empty_outputs.items():
-                    existing = engine_core_outputs.get(client_index)
-                    if existing is None:
-                        engine_core_outputs[client_index] = output
-                    elif output.finished_requests:
-                        existing_finished = existing.finished_requests or set()
-                        existing.finished_requests = existing_finished.union(
-                            output.finished_requests
-                        )
-            else:
-                engine_core_outputs = empty_outputs
 
     if deferred_scheduler_output:
         if self.use_spec_decode:
@@ -586,6 +398,16 @@ def _patched_step_with_batch_queue(self):
 # =======================================================================#
 @functools.wraps(_ORIG_ENGINE_CORE_SHUTDOWN)
 def _patched_engine_core_shutdown(self):
+    pub = getattr(self, "_pp_scheduler_zmq_publisher", None)
+    if pub is not None:
+        try:
+            pub.shutdown()
+        except Exception:
+            logger.exception(
+                "Error while shutting down PP scheduler ZMQ publisher"
+            )
+        self._pp_scheduler_zmq_publisher = None
+
     ch = getattr(self, "_pp_pd_channel", None)
     if ch is not None:
         try:
@@ -600,20 +422,47 @@ def _patched_engine_core_shutdown(self):
 
 
 # =======================================================================#
-# EngineCoreProc.run_engine_core — keep child-process patch import.       #
+# EngineCoreProc.run_engine_core — auto-derive ZMQ address.               #
 # =======================================================================#
 def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
                              **kwargs):
-    """Delegate to upstream while keeping this patch module as the process
-    target so spawn-based child processes import and install the patches.
+    """Wrap upstream ``run_engine_core`` to derive the PP scheduler ZMQ
+    address before the engine subprocess is created.
+
+    This intentionally short-circuits *before* the (lengthy) original
+    bootstrapping happens, so that ``envs.VLLM_PP_SCHEDULER_ZMQ_ADDR`` is
+    visible to ``EngineCore.__init__`` running in the subprocess.
     """
+    vllm_config: VllmConfig | None = kwargs.get("vllm_config")
+    if vllm_config is None and args:
+        # Best-effort positional fallback. Upstream always passes
+        # vllm_config via kwargs, so this is just defensive.
+        for arg in args:
+            if isinstance(arg, VllmConfig):
+                vllm_config = arg
+                break
+    if vllm_config is not None:
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.pipeline_parallel_size > 1
+            and getattr(parallel_config, "nnodes_within_dp", 1) > 1
+            and envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is None
+        ):
+            pp_zmq_port = int(
+                os.getenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "5558")
+            )
+            os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"] = (
+                f"tcp://*:{pp_zmq_port}"
+            )
+            envs.disable_envs_cache()
+            logger.info(
+                "PP scheduler ZMQ publisher address: %s",
+                os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"],
+            )
+
     return _ORIG_RUN_ENGINE_CORE(
         *args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs
     )
-
-
-_patched_run_engine_core.__module__ = __name__
-_patched_run_engine_core.__qualname__ = "_patched_run_engine_core"
 
 
 # =======================================================================#
@@ -658,7 +507,11 @@ def _patched_process_input_queue(self):
 
         try:
             if block and self.input_queue.empty():
-                logger.info("input_queue is empty, EngineCore waiting for work.")
+                print(
+                    "input_queue is empty, "
+                    "EngineCore waiting for work.",
+                    flush=True,
+                )
             req = self.input_queue.get(block=block)
             self._handle_client_request(*req)
         except _queue_mod.Empty:
@@ -685,14 +538,7 @@ def install() -> None:
     EngineCore.__init__ = _patched_engine_core_init
     EngineCore._drain_pd_channel_inbox = _drain_pd_channel_inbox
     EngineCore._maybe_publish_pre_out = _maybe_publish_pre_out
-    EngineCore._publish_pre_out_when_ready = _publish_pre_out_when_ready
-    EngineCore._clear_published_pre_out_token = _clear_published_pre_out_token
     EngineCore._needs_sample_tokens = _needs_sample_tokens
-    EngineCore._stash_empty_worker_cleanup = _stash_empty_worker_cleanup
-    EngineCore._merge_pending_worker_cleanup = _merge_pending_worker_cleanup
-    EngineCore._finish_empty_batch = _finish_empty_batch
-    EngineCore._defer_empty_batch = _defer_empty_batch
-    EngineCore._pop_deferred_empty_batch = _pop_deferred_empty_batch
     EngineCore.step = _patched_step
     EngineCore.step_with_batch_queue = _patched_step_with_batch_queue
     EngineCore.shutdown = _patched_engine_core_shutdown
