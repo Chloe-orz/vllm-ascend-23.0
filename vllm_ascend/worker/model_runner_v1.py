@@ -328,29 +328,32 @@ def _log_kv_cache_allocation(
     GiB_div = 1 << 30  # float division
 
     total_bytes = 0
-    layer_bytes: dict[str, int] = {}
+    tensor_count = 0
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         size_bytes = kv_cache_tensor.size
         total_bytes += size_bytes
-        for layer_name in kv_cache_tensor.shared_by:
-            layer_bytes[layer_name] = layer_bytes.get(layer_name, 0) + size_bytes
+        tensor_count += 1
 
     num_layers = len(layer_kv_cache_spec)
-    block_size = getattr(
-        next(iter(layer_kv_cache_spec.values()), None), "block_size", 0
-    )
-    num_blocks = int(total_bytes / (block_size or 1)) if block_size else 0
+    page_sizes = {
+        name: getattr(spec, "page_size_bytes", 0)
+        for name, spec in layer_kv_cache_spec.items()
+    }
+    max_page = max(page_sizes.values()) if page_sizes else 0
 
     logger.info(
         "[EdgeCloud] KV cache allocation: "
-        "total=%.1f GiB (%d bytes) | "
-        "layers=%d | block_size=%d | blocks=%d | "
-        "per_layer: %s",
-        total_bytes / GiB_div, total_bytes,
-        num_layers, block_size, num_blocks,
+        "total=%.1f GiB | num_blocks=%d | layers=%d | "
+        "tensors=%d | max_page_size=%d | "
+        "page_sizes: %s",
+        total_bytes / GiB_div,
+        kv_cache_config.num_blocks,
+        num_layers,
+        tensor_count,
+        max_page,
         ", ".join(
-            f"{name}={b / GiB_div:.1f}G" for name, b in sorted(layer_bytes.items())
-        ) if layer_bytes else "(none)",
+            f"{n}={s}" for n, s in sorted(page_sizes.items())
+        ) if page_sizes else "(none)",
     )
 
 
