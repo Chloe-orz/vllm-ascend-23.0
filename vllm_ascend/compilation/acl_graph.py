@@ -314,7 +314,7 @@ def update_full_graph_params(
             提前过滤掉了 skip_graph_params_update=True 的 key 时，需要传入此参数
             以保证 GDN 的 update_conv1d_graph_params 仍能按 layer_prefix 查找。
     """
-    with graph_params_scope(graph_params, draft_graph_params):
+    with graph_params_scope(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
         impl_cls = attn_backend.get_impl_cls()
 
         # Use the caller-supplied unfiltered metadata if available;
