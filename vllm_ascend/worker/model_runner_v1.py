@@ -5056,41 +5056,17 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
-        if self._edge_cloud_enabled and hasattr(self, "model") and self.model is not None:
-            # In embedding_only mode, edge side has no transformer layers but
-            # still needs kv_cache_spec to be non-empty so the scheduler can
-            # allocate KV cache and schedule requests. Cloud side manages the
-            # actual KV cache usage; edge side keeps the spec for scheduling.
-            if not (
-                self.edge_cloud_cfg.mode == "embedding_only"
-                and self.edge_cloud_cfg.role == "edge"
-            ):
-                import re
-
-                # Locate transformer layers (handle CausalLM and
-                # multimodal wrappers).
-                transformer = (
-                    self.model.model
-                    if hasattr(self.model, "model")
-                    and hasattr(self.model.model, "layers")
-                    else self.model.language_model.model
-                )
-                local_layer_indices = {
-                    idx
-                    for idx, layer in enumerate(transformer.layers)
-                    if not isinstance(layer, PPMissingLayer)
-                }
-                filtered_spec: dict[str, KVCacheSpec] = {}
-                for layer_name, spec in kv_cache_spec.items():
-                    match = re.search(r"layers\.(\d+)", layer_name)
-                    if match is None or int(match.group(1)) in local_layer_indices:
-                        filtered_spec[layer_name] = spec
-                kv_cache_spec = filtered_spec
-
-            # Log each layer's KV cache spec for edge-cloud diagnosis
+        # embedding_only edge has no local attention layers; the spec
+        # is already empty (returned early above).  Cloud side keeps
+        # its real spec for the scheduler.
+        # With the PP-reuse init path make_layers directly creates
+        # PPMissingLayer for non-local indices — no stale entries
+        # ever register in static_forward_context, so no filtering
+        # is needed.
+        if self._edge_cloud_enabled:
             for layer_name, spec in sorted(kv_cache_spec.items()):
                 logger.info(
-                    "[EdgeCloud] KV spec after filter: layer=%s type=%s "
+                    "[EdgeCloud] KV spec: layer=%s type=%s "
                     "block_size=%d page_size=%d",
                     layer_name,
                     type(spec).__name__,
