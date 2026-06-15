@@ -109,10 +109,24 @@ def _patched_engine_core_init(self, *args, **kwargs):
 
     parallel_config: ParallelConfig = self.vllm_config.parallel_config
 
+    # PD-separation is owned by the ascend plugin and lives under
+    # ``additional_config.edge_cloud_config.pd_separation``. ``ascend_config``
+    # is initialized during ``Platform.check_and_update_config``, which runs
+    # before EngineCore is constructed, so the singleton is always ready here.
+    from vllm_ascend.ascend_config import get_ascend_config
+    ascend_config = get_ascend_config()
+    edge_cloud = getattr(ascend_config, "edge_cloud_config", None)
+    pd_enabled = bool(
+        edge_cloud is not None
+        and getattr(edge_cloud, "enabled", False)
+        and getattr(edge_cloud, "pd_separation", None) is not None
+        and edge_cloud.pd_separation.enabled
+    )
+
     if getattr(parallel_config, "enable_edge_cloud", False):
         logger.info(
-            "Edge-cloud mode enabled (enable_pd_separation=%s)",
-            getattr(parallel_config, "enable_pd_separation", False),
+            "Edge-cloud mode enabled (pd_separation=%s)",
+            pd_enabled,
         )
 
     # PP scheduler ZMQ publisher (pp rank0 → pp rank1 PassiveEngineCore).
@@ -124,10 +138,7 @@ def _patched_engine_core_init(self, *args, **kwargs):
 
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
     self._pp_pd_channel = None
-    if (
-        getattr(parallel_config, "enable_pd_separation", False)
-        and getattr(parallel_config, "is_edge_node", False)
-    ):
+    if pd_enabled and getattr(parallel_config, "is_edge_node", False):
         cloud_addr = (
             getattr(parallel_config, "cloud_addr", None) or "127.0.0.1"
         )

@@ -388,12 +388,19 @@ class PassiveEngineCoreProc:
         # side in PD-separation mode; left None for the legacy PP path.
         self._pp_pd_channel = pp_pd_channel
         if getattr(vllm_config.parallel_config, "enable_edge_cloud", False):
+            from vllm_ascend.ascend_config import get_ascend_config
+            _ascend_config = get_ascend_config()
+            _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
+            _pd_enabled = bool(
+                _edge_cloud is not None
+                and getattr(_edge_cloud, "enabled", False)
+                and getattr(_edge_cloud, "pd_separation", None) is not None
+                and _edge_cloud.pd_separation.enabled
+            )
             logger.info(
                 "PassiveEngineCore: edge-cloud mode enabled "
-                "(enable_pd_separation=%s, pd_channel=%s)",
-                getattr(
-                    vllm_config.parallel_config, "enable_pd_separation", False
-                ),
+                "(pd_separation=%s, pd_channel=%s)",
+                _pd_enabled,
                 "on" if pp_pd_channel is not None else "off",
             )
         self._idle_sleep_seconds = 0.001
@@ -574,11 +581,16 @@ class PassiveEngineCoreProc:
                 # Set up edge-cloud PD-separation channel (cloud side).
                 # The cloud binds POST_OUT and connects PRE_OUT via
                 # master_addr (the edge's IP) so PRE_OUT connects back.
-                if getattr(
-                    vllm_config.parallel_config,
-                    "enable_pd_separation",
-                    False,
-                ):
+                from vllm_ascend.ascend_config import get_ascend_config
+                _ascend_config = get_ascend_config()
+                _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
+                _pd_enabled = bool(
+                    _edge_cloud is not None
+                    and getattr(_edge_cloud, "enabled", False)
+                    and getattr(_edge_cloud, "pd_separation", None) is not None
+                    and _edge_cloud.pd_separation.enabled
+                )
+                if _pd_enabled:
                     master_addr = vllm_config.parallel_config.master_addr
                     post_out_bind = (
                         f"tcp://*:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
