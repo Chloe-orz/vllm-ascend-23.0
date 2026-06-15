@@ -4833,13 +4833,6 @@ class NPUModelRunner(GPUModelRunner):
 
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
-        # Temporary: log static_forward_context contents for edge-cloud diagnosis
-        logger.info(
-            "[EdgeCloud] static_forward_ctx: role=%s layers=%d types=%s",
-            self.edge_cloud_cfg.role if self._edge_cloud_enabled else "none",
-            len(attn_layers),
-            sorted((n, type(m).__name__) for n, m in attn_layers.items()),
-        )
         # NOTE: Must process Attention/MLAAttention before MambaBase to maintain
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
