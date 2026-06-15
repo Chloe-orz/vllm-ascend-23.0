@@ -5753,11 +5753,12 @@ class NPUModelRunner(GPUModelRunner):
                 f"tail is {scheduler_output.batch_type}"
             )
 
-        tail_req_ids = tuple(scheduler_output.num_scheduled_tokens)
-        if tail_req_ids != head_state.req_ids:
+        tail_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
+        head_req_ids = set(head_state.req_ids)
+        if tail_req_ids != head_req_ids:
             raise RuntimeError(
                 f"HeadState req_ids mismatch: head had "
-                f"{head_state.req_ids}, tail scheduler_output has "
+                f"{head_req_ids}, tail scheduler_output has "
                 f"{tail_req_ids}"
             )
 
