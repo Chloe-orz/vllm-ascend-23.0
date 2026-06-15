@@ -124,6 +124,11 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.compilation.acl_graph_edge_cloud import (
+    EdgeCloudACLGraphWrapper,
+    make_graph_params,
+    update_segment_graph_params,
+)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -701,7 +706,7 @@ class NPUModelRunner(GPUModelRunner):
             return segment
         if self._is_dummy_or_profile_run():
             return segment
-        return ACLGraphWrapper(
+        return EdgeCloudACLGraphWrapper(
             segment,
             self.vllm_config,
             runtime_mode=runtime_mode,
@@ -2662,39 +2667,27 @@ class NPUModelRunner(GPUModelRunner):
             and not self.use_sparse
         ):
             assert positions is not None
-            if graph_wrapper is not None:
-                assert graph_wrapper.graph_params is not None
-            # Edge-cloud segments may contain mixed DSA+FIA layers.
-            # DSA layers do not append entries to graph_params during capture,
-            # so update_graph_params' zip over attn_keys vs attn_params would
-            # misalign if DSA keys are present. Filter them out temporarily.
-            # 使用显式字段 skip_graph_params_update 替代 hasattr 属性嗅探，
-            # 避免后端字段命名变化导致误判
-            original_attn_metadata = forward_context.attn_metadata
-            if original_attn_metadata:
-                filtered_metadata = {
-                    k: v for k, v in original_attn_metadata.items()
-                    if not getattr(v, 'skip_graph_params_update', False)
-                }
-                if len(filtered_metadata) != len(original_attn_metadata):
-                    forward_context.attn_metadata = filtered_metadata
-            try:
-                update_full_graph_params(
-                    self.attn_backend,
-                    self.update_stream,
-                    forward_context,
-                    num_tokens_padded,
-                    self.vllm_config,
-                    self.speculative_config,
-                    positions.shape[0],
-                    layer_indices=layer_indices,
-                    graph_params=graph_wrapper.graph_params if graph_wrapper is not None else None,
-                    draft_graph_params=(
-                        graph_wrapper.draft_graph_params if graph_wrapper is not None else None
-                    ),
-                )
-            finally:
-                forward_context.attn_metadata = original_attn_metadata
+            assert graph_wrapper is not None, (
+                "_update_full_graph_params_if_needed requires a graph_wrapper "
+                "for edge-cloud segment graph param updates."
+            )
+            assert graph_wrapper.graph_params is not None
+            assert layer_indices is not None, (
+                "_update_full_graph_params_if_needed requires layer_indices "
+                "for edge-cloud segment graph param updates."
+            )
+            update_segment_graph_params(
+                self.attn_backend,
+                self.update_stream,
+                forward_context,
+                num_tokens_padded,
+                self.vllm_config,
+                layer_indices,
+                graph_params=graph_wrapper.graph_params,
+                draft_graph_params=graph_wrapper.draft_graph_params,
+                speculative_config=self.speculative_config,
+                num_dcp_pcp_tokens=positions.shape[0],
+            )
 
     def _model_forward(
         self,
@@ -3025,10 +3018,6 @@ class NPUModelRunner(GPUModelRunner):
                     **model_kwargs,
                 )
             finally:
-                # 恢复 layer_idx 前先同步当前流，确保 weight_prefetch 等
-                # 依赖 layer_idx 的异步任务已在正确层号下完成，防止后续段读到错层权重
-                # if seg_a_graph:
-                #     torch.npu.current_stream().synchronize()
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
 
@@ -3049,11 +3038,10 @@ class NPUModelRunner(GPUModelRunner):
             _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
         try:
-            if seg_e_graph:
-                tail_layer_indices = list(range(
-                    self.num_layers - self.tail_k,
-                    self.num_layers,
-                ))
+            tail_layer_indices = list(range(
+                self.num_layers - self.tail_k,
+                self.num_layers,
+            ))
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
@@ -3099,11 +3087,10 @@ class NPUModelRunner(GPUModelRunner):
         seg_c = self.segment_c_wrapper if use_graph else self.segment_c
         seg_c_graph = isinstance(seg_c, ACLGraphWrapper)
 
-        if seg_c_graph:
-            cloud_layer_indices = list(range(
-                self.head_k,
-                self.num_layers - self.tail_k,
-            ))
+        cloud_layer_indices = list(range(
+            self.head_k,
+            self.num_layers - self.tail_k,
+        ))
         # intermediate_tensors 已由 NPUWorker 从 Edge 侧接收
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
         old_layer_idx = _EXTRA_CTX.layer_idx
@@ -4985,9 +4972,9 @@ class NPUModelRunner(GPUModelRunner):
                     wrappers = [self.segment_c_wrapper]
                 for wrapper in wrappers:
                     if isinstance(wrapper, ACLGraphWrapper):
-                        wrapper.init_graph_params(self.cudagraph_batch_sizes)
+                        wrapper.graph_params = make_graph_params(self.cudagraph_batch_sizes)
                         if self.speculative_config:
-                            wrapper.init_draft_graph_params(self.cudagraph_batch_sizes)
+                            wrapper.draft_graph_params = make_graph_params(self.cudagraph_batch_sizes)
 
     def _get_aclgraph_wrappers(self) -> list[ACLGraphWrapper]:
         """返回所有可能残留 profile 阶段图捕获结果的 ACLGraphWrapper。"""
