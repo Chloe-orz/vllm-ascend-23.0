@@ -602,12 +602,13 @@ class NPUWorker(WorkerBase):
         assert isinstance(output, IntermediateTensors)
         if get_pp_group().world_size == 2:
             channel = self._hidden_channel_for(scheduler_output)
+            print(f"Send intermediate tensors to cloud, hidden_channel={channel.value} before", flush=True,)
             self._record_pp_send_work(
                 edge_cloud_send_tensor_dict(output.tensors, channel=channel),
                 channel=channel,
             )
             print(
-                f"Send intermediate tensors to cloud, hidden_channel={channel.value}",
+                f"Send intermediate tensors to cloud, hidden_channel={channel.value} after",
                 flush=True,
             )
         # Return a placeholder output that carries the request IDs so the
@@ -639,7 +640,6 @@ class NPUWorker(WorkerBase):
             comm_handles=comm_handles,
             comm_postprocess=comm_postprocess,
         )
-        torch.npu.synchronize()
 
         print("model_runner.execute_model edge tail before.", flush=True)
         output = self.model_runner.execute_model(
