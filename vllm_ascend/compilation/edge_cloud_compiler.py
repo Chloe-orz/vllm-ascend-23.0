@@ -69,6 +69,19 @@ class EdgeCloudCompiledSegment(nn.Module):
         self._vllm_config = vllm_config
         self._ascend_compilation_config = ascend_compilation_config
 
+        # Skip all Dynamo guards so that the segment is compiled exactly once.
+        # Without guard skipping, each call with a different batch size during
+        # warmup triggers a fresh Dynamo compilation, quickly exhausting the
+        # recompile limit (default 8) and raising FailOnRecompileLimitHit.
+        # This matches TorchCompileWithNoGuardsWrapper in the standard flow:
+        # the single compiled graph is shape-agnostic; shape-specific
+        # capture / replay is handled independently by ACLGraphWrapper.
+        options: dict[str, Any] = {}
+        if hasattr(torch.compiler, "skip_all_guards_unsafe"):
+            options["guard_filter_fn"] = torch.compiler.skip_all_guards_unsafe
+        else:
+            options["guard_filter_fn"] = lambda x: [False for _ in x]
+
         if ascend_compilation_config.enable_npugraph_ex:
             logger.info(
                 "EdgeCloudCompiledSegment: enable_npugraph_ex=True, "
@@ -79,6 +92,7 @@ class EdgeCloudCompiledSegment(nn.Module):
                 fullgraph=True,
                 dynamic=False,
                 backend=self._npugraph_ex_backend,
+                options=options,
             )
         else:
             logger.info(
@@ -90,6 +104,7 @@ class EdgeCloudCompiledSegment(nn.Module):
                 fullgraph=True,
                 dynamic=False,
                 backend=self._fusion_pass_backend,
+                options=options,
             )
 
     def _npugraph_ex_backend(
