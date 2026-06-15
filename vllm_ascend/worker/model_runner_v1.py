@@ -196,6 +196,7 @@ from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
 
 
+
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
     get_mc2_tokens_capacity,
