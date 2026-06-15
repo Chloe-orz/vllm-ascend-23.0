@@ -82,6 +82,12 @@ class EdgeCloudCompiledSegment(nn.Module):
         else:
             options["guard_filter_fn"] = lambda x: [False for _ in x]
 
+        # dynamic=True is essential here so that Dynamo treats the batch
+        # dimension symbolically (s0) rather than baking a concrete value
+        # (e.g. 8192) into the FX graph.  Without it, npugraph_ex produces
+        # a shape-specific binary that fails on the next warmup run with a
+        # different batch size.  This mirrors the standard flow's behaviour
+        # where _mark_dynamic_inputs() marks dim-0 dynamic before tracing.
         if ascend_compilation_config.enable_npugraph_ex:
             logger.info(
                 "EdgeCloudCompiledSegment: enable_npugraph_ex=True, "
@@ -90,7 +96,7 @@ class EdgeCloudCompiledSegment(nn.Module):
             self._compiled = torch.compile(
                 segment,
                 fullgraph=True,
-                dynamic=False,
+                dynamic=True,
                 backend=self._npugraph_ex_backend,
                 options=options,
             )
@@ -102,7 +108,7 @@ class EdgeCloudCompiledSegment(nn.Module):
             self._compiled = torch.compile(
                 segment,
                 fullgraph=True,
-                dynamic=False,
+                dynamic=True,
                 backend=self._fusion_pass_backend,
                 options=options,
             )
