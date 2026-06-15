@@ -388,12 +388,22 @@ class PassiveEngineCoreProc:
         # side in PD-separation mode; left None for the legacy PP path.
         self._pp_pd_channel = pp_pd_channel
         if getattr(vllm_config.parallel_config, "enable_edge_cloud", False):
+            # PassiveEngineCore runs in a freshly-spawned subprocess; the
+            # ``_ASCEND_CONFIG`` singleton may be empty here. ``init_ascend_config``
+            # is idempotent and returns the cached singleton if already set.
+            from vllm_ascend.ascend_config import init_ascend_config
+            _ascend_config = init_ascend_config(vllm_config)
+            _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
+            _pd_enabled = bool(
+                _edge_cloud is not None
+                and getattr(_edge_cloud, "enabled", False)
+                and getattr(_edge_cloud, "pd_separation", None) is not None
+                and _edge_cloud.pd_separation.enabled
+            )
             logger.info(
                 "PassiveEngineCore: edge-cloud mode enabled "
-                "(enable_pd_separation=%s, pd_channel=%s)",
-                getattr(
-                    vllm_config.parallel_config, "enable_pd_separation", False
-                ),
+                "(pd_separation=%s, pd_channel=%s)",
+                _pd_enabled,
                 "on" if pp_pd_channel is not None else "off",
             )
         self._idle_sleep_seconds = 0.001
@@ -574,11 +584,21 @@ class PassiveEngineCoreProc:
                 # Set up edge-cloud PD-separation channel (cloud side).
                 # The cloud binds POST_OUT and connects PRE_OUT via
                 # master_addr (the edge's IP) so PRE_OUT connects back.
-                if getattr(
-                    vllm_config.parallel_config,
-                    "enable_pd_separation",
-                    False,
-                ):
+                #
+                # PassiveEngineCore runs in a freshly-spawned subprocess where
+                # the ``_ASCEND_CONFIG`` singleton is empty; re-init from the
+                # ``vllm_config`` we were handed. ``init_ascend_config`` is
+                # idempotent on the singleton.
+                from vllm_ascend.ascend_config import init_ascend_config
+                _ascend_config = init_ascend_config(vllm_config)
+                _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
+                _pd_enabled = bool(
+                    _edge_cloud is not None
+                    and getattr(_edge_cloud, "enabled", False)
+                    and getattr(_edge_cloud, "pd_separation", None) is not None
+                    and _edge_cloud.pd_separation.enabled
+                )
+                if _pd_enabled:
                     master_addr = vllm_config.parallel_config.master_addr
                     post_out_bind = (
                         f"tcp://*:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
