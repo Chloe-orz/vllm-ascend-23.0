@@ -52,18 +52,14 @@ from vllm.distributed.parallel_state import is_edge_device, is_edge_cloud_pp_mod
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.model_loader import get_model, get_model_loader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model,
-    process_weights_after_loading,
-)
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import get_dtype_size, set_default_torch_dtype
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -173,10 +169,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
-from vllm_ascend.model_loader.layer_shard_loader import (
-    EdgeCloudLayerPlan,
-    LayerShardLoader,
-)
+
 
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
