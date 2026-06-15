@@ -127,8 +127,11 @@ def update_segment_graph_params(
 ) -> None:
     """边云分段流程：使用 segment 独立 GraphParams 更新指定层的 attention 图参数。
 
-    调用方负责通过 graph_params_scope 将本 segment 的 GraphParams 设为活跃。
-    本函数处理 attention metadata 的两层过滤：
+    本函数自包含 graph_params_scope：将 acl_graph._graph_params 临时替换为
+    当前 segment 的独立 GraphParams，使 impl_cls.update_graph_params 内部
+    通过 get_graph_params() 获取到正确的 (events, workspaces, handles, attn_params)。
+
+    处理 attention metadata 的两层过滤：
     1. 剔除 skip_graph_params_update 标记的 DSA 层
     2. 按 layer_indices 过滤仅保留当前 segment 的层
     """
@@ -155,25 +158,24 @@ def update_segment_graph_params(
         working_metadata, layer_indices
     )
 
-    try:
+    # 将当前 segment 的 GraphParams 设为活跃，使 impl_cls.update_graph_params
+    # 通过 get_graph_params() 获取到正确的 segment 参数。
+    # scope 退出时自动 synchronize + 恢复全局 GraphParams。
+    with graph_params_scope(graph_params, draft_graph_params):
         impl_cls = attn_backend.get_impl_cls()
-        impl_cls.update_graph_params(
-            update_stream,
-            forward_context,
-            num_tokens,
-            vllm_config,
-            speculative_config,
-            num_dcp_pcp_tokens,
-            draft_attn_metadatas,
-        )
-    finally:
-        forward_context.attn_metadata = original_attn_metadata
-
-    # 确保 update_stream 上的异步 attention 参数更新在返回前完成。
-    # EdgeCloudACLGraphWrapper.__call__ 中的 graph_params_scope 会在 wrapper
-    # 退出时再次同步，但此处的同步是必需的：update_graph_params 之后、图回放
-    # 之前，如果异步更新未完成，回放会使用 stale 参数导致卡死或 NaN。
-    torch.npu.current_stream().synchronize()
+        try:
+            impl_cls.update_graph_params(
+                update_stream,
+                forward_context,
+                num_tokens,
+                vllm_config,
+                speculative_config,
+                num_dcp_pcp_tokens,
+                draft_attn_metadatas,
+            )
+        finally:
+            forward_context.attn_metadata = original_attn_metadata
+    # scope 退出时已完成 synchronize，确保异步 attention 参数更新在返回前完成
 
 
 def _filter_attn_metadata_for_layers(
