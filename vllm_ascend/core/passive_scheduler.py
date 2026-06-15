@@ -16,6 +16,7 @@ import enum
 import math
 import queue
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
@@ -135,6 +136,12 @@ class PassiveScheduler:
         # these continuation slices; another prefill-like slice-0 may not.
         self._active_sliced_prefill: SchedulerOutput | None = None
         self._active_prefill_slices: deque[SliceTask] = deque()
+
+        # Cloud-side P/D interleave guard. After dispatching one prefill-middle
+        # slice, EXPECT_EXECUTE_DECODE waits up to 10ms for a decode-middle
+        # batch before falling back to another prefill-middle slice.
+        self._prefill_middle_throttle_started_at: float | None = None
+        self._prefill_middle_throttle_seconds = 0.010
 
         # Bridge queue between the (optional) subscriber thread and the
         # main loop. When the thread is enabled, it drains
@@ -351,6 +358,21 @@ class PassiveScheduler:
         ),
     }
 
+    def _start_prefill_middle_throttle(self) -> None:
+        self._prefill_middle_throttle_started_at = time.monotonic()
+
+    def _clear_prefill_middle_throttle(self) -> None:
+        self._prefill_middle_throttle_started_at = None
+
+    def _can_fallback_to_prefill_in_decode_state(self) -> bool:
+        started_at = self._prefill_middle_throttle_started_at
+        if started_at is None:
+            return True
+        if time.monotonic() - started_at >= self._prefill_middle_throttle_seconds:
+            self._clear_prefill_middle_throttle()
+            return True
+        return False
+
     def schedule(self) -> ScheduledBatch:
         """Pick the next SchedulerOutput to dispatch.
 
@@ -375,26 +397,42 @@ class PassiveScheduler:
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE
                 )
+                self._start_prefill_middle_throttle()
                 return self._build_active_prefill_slice_batch()
             if self.ready_prefills:
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE
                 )
+                self._start_prefill_middle_throttle()
                 return self._build_batch(self.ready_prefills.popleft())
             if self.ready_decodes:
+                self._clear_prefill_middle_throttle()
                 return self._build_batch(self.ready_decodes.popleft())
         else:
             if self.ready_decodes:
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_PREFILL
                 )
+                self._clear_prefill_middle_throttle()
                 return self._build_batch(self.ready_decodes.popleft())
-            if self._active_prefill_slices:
-                return self._build_active_prefill_slice_batch()
-            if self.ready_prefills:
-                return self._build_batch(self.ready_prefills.popleft())
+            if self._can_fallback_to_prefill_in_decode_state():
+                if self._active_prefill_slices:
+                    self._start_prefill_middle_throttle()
+                    return self._build_active_prefill_slice_batch()
+                if self.ready_prefills:
+                    self._start_prefill_middle_throttle()
+                    return self._build_batch(self.ready_prefills.popleft())
+            else:
+                return ScheduledBatch.empty()
 
         if self.ready_pdmixes:
+            if (
+                state == CloudSchedulingState.EXPECT_EXECUTE_DECODE
+                and not self._can_fallback_to_prefill_in_decode_state()
+            ):
+                return ScheduledBatch.empty()
+            if state == CloudSchedulingState.EXPECT_EXECUTE_DECODE:
+                self._start_prefill_middle_throttle()
             return self._build_batch(self.ready_pdmixes.popleft())
         return ScheduledBatch.empty()
 
