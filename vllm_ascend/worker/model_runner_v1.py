@@ -597,12 +597,20 @@ class NPUModelRunner(GPUModelRunner):
 
         # Layerwise chunking: state saved by chunk 0 and consumed by
         # continuation chunks (1..N-1).
-        # In edge-cloud PD-separated mode multiple batches may be in flight
-        # concurrently (e.g. P-slice chain interleaved with D-middle).
-        # We key the saved state by scheduler_output.head_token so that
-        # a non-first slice always recovers the state belonging to its own
-        # batch rather than the most recently executed first slice.
-        self._layerwise_states: dict[str, dict] = {}
+        self._layerwise_intermediate: IntermediateTensors | None = None
+        self._layerwise_positions: torch.Tensor | None = None
+        self._layerwise_attn_metadata: Any = None
+        self._layerwise_num_tokens_padded: int = 0
+        self._layerwise_num_tokens_across_dp: int | None = None
+        self._layerwise_batch_desc: Any = None
+        self._layerwise_scheduler_output: Any = None
+        # Additional state needed by the last chunk on the last PP rank
+        # for logits computation and execute_model_state setup.
+        self._layerwise_logits_indices: torch.Tensor | None = None
+        self._layerwise_spec_decode_metadata: Any = None
+        self._layerwise_spec_decode_common_attn_metadata: Any = None
+        self._layerwise_ec_connector_output: Any = None
+        self._layerwise_cudagraph_stats: Any = None
 
         # Edge-cloud PD-separation: suspended head-segment states keyed by
         # head_token.  Each entry holds the minimal context needed to verify
@@ -2663,12 +2671,10 @@ class NPUModelRunner(GPUModelRunner):
             # Slice 0 may have returned early (e.g. 0 scheduled tokens)
             # without saving intermediate state.  In that case all
             # subsequent slices should also return early.
-            key = scheduler_output.head_token or "default"
-            state = self._layerwise_states.pop(key, None)
-            if state is None:
+            if self._layerwise_intermediate is None:
                 return EMPTY_MODEL_RUNNER_OUTPUT
             return self._execute_layerwise_continuation(
-                layer_slice_info, state
+                layer_slice_info
             )
         # --- End layer slice fast path ---
 
@@ -3245,24 +3251,18 @@ class NPUModelRunner(GPUModelRunner):
         clear_kv_metadata = self.speculative_config is None
 
         # Save per-step state for layer slice continuation.
-        # Metadata is stored now; intermediate hidden_states are added
-        # in the post-process block after the forward pass.
         if layer_slice_info is not None and not layer_slice_info.is_last_slice:
-            key = scheduler_output.head_token or "default"
-            self._layerwise_states[key] = {
-                "positions": positions,
-                "attn_metadata": attn_metadata,
-                "num_tokens_padded": num_tokens_padded,
-                "num_tokens_across_dp": num_tokens_across_dp,
-                "batch_desc": batch_desc,
-                "scheduler_output": scheduler_output,
-                "logits_indices": logits_indices,
-                "spec_decode_metadata": spec_decode_metadata,
-                "spec_decode_common_attn_metadata": spec_decode_common_attn_metadata,
-                "ec_connector_output": ec_connector_output,
-                "cudagraph_stats": cudagraph_stats,
-                "intermediate": None,
-            }
+            self._layerwise_positions = positions
+            self._layerwise_attn_metadata = attn_metadata
+            self._layerwise_num_tokens_padded = num_tokens_padded
+            self._layerwise_num_tokens_across_dp = num_tokens_across_dp
+            self._layerwise_batch_desc = batch_desc
+            self._layerwise_scheduler_output = scheduler_output
+            self._layerwise_logits_indices = logits_indices
+            self._layerwise_spec_decode_metadata = spec_decode_metadata
+            self._layerwise_spec_decode_common_attn_metadata = spec_decode_common_attn_metadata
+            self._layerwise_ec_connector_output = ec_connector_output
+            self._layerwise_cudagraph_stats = cudagraph_stats
 
         with (
             record_function_or_nullcontext("forward"),
@@ -3326,7 +3326,7 @@ class NPUModelRunner(GPUModelRunner):
             # Must happen BEFORE the edge-cloud early return below;
             # otherwise cloud non-last slices would return IntermediateTensors
             # to the worker immediately without saving continuation state,
-            # causing all subsequent slices to see an empty _layerwise_states entry.
+            # causing all subsequent slices to see _layerwise_intermediate=None.
             if (
                 layer_slice_info is not None
                 and not layer_slice_info.is_last_slice
@@ -3335,14 +3335,7 @@ class NPUModelRunner(GPUModelRunner):
                 # ranks.  Detach the hidden/residual so they serve as
                 # fresh inputs for the next slice's forward pass.
                 assert isinstance(hidden_states, IntermediateTensors)
-                key = scheduler_output.head_token or "default"
-                if key in self._layerwise_states:
-                    self._layerwise_states[key]["intermediate"] = hidden_states
-                else:
-                    # Defensive: if the metadata dict was somehow dropped,
-                    # create a minimal entry so the continuation can still
-                    # find the intermediate tensor.
-                    self._layerwise_states[key] = {"intermediate": hidden_states}
+                self._layerwise_intermediate = hidden_states
                 if self.debugger is not None:
                     self.debugger.stop()
                     self.debugger.step()
@@ -5559,38 +5552,30 @@ class NPUModelRunner(GPUModelRunner):
     def _execute_layerwise_continuation(
         self,
         layer_slice_info: Any,
-        state: dict | None = None,
     ) -> IntermediateTensors | None:
         """Run model forward for a non-first layer slice.
 
         On the first slice, execute_model set up all the batch state
         (requests, attention metadata, positions, etc.) and saved the
         intermediate hidden_states/residual in
-        ``self._layerwise_states[head_token]``.  Subsequent slices only
-        need to feed that intermediate state back into the model for the
-        current slice's layer range.
+        ``self._layerwise_intermediate``.  Subsequent slices only need to
+        feed that intermediate state back into the model for the current
+        slice's layer range.
         """
-        if state is None:
-            # Fallback for any legacy callers – not expected in normal flow.
-            raise RuntimeError(
-                "Layer slice continuation requires a state dict. "
-                "Was this called from the updated execute_model fast path?"
-            )
+        assert self._layerwise_intermediate is not None, (
+            "Layer slice continuation requires saved intermediate state from "
+            "the previous slice.  Was slice 0 executed first?"
+        )
 
-        intermediate_tensors = state.get("intermediate")
-        if intermediate_tensors is None:
-            raise RuntimeError(
-                "Layer slice continuation requires saved intermediate state from "
-                "the previous slice.  Was slice 0 executed first?"
-            )
+        intermediate_tensors = self._layerwise_intermediate
+        self._layerwise_intermediate = None
 
         # Re-use the positions and attention metadata that slice 0 prepared.
-        positions = state["positions"]
-        attn_metadata = state["attn_metadata"]
-        num_tokens_padded = state["num_tokens_padded"]
-        num_tokens_across_dp = state["num_tokens_across_dp"]
-        batch_desc = state["batch_desc"]
-        scheduler_output = state["scheduler_output"]
+        positions = self._layerwise_positions
+        attn_metadata = self._layerwise_attn_metadata
+        num_tokens_padded = self._layerwise_num_tokens_padded
+        num_tokens_across_dp = self._layerwise_num_tokens_across_dp
+        batch_desc = self._layerwise_batch_desc
 
         has_encoder_input = False
         clear_kv_metadata = self.speculative_config is None
@@ -5610,7 +5595,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
             ),
             self.maybe_get_kv_connector_output(
-                scheduler_output,
+                self._layerwise_scheduler_output,
                 **({"defer_finalize": not clear_kv_metadata}),
             ) as kv_connector_output,
         ):
@@ -5634,9 +5619,7 @@ class NPUModelRunner(GPUModelRunner):
             # Non-last slice: save intermediate and return None.
             if not layer_slice_info.is_last_slice:
                 assert isinstance(hidden_states, IntermediateTensors)
-                key = scheduler_output.head_token or "default"
-                state["intermediate"] = hidden_states
-                self._layerwise_states[key] = state
+                self._layerwise_intermediate = hidden_states
                 return None
 
             # Edge-cloud cloud segment: always returns IntermediateTensors
@@ -5669,22 +5652,22 @@ class NPUModelRunner(GPUModelRunner):
                 "Layerwise chunking with pooling models is not yet "
                 "supported on the last PP rank."
             )
-            logits_indices = state["logits_indices"]
+            logits_indices = self._layerwise_logits_indices
             sample_hidden_states = hidden_states[logits_indices]
             logits = self.model.compute_logits(sample_hidden_states)
             self.execute_model_state = ExecuteModelState(
-                scheduler_output,
+                self._layerwise_scheduler_output,
                 logits,
-                state["spec_decode_metadata"],
-                state["spec_decode_common_attn_metadata"],
+                self._layerwise_spec_decode_metadata,
+                self._layerwise_spec_decode_common_attn_metadata,
                 hidden_states,
                 sample_hidden_states,
                 None,   # aux_hidden_states
-                attn_metadata,
-                positions,
-                state["ec_connector_output"],
-                state["cudagraph_stats"],
-                batch_desc,
+                self._layerwise_attn_metadata,
+                self._layerwise_positions,
+                self._layerwise_ec_connector_output,
+                self._layerwise_cudagraph_stats,
+                self._layerwise_batch_desc,
             )
             self.kv_connector_output = kv_connector_output
             return None
