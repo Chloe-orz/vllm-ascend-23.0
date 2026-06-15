@@ -515,10 +515,21 @@ def _build_non_spec_causal_conv1d_host_meta(
         None if slot is None else slot.has_initial_state_cpu,
     )
 
+    # _copy_to_pinned_cpu uses non_blocking=True; the data may still be
+    # in flight on the NPU stream.  Synchronize before .clone() so we
+    # copy the correct values, not uninitialized pool-buffer garbage.
+    if torch.npu.is_available():
+        torch.npu.current_stream().synchronize()
+
+    # Clone the CPU tensors so the returned metadata does not hold a
+    # live view into the shared round-robin pool buffer.  This prevents
+    # a later batch (e.g. a decode task interleaved between prefill
+    # slices) from overwriting the data while the prefill continuation
+    # is still in flight.
     return GDNCausalConv1dHostMetadata(
-        query_start_loc_cpu=non_spec_query_start_loc_cpu,
-        cache_indices_cpu=cache_indices_cpu,
-        has_initial_state_cpu=has_initial_state_cpu,
+        query_start_loc_cpu=non_spec_query_start_loc_cpu.clone(),
+        cache_indices_cpu=cache_indices_cpu.clone(),
+        has_initial_state_cpu=has_initial_state_cpu.clone(),
         _buffer_slot=slot,
     )
 
@@ -546,7 +557,23 @@ def _build_non_spec_chunked_prefill_meta(
     slot = builder._ascend_gdn_chunked_prefill_pool[builder._ascend_gdn_chunked_prefill_pool_idx]
     tensors = _slice_chunk_meta_slot_tensors(slot, shape_info)
     _fill_chunk_meta_device_tensors(builder, cu_seqlens, tensors)
-    return _build_chunked_prefill_metadata(builder, tensors, slot=slot)
+    meta = _build_chunked_prefill_metadata(builder, tensors, slot=slot)
+    # _fill_chunk_meta_device_tensors may launch async device ops.
+    # Synchronize before .clone() so we read committed data.
+    if torch.npu.is_available():
+        torch.npu.current_stream().synchronize()
+    # Defensive clone: decouple from the shared pool so that interleaved
+    # batches cannot overwrite the metadata while a prefill slice chain
+    # is still in flight.
+    return GDNChunkedPrefillMetadata(
+        chunk_indices_chunk64=meta.chunk_indices_chunk64.clone(),
+        chunk_offsets_chunk64=meta.chunk_offsets_chunk64.clone(),
+        update_chunk_offsets_chunk64=meta.update_chunk_offsets_chunk64.clone(),
+        final_chunk_indices_chunk64=meta.final_chunk_indices_chunk64.clone(),
+        chunk_indices_large_block=meta.chunk_indices_large_block.clone(),
+        block_indices_cumsum=meta.block_indices_cumsum.clone(),
+        _buffer_slot=None,
+    )
 
 
 def _patched_build(
