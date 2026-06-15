@@ -169,6 +169,12 @@ def update_segment_graph_params(
     finally:
         forward_context.attn_metadata = original_attn_metadata
 
+    # 确保 update_stream 上的异步 attention 参数更新在返回前完成。
+    # EdgeCloudACLGraphWrapper.__call__ 中的 graph_params_scope 会在 wrapper
+    # 退出时再次同步，但此处的同步是必需的：update_graph_params 之后、图回放
+    # 之前，如果异步更新未完成，回放会使用 stale 参数导致卡死或 NaN。
+    torch.npu.current_stream().synchronize()
+
 
 def _filter_attn_metadata_for_layers(
     attn_metadata: dict,
