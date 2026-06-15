@@ -5573,6 +5573,17 @@ class NPUModelRunner(GPUModelRunner):
         # Re-use the positions and attention metadata that slice 0 prepared.
         positions = self._layerwise_positions
         attn_metadata = self._layerwise_attn_metadata
+
+        # Mark the attention metadata as a layer-slice continuation so that
+        # GDN's causal_conv1d prefill path knows conv_state may have been
+        # polluted by an interleaved decode batch.  See
+        # vllm_ascend.ops.gdn._maybe_reset_initial_state_for_layer_slice.
+        if isinstance(attn_metadata, dict):
+            for per_layer_meta in attn_metadata.values():
+                per_layer_meta._is_layer_slice_continuation = True
+        elif attn_metadata is not None:
+            attn_metadata._is_layer_slice_continuation = True
+
         num_tokens_padded = self._layerwise_num_tokens_padded
         num_tokens_across_dp = self._layerwise_num_tokens_across_dp
         batch_desc = self._layerwise_batch_desc
