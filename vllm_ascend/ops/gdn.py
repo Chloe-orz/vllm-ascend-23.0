@@ -510,19 +510,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     cache_indices_opt,
                     initial_state_mode_opt,
                 ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
-                # Defensive check: catch parameter mismatches caused by
-                # interleaved batches corrupting the attention metadata.
-                qsl_len = len(query_start_loc_opt)
-                expected_tokens = query_start_loc_opt[-1] if qsl_len > 0 else 0
-                actual_tokens = mixed_qkv_non_spec.shape[0]
-                if expected_tokens != actual_tokens:
-                    raise RuntimeError(
-                        f"aclnnCausalConv1d parameter mismatch: "
-                        f"query_start_loc says {expected_tokens} tokens, "
-                        f"but mixed_qkv has {actual_tokens} tokens. "
-                        f"This usually means the attention metadata was "
-                        f"corrupted by an interleaved batch."
-                    )
                 mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
                     conv_weights_T,

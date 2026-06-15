@@ -57,38 +57,12 @@ def chunk_gated_delta_rule_fwd(
     update_chunk_offsets_chunk64 = None if prebuilt_meta is None else prebuilt_meta.update_chunk_offsets_chunk64
     final_chunk_indices_chunk64 = None if prebuilt_meta is None else prebuilt_meta.final_chunk_indices_chunk64
     chunk_indices_large_block = None if prebuilt_meta is None else prebuilt_meta.chunk_indices_large_block
-
-    # --- Step 2: print prebuilt_meta tensor ptrs to detect shared-pool reuse ---
-    if prebuilt_meta is not None:
-        print(
-            f"[CHUNK-DEBUG] prebuilt_meta ptrs: "
-            f"block_indices_cumsum={block_indices_cumsum.data_ptr() if block_indices_cumsum is not None else None}, "
-            f"chunk_indices_chunk64={chunk_indices_chunk64.data_ptr() if chunk_indices_chunk64 is not None else None}, "
-            f"chunk_offsets_chunk64={chunk_offsets_chunk64.data_ptr() if chunk_offsets_chunk64 is not None else None}, "
-            f"update_chunk_offsets_chunk64={update_chunk_offsets_chunk64.data_ptr() if update_chunk_offsets_chunk64 is not None else None}, "
-            f"final_chunk_indices_chunk64={final_chunk_indices_chunk64.data_ptr() if final_chunk_indices_chunk64 is not None else None}, "
-            f"chunk_indices_large_block={chunk_indices_large_block.data_ptr() if chunk_indices_large_block is not None else None}",
-            flush=True,
-        )
-        print(
-            f"[CHUNK-DEBUG] tensor shapes: "
-            f"q={q.shape}, k={k.shape}, v={v.shape}, "
-            f"initial_state={'None' if initial_state is None else list(initial_state.shape)}, "
-            f"cu_seqlens={'None' if cu_seqlens is None else cu_seqlens.tolist()}",
-            flush=True,
-        )
-
     g = chunk_local_cumsum(
         g,
         chunk_size=chunk_size,
         cu_seqlens=cu_seqlens,
         block_indices=block_indices_cumsum,
     )
-    # --- Step 1: sync after chunk_local_cumsum ---
-    if torch.npu.is_available():
-        torch.npu.current_stream().synchronize()
-        print("[CHUNK-SYNC] after chunk_local_cumsum OK", flush=True)
-
     # obtain WY representation. u is actually the new v.
     A = chunk_scaled_dot_kkt_fwd(
         k=k,
@@ -105,11 +79,6 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices_bt=chunk_indices_chunk64,
         output_dtype=k.dtype,
     )
-    # --- Step 1: sync after solve_tril ---
-    if torch.npu.is_available():
-        torch.npu.current_stream().synchronize()
-        print("[CHUNK-SYNC] after solve_tril OK", flush=True)
-
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -119,20 +88,12 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
     )
-    # --- Step 1: sync after recompute_w_u_fwd ---
-    if torch.npu.is_available():
-        torch.npu.current_stream().synchronize()
-        print("[CHUNK-SYNC] after recompute_w_u_fwd OK", flush=True)
 
     k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
     w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
     u_ascendc = u.to(torch.bfloat16).transpose(1, 2).contiguous()
     g_ascendc = g.transpose(1, 2).contiguous()
     q_ascendc = q.to(torch.bfloat16).transpose(1, 2).contiguous()
-    # --- Step 1: sync after tensor prep ---
-    if torch.npu.is_available():
-        torch.npu.current_stream().synchronize()
-        print("[CHUNK-SYNC] after tensor prep OK", flush=True)
 
     cu_seqlens = None if cu_seqlens is None else cu_seqlens.to(torch.int64)
     chunk_indices = None if chunk_indices_chunk64 is None else chunk_indices_chunk64.to(torch.int64)
