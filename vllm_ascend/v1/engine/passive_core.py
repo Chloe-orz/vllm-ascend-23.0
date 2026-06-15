@@ -388,8 +388,11 @@ class PassiveEngineCoreProc:
         # side in PD-separation mode; left None for the legacy PP path.
         self._pp_pd_channel = pp_pd_channel
         if getattr(vllm_config.parallel_config, "enable_edge_cloud", False):
-            from vllm_ascend.ascend_config import get_ascend_config
-            _ascend_config = get_ascend_config()
+            # PassiveEngineCore runs in a freshly-spawned subprocess; the
+            # ``_ASCEND_CONFIG`` singleton may be empty here. ``init_ascend_config``
+            # is idempotent and returns the cached singleton if already set.
+            from vllm_ascend.ascend_config import init_ascend_config
+            _ascend_config = init_ascend_config(vllm_config)
             _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
             _pd_enabled = bool(
                 _edge_cloud is not None
@@ -581,8 +584,13 @@ class PassiveEngineCoreProc:
                 # Set up edge-cloud PD-separation channel (cloud side).
                 # The cloud binds POST_OUT and connects PRE_OUT via
                 # master_addr (the edge's IP) so PRE_OUT connects back.
-                from vllm_ascend.ascend_config import get_ascend_config
-                _ascend_config = get_ascend_config()
+                #
+                # PassiveEngineCore runs in a freshly-spawned subprocess where
+                # the ``_ASCEND_CONFIG`` singleton is empty; re-init from the
+                # ``vllm_config`` we were handed. ``init_ascend_config`` is
+                # idempotent on the singleton.
+                from vllm_ascend.ascend_config import init_ascend_config
+                _ascend_config = init_ascend_config(vllm_config)
                 _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
                 _pd_enabled = bool(
                     _edge_cloud is not None

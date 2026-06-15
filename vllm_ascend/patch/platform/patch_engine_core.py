@@ -110,11 +110,12 @@ def _patched_engine_core_init(self, *args, **kwargs):
     parallel_config: ParallelConfig = self.vllm_config.parallel_config
 
     # PD-separation is owned by the ascend plugin and lives under
-    # ``additional_config.edge_cloud_config.pd_separation``. ``ascend_config``
-    # is initialized during ``Platform.check_and_update_config``, which runs
-    # before EngineCore is constructed, so the singleton is always ready here.
-    from vllm_ascend.ascend_config import get_ascend_config
-    ascend_config = get_ascend_config()
+    # ``additional_config.edge_cloud_config.pd_separation``. ``init_ascend_config``
+    # is idempotent and returns the cached singleton if already initialized
+    # in the main process; in a freshly-spawned subprocess it re-initializes
+    # from the ``vllm_config`` we hold.
+    from vllm_ascend.ascend_config import init_ascend_config
+    ascend_config = init_ascend_config(self.vllm_config)
     edge_cloud = getattr(ascend_config, "edge_cloud_config", None)
     pd_enabled = bool(
         edge_cloud is not None
