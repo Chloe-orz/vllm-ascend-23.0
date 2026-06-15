@@ -202,6 +202,7 @@ from vllm_ascend.worker.edge_cloud.execute_model_bundle import (
     _MergedAttnContext,
 )
 
+from vllm_ascend.worker.edge_cloud.execute_model_bundle import _ExecuteModelBundle
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -3864,7 +3865,6 @@ class NPUModelRunner(GPUModelRunner):
     def execute_model_batched_head(
         self,
         bundles: list[_ExecuteModelBundle],
-        batched_dp_ranks: list[int] | None = None,
     ) -> list[IntermediateTensors]:
         """1 batched head model_forward = 1 ``model.embed_tokens``.
 
@@ -3880,96 +3880,82 @@ class NPUModelRunner(GPUModelRunner):
         """
         dp_size = len(bundles)
 
-        # Per-bundle actual (non-padded) token counts. The
-        # cudagraph dispatcher pads each dp_rank's tensors to its
-        # own cudagraph alignment (``num_tokens_padded``), but
-        # the merged forward is single-shot (no cudagraph
-        # capture — see ``invalid_modes={CUDAGraphMode.FULL}``
-        # below) so we concatenate the *actual* tokens and let
-        # the merged forward produce an actual-shaped output.
-        # Padding would otherwise waste compute on padded slots.
-        n_actuals = [
-            b.attn_metadata[0][
-                next(iter(b.attn_metadata[0]))].num_actual_tokens
-            if isinstance(b.attn_metadata, list) and b.attn_metadata
-            else next(iter(b.attn_metadata.values())).num_actual_tokens
-            for b in bundles
-        ]
-
-        # Total merged actual token count (sum across dp_ranks
-        # — the cudagraph dispatcher pads each dp_rank to its
-        # own alignment, but the merged forward is single-shot
-        # and consumes only the actual tokens). The if/else
-        # below builds the actual trimmed-and-catted merged
-        # tensors (``merged_input_ids`` /
-        # ``merged_positions`` / ``merged_inputs_embeds``).
-        num_tokens_merged = sum(n_actuals)
+        # All bundles in a round come from the same
+        # ``_determine_batch_execution_and_padding`` condition, so
+        # the per-bundle fields that are ``| None`` are either
+        # None for every bundle or non-None for every bundle.
+        # ``torch.cat`` cannot accept None elements, so for each
+        # such field we short-circuit: if any bundle has it as
+        # None, the merged value is None (or an empty-tensor
+        # placeholder for ``input_ids`` / ``positions`` /
+        # ``num_tokens_across_dp``, since the downstream
+        # ``_model_forward`` accepts None for those).
+        if all(b.input_ids is not None for b in bundles):
+            merged_input_ids = torch.cat([b.input_ids for b in bundles])
+        else:
+            merged_input_ids = None
+        if all(b.positions is not None for b in bundles):
+            # ``positions`` is 1D ``[N]`` for plain text models and
+            # 2D ``[mrope_dim, N]`` for mrope / xdrope models
+            # (see ``_preprocess`` upstream). ``torch.cat`` along
+            # the token axis means:
+            #   - 1D: dim=0  (the only dim)
+            #   - 2D: dim=1  (mrope_dim is fixed; token dim is
+            #     the inner axis)
+            # All per-dp_rank ``N`` values differ, so the wrong
+            # dim would error with "Sizes of tensors must match
+            # except in the concatenating dimension".
+            # All per-dp_rank ``positions`` tensors share the
+            # same dimensionality (same model, same
+            # text / mrope / xdrope path) — pick the first
+            # bundle's shape to determine the cat dim.
+            cat_dim = bundles[0].positions.dim() - 1
+            merged_positions = torch.cat(
+                [b.positions for b in bundles], dim=cat_dim)
+        else:
+            merged_positions = None
+        # ``input_ids`` and ``inputs_embeds`` are mutually
+        # exclusive: text path → ``input_ids``, mm path →
+        # ``inputs_embeds``. Forwarding both correctly requires
+        # cat-ing the mm-side tensor when present and letting
+        # ``forward_edge_cloud_segment`` (segment_a) pick the
+        # right one. We pass both; the segment wrapper
+        # internally prefers ``inputs_embeds`` when non-None
+        # (see qwen3_5_edge_cloud.py ``is_first_segment``
+        # branch).
+        if all(b.inputs_embeds is not None for b in bundles):
+            merged_inputs_embeds = torch.cat(
+                [b.inputs_embeds for b in bundles])
+        else:
+            merged_inputs_embeds = None
+        num_tokens_merged = (
+            merged_input_ids.shape[0] if merged_input_ids is not None
+            else (merged_inputs_embeds.shape[0]
+                  if merged_inputs_embeds is not None else 0))
+        num_tokens_padded_merged = sum(b.num_tokens_padded for b in bundles)
+        # The batched head segment runs as a single merged
+        # forward — there is no SP / DP all-gather that
+        # needs the per-dp_rank padded token counts. The
+        # forward-context consumers (MoE comm-method
+        # selector at line 91, post-segment custom ops)
+        # fall back to ``num_tokens`` when
+        # ``num_tokens_across_dp`` is ``None``. The
+        # per-dp_rank vector is also ambiguous in a
+        # partial round (some dp_ranks may not have
+        # produced a batched marker), so we pass ``None``
+        # rather than reconstructing it.
         num_tokens_across_dp_merged = None
 
         any_bundle = bundles[0]
-        # Non-embedding_only edge runs attention in the head
-        # segment; embedding_only edges skip attention and pass
-        # ``any_bundle.attn_metadata`` as a placeholder.
-        is_non_embedding_only_edge = (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "edge"
-            and self.edge_cloud_cfg.mode != "embedding_only")
-        if is_non_embedding_only_edge:
-            assert batched_dp_ranks is not None, (
-                "execute_model_batched_head: batched_dp_ranks required "
-                "for non-embedding_only edge mode.")
-            ctx = self._get_or_build_merged_attn_ctx(
-                bundles, batched_dp_ranks)
-            head_attn_metadata: Any = ctx.merged_attn_metadata
-            batch_descriptor = ctx.merged_batch_descriptor
-            # ``num_tokens_padded_merged`` is the cudagraph-
-            # dispatched merged padded count (NOT a per-dp_rank
-            # sum — summing would over-allocate the buffer).
-            num_tokens_padded_merged = ctx.num_tokens_padded_merged
-            # Reuse the trimmed-and-catted merged tensors
-            # cached in ctx (head and tail share the same
-            # per-dp_rank batches — 1:1 token mapping via
-            # cloud middle).
-            merged_input_ids = ctx.merged_input_ids
-            merged_positions = ctx.merged_positions
-            merged_inputs_embeds = ctx.merged_inputs_embeds
-        else:
-            head_attn_metadata = any_bundle.attn_metadata
-            batch_descriptor = any_bundle.batch_desc
-            num_tokens_padded_merged = sum(
-                b.num_tokens_padded for b in bundles)
-            # No merged ctx (cloud / non-edge path) — build
-            # the trimmed tensors locally for head (tail is not
-            # in this path).
-            if all(b.input_ids is not None for b in bundles):
-                merged_input_ids = torch.cat(
-                    [b.input_ids[:n]
-                     for b, n in zip(bundles, n_actuals)])
-            else:
-                merged_input_ids = None
-            if all(b.positions is not None for b in bundles):
-                cat_dim = bundles[0].positions.dim() - 1
-                merged_positions = torch.cat(
-                    [b.positions[..., :n]
-                     for b, n in zip(bundles, n_actuals)],
-                    dim=cat_dim)
-            else:
-                merged_positions = None
-            if all(b.inputs_embeds is not None for b in bundles):
-                merged_inputs_embeds = torch.cat(
-                    [b.inputs_embeds[:n]
-                     for b, n in zip(bundles, n_actuals)])
-            else:
-                merged_inputs_embeds = None
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
-                attn_metadata=head_attn_metadata,
+                attn_metadata=any_bundle.attn_metadata,
                 vllm_config=self.vllm_config,
                 num_tokens=num_tokens_padded_merged,
                 num_tokens_across_dp=num_tokens_across_dp_merged,
                 aclgraph_runtime_mode=any_bundle.cudagraph_mode,
-                batch_descriptor=batch_descriptor,
+                batch_descriptor=any_bundle.batch_desc,
                 num_actual_tokens=num_tokens_merged,
                 model_instance=self.model,
                 max_tokens_across_pcp=(0 if self.pcp_size == 1
@@ -3985,13 +3971,14 @@ class NPUModelRunner(GPUModelRunner):
                 merged_inputs_embeds,
             )
 
-        # Per-dp_rank actual (non-padded) token counts. The
-        # merged forward produced ``hidden_states`` of shape
-        # ``[num_tokens_merged, hidden]`` (no padding) — slice
-        # back using actual counts.
         token_offsets = [0]
-        for n in n_actuals:
-            token_offsets.append(token_offsets[-1] + n)
+        for b in bundles:
+            # ``input_ids`` and ``inputs_embeds`` are mutually
+            # exclusive: text path → ``input_ids``,
+            # mm path → ``inputs_embeds``. Use whichever is
+            # present for the per-dp_rank slice shape.
+            shape_src = b.input_ids if b.input_ids is not None else b.inputs_embeds
+            token_offsets.append(token_offsets[-1] + shape_src.shape[0])
         results: list[IntermediateTensors] = []
         # Edge head segment's ``_model_forward`` returns an
         # ``IntermediateTensors`` (carrying ``hidden_states`` and
@@ -4025,7 +4012,6 @@ class NPUModelRunner(GPUModelRunner):
         self,
         bundles: list[_ExecuteModelBundle],
         intermediates: list[IntermediateTensors],
-        batched_dp_ranks: list[int] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Any]:
         """1 batched tail model_forward + 1 batched ``compute_logits``.
 
@@ -4054,19 +4040,6 @@ class NPUModelRunner(GPUModelRunner):
         # Per-dp_rank head slices come from
         # ``execute_model_batched_head``; both fields are
         # populated by the patched Qwen3.5 segment. Defensive
-        # Per-bundle actual token counts (defensive trim of
-        # the cloud-returned intermediates — cloud middle is
-        # 1:1 token pass-through, but we use the per-bundle
-        # ``num_actual_tokens`` from the bundle's attn metadata
-        # to make the trim explicit and avoid any cloud-side
-        # padding leaking into the merged tensor).
-        n_actuals_tail = [
-            (b.attn_metadata[0][
-                next(iter(b.attn_metadata[0]))].num_actual_tokens
-             if isinstance(b.attn_metadata, list) and b.attn_metadata
-             else next(iter(b.attn_metadata.values())).num_actual_tokens)
-            for b in bundles
-        ]
         # short-circuit: if a per-dp_rank slice is ``None`` for
         # either field, the merged value is ``None`` and the
         # corresponding ``IntermediateTensors`` entry is
@@ -4075,14 +4048,12 @@ class NPUModelRunner(GPUModelRunner):
         # in the head-segment path).
         if all(it["hidden_states"] is not None for it in intermediates):
             merged_hidden = torch.cat(
-                [it["hidden_states"][:n]
-                 for it, n in zip(intermediates, n_actuals_tail)])
+                [it["hidden_states"] for it in intermediates])
         else:
             merged_hidden = None
         if all(it["residual"] is not None for it in intermediates):
             merged_residual = torch.cat(
-                [it["residual"][:n]
-                 for it, n in zip(intermediates, n_actuals_tail)])
+                [it["residual"] for it in intermediates])
         else:
             merged_residual = None
         merged_intermediate = IntermediateTensors({
@@ -4090,96 +4061,30 @@ class NPUModelRunner(GPUModelRunner):
             "residual": merged_residual,
         })
 
-        # Token offsets for ``logits_indices`` use the
-        # per-bundle actual count (NOT
-        # ``it["hidden_states"].shape[0]`` which equals the
-        # actual count in practice but is redundant given
-        # we just trimmed — explicit here for clarity and
-        # consistency with head segment).
         token_offsets = [0]
-        for n in n_actuals_tail:
-            token_offsets.append(token_offsets[-1] + n)
+        for it in intermediates:
+            if it["hidden_states"] is None:
+                token_offsets.append(token_offsets[-1])
+            else:
+                token_offsets.append(token_offsets[-1]
+                                     + it["hidden_states"].shape[0])
         merged_logits_indices = torch.cat(
             [bundles[i].logits_indices + token_offsets[i]
              for i in range(dp_size)])
 
         any_bundle = bundles[0]
-        # Non-embedding_only path: tail segment ALSO writes KV cache
-        # (each tail layer's reshape_and_cache writes its own K/V) —
-        # the merged attn_metadata must address the GLOBAL KV
-        # buffer with per-dp_rank offsets. Reuses the cached
-        # merged ctx from the head segment verbatim — every field
-        # (including ``num_actual_tokens``) is identical between
-        # head and tail because cloud middle is a 1:1 token mapping
-        # (``merged_input_ids.shape[0]`` ==
-        # ``merged_hidden.shape[0]``), so no per-layer mutation
-        # is needed here.
-        is_non_embedding_only_edge = (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "edge"
-            and self.edge_cloud_cfg.mode != "embedding_only")
-        if is_non_embedding_only_edge:
-            assert batched_dp_ranks is not None, (
-                "execute_model_batched_tail: batched_dp_ranks required "
-                "for non-embedding_only edge mode.")
-            ctx = self._get_or_build_merged_attn_ctx(
-                bundles, batched_dp_ranks)
-            tail_attn_metadata: Any = ctx.merged_attn_metadata
-            batch_descriptor = ctx.merged_batch_descriptor
-            # ``num_tokens_padded_merged`` is the cudagraph-
-            # dispatched merged padded count (NOT a per-dp_rank
-            # sum — summing would over-allocate the buffer).
-            num_tokens_padded_merged = ctx.num_tokens_padded_merged
-        else:
-            tail_attn_metadata = any_bundle.attn_metadata
-            batch_descriptor = any_bundle.batch_desc
-            num_tokens_padded_merged = sum(
-                b.num_tokens_padded for b in bundles)
         kv_connector_output = None
-        # Mirror head segment's ``num_tokens_merged``:
-        # ``merged_input_ids``/``merged_inputs_embeds`` are not
-        # reconstructed here (tail doesn't need the cat-ed
-        # tensor), but the per-dp_rank token count
-        # (``bundle.input_ids.shape[0]`` or
-        # ``bundle.inputs_embeds.shape[0]`` for the mm path)
-        # is the same scalar that head used — they are
-        # 1:1 between head and tail because cloud middle is a
-        # 1:1 token mapping. Sum the per-dp_rank values to get
-        # the merged total the same way head does.
-        # Mirror head segment's ``num_tokens_merged`` (sum
-        # of per-dp_rank actuals, NOT padded counts).
-        # ``n_actuals_tail`` was defined above for the
-        # intermediates trim; reuse it here.
-        num_tokens_merged = sum(n_actuals_tail)
-        # The batched head segment runs as a single merged
-        # forward — there is no SP / DP all-gather that
-        # needs the per-dp_rank padded token counts. The
-        # forward-context consumers (MoE comm-method
-        # selector at line 91, post-segment custom ops)
-        # fall back to ``num_tokens`` when
-        # ``num_tokens_across_dp`` is ``None``. The
-        # per-dp_rank vector is also ambiguous in a
-        # partial round (some dp_ranks may not have
-        # produced a batched marker), so we pass ``None``
-        # rather than reconstructing it.
-        num_tokens_across_dp_merged = None
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
-                attn_metadata=tail_attn_metadata,
+                attn_metadata=any_bundle.attn_metadata,
                 vllm_config=self.vllm_config,
-                # Mirror head segment's merged forward-context:
-                # the tail segment also runs on the merged batch,
-                # so num_tokens / num_tokens_across_dp /
-                # batch_descriptor must reflect the merged sum
-                # (otherwise cudagraph dispatch keys / SP all-gather
-                # inputs would be inconsistent with the merged
-                # _model_forward call below).
-                num_tokens=num_tokens_padded_merged,
-                num_tokens_across_dp=num_tokens_across_dp_merged,
+                num_tokens=any_bundle.num_tokens_padded,
+                num_tokens_across_dp=any_bundle.num_tokens_across_dp,
                 aclgraph_runtime_mode=any_bundle.cudagraph_mode,
-                batch_descriptor=batch_descriptor,
-                num_actual_tokens=num_tokens_merged,
+                batch_descriptor=any_bundle.batch_desc,
+                num_actual_tokens=(merged_hidden.shape[0]
+                                   if merged_hidden is not None else 0),
                 model_instance=self.model,
                 max_tokens_across_pcp=(0 if self.pcp_size == 1
                                        else self.pcp_manager.max_num_tokens_across_pcp),
@@ -4190,29 +4095,12 @@ class NPUModelRunner(GPUModelRunner):
                 **{"defer_finalize": True},
             ) as kv_connector_output,
         ):
-            # ``num_tokens_padded_merged`` is used by the forward
-            # context (set above); tail segment's ``_model_forward``
-            # consumes it for downstream kernels that read
-            # ``forward_context.num_tokens`` (e.g. MoE comm-method
-            # selector, post-segment custom ops).
-            # Reuse the trimmed merged tensors cached in the
-            # ctx (head and tail share the same per-dp_rank
-            # batches — 1:1 token mapping).
             hidden_states = self._model_forward(
-                num_tokens_padded_merged,
-                (ctx.merged_input_ids
-                 if (is_non_embedding_only_edge
-                     and ctx.merged_input_ids is not None)
-                 else any_bundle.input_ids),
-                (ctx.merged_positions
-                 if (is_non_embedding_only_edge
-                     and ctx.merged_positions is not None)
-                 else any_bundle.positions),
+                any_bundle.num_tokens_padded,
+                any_bundle.input_ids,
+                any_bundle.positions,
                 merged_intermediate,
-                (ctx.merged_inputs_embeds
-                 if (is_non_embedding_only_edge
-                     and ctx.merged_inputs_embeds is not None)
-                 else any_bundle.inputs_embeds),
+                any_bundle.inputs_embeds,
             )
 
         merged_sample_hidden_states = hidden_states[merged_logits_indices]
