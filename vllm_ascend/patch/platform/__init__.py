@@ -45,11 +45,12 @@ if (
 
 # EngineCore PD-separation / edge-cloud / passive-PP hooks. Unconditionally
 # loaded — every behavior change inside the patch is gated at runtime by the
-# ``parallel_config.enable_pd_separation`` / ``parallel_config.is_edge_node``
-# / ``envs.VLLM_PP_SCHEDULER_ZMQ_ADDR`` checks, so when none of those are on
-# the patched code paths are byte-equivalent to upstream vLLM. Loading must
-# be unconditional because the leader (edge) process has no env-level signal
-# at platform-init time that PD/edge-cloud is requested — the flag is set on
+# ``ascend_config.edge_cloud_config.pd_separation.enabled`` /
+# ``parallel_config.is_edge_node`` / ``envs.VLLM_PP_SCHEDULER_ZMQ_ADDR`` checks,
+# so when none of those are on the patched code paths are byte-equivalent to
+# upstream vLLM. Loading must be unconditional because the leader (edge)
+# process has no env-level signal at platform-init time that PD/edge-cloud is
+# requested — the flag is set on
 # the VllmConfig only and reaches us via ``EngineCore.__init__``.
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
 
