@@ -376,17 +376,42 @@ class PassiveScheduler:
 
     def _start_prefill_middle_throttle(self) -> None:
         self._prefill_middle_throttle_started_at = time.monotonic()
+        print(
+            f"[PD-PASSIVE] Prefill throttle started: waiting up to "
+            f"{self._prefill_middle_throttle_seconds * 1000:.0f}ms for decode",
+            flush=True,
+        )
 
     def _clear_prefill_middle_throttle(self) -> None:
+        started_at = self._prefill_middle_throttle_started_at
+        if started_at is not None:
+            elapsed_ms = (time.monotonic() - started_at) * 1000
+            print(
+                f"[PD-PASSIVE] Prefill throttle cleared after "
+                f"{elapsed_ms:.1f}ms",
+                flush=True,
+            )
         self._prefill_middle_throttle_started_at = None
 
     def _can_fallback_to_prefill_in_decode_state(self) -> bool:
         started_at = self._prefill_middle_throttle_started_at
         if started_at is None:
             return True
-        if time.monotonic() - started_at >= self._prefill_middle_throttle_seconds:
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        limit_ms = self._prefill_middle_throttle_seconds * 1000
+        if elapsed_ms >= limit_ms:
+            print(
+                f"[PD-PASSIVE] Throttle timeout: waited {elapsed_ms:.1f}ms, "
+                f"fallback to prefill",
+                flush=True,
+            )
             self._clear_prefill_middle_throttle()
             return True
+        print(
+            f"[PD-PASSIVE] Throttle active: {elapsed_ms:.1f}ms / {limit_ms:.0f}ms, "
+            f"still waiting for decode",
+            flush=True,
+        )
         return False
 
     def schedule(self) -> ScheduledBatch:
