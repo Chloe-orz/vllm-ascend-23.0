@@ -31,18 +31,10 @@ if TYPE_CHECKING:
 # ============================================================
 
 def make_graph_params(aclgraph_capture_sizes: list[int]) -> GraphParams:
-    """创建 GraphParams 实例（供边云 segment wrapper 初始化独立参数）。
-
-    与 acl_graph.set_graph_params 字段完全一致（7 字段），
-    但不写入全局 _graph_params，而是返回独立实例供每个
-    EdgeCloudACLGraphWrapper 持有，实现 segment 间参数隔离。
-    """
+    """创建 GraphParams 实例（供边云 segment wrapper 初始化独立参数）。"""
     return GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
     )
@@ -72,30 +64,6 @@ def graph_params_scope(
     finally:
         if graph_params is not None:
             torch.npu.current_stream().synchronize()
-        _acl_graph._graph_params = old_graph_params
-        _acl_graph._draft_graph_params = old_draft_graph_params
-
-
-@contextmanager
-def graph_params_scope_no_sync(
-    graph_params: GraphParams | None,
-    draft_graph_params: GraphParams | None = None,
-):
-    """与 graph_params_scope 相同，但退出时不同步 NPU 主 stream。
-
-    仅用于 update_full_graph_params 等已知 work 全在独立 update_stream 上、
-    且不需要阻塞主 stream 的场景。图回放前仍需由调用方保证 update_stream
-    上的参数更新已全部完成。
-    """
-    old_graph_params = _acl_graph._graph_params
-    old_draft_graph_params = _acl_graph._draft_graph_params
-    if graph_params is not None:
-        _acl_graph._graph_params = graph_params
-    if draft_graph_params is not None:
-        _acl_graph._draft_graph_params = draft_graph_params
-    try:
-        yield
-    finally:
         _acl_graph._graph_params = old_graph_params
         _acl_graph._draft_graph_params = old_draft_graph_params
 
@@ -136,8 +104,102 @@ class EdgeCloudACLGraphWrapper(ACLGraphWrapper):
         self.draft_graph_params: GraphParams | None = None
 
     def __call__(self, *args, **kwargs):
-        # 使用 no_sync 变体：capture 时仅切换 _graph_params 指针供 attention 后端
-        # 填充本 segment 参数，replay 时指针切换无副作用（replay 不再读取全局指针）。
-        # 不在退出时同步主 stream，避免 replay 后 host-block 破坏 CPU-NPU 掩盖。
-        with graph_params_scope_no_sync(self.graph_params, self.draft_graph_params):
+        with graph_params_scope(self.graph_params, self.draft_graph_params):
             return super().__call__(*args, **kwargs)
+
+
+# ============================================================
+#  边云分段图参数更新
+# ============================================================
+
+def update_segment_graph_params(
+    attn_backend: Any,
+    update_stream: Any,
+    forward_context: Any,
+    num_tokens: int,
+    vllm_config: Any,
+    layer_indices: list[int],
+    graph_params: GraphParams,
+    draft_graph_params: GraphParams | None = None,
+    speculative_config: Any = None,
+    num_dcp_pcp_tokens: int | None = None,
+    draft_attn_metadatas: Any = None,
+) -> None:
+    """边云分段流程：使用 segment 独立 GraphParams 更新指定层的 attention 图参数。
+
+    本函数自包含 graph_params_scope：将 acl_graph._graph_params 临时替换为
+    当前 segment 的独立 GraphParams，使 impl_cls.update_graph_params 内部
+    通过 get_graph_params() 获取到正确的 (events, workspaces, handles, attn_params)。
+
+    处理 attention metadata 的两层过滤：
+    1. 剔除 skip_graph_params_update 标记的 DSA 层
+    2. 按 layer_indices 过滤仅保留当前 segment 的层
+    """
+    assert layer_indices == sorted(layer_indices), (
+        "layer_indices must be in ascending natural order to align with "
+        "graph_params.attn_params append order."
+    )
+
+    original_attn_metadata = forward_context.attn_metadata
+
+    # Step 1: 剔除 DSA 层（skip_graph_params_update）
+    working_metadata = original_attn_metadata
+    if original_attn_metadata:
+        filtered = {
+            k: v for k, v in original_attn_metadata.items()
+            if not getattr(v, 'skip_graph_params_update', False)
+        }
+        if len(filtered) != len(original_attn_metadata):
+            forward_context.attn_metadata = filtered
+            working_metadata = filtered
+
+    # Step 2: 按 layer_indices 过滤
+    forward_context.attn_metadata = _filter_attn_metadata_for_layers(
+        working_metadata, layer_indices
+    )
+
+    # 将当前 segment 的 GraphParams 设为活跃，使 impl_cls.update_graph_params
+    # 通过 get_graph_params() 获取到正确的 segment 参数。
+    # scope 退出时自动 synchronize + 恢复全局 GraphParams。
+    with graph_params_scope(graph_params, draft_graph_params):
+        impl_cls = attn_backend.get_impl_cls()
+        try:
+            impl_cls.update_graph_params(
+                update_stream,
+                forward_context,
+                num_tokens,
+                vllm_config,
+                speculative_config,
+                num_dcp_pcp_tokens,
+                draft_attn_metadatas,
+            )
+        finally:
+            forward_context.attn_metadata = original_attn_metadata
+    # scope 退出时已完成 synchronize，确保异步 attention 参数更新在返回前完成
+
+
+def _filter_attn_metadata_for_layers(
+    attn_metadata: dict,
+    layer_indices: list[int],
+) -> dict:
+    """返回仅包含指定层索引对应条目的 dict，key 顺序与 layer_indices 一致。
+
+    attn_metadata 的 key 格式通常为 ``"model.layers.3.self_attn"``。
+    通过匹配 ``.layers.{idx}.`` 子串来定位目标层。
+    """
+    result: dict = {}
+    skipped_no_key_layers: list[int] = []
+    for idx in layer_indices:
+        needle = f".layers.{idx}."
+        matched_keys = [k for k in attn_metadata if needle in k]
+        if not matched_keys:
+            skipped_no_key_layers.append(idx)
+            continue
+        if len(matched_keys) > 1:
+            raise ValueError(
+                f"Layer {idx} has multiple attention metadata keys: {matched_keys}. "
+                f"This breaks the 1:1 alignment between attn_metadata and attn_params."
+            )
+        result[matched_keys[0]] = attn_metadata[matched_keys[0]]
+
+    return result

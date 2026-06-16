@@ -142,9 +142,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.compilation.acl_graph_edge_cloud import (
     EdgeCloudACLGraphWrapper,
     make_graph_params,
-)
-from vllm_ascend.compilation.edge_cloud_compiler import (
-    EdgeCloudCompiledSegment,
+    update_segment_graph_params,
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
@@ -1060,7 +1058,7 @@ class NPUModelRunner(GPUModelRunner):
             return segment
         if self._is_dummy_or_profile_run():
             return segment
-        return ACLGraphWrapper(
+        return EdgeCloudACLGraphWrapper(
             segment,
             self.vllm_config,
             runtime_mode=runtime_mode,
@@ -5446,10 +5444,6 @@ class NPUModelRunner(GPUModelRunner):
                     **model_kwargs,
                 )
             finally:
-                # 恢复 layer_idx 前先同步当前流，确保 weight_prefetch 等
-                # 依赖 layer_idx 的异步任务已在正确层号下完成，防止后续段读到错层权重
-                # if seg_a_graph:
-                #     torch.npu.current_stream().synchronize()
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
 
@@ -5470,11 +5464,10 @@ class NPUModelRunner(GPUModelRunner):
             _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
         try:
-            if seg_e_graph:
-                tail_layer_indices = list(range(
-                    self.num_layers - self.tail_k,
-                    self.num_layers,
-                ))
+            tail_layer_indices = list(range(
+                self.num_layers - self.tail_k,
+                self.num_layers,
+            ))
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
@@ -5739,17 +5732,10 @@ class NPUModelRunner(GPUModelRunner):
         seg_c = self.segment_c_wrapper if use_graph else self.segment_c
         seg_c_graph = isinstance(seg_c, ACLGraphWrapper)
 
-        if seg_c_graph:
-            if layer_slice_info is not None:
-                cloud_layer_indices = list(range(
-                    layer_slice_info.start_layer + self.head_k,
-                    layer_slice_info.end_layer + self.head_k,
-                ))
-            else:
-                cloud_layer_indices = list(range(
-                    self.head_k,
-                    self.num_layers - self.tail_k,
-                ))
+        cloud_layer_indices = list(range(
+            self.head_k,
+            self.num_layers - self.tail_k,
+        ))
         # intermediate_tensors 已由 NPUWorker 从 Edge 侧接收
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
         old_layer_idx = _EXTRA_CTX.layer_idx
@@ -8396,9 +8382,9 @@ class NPUModelRunner(GPUModelRunner):
                     wrappers = [self.segment_c_wrapper]
                 for wrapper in wrappers:
                     if isinstance(wrapper, ACLGraphWrapper):
-                        wrapper.init_graph_params(self.cudagraph_batch_sizes)
+                        wrapper.graph_params = make_graph_params(self.cudagraph_batch_sizes)
                         if self.speculative_config:
-                            wrapper.init_draft_graph_params(self.cudagraph_batch_sizes)
+                            wrapper.draft_graph_params = make_graph_params(self.cudagraph_batch_sizes)
 
     def _get_aclgraph_wrappers(self) -> list[ACLGraphWrapper]:
         """返回所有可能残留 profile 阶段图捕获结果的 ACLGraphWrapper。"""
