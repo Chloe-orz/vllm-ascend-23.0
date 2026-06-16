@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import sys
+
 import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
@@ -102,27 +104,6 @@ def _maybe_reset_initial_state_for_layer_slice(
 def get_non_spec_chunked_prefill_meta(attn_metadata):
     fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "chunk")
     return fallback_meta.chunk
-
-
-def _clone_chunked_prefill_meta(meta):
-    """Clone all device tensors inside GDNChunkedPrefillMetadata.
-
-    The chunked prefill metadata is backed by a 2-slot pool that is
-    round-robin allocated per build() call.  In layer-slice continuation,
-    an interleaved decode batch can trigger another build() that
-    overwrites the pool slot still referenced by the saved
-    _layerwise_attn_metadata.  Cloning decouples the metadata from
-    the shared pool buffers.
-    """
-    return type(meta)(
-        chunk_indices_chunk64=meta.chunk_indices_chunk64.clone(),
-        chunk_offsets_chunk64=meta.chunk_offsets_chunk64.clone(),
-        update_chunk_offsets_chunk64=meta.update_chunk_offsets_chunk64.clone(),
-        final_chunk_indices_chunk64=meta.final_chunk_indices_chunk64.clone(),
-        chunk_indices_large_block=meta.chunk_indices_large_block.clone(),
-        block_indices_cumsum=meta.block_indices_cumsum.clone(),
-        _buffer_slot=None,  # decoupled from pool
-    )
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -261,10 +242,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # recurrent attention kernels start from a clean zero state instead
         # of reading stale data left by a prior decode that was interleaved
         # between slices.
-        _is_continuation = getattr(
-            attn_metadata, "_is_layer_slice_continuation", False
-        )
-        if _is_continuation:
+        if getattr(attn_metadata, "_is_layer_slice_continuation", False):
             if has_initial_state is not None:
                 has_initial_state = torch.zeros_like(has_initial_state)
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -274,39 +252,31 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
-
-        # [ROOT-CAUSE-2 VERIFY] In layer-slice continuation, the
-        # decode batch interleaved between slices rebuilds
-        # common_attn_metadata and overwrites shared device buffers
-        # (query_start_loc, state_indices, etc.) in-place.  The
-        # _layerwise_attn_metadata saved by slice 0 holds references
-        # to these shared buffers, so by the time slice 1+ reads them,
-        # they contain decode-length values instead of the original
-        # prefill-length values.  This causes chunk_gated_delta_rule
-        # to compute wrong output positions → MTE write out of range.
-        #
-        # The CPU-side query_start_loc was already cloned in
-        # patch_gdn_attn.py:528, but the device-side tensors were not.
-        # Clone all shared device tensors to decouple them from the
-        # shared buffers when running a layer-slice continuation.
-        if _is_continuation:
-            if non_spec_query_start_loc is not None:
-                non_spec_query_start_loc = non_spec_query_start_loc.clone()
-            if spec_query_start_loc is not None:
-                spec_query_start_loc = spec_query_start_loc.clone()
-            if non_spec_state_indices_tensor is not None:
-                non_spec_state_indices_tensor = (
-                    non_spec_state_indices_tensor.clone()
-                )
-            if spec_state_indices_tensor is not None:
-                spec_state_indices_tensor = spec_state_indices_tensor.clone()
-            if spec_token_indx is not None:
-                spec_token_indx = spec_token_indx.clone()
-            if non_spec_token_indx is not None:
-                non_spec_token_indx = non_spec_token_indx.clone()
         self_kv_cache = self.kv_cache
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
+
+        # [DEBUG-BISECT] Print key metadata for continuation layers
+        _is_continuation = getattr(
+            attn_metadata, "_is_layer_slice_continuation", False
+        )
+        if _is_continuation:
+            _cu_sl_cpu = non_spec_query_start_loc.cpu() if non_spec_query_start_loc is not None else None
+            _ssm_idx_cpu = non_spec_state_indices_tensor.cpu() if non_spec_state_indices_tensor is not None else None
+            print(
+                f"[DEBUG-BISECT] ENTER _forward_core layer={self.prefix} "
+                f"num_actual_tokens={num_actual_tokens} "
+                f"num_prefills={attn_metadata.num_prefills} "
+                f"num_decodes={attn_metadata.num_decodes} "
+                f"mixed_qkv.shape={mixed_qkv.shape} "
+                f"core_attn_out.shape={core_attn_out.shape} "
+                f"ssm_state.shape={ssm_state.shape} "
+                f"non_spec_state_indices={_ssm_idx_cpu.tolist() if _ssm_idx_cpu is not None else None} "
+                f"non_spec_query_start_loc={_cu_sl_cpu.tolist() if _cu_sl_cpu is not None else None} "
+                f"has_initial_state_sum={has_initial_state.sum().item() if has_initial_state is not None else None}",
+                file=sys.stderr,
+                flush=True,
+            )
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
@@ -385,27 +355,17 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     attn_metadata, initial_state_mode_opt
                 )
 
-                # [ROOT-CAUSE-1 VERIFY] In layer-slice continuation, the
-                # decode batch interleaved between slices writes conv_state
-                # in a sliding-window format that leaves stale ring-buffer
-                # cursor / offset metadata.  Even with initial_state_mode=0
-                # (don't read conv_state as initial state), the CANN kernel
-                # may still use conv_state internal metadata to compute
-                # write-back addresses, causing MTE write out-of-range.
-                # Fix: explicitly zero out conv_state slots for the current
-                # prefill requests so the kernel starts from a clean state.
-                #
-                # NOTE: we intentionally avoid .item() / stream-sync here
-                # because a prior layer's AICore async error would surface
-                # at the first sync point, masking the real error location.
-                _is_continuation = getattr(
-                    attn_metadata, "_is_layer_slice_continuation", False
-                )
+                # [DEBUG-BISECT] Sync before causal_conv1d to check if error
+                # already exists from a prior kernel
                 if _is_continuation:
-                    _conv_state_base = self_kv_cache[0]
-                    for _slot_idx in cache_indices_opt:
-                        if _slot_idx != PAD_SLOT_ID and _slot_idx < _conv_state_base.size(0):
-                            _conv_state_base[_slot_idx].zero_()
+                    try:
+                        torch.npu.synchronize()
+                        print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-OK before causal_conv1d",
+                              file=sys.stderr, flush=True)
+                    except RuntimeError as e:
+                        print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-FAIL before causal_conv1d: {e}",
+                              file=sys.stderr, flush=True)
+                        raise
 
                 mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
@@ -420,6 +380,18 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=0,
                 )
+
+                # [DEBUG-BISECT] Sync after causal_conv1d
+                if _is_continuation:
+                    try:
+                        torch.npu.synchronize()
+                        print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-OK after causal_conv1d",
+                              file=sys.stderr, flush=True)
+                    except RuntimeError as e:
+                        print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-FAIL after causal_conv1d: {e}",
+                              file=sys.stderr, flush=True)
+                        raise
+
         elif attn_metadata.num_decodes > 0:
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
@@ -522,11 +494,27 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata.num_prefills > 0:
             initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
             clear_ssm_states(initial_state, has_initial_state)
-            _prebuilt_meta = get_non_spec_chunked_prefill_meta(attn_metadata)
-            # [ROOT-CAUSE-2 VERIFY] Clone pooled device tensors that may
-            # have been overwritten by an interleaved decode batch.
+
+            # [DEBUG-BISECT] Sync + print shapes before chunk_gated_delta_rule
             if _is_continuation:
-                _prebuilt_meta = _clone_chunked_prefill_meta(_prebuilt_meta)
+                try:
+                    torch.npu.synchronize()
+                    print(
+                        f"[DEBUG-BISECT] layer={self.prefix} SYNC-OK before chunk "
+                        f"q={query_non_spec.shape} k={key_non_spec.shape} "
+                        f"v={value_non_spec.shape} g={g_non_spec.shape} "
+                        f"beta={beta_non_spec.shape} "
+                        f"initial_state={initial_state.shape} "
+                        f"has_initial_state_sum={has_initial_state.sum().item() if has_initial_state is not None else None} "
+                        f"cu_seqlens={non_spec_query_start_loc.cpu().tolist() if non_spec_query_start_loc is not None else None}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                except RuntimeError as e:
+                    print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-FAIL before chunk: {e}",
+                          file=sys.stderr, flush=True)
+                    raise
+
             (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
@@ -536,16 +524,25 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
-                prebuilt_meta=_prebuilt_meta,
+                prebuilt_meta=get_non_spec_chunked_prefill_meta(attn_metadata),
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-            ssm_state[prefill_state_indices] = last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
-            if split_non_spec:
-                core_attn_out_non_spec = torch.cat(
-                    [core_attn_out_decode, core_attn_out_non_spec],
-                    dim=1,
-                )
+
+            # [DEBUG-BISECT] Sync after chunk
+            if _is_continuation:
+                try:
+                    torch.npu.synchronize()
+                    print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-OK after chunk",
+                          file=sys.stderr, flush=True)
+                except RuntimeError as e:
+                    print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-FAIL after chunk: {e}",
+                          file=sys.stderr, flush=True)
+                    raise
+
+            ssm_state[non_spec_state_indices_tensor] = (
+                last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
+            )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_non_spec = l2norm_fwd(query_non_spec)
