@@ -3095,7 +3095,9 @@ class NPUModelRunner(GPUModelRunner):
         assert isinstance(hidden_states, IntermediateTensors)
         return hidden_states
 
-    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
+    def _pad_for_sequence_parallelism(
+        self, num_scheduled_tokens: int, for_cudagraph_capture: bool = False
+    ) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
@@ -3103,7 +3105,9 @@ class NPUModelRunner(GPUModelRunner):
             pc = self.vllm_config.parallel_config
             # Edge-cloud mode: edge node should pad to cloud's tp_size so that
             # the full sequence after all_gather is directly chunkable by cloud SP.
-            if pc.enable_edge_cloud and pc.is_edge_node:
+            # During cudagraph/ACL graph capture, skip this extra padding so that
+            # graph keys match the normal SP-aligned capture sizes.
+            if pc.enable_edge_cloud and pc.is_edge_node and not for_cudagraph_capture:
                 tp_size = max(tp_size, pc.cloud_npu_count)
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
@@ -3183,8 +3187,11 @@ class NPUModelRunner(GPUModelRunner):
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        for_cudagraph_capture: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        num_tokens_padded = self._pad_for_sequence_parallelism(
+            num_tokens, for_cudagraph_capture=for_cudagraph_capture
+        )
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
@@ -3698,6 +3705,7 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
+            for_cudagraph_capture=is_graph_capturing,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -5112,35 +5120,6 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
-
-        # Edge-cloud SP: edge node pads to max(tp_size, cloud_npu_count).
-        # Need to re-align capture sizes so dispatch_cudagraph finds matching keys.
-        pc = self.parallel_config
-        if (
-            self._edge_cloud_enabled
-            and pc.is_edge_node
-            and enable_sp(self.vllm_config)
-            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-        ):
-            edge_sp_multiple = max(pc.tensor_parallel_size, pc.cloud_npu_count)
-            orig_sizes = self.compilation_config.cudagraph_capture_sizes
-            max_size = self.compilation_config.max_cudagraph_capture_size
-            new_sizes = sorted(
-                set(
-                    round_up(size, edge_sp_multiple)
-                    for size in orig_sizes
-                    if round_up(size, edge_sp_multiple) <= max_size
-                )
-            )
-            if len(new_sizes) == 0 and edge_sp_multiple <= max_size:
-                new_sizes = [edge_sp_multiple]
-            if new_sizes != orig_sizes:
-                self.compilation_config.cudagraph_capture_sizes = new_sizes
-                # Re-initialize dispatcher keys with adjusted sizes
-                self.cudagraph_dispatcher.initialize_cudagraph_keys(
-                    self.compilation_config.cudagraph_mode,
-                    self.uniform_decode_query_len,
-                )
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
