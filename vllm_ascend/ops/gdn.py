@@ -104,6 +104,27 @@ def get_non_spec_chunked_prefill_meta(attn_metadata):
     return fallback_meta.chunk
 
 
+def _clone_chunked_prefill_meta(meta):
+    """Clone all device tensors inside GDNChunkedPrefillMetadata.
+
+    The chunked prefill metadata is backed by a 2-slot pool that is
+    round-robin allocated per build() call.  In layer-slice continuation,
+    an interleaved decode batch can trigger another build() that
+    overwrites the pool slot still referenced by the saved
+    _layerwise_attn_metadata.  Cloning decouples the metadata from
+    the shared pool buffers.
+    """
+    return type(meta)(
+        chunk_indices_chunk64=meta.chunk_indices_chunk64.clone(),
+        chunk_offsets_chunk64=meta.chunk_offsets_chunk64.clone(),
+        update_chunk_offsets_chunk64=meta.update_chunk_offsets_chunk64.clone(),
+        final_chunk_indices_chunk64=meta.final_chunk_indices_chunk64.clone(),
+        chunk_indices_large_block=meta.chunk_indices_large_block.clone(),
+        block_indices_cumsum=meta.block_indices_cumsum.clone(),
+        _buffer_slot=None,  # decoupled from pool
+    )
+
+
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if hasattr(self, "split_ba"):
@@ -240,7 +261,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # recurrent attention kernels start from a clean zero state instead
         # of reading stale data left by a prior decode that was interleaved
         # between slices.
-        if getattr(attn_metadata, "_is_layer_slice_continuation", False):
+        _is_continuation = getattr(
+            attn_metadata, "_is_layer_slice_continuation", False
+        )
+        if _is_continuation:
             if has_initial_state is not None:
                 has_initial_state = torch.zeros_like(has_initial_state)
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -250,6 +274,36 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+
+        # [ROOT-CAUSE-2 VERIFY] In layer-slice continuation, the
+        # decode batch interleaved between slices rebuilds
+        # common_attn_metadata and overwrites shared device buffers
+        # (query_start_loc, state_indices, etc.) in-place.  The
+        # _layerwise_attn_metadata saved by slice 0 holds references
+        # to these shared buffers, so by the time slice 1+ reads them,
+        # they contain decode-length values instead of the original
+        # prefill-length values.  This causes chunk_gated_delta_rule
+        # to compute wrong output positions → MTE write out of range.
+        #
+        # The CPU-side query_start_loc was already cloned in
+        # patch_gdn_attn.py:528, but the device-side tensors were not.
+        # Clone all shared device tensors to decouple them from the
+        # shared buffers when running a layer-slice continuation.
+        if _is_continuation:
+            if non_spec_query_start_loc is not None:
+                non_spec_query_start_loc = non_spec_query_start_loc.clone()
+            if spec_query_start_loc is not None:
+                spec_query_start_loc = spec_query_start_loc.clone()
+            if non_spec_state_indices_tensor is not None:
+                non_spec_state_indices_tensor = (
+                    non_spec_state_indices_tensor.clone()
+                )
+            if spec_state_indices_tensor is not None:
+                spec_state_indices_tensor = spec_state_indices_tensor.clone()
+            if spec_token_indx is not None:
+                spec_token_indx = spec_token_indx.clone()
+            if non_spec_token_indx is not None:
+                non_spec_token_indx = non_spec_token_indx.clone()
         self_kv_cache = self.kv_cache
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
@@ -466,23 +520,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.3: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            prefill_query_start_loc = attn_metadata.prefill_query_start_loc
-            prefill_state_indices = attn_metadata.prefill_state_indices
-            prefill_has_initial_state = attn_metadata.prefill_has_initial_state
-            assert prefill_query_start_loc is not None
-            assert prefill_state_indices is not None
-            assert prefill_has_initial_state is not None
-            assert g_non_spec is not None
-            assert beta_non_spec is not None
-            if split_non_spec:
-                query_non_spec = query_non_spec[:, num_decode_tokens:]
-                key_non_spec = key_non_spec[:, num_decode_tokens:]
-                value_non_spec = value_non_spec[:, num_decode_tokens:]
-                g_non_spec = g_non_spec[:, num_decode_tokens:]
-                beta_non_spec = beta_non_spec[:, num_decode_tokens:]
-
-            initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
-            clear_ssm_states(initial_state, prefill_has_initial_state)
+            initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
+            clear_ssm_states(initial_state, has_initial_state)
+            _prebuilt_meta = get_non_spec_chunked_prefill_meta(attn_metadata)
+            # [ROOT-CAUSE-2 VERIFY] Clone pooled device tensors that may
+            # have been overwritten by an interleaved decode batch.
+            if _is_continuation:
+                _prebuilt_meta = _clone_chunked_prefill_meta(_prebuilt_meta)
             (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
@@ -491,8 +535,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 beta=beta_non_spec,
                 initial_state=initial_state,
                 output_final_state=True,
-                cu_seqlens=prefill_query_start_loc,
-                prebuilt_meta=attn_metadata.non_spec_prefill_metadata.chunk,
+                cu_seqlens=non_spec_query_start_loc,
+                prebuilt_meta=_prebuilt_meta,
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
