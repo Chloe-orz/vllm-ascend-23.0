@@ -140,9 +140,22 @@ def _patched_engine_core_init(self, *args, **kwargs):
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
     self._pp_pd_channel = None
     if pd_enabled and getattr(parallel_config, "is_edge_node", False):
-        cloud_addr = (
-            getattr(parallel_config, "cloud_addr", None) or "127.0.0.1"
+        # Discover the cloud's IP via a one-shot TCPStore. The edge
+        # acts as store master on ``master_port + 1``; the cloud
+        # connects and writes its ``get_ip()`` result. See
+        # passive_core.py for the symmetric writer side.
+        import torch.distributed as dist
+        from datetime import timedelta
+        _addr_store = dist.TCPStore(
+            host_name=parallel_config.master_addr,
+            port=parallel_config.master_port + 1,
+            world_size=2,
+            is_master=True,
+            timeout=timedelta(seconds=300),
         )
+        cloud_addr = _addr_store.get("cloud_ip").decode()
+        del _addr_store
+
         pre_out = f"tcp://*:{envs.VLLM_PP_PRE_OUT_ZMQ_PORT}"
         post_out = (
             f"tcp://{cloud_addr}:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
@@ -153,8 +166,9 @@ def _patched_engine_core_init(self, *args, **kwargs):
             name="pd-edge",
         )
         logger.info(
-            "PD-separation edge channel: PRE_OUT=%s, POST_OUT=%s",
-            pre_out, post_out,
+            "PD-separation edge channel: PRE_OUT=%s, POST_OUT=%s "
+            "(cloud_addr=%s auto-discovered)",
+            pre_out, post_out, cloud_addr,
         )
 
 
