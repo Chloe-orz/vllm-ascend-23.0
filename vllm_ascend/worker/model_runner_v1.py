@@ -4981,6 +4981,7 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
+            num_scheduled_tokens_compressed_list,
         ) = self._prepare_inputs(
             scheduler_output,
             num_scheduled_tokens_np,
@@ -5061,6 +5062,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                 num_scheduled_tokens_np=num_scheduled_tokens_np,
                 cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list,
             )
         )
 
@@ -5075,6 +5077,7 @@ class NPUModelRunner(GPUModelRunner):
             "cudagraph_mode": cudagraph_mode,
             "batch_desc": batch_desc,
             "cudagraph_stats": cudagraph_stats,
+            "num_scheduled_tokens_compressed_list": num_scheduled_tokens_compressed_list,
         }
 
     def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
