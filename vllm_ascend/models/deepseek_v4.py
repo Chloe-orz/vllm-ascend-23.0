@@ -889,21 +889,15 @@ class DeepseekV4Model(nn.Module):
         # this buffer with the MTP draft via attribute replacement.
         self.topk_indices_buffer = topk_indices_buffer
 
-        # Edge-cloud mode: make_layers() → _get_edge_cloud_local_indices()
-        # reads head_k / tail_k from set_edge_cloud_layer_range() and creates
-        # real layers only for locally-owned indices (PPMissingLayer for the
-        # rest).  Embeddings and norm are created unconditionally — the tiny
-        # memory overhead on the side that does not need them is negligible
-        # compared to the transformer layers.
-        additional_config = getattr(vllm_config, 'additional_config', None) or {}
-        edge_cloud_enabled = additional_config.get('edge_cloud_config', {}).get('enabled', False)
-
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.embed_tokens",
-        ) if (edge_cloud_enabled or get_pp_group().is_first_rank) else PPMissingLayer()
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens",
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -911,9 +905,10 @@ class DeepseekV4Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps) if (
-            edge_cloud_enabled or get_pp_group().is_last_rank
-        ) else PPMissingLayer()
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
 
         def _make_empty_intermediate_tensors(
             batch_size: int,
@@ -1083,9 +1078,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         self.quant_config = quant_config
 
         self.model = self.model_cls(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-        additional_config = getattr(vllm_config, 'additional_config', None) or {}
-        edge_cloud_enabled = additional_config.get('edge_cloud_config', {}).get('enabled', False)
-        if edge_cloud_enabled or get_pp_group().is_last_rank:
+        if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,
