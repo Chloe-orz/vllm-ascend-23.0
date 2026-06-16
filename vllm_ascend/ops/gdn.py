@@ -394,6 +394,36 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     attn_metadata, initial_state_mode_opt
                 )
 
+                # [ROOT-CAUSE-1 VERIFY] In layer-slice continuation, the
+                # decode batch interleaved between slices writes conv_state
+                # in a sliding-window format that leaves stale ring-buffer
+                # cursor / offset metadata.  Even with initial_state_mode=0
+                # (don't read conv_state as initial state), the CANN kernel
+                # may still use conv_state internal metadata to compute
+                # write-back addresses, causing MTE write out-of-range.
+                # Fix: explicitly zero out conv_state slots for the current
+                # prefill requests so the kernel starts from a clean state.
+                _is_continuation = getattr(
+                    attn_metadata, "_is_layer_slice_continuation", False
+                )
+                if _is_continuation:
+                    _conv_state_base = self_kv_cache[0]
+                    _polluted_count = 0
+                    for _slot_idx in cache_indices_opt:
+                        if _slot_idx != PAD_SLOT_ID and _slot_idx < _conv_state_base.size(0):
+                            _slot_data = _conv_state_base[_slot_idx]
+                            if _slot_data.abs().sum().item() != 0:
+                                _polluted_count += 1
+                            _slot_data.zero_()
+                    import sys
+                    print(
+                        f"[ROOT-CAUSE-1] layer={self.prefix} "
+                        f"continuation=True, cleared {len(cache_indices_opt)} "
+                        f"conv_state slots ({_polluted_count} were polluted)",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
                 mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
                     conv_weights_T,
