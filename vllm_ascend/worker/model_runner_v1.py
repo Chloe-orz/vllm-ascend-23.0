@@ -5792,7 +5792,9 @@ class NPUModelRunner(GPUModelRunner):
         assert isinstance(hidden_states, IntermediateTensors)
         return hidden_states
 
-    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
+    def _pad_for_sequence_parallelism(
+        self, num_scheduled_tokens: int, for_cudagraph_capture: bool = False
+    ) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
@@ -5800,7 +5802,9 @@ class NPUModelRunner(GPUModelRunner):
             pc = self.vllm_config.parallel_config
             # Edge-cloud mode: edge node should pad to cloud's tp_size so that
             # the full sequence after all_gather is directly chunkable by cloud SP.
-            if pc.enable_edge_cloud and pc.is_edge_node:
+            # During cudagraph/ACL graph capture, skip this extra padding so that
+            # graph keys match the normal SP-aligned capture sizes.
+            if pc.enable_edge_cloud and pc.is_edge_node and not for_cudagraph_capture:
                 tp_size = max(tp_size, pc.cloud_npu_count)
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
@@ -8339,8 +8343,8 @@ class NPUModelRunner(GPUModelRunner):
         attention_backends: list[set[type[AttentionBackend]]],
         kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
-        min_cg_support = AttentionCGSupport.ALWAYS
-        min_cg_attn_backend = None
+        with update_pass_config(self):
+            super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
