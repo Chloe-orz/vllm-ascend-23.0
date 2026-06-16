@@ -442,68 +442,6 @@ def _clone_gdn_attn_metadata(meta):
     return cloned
 
 
-
-
-class EdgeCloudSegment(torch.nn.Module):
-    """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
-
-    将基础模型的 ``forward_edge_cloud_segment``（模型加载阶段通过
-    monkey-patch 注入）包装为标准 nn.Module，使 ACLGraphWrapper 可以像
-    标准流程包裹完整模型一样包裹 segment：:
-
-        ACLGraphWrapper(EdgeCloudSegment(model, N-1, N), ...)
-
-    使用 nn.Module 而非函数闭包，确保 ``torch.npu.graph`` 的参数追踪、
-    缓冲区管理、模块分发与标准（非边云）流程完全一致。
-
-    注意：model 作为 nn.Module 属性注册为子模块，torch.npu.graph 捕获时
-    通过模块层级静态识别参数张量，确保图回放时参数正确处理。
-    模型在传入前已完成 PPMissingLayer 裁剪，子模块注册不会引入额外显存。
-    """
-
-    def __init__(
-        self,
-        model: torch.nn.Module,
-        start_layer: int,
-        end_layer: int,
-        is_first_segment: bool | None = None,
-        is_last_segment: bool | None = None,
-    ):
-        super().__init__()
-        self._edge_model = model
-        self._start_layer = start_layer
-        self._end_layer = end_layer
-        self._is_first_segment = is_first_segment
-        self._is_last_segment = is_last_segment
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None = None,
-        positions: torch.Tensor | None = None,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        **extra_layer_kwargs: Any,
-    ) -> torch.Tensor | IntermediateTensors:
-        # Layer-sliced execution (non-ACLGraph mode): allow dynamic override
-        # of the layer range via kwargs from PassiveScheduler slice dispatch.
-        start_layer = extra_layer_kwargs.pop(
-            "layer_slice_start", self._start_layer
-        )
-        end_layer = extra_layer_kwargs.pop(
-            "layer_slice_end", self._end_layer
-        )
-        return self._edge_model.forward_edge_cloud_segment(
-            start_layer,
-            end_layer,
-            input_ids,
-            positions,
-            intermediate_tensors,
-            inputs_embeds,
-            is_first_segment=self._is_first_segment,
-            is_last_segment=self._is_last_segment,
-            **extra_layer_kwargs,
-        )
-
 class NPUModelRunner(GPUModelRunner):
     # ------------------------------------------------------------------
     # Class-level sync state for shared-model-edge KV cache global remap
@@ -3253,7 +3191,22 @@ class NPUModelRunner(GPUModelRunner):
         # Save per-step state for layer slice continuation.
         if layer_slice_info is not None and not layer_slice_info.is_last_slice:
             self._layerwise_positions = positions
-            self._layerwise_attn_metadata = attn_metadata
+            # Deep-clone device tensors inside attn_metadata to prevent
+            # corruption by subsequent decode batches.  The metadata's
+            # device tensors (query_start_loc, state_indices, etc.) are
+            # views into shared common_attn_metadata buffers that get
+            # rebuilt on every batch.  If a decode batch runs between
+            # two prefill slices, it overwrites these buffers in-place,
+            # corrupting the saved metadata.  Cloning at save time
+            # preserves the correct prefill values.
+            if isinstance(attn_metadata, dict):
+                self._layerwise_attn_metadata = {
+                    k: _clone_gdn_attn_metadata(v) for k, v in attn_metadata.items()
+                }
+            elif attn_metadata is not None:
+                self._layerwise_attn_metadata = _clone_gdn_attn_metadata(attn_metadata)
+            else:
+                self._layerwise_attn_metadata = attn_metadata
             self._layerwise_num_tokens_padded = num_tokens_padded
             self._layerwise_num_tokens_across_dp = num_tokens_across_dp
             self._layerwise_batch_desc = batch_desc
