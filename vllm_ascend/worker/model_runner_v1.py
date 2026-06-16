@@ -5113,6 +5113,33 @@ class NPUModelRunner(GPUModelRunner):
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
+        # Edge-cloud SP: edge node pads to max(tp_size, cloud_npu_count).
+        # Need to re-align capture sizes so dispatch_cudagraph finds matching keys.
+        pc = self.parallel_config
+        if (
+            self._edge_cloud_enabled
+            and pc.is_edge_node
+            and enable_sp(self.vllm_config)
+            and self.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            edge_sp_multiple = max(pc.tensor_parallel_size, pc.cloud_npu_count)
+            orig_sizes = self.compilation_config.cudagraph_capture_sizes
+            max_size = self.compilation_config.max_cudagraph_capture_size
+            new_sizes = sorted(
+                set(
+                    round_up(size, edge_sp_multiple)
+                    for size in orig_sizes
+                    if round_up(size, edge_sp_multiple) <= max_size
+                )
+            )
+            if len(new_sizes) == 0 and edge_sp_multiple <= max_size:
+                new_sizes = [edge_sp_multiple]
+            if new_sizes != orig_sizes:
+                self.compilation_config.cudagraph_capture_sizes = new_sizes
+                # Re-initialize dispatcher keys with adjusted sizes
+                self.cudagraph_dispatcher.initialize_cudagraph_keys(
+                    self.cudagraph_mode, self.uniform_decode_query_len
+                )
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
