@@ -4930,10 +4930,18 @@ class NPUModelRunner(GPUModelRunner):
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
-        
-        if self.dynamic_eplb:
-            self.update_eplb_heat_collection_status(num_tokens_padded)
-        
+
+        # SP padding or cudagraph dispatcher may increase num_reqs_padded
+        # beyond the length of num_scheduled_tokens. Ensure they match.
+        if len(num_scheduled_tokens) < num_reqs_padded:
+            if num_tokens_padded == num_reqs_padded * max_query_len:
+                # Uniform decode: each request (including padded) has max_query_len tokens
+                num_scheduled_tokens = np.full(num_reqs_padded, max_query_len, dtype=num_scheduled_tokens.dtype)
+            else:
+                # Mixed batch: padded requests have 0 scheduled tokens
+                extended = np.zeros(num_reqs_padded, dtype=num_scheduled_tokens.dtype)
+                extended[:len(num_scheduled_tokens)] = num_scheduled_tokens
+                num_scheduled_tokens = extended
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
