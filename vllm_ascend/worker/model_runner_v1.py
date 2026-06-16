@@ -2087,6 +2087,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
+                self._pp_timing("prepare_inputs_begin", sync_npu=True)
                 (
                     logits_indices,
                     spec_decode_metadata,
@@ -2111,6 +2112,7 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output.num_common_prefix_blocks,
                     )
 
+                self._pp_timing("determine_batch_begin", sync_npu=True)
                 (
                     cudagraph_mode,
                     batch_desc,
@@ -2987,6 +2989,7 @@ class NPUModelRunner(GPUModelRunner):
         forward_context,
         **model_kwargs: dict[str, Any],
     ):
+        self._pp_timing("forward_edge_entry", sync_npu=True)
         """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
         seg_a = self.segment_a_wrapper if use_graph else self.segment_a
         seg_e = self.segment_e_wrapper if use_graph else self.segment_e
@@ -3077,6 +3080,7 @@ class NPUModelRunner(GPUModelRunner):
         forward_context,
         **model_kwargs: dict[str, Any],
     ):
+        self._pp_timing("forward_cloud_entry", sync_npu=True)
         """Cloud 侧分段执行：segment_c（中段）。"""
         assert self.edge_cloud_cfg.role == "cloud", (
             "Cloud segment_c should only be executed when role == 'cloud'"

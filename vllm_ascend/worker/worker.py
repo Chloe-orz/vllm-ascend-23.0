@@ -500,6 +500,10 @@ class NPUWorker(WorkerBase):
                     comm_handles=comm_handles,
                     comm_postprocess=comm_postprocess,
                 )
+                intermediate_tensors.wait_for_comm()
+                print(f"[PP_TIMING][edge][wait_for_comm done] {time.perf_counter()}")
+                print(f"intermediate_tensors:{intermediate_tensors}")
+                print(f"[PP_TIMING][edge][print intermediate_tensors done] {time.perf_counter()}")
                 if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
                     intermediate_tensors.wait_for_comm()
                     torch.npu.synchronize()
@@ -562,6 +566,10 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
+            intermediate_tensors.wait_for_comm()
+            print(f"[PP_TIMING][edge][wait_for_comm done] {time.perf_counter()}")
+            print(f"intermediate_tensors:{intermediate_tensors}")
+            print(f"[PP_TIMING][edge][print intermediate_tensors done] {time.perf_counter()}")
             if os.environ.get("PP_TIMING_ENABLE", "0") == "1":
                 intermediate_tensors.wait_for_comm()
                 torch.npu.synchronize()
