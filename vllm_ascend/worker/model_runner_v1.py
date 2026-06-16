@@ -5120,7 +5120,7 @@ class NPUModelRunner(GPUModelRunner):
             self._edge_cloud_enabled
             and pc.is_edge_node
             and enable_sp(self.vllm_config)
-            and self.cudagraph_mode != CUDAGraphMode.NONE
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
         ):
             edge_sp_multiple = max(pc.tensor_parallel_size, pc.cloud_npu_count)
             orig_sizes = self.compilation_config.cudagraph_capture_sizes
@@ -5138,7 +5138,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.compilation_config.cudagraph_capture_sizes = new_sizes
                 # Re-initialize dispatcher keys with adjusted sizes
                 self.cudagraph_dispatcher.initialize_cudagraph_keys(
-                    self.cudagraph_mode, self.uniform_decode_query_len
+                    self.compilation_config.cudagraph_mode,
+                    self.uniform_decode_query_len,
                 )
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
