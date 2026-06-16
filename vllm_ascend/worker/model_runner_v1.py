@@ -142,7 +142,6 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.compilation.acl_graph_edge_cloud import (
     EdgeCloudACLGraphWrapper,
     make_graph_params,
-    update_segment_graph_params,
 )
 from vllm_ascend.compilation.edge_cloud_compiler import (
     EdgeCloudCompiledSegment,
