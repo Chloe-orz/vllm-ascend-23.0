@@ -2526,19 +2526,24 @@ class NPUModelRunner(GPUModelRunner):
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
-                    mamba_bufs = self._get_mamba_bufs()
-                    preprocess_bufs = mamba_bufs.preprocess
-                    mamba_utils.preprocess_mamba(
-                        scheduler_output,
-                        self.kv_cache_config,
-                        self.cache_config,
-                        self.mamba_state_idx,
-                        self.input_batch,
-                        self.requests,
-                        self.compilation_config.static_forward_context,
-                        self.model.get_mamba_state_copy_func(),
-                        preprocess_bufs,
-                    )
+                    if self.cache_config.enable_prefix_caching:
+                        if vllm_version_is("0.20.2"):
+                            mamba_bufs = self._get_mamba_copy_bufs()
+                            preprocess_bufs = mamba_bufs
+                        else:
+                            mamba_bufs = self._get_mamba_bufs()
+                            preprocess_bufs = mamba_bufs.preprocess
+                        mamba_utils.preprocess_mamba(
+                            scheduler_output,
+                            self.kv_cache_config,
+                            self.cache_config,
+                            self.mamba_state_idx,
+                            self.input_batch,
+                            self.requests,
+                            self.compilation_config.static_forward_context,
+                            self.model.get_mamba_state_copy_func(),
+                            preprocess_bufs,
+                        )
                     # preprocess_mamba resets num_accepted_tokens_cpu to 1
                     # for requests whose state was copied to a new block.
                     # Re-sync to GPU so the mamba kernel reads from the
@@ -3696,7 +3701,13 @@ class NPUModelRunner(GPUModelRunner):
         self._update_states(scheduler_output)
 
         # --- Run core input preparation ---
-        cache = self._run_input_preparation(scheduler_output)
+        # cloud_prepare_early runs BEFORE the forward pass (outside
+        # torch.inference_mode), but GDN attention builder does in-place
+        # tensor copies that require inference mode.  Wrap the whole
+        # preparation inside inference_mode to stay compatible with
+        # PyTorch >= 2.0 inference tensor protection.
+        with torch.inference_mode():
+            cache = self._run_input_preparation(scheduler_output)
 
         # --- update_cos_sin ---
         num_input_tokens = cache["num_tokens_padded"]
