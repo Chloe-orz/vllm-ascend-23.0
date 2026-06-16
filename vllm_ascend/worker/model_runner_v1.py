@@ -2800,6 +2800,12 @@ class NPUModelRunner(GPUModelRunner):
                     # Update persistent batch states.
                     deferred_state_corrections_fn = self._update_states(scheduler_output)
 
+                    num_reqs = self.input_batch.num_reqs
+                    req_ids = self.input_batch.req_ids
+                    tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                    num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+                    max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+
                     (
                         logits_indices,
                         spec_decode_metadata,
