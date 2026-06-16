@@ -2482,14 +2482,15 @@ class NPUModelRunner(GPUModelRunner):
                     # Update persistent batch states.
                     deferred_state_corrections_fn = self._update_states(scheduler_output)
 
-                (
-                    logits_indices,
-                    spec_decode_metadata,
-                    total_num_scheduled_tokens,
-                ) = self._prepare_inputs(
-                    scheduler_output,
-                    num_scheduled_tokens_np,
-                )
+                    (
+                        logits_indices,
+                        spec_decode_metadata,
+                        total_num_scheduled_tokens,
+                        num_scheduled_tokens_compressed_list,
+                    ) = self._prepare_inputs(
+                        scheduler_output,
+                        num_scheduled_tokens_np,
+                    )
 
                     if not num_scheduled_tokens:
                         if (
@@ -2550,21 +2551,21 @@ class NPUModelRunner(GPUModelRunner):
                             self.requests,
                             self.mamba_state_idx,
                         )
-                if self.use_compress:
-                    if deferred_state_corrections_fn:
-                        deferred_state_corrections_fn()
-                        deferred_state_corrections_fn = None
-                    num_reqs = self.input_batch.num_reqs
-                    req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
-                    dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
-                    np.add(
-                        self.input_batch.num_computed_tokens_cpu[req_indices],
-                        self.query_pos.np[:total_num_scheduled_tokens],
-                        out=dsa_positions_np,
-                    )
+                    if self.use_compress:
+                        if deferred_state_corrections_fn:
+                            deferred_state_corrections_fn()
+                            deferred_state_corrections_fn = None
+                        num_reqs = self.input_batch.num_reqs
+                        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+                        dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
+                        np.add(
+                            self.input_batch.num_computed_tokens_cpu[req_indices],
+                            self.query_pos.np[:total_num_scheduled_tokens],
+                            out=dsa_positions_np,
+                        )
 
-                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+                    use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                    ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
 
                     # Run core input preparation.
                     cache = self._run_input_preparation(scheduler_output)
