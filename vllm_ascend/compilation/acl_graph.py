@@ -435,48 +435,22 @@ class GraphParams:
 
 
 _graph_params: GraphParams | None = None
-_draft_graph_params: GraphParams | None = None
-_active_graph_params: GraphParams | None = None
-_active_draft_graph_params: GraphParams | None = None
-
-
-def make_graph_params(aclgraph_capture_sizes: list[int]) -> GraphParams:
-    return GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-    )
-
-
-@contextmanager
-def graph_params_scope(
-    graph_params: GraphParams | None,
-    draft_graph_params: GraphParams | None = None,
-):
-    global _active_graph_params, _active_draft_graph_params
-    old_graph_params = _active_graph_params
-    old_draft_graph_params = _active_draft_graph_params
-    if graph_params is not None:
-        _active_graph_params = graph_params
-    if draft_graph_params is not None:
-        _active_draft_graph_params = draft_graph_params
-    try:
-        yield
-    finally:
-        # 在切回旧的 graph_params 之前，确保当前流上所有 attention 参数更新任务
-        # 已全部完成，避免异步流仍在引用本段 graph_params 导致 task handle 错配
-        # if graph_params is not None:
-        #     torch.npu.current_stream().synchronize()
-        _active_graph_params = old_graph_params
-        _active_draft_graph_params = old_draft_graph_params
 
 
 def set_graph_params(aclgraph_capture_sizes: list[int]):
     global _graph_params
     if _graph_params is not None:
-        raise ValueError("Graph parameters have already been set!")
-    _graph_params = make_graph_params(aclgraph_capture_sizes)
+        logger.info("Graph parameters have already been set!")
+        return
+    _graph_params = GraphParams(
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+    )
 
 
 def update_graph_params_workspaces(num_tokens: int, workspace: torch.Tensor):
