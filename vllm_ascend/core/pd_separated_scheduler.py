@@ -175,7 +175,18 @@ class PDSeparatedScheduler(Scheduler):
         if state == PrefillState.IDLE:
             # IDLE: P首/chunk0首 > D首 > D尾 > Empty.
             if self._can_schedule_prefill_first():
-                return self._pick_prefill_first_batch()
+                so = self._pick_prefill_first_batch()
+                if so.total_num_scheduled_tokens > 0:
+                    return so
+                # P首 returned empty (e.g. KV cache exhausted). Preserve
+                # finished_req_ids and fall through to decode tasks to avoid
+                # a tight busy-loop where the edge spins on empty prefill.
+                logger.warning(
+                    "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
+                    "This usually means KV cache blocks are exhausted by running decode "
+                    "requests. Prefill work will be deferred until resources are freed."
+                )
+                self.finished_req_ids.update(so.finished_req_ids)
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
             if self.decodes_last_ready:
@@ -185,7 +196,15 @@ class PDSeparatedScheduler(Scheduler):
         if state == PrefillState.LOW:
             # LOW: chunk/P首(when slot available) > P尾 > D首 > D尾 > Empty.
             if self._can_schedule_prefill_first():
-                return self._pick_prefill_first_batch()
+                so = self._pick_prefill_first_batch()
+                if so.total_num_scheduled_tokens > 0:
+                    return so
+                logger.warning(
+                    "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
+                    "This usually means KV cache blocks are exhausted by running decode "
+                    "requests. Prefill work will be deferred until resources are freed."
+                )
+                self.finished_req_ids.update(so.finished_req_ids)
             if self.prefills_last_ready:
                 return self._pick_prefill_last_batch()
             if self._can_schedule_decode_first():
@@ -232,10 +251,16 @@ class PDSeparatedScheduler(Scheduler):
         return bool(self.chunk_prefill_first or self.waiting)
 
     def _can_schedule_prefill_first(self) -> bool:
+        # When running decode requests already fill max_num_running_reqs,
+        # super().schedule() inside _pick_prefill_first_batch will return an
+        # empty batch, causing a tight-loop.  Pre-check capacity to avoid
+        # the useless call.
+        effective_capacity = self.max_num_running_reqs - len(self.running)
         return (
             self._has_prefill_work()
             and self.prefill_inflight_count < self.prefill_inflight_limit
             and self.hidden_channel_manager.has_free_prefill()
+            and effective_capacity > 0
         )
 
     def _can_schedule_decode_first(self) -> bool:
@@ -473,6 +498,12 @@ class PDSeparatedScheduler(Scheduler):
             if scheduler_output is not None:
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     scheduler_output.batch_type = BatchType.EMPTY
+                    logger.error(
+                        "DECODE_FIRST returned empty batch (total_num_scheduled_tokens=0) "
+                        "despite %d running requests. This indicates a severe KV cache "
+                        "shortage or scheduler budget exhaustion.",
+                        len(self.running),
+                    )
                 else:
                     scheduler_output.batch_type = BatchType.DECODE_FIRST
                     scheduler_output.head_token = uuid4().hex
