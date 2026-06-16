@@ -600,6 +600,27 @@ class PassiveEngineCoreProc:
                 )
                 if _pd_enabled:
                     master_addr = vllm_config.parallel_config.master_addr
+                    master_port = vllm_config.parallel_config.master_port
+
+                    # Report this node's reachable IP to the edge so the
+                    # edge can construct POST_OUT's connect endpoint
+                    # without a CLI flag. Uses a one-shot TCPStore (edge
+                    # = master, cloud = client) on ``master_port + 1``
+                    # to avoid colliding with the NCCL rendezvous store
+                    # on ``master_port``.
+                    import torch.distributed as dist
+                    from datetime import timedelta
+                    from vllm.utils.network_utils import get_ip
+                    _addr_store = dist.TCPStore(
+                        host_name=master_addr,
+                        port=master_port + 1,
+                        world_size=2,
+                        is_master=False,
+                        timeout=timedelta(seconds=300),
+                    )
+                    _addr_store.set("cloud_ip", get_ip())
+                    del _addr_store
+
                     post_out_bind = (
                         f"tcp://*:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
                     )
