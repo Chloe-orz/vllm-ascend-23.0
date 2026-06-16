@@ -2903,9 +2903,6 @@ class NPUModelRunner(GPUModelRunner):
                             out=dsa_positions_np,
                         )
 
-                    use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                    ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
-
                     # Run core input preparation.
                     cache = self._run_input_preparation(scheduler_output)
                     total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
@@ -2927,22 +2924,6 @@ class NPUModelRunner(GPUModelRunner):
                         num_tokens_across_dp,
                     )
 
-                (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded
-                    if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
-                    else total_num_scheduled_tokens,
-                    num_tokens_padded=num_tokens_padded,
-                    num_reqs=num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    max_query_len=max_num_scheduled_tokens,
-                    ubatch_slices=ubatch_slices_attn,
-                    logits_indices=logits_indices,
-                    use_spec_decode=use_spec_decode,
-                    num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
-                    num_scheduled_tokens_np=num_scheduled_tokens_np,
-                    cascade_attn_prefix_lens=cascade_attn_prefix_lens,
-                    num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list,
-                )
 
             (
                 input_ids,
