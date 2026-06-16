@@ -15,8 +15,6 @@
 # limitations under the License.
 #
 
-import sys
-
 import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
@@ -256,28 +254,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
 
-        # [DEBUG-BISECT] Print key metadata for continuation layers
-        _is_continuation = getattr(
-            attn_metadata, "_is_layer_slice_continuation", False
-        )
-        if _is_continuation:
-            _cu_sl_cpu = non_spec_query_start_loc.cpu() if non_spec_query_start_loc is not None else None
-            _ssm_idx_cpu = non_spec_state_indices_tensor.cpu() if non_spec_state_indices_tensor is not None else None
-            print(
-                f"[DEBUG-BISECT] ENTER _forward_core layer={self.prefix} "
-                f"num_actual_tokens={num_actual_tokens} "
-                f"num_prefills={attn_metadata.num_prefills} "
-                f"num_decodes={attn_metadata.num_decodes} "
-                f"mixed_qkv.shape={mixed_qkv.shape} "
-                f"core_attn_out.shape={core_attn_out.shape} "
-                f"ssm_state.shape={ssm_state.shape} "
-                f"non_spec_state_indices={_ssm_idx_cpu.tolist() if _ssm_idx_cpu is not None else None} "
-                f"non_spec_query_start_loc={_cu_sl_cpu.tolist() if _cu_sl_cpu is not None else None} "
-                f"has_initial_state_sum={has_initial_state.sum().item() if has_initial_state is not None else None}",
-                file=sys.stderr,
-                flush=True,
-            )
-
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
@@ -355,18 +331,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     attn_metadata, initial_state_mode_opt
                 )
 
-                # [DEBUG-BISECT] Sync before causal_conv1d to check if error
-                # already exists from a prior kernel
-                if _is_continuation:
-                    try:
-                        torch.npu.synchronize()
-                        print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-OK before causal_conv1d",
-                              file=sys.stderr, flush=True)
-                    except RuntimeError as e:
-                        print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-FAIL before causal_conv1d: {e}",
-                              file=sys.stderr, flush=True)
-                        raise
-
                 mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_custom(
                     mixed_qkv_non_spec,
                     conv_weights_T,
@@ -380,18 +344,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=0,
                 )
-
-                # [DEBUG-BISECT] Sync after causal_conv1d
-                if _is_continuation:
-                    try:
-                        torch.npu.synchronize()
-                        print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-OK after causal_conv1d",
-                              file=sys.stderr, flush=True)
-                    except RuntimeError as e:
-                        print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-FAIL after causal_conv1d: {e}",
-                              file=sys.stderr, flush=True)
-                        raise
-
         elif attn_metadata.num_decodes > 0:
             conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
@@ -494,27 +446,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata.num_prefills > 0:
             initial_state = ssm_state[non_spec_state_indices_tensor].transpose(-1, -2).contiguous()
             clear_ssm_states(initial_state, has_initial_state)
-
-            # [DEBUG-BISECT] Sync + print shapes before chunk_gated_delta_rule
-            if _is_continuation:
-                try:
-                    torch.npu.synchronize()
-                    print(
-                        f"[DEBUG-BISECT] layer={self.prefix} SYNC-OK before chunk "
-                        f"q={query_non_spec.shape} k={key_non_spec.shape} "
-                        f"v={value_non_spec.shape} g={g_non_spec.shape} "
-                        f"beta={beta_non_spec.shape} "
-                        f"initial_state={initial_state.shape} "
-                        f"has_initial_state_sum={has_initial_state.sum().item() if has_initial_state is not None else None} "
-                        f"cu_seqlens={non_spec_query_start_loc.cpu().tolist() if non_spec_query_start_loc is not None else None}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                except RuntimeError as e:
-                    print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-FAIL before chunk: {e}",
-                          file=sys.stderr, flush=True)
-                    raise
-
             (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                 q=query_non_spec,
                 k=key_non_spec,
@@ -528,18 +459,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
-
-            # [DEBUG-BISECT] Sync after chunk
-            if _is_continuation:
-                try:
-                    torch.npu.synchronize()
-                    print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-OK after chunk",
-                          file=sys.stderr, flush=True)
-                except RuntimeError as e:
-                    print(f"[DEBUG-BISECT] layer={self.prefix} SYNC-FAIL after chunk: {e}",
-                          file=sys.stderr, flush=True)
-                    raise
-
             ssm_state[non_spec_state_indices_tensor] = (
                 last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
             )
