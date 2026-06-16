@@ -4209,7 +4209,9 @@ class NPUModelRunner(GPUModelRunner):
         assert isinstance(hidden_states, IntermediateTensors)
         return hidden_states
 
-    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
+    def _pad_for_sequence_parallelism(
+        self, num_scheduled_tokens: int, for_cudagraph_capture: bool = False
+    ) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
@@ -4217,7 +4219,9 @@ class NPUModelRunner(GPUModelRunner):
             pc = self.vllm_config.parallel_config
             # Edge-cloud mode: edge node should pad to cloud's tp_size so that
             # the full sequence after all_gather is directly chunkable by cloud SP.
-            if pc.enable_edge_cloud and pc.is_edge_node:
+            # During cudagraph/ACL graph capture, skip this extra padding so that
+            # graph keys match the normal SP-aligned capture sizes.
+            if pc.enable_edge_cloud and pc.is_edge_node and not for_cudagraph_capture:
                 tp_size = max(tp_size, pc.cloud_npu_count)
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
@@ -4304,10 +4308,11 @@ class NPUModelRunner(GPUModelRunner):
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        for_cudagraph_capture: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        # A one-token chunk can still be a prefill, notably at a PD handoff.
-        # Dispatch a decode graph only after every prompt is fully computed.
+        num_tokens_padded = self._pad_for_sequence_parallelism(
+            num_tokens, for_cudagraph_capture=for_cudagraph_capture
+        )
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
@@ -4817,6 +4822,7 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
+            for_cudagraph_capture=is_graph_capturing,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -6587,45 +6593,6 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_attn_backend = None
-
-        for attn_backend_set, kv_cache_group in zip(
-            attention_backends, kv_cache_groups
-        ):
-            for attn_backend in attn_backend_set:
-                builder_cls = attn_backend.get_builder_cls()
-                cg_support = builder_cls.get_cudagraph_support(
-                    self.vllm_config, kv_cache_group.kv_cache_spec
-                )
-                if cg_support.value < min_cg_support.value:
-                    min_cg_support = cg_support
-                    min_cg_attn_backend = attn_backend.__name__
-
-        with update_pass_config(self):
-            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                min_cg_support,
-                min_cg_attn_backend,
-                self.uniform_decode_query_len,
-                self.parallel_config.tensor_parallel_size,
-                self.kv_cache_config,
-                self.max_num_reqs,
-            )
-            self.cudagraph_dispatcher.initialize_cudagraph_keys(
-                cudagraph_mode, self.uniform_decode_query_len
-            )
-
-        if (
-            self.speculative_config
-            and self.drafter is not None
-            and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_extract_hidden_states()
-            )
-        ):
-            assert isinstance(
-                self.drafter,
-                AscendEagleProposer | AscendDflashProposer | AscendExtractHiddenStatesProposer,
-            )
-            self.drafter.initialize_cudagraph_keys(cudagraph_mode)
 
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
