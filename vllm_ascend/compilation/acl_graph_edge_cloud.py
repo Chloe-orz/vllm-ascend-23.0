@@ -31,10 +31,18 @@ if TYPE_CHECKING:
 # ============================================================
 
 def make_graph_params(aclgraph_capture_sizes: list[int]) -> GraphParams:
-    """创建 GraphParams 实例（供边云 segment wrapper 初始化独立参数）。"""
+    """创建 GraphParams 实例（供边云 segment wrapper 初始化独立参数）。
+
+    与 acl_graph.set_graph_params 字段完全一致（7 字段），
+    但不写入全局 _graph_params，而是返回独立实例供每个
+    EdgeCloudACLGraphWrapper 持有，实现 segment 间参数隔离。
+    """
     return GraphParams(
         {size: [] for size in aclgraph_capture_sizes},
         {size: None for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
+        {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
         {size: [] for size in aclgraph_capture_sizes},
     )
