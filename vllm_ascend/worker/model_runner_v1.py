@@ -1061,11 +1061,9 @@ class NPUModelRunner(GPUModelRunner):
         # 对 segment 应用 npugraph_ex 编译时优化（第1层）。
         # 第2层（ACLGraphWrapper 运行时捕获）由 _wrap_segment_if_needed 负责。
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
-        edge_cloud_cfg = self.edge_cloud_cfg
         if (
             ascend_compilation_config.enable_npugraph_ex
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            and edge_cloud_cfg.enable_npugraph_ex
         ):
             logger.info(
                 "EdgeCloudCompiledSegment wrapping segment [%d, %d) "

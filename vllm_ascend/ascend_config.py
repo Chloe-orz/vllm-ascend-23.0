@@ -892,12 +892,6 @@ class EdgeCloudConfig:
         self.decode_graph_min_tokens: int = user_config.get("decode_graph_min_tokens", 1)
         self.transfer_config: dict = user_config.get("transfer_config", {})
         self.hidden_dtype: str = user_config.get("hidden_dtype", "bf16")
-        # Independent switch for npugraph_ex compile-time optimization in
-        # edge-cloud mode.  Defaults to True so that edge-cloud segments
-        # automatically benefit from FX graph fusion passes when the global
-        # enable_npugraph_ex is also True.  Set to False to opt out (e.g. for
-        # A/B performance comparison or when debugging segment-level issues).
-        self.enable_npugraph_ex: bool = user_config.get("enable_npugraph_ex", True)
 
         if self.enabled:
             self._validate()
@@ -946,8 +940,7 @@ class EdgeCloudConfig:
         return (
             f"EdgeCloudConfig(enabled={self.enabled}, role={self.role}, "
             f"mode={self.mode}, edge_head_tail_layers={self.edge_head_tail_layers}, "
-            f"enable_decode_graph={self.enable_decode_graph}, "
-            f"enable_npugraph_ex={self.enable_npugraph_ex})"
+            f"enable_decode_graph={self.enable_decode_graph})"
         )
 
 
