@@ -967,6 +967,7 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens,
         ]
         """
+        self._pp_timing("prepare_inputs:entry", sync_npu=True)
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -991,6 +992,7 @@ class NPUModelRunner(GPUModelRunner):
                 dtype=np.int32,
             )
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
+        self._pp_timing("prepare_inputs:attn_state", sync_npu=True)
 
         # Determine if it's a splitfuse batch
         with_prefill = attn_state not in [AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding]
@@ -1172,6 +1174,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
+        self._pp_timing("prepare_inputs:input_ids", sync_npu=True)
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -1225,6 +1228,7 @@ class NPUModelRunner(GPUModelRunner):
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
+            self._pp_timing("prepare_inputs:accepted_sync", sync_npu=True)
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
                 prev_idx = self.prev_positions.np[:num_reqs]
@@ -1349,6 +1353,7 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 self._seq_lens_cpu_event.synchronize()
                 self._seq_lens_cpu_event_pending = False
+                self._pp_timing("prepare_inputs:seq_lens_sync", sync_npu=True)
                 num_computed_tokens_for_compress = (
                     self.optimistic_seq_lens_cpu[:num_reqs].numpy()
                     - num_scheduled_tokens[:num_reqs]
@@ -1374,6 +1379,7 @@ class NPUModelRunner(GPUModelRunner):
                 positions_compressed_list,
                 req_indices_compressed_list,
             )
+        self._pp_timing("prepare_inputs:slot_mapping", sync_npu=True)
 
         if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
             drift = self.num_computed_tokens[req_indices_gpu].to(
@@ -1458,6 +1464,7 @@ class NPUModelRunner(GPUModelRunner):
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
             )
 
+        self._pp_timing("prepare_inputs:exit", sync_npu=True)
         return (
             logits_indices,
             spec_decode_metadata,
