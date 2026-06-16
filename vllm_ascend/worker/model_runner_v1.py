@@ -2483,6 +2483,12 @@ class NPUModelRunner(GPUModelRunner):
                     deferred_state_corrections_fn = self._update_states(scheduler_output)
 
                     num_reqs = self.input_batch.num_reqs
+                    if num_reqs == 0:
+                        # No active requests remaining (e.g. all were completed
+                        # or removed by a prior _update_states call in
+                        # cloud_prepare_early).  Return empty output consistent
+                        # with the num_scheduled_tokens == 0 path.
+                        return EMPTY_MODEL_RUNNER_OUTPUT
                     req_ids = self.input_batch.req_ids
                     tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
                     num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
@@ -3523,6 +3529,22 @@ class NPUModelRunner(GPUModelRunner):
         can be passed to the forward pass or cached for fast-path reuse.
         """
         num_reqs = self.input_batch.num_reqs
+        # Guard against empty batch after _update_states
+        # (e.g. cloud_prepare_early may have cleared all requests).
+        if num_reqs == 0:
+            return {
+                "total_num_scheduled_tokens": 0,
+                "num_tokens_padded": 0,
+                "num_tokens_across_dp": None,
+                "attn_metadata": None,
+                "logits_indices": None,
+                "spec_decode_metadata": None,
+                "spec_decode_common_attn_metadata": None,
+                "cudagraph_mode": CUDAGraphMode.NONE,
+                "batch_desc": None,
+                "cudagraph_stats": None,
+                "num_scheduled_tokens_compressed_list": None,
+            }
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
@@ -3708,6 +3730,14 @@ class NPUModelRunner(GPUModelRunner):
         # PyTorch >= 2.0 inference tensor protection.
         with torch.inference_mode():
             cache = self._run_input_preparation(scheduler_output)
+
+        # If the batch became empty after _update_states (num_reqs == 0),
+        # _run_input_preparation returns a zeroed placeholder.  Don't cache
+        # it — let execute_model fall through to the normal slow path which
+        # will return EMPTY_MODEL_RUNNER_OUTPUT.
+        if cache["total_num_scheduled_tokens"] == 0:
+            self._cloud_prepare_cache = None
+            return
 
         # --- update_cos_sin ---
         num_input_tokens = cache["num_tokens_padded"]
