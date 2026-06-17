@@ -6,7 +6,7 @@ A `PassiveScheduler` does not make scheduling decisions. It receives
 SchedulerOutputs that have already been decided by the leader rank (rank 0)
 over a ZMQ subscriber, classifies them by `batch_type`, and emits ready-to-
 dispatch payloads — optionally splitting prefill / PD-mix batches into N
-layer slices when `VLLM_LAYER_SLICE_NUM` is set.
+layer slices based on a YAML config.
 
 The class is intentionally minimal: it shares no implementation with
 `vllm.v1.core.sched.scheduler.Scheduler` and depends only on the public
@@ -14,10 +14,10 @@ The class is intentionally minimal: it shares no implementation with
 """
 import enum
 import math
+import os
 import queue
 import threading
 import time
-import os
 from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
@@ -55,7 +55,7 @@ class CloudSchedulingState(enum.Enum):
 class LayerSliceInfo:
     """Metadata for a single layer slice in layerwise-disaggregated execution.
 
-    When VLLM_LAYER_SLICE_NUM > 0, the PassiveScheduler splits the local
+    When layer slicing is enabled, the PassiveScheduler splits the local
     layer range of a single SchedulerOutput into N slices. Each slice carries
     this info so the worker / model_runner can run only the assigned layer
     range and decide whether to perform PP communication.
@@ -168,51 +168,54 @@ class PassiveScheduler:
         self._subscriber_thread: threading.Thread | None = None
         self._shutdown_event = threading.Event()
 
-        # Precompute layer-slice plan once. Mirrors the logic previously
-        # inlined in `run_passive_engine_core`.
-        self._layer_slice_num = envs.VLLM_LAYER_SLICE_NUM
+        # Precompute local layer count.  The actual slice count is resolved
+        # per-batch from a YAML config (token threshold -> slice count).
         self._num_local_layers = 0
-        self._total_slices = 0
-        self._slice_boundaries: list[tuple[int, int]] = []
-        if self._layer_slice_num > 0:
-            num_hidden_layers = (
-                vllm_config.model_config.hf_config.num_hidden_layers
+        self._layer_slice_config: dict[int, int] | None = None
+        self._layer_slice_config_mtime: float = 0.0
+        self._layer_slice_config_path: str | None = None
+        num_hidden_layers = (
+            vllm_config.model_config.hf_config.num_hidden_layers
+        )
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        if vllm_config.parallel_config.enable_edge_cloud:
+            head_k = tail_k = 1
+            additional_config = getattr(
+                vllm_config, "additional_config", None
             )
-            pp_size = vllm_config.parallel_config.pipeline_parallel_size
-            if vllm_config.parallel_config.enable_edge_cloud:
-                # Edge-cloud mode: the cloud (this PassiveScheduler side)
-                # holds the *middle* layers, not the second half of a
-                # standard PP split.  Compute local layer count from
-                # edge_head_tail_layers configured in additional_config.
-                head_k = tail_k = 1
-                additional_config = getattr(
-                    vllm_config, "additional_config", None
-                )
-                if isinstance(additional_config, dict):
-                    ec_cfg = additional_config.get("edge_cloud_config", {})
-                    htl = ec_cfg.get("edge_head_tail_layers", 1)
-                    if isinstance(htl, int):
-                        head_k = tail_k = htl
-                    elif isinstance(htl, (list, tuple)) and len(htl) >= 2:
-                        head_k = int(htl[0])
-                        tail_k = int(htl[1])
-                self._num_local_layers = max(
-                    0, num_hidden_layers - head_k - tail_k
+            if isinstance(additional_config, dict):
+                ec_cfg = additional_config.get("edge_cloud_config", {})
+                htl = ec_cfg.get("edge_head_tail_layers", 1)
+                if isinstance(htl, int):
+                    head_k = tail_k = htl
+                elif isinstance(htl, (list, tuple)) and len(htl) >= 2:
+                    head_k = int(htl[0])
+                    tail_k = int(htl[1])
+            self._num_local_layers = max(
+                0, num_hidden_layers - head_k - tail_k
+            )
+        else:
+            from vllm.distributed.utils import get_pp_indices
+            start_layer_pp, end_layer = get_pp_indices(
+                num_hidden_layers, pp_size - 1, pp_size
+            )
+            self._num_local_layers = end_layer - start_layer_pp
+
+        if self._num_local_layers > 0:
+            cfg = self._load_layer_slice_config()
+            if cfg is not None:
+                self._layer_slice_config = cfg
+                print(
+                    f"[PassiveScheduler] Layer-slice config loaded: "
+                    f"{self._layer_slice_config}",
+                    flush=True,
                 )
             else:
-                # Standard PP mode: use the second-half layer range.
-                from vllm.distributed.utils import get_pp_indices
-                start_layer_pp, end_layer = get_pp_indices(
-                    num_hidden_layers, pp_size - 1, pp_size
+                print(
+                    "[PassiveScheduler] Layer-slice YAML not found; "
+                    "layer slicing is disabled.",
+                    flush=True,
                 )
-                self._num_local_layers = end_layer - start_layer_pp
-
-            # Fixed slice count: distribute layers as evenly as possible.
-            # Larger slices come first (diff <= 1).
-            self._slice_boundaries = self._compute_slice_boundaries(
-                self._num_local_layers, self._layer_slice_num
-            )
-            self._total_slices = len(self._slice_boundaries)
 
         if run_subscriber_thread:
             self.start_subscriber_thread()
@@ -328,17 +331,111 @@ class PassiveScheduler:
             self._inbox.put(scheduler_output)
 
     # ------------------------------------------------------------------ #
+    # Layer-slice config loading                                         #
+    # ------------------------------------------------------------------ #
+    def _load_layer_slice_config(self) -> dict[int, int] | None:
+        """Load token-threshold -> slice-count mapping from YAML.
+
+        The YAML is expected to contain entries like::
+
+            16: 24
+            8: 10
+            4: 4
+            1: 5
+            0: 5
+
+        where the key is the token count in *thousands* and the value is
+        the total number of slices.
+
+        The file path resolution order is:
+        1. ``VLLM_LAYER_SLICE_CONFIG`` env var if set.
+        2. ``layer_slice_config.yaml`` in the same directory as this module.
+
+        On success the path and mtime are cached on ``self`` for hot-reload
+        tracking.  Returns ``None`` when the file does not exist or cannot
+        be parsed.
+        """
+        yaml_path = os.environ.get("VLLM_LAYER_SLICE_CONFIG")
+        if yaml_path is None:
+            yaml_path = os.path.join(
+                os.path.dirname(__file__), "layer_slice_config.yaml"
+            )
+        if not os.path.exists(yaml_path):
+            self._layer_slice_config_path = None
+            self._layer_slice_config_mtime = 0.0
+            return None
+        try:
+            import yaml
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f)
+            if not isinstance(raw, dict):
+                logger.warning(
+                    "Layer-slice config %s is not a dict; ignoring.", yaml_path
+                )
+                return None
+            # Normalize to int keys / values and sort descending by token threshold.
+            config = {
+                int(k): int(v) for k, v in raw.items()
+            }
+            self._layer_slice_config_path = yaml_path
+            self._layer_slice_config_mtime = os.path.getmtime(yaml_path)
+            return dict(sorted(config.items(), key=lambda item: item[0], reverse=True))
+        except Exception:
+            logger.exception("Failed to load layer-slice config from %s", yaml_path)
+            return None
+
+    def _maybe_hot_reload_layer_slice_config(self) -> None:
+        """Check whether the YAML config file has changed on disk and reload."""
+        path = self._layer_slice_config_path
+        if path is None:
+            return
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+        if mtime != self._layer_slice_config_mtime:
+            new_cfg = self._load_layer_slice_config()
+            if new_cfg is not None:
+                self._layer_slice_config = new_cfg
+                print(
+                    f"[PassiveScheduler] Layer-slice config hot-reloaded: "
+                    f"{self._layer_slice_config}",
+                    flush=True,
+                )
+
+    def _resolve_slice_count(self, total_tokens: int) -> int:
+        """Map a prefill batch size (in tokens) to the desired slice count.
+
+        Uses the loaded YAML config (token-threshold in **thousands** ->
+        slice-count).  The thresholds are checked from largest to smallest;
+        the first threshold that ``total_tokens`` meets or exceeds wins.
+
+        If no YAML config is present, layer slicing is disabled.
+        """
+        self._maybe_hot_reload_layer_slice_config()
+        if self._layer_slice_config is not None:
+            for token_k, slice_num in self._layer_slice_config.items():
+                if total_tokens >= token_k * 1000:
+                    return slice_num
+        return 0
+
+    # ------------------------------------------------------------------ #
     # Slicing                                                            #
     # ------------------------------------------------------------------ #
-    def _make_slice_info(self, slice_idx: int) -> LayerSliceInfo:
-        slice_start, slice_end = self._slice_boundaries[slice_idx]
+    def _make_slice_info(
+        self,
+        slice_idx: int,
+        total_slices: int,
+        boundaries: list[tuple[int, int]],
+    ) -> LayerSliceInfo:
+        slice_start, slice_end = boundaries[slice_idx]
         return LayerSliceInfo(
             slice_index=slice_idx,
-            total_slices=self._total_slices,
+            total_slices=total_slices,
             start_layer=slice_start,
             end_layer=slice_end,
             is_first_slice=(slice_idx == 0),
-            is_last_slice=(slice_idx == self._total_slices - 1),
+            is_last_slice=(slice_idx == total_slices - 1),
         )
 
     def _slice_for(
@@ -352,11 +449,22 @@ class PassiveScheduler:
             BatchType.DECODE_FIRST,
         ):
             return [None]
+
+        total_slices = self._resolve_slice_count(
+            so.total_num_scheduled_tokens
+        )
         # Slicing disabled or trivially 1 slice.
-        if self._total_slices <= 1:
+        if total_slices <= 1:
             return [None]
+
+        boundaries = self._compute_slice_boundaries(
+            self._num_local_layers, total_slices
+        )
         # PURE_PREFILL / PREFILL_FIRST / PD_MIX → expand into N slice payloads.
-        return [self._make_slice_info(i) for i in range(self._total_slices)]
+        return [
+            self._make_slice_info(i, total_slices, boundaries)
+            for i in range(total_slices)
+        ]
 
     # ------------------------------------------------------------------ #
     # Dispatch                                                           #
