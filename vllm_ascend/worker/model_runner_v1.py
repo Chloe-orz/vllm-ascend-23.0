@@ -17,6 +17,8 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import os
+import time
 import math
 import sys
 import time
@@ -655,6 +657,17 @@ class NPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         torch.npu.synchronize()
+
+    def _pp_timing(self, stage: str, sync_npu: bool = False) -> None:
+        if os.environ.get("PP_TIMING_ENABLE", "0") != "1":
+            return
+        if sync_npu:
+            torch.npu.synchronize()
+        if self._edge_cloud_enabled:
+            role = self.edge_cloud_cfg.role
+        else:
+            role = "standard"
+        print(f"[PP_TIMING][{role}][{stage}] {time.perf_counter()}")
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -2905,6 +2918,7 @@ class NPUModelRunner(GPUModelRunner):
                 torch.npu.current_stream().synchronize()
 
             assert positions is not None
+            self._pp_timing("update_full_graph_params entry", sync_npu=False)
             update_full_graph_params(
                 self.attn_backend,
                 self.update_stream,
@@ -2914,6 +2928,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
                 positions.shape[0],
             )
+            self.update_stream.synchronize()
+            self._pp_timing("update_full_graph_params done", sync_npu=False)
         if get_forward_context().flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
