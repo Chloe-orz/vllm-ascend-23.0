@@ -219,6 +219,12 @@ class ACLGraphWrapper:
 def weak_ref_workspaces(params):
     if params is None:
         return
+    # Edge-cloud segments: keep strong reference to workspace
+    # because the gap between capture and replay is long
+    # (edge compute + cross-node communication). Weak reference
+    # would be GC'ed before first replay, causing NPU deadlock.
+    if getattr(params, "_is_edge_cloud_segment", False):
+        return
     for num_tokens in params.workspaces:
         if params.workspaces[num_tokens] is None:
             continue
@@ -254,10 +260,10 @@ def update_full_graph_params(
     # acl_graph_edge_cloud.py imports ACLGraphWrapper / GraphParams from this module,
     # so we import graph_params_scope inside the function body.
     from vllm_ascend.compilation.acl_graph_edge_cloud import (
-        graph_params_scope_no_sync,
+        graph_params_scope,
     )
 
-    with graph_params_scope_no_sync(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
+    with graph_params_scope(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
         impl_cls = attn_backend.get_impl_cls()
 
         # Use the caller-supplied unfiltered metadata if available;
