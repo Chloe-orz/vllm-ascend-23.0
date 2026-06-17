@@ -2558,8 +2558,50 @@ class NPUModelRunner(GPUModelRunner):
                             "it when the requests need prompt logprobs"
                         )
 
-                    # Apply deferred state corrections, then mamba preprocess
-                    # (must run after _update_states, before input preparation).
+                logger.debug(
+                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                    "should_ubatch: %s, num_tokens_across_dp: %s",
+                    cudagraph_mode,
+                    batch_desc,
+                    should_ubatch,
+                    num_tokens_across_dp,
+                )
+
+                # Layerwise chunked execution requires eager mode because
+                # each chunk is a separate execute_model call with a
+                # different layer range, which is incompatible with a
+                # captured full CUDAGraph.
+                if (
+                    not get_pp_group().is_first_rank
+                    and envs.VLLM_LAYER_SLICE_NUM > 0
+                    and cudagraph_mode == CUDAGraphMode.FULL
+                ):
+                    cudagraph_mode = CUDAGraphMode.NONE
+                    batch_desc = BatchDescriptor(
+                        num_tokens=batch_desc.num_tokens,
+                        num_reqs=batch_desc.num_reqs,
+                    )
+
+                num_tokens_padded = batch_desc.num_tokens
+                num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+                ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+                    should_ubatch,
+                    num_scheduled_tokens_np,
+                    num_tokens_padded,
+                    num_reqs_padded,
+                    self.parallel_config.num_ubatches,
+                )
+
+                pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+                # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
+                # there should be a corresponding 'postprocess_mamba'. However, it is called inside
+                # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
+                # We simply utilize the implementation in vLLM.
+                if self.cache_config.mamba_cache_mode == "align":
+                    # preprocess_mamba reads req_state.num_computed_tokens (CPU)
+                    # to decide copy operations, so we must apply deferred
+                    # corrections before it runs.
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
@@ -5283,7 +5325,7 @@ class NPUModelRunner(GPUModelRunner):
         # rebound forward is what the loaded modules actually expose.
         # Loaded on demand to keep upstream vLLM unmodified for users that
         # don't enable this feature.
-        if envs.VLLM_LAYER_SLICE_SIZE > 0:
+        if envs.VLLM_LAYER_SLICE_NUM > 0:
             import vllm_ascend.patch.models.qwen_layer_slice  # noqa: F401
 
         if self._edge_cloud_enabled:

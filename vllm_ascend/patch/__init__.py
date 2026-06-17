@@ -1081,7 +1081,7 @@
 #       extra kwargs (layer_slice_start / layer_slice_end /
 #       layer_slice_return_intermediate) and propagate them into the inner
 #       model loop.  Loaded on demand from
-#       ``model_runner_v1.load_model`` only when ``envs.VLLM_LAYER_SLICE_SIZE
+#       ``model_runner_v1.load_model`` only when ``envs.VLLM_LAYER_SLICE_NUM
 #       > 0``, so users that don't enable layer slicing see no change.
 #       Patching the base classes (Qwen2Model, Qwen3NextModel) is enough —
 #       Qwen3Model and Qwen3_5Model inherit the new forward.
