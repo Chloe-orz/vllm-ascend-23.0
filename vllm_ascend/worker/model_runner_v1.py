@@ -2312,7 +2312,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
-        self._cloud_graph_params_pre_updated = False
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2336,15 +2335,6 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
-            # Edge-cloud cloud: pre-update segment_c graph params on update_stream
-            # so the update overlaps with CPU work before segment_c replay.
-            if (
-                self._edge_cloud_enabled
-                and self.edge_cloud_cfg.role == "cloud"
-            ):
-                self._pre_update_segment_c_graph_params(
-                    num_tokens_padded, positions
-                )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
@@ -2833,32 +2823,6 @@ class NPUModelRunner(GPUModelRunner):
             )
         return NPUModelRunner._all_gather_hidden_states(hidden_states)
 
-    def _pre_update_segment_c_graph_params(
-        self,
-        num_tokens_padded: int,
-        positions: torch.Tensor | None,
-    ) -> None:
-        """在 update_stream 上提前 launch segment_c 的 graph params 更新，
-        使更新与 edge→cloud 数据传输 / CPU 准备阶段并行，避免 segment_c
-        入口处串行阻塞。
-        """
-        forward_context = get_forward_context()
-        if forward_context is None or forward_context.capturing:
-            return
-        seg_c = self.segment_c_wrapper
-        if not isinstance(seg_c, ACLGraphWrapper):
-            return
-        cloud_layer_indices = list(range(
-            self.head_k,
-            self.num_layers - self.tail_k,
-        ))
-        self._update_full_graph_params_if_needed(
-            forward_context, num_tokens_padded, positions,
-            layer_indices=cloud_layer_indices,
-            graph_wrapper=seg_c,
-        )
-        self._cloud_graph_params_pre_updated = True
-
     def _update_full_graph_params_if_needed(
         self,
         forward_context: ForwardContext,
@@ -3271,18 +3235,18 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
@@ -3308,17 +3272,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -3366,18 +3330,17 @@ class NPUModelRunner(GPUModelRunner):
             # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
             # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
             # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
-            if seg_c_graph and not forward_context.capturing:
-                if not getattr(self, '_cloud_graph_params_pre_updated', False):
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=cloud_layer_indices,
-                        graph_wrapper=seg_c,
-                    )
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 **model_kwargs,
             )
+            if seg_c_graph and not forward_context.capturing:
+                self._update_full_graph_params_if_needed(
+                    forward_context, num_tokens_padded, positions,
+                    layer_indices=cloud_layer_indices,
+                    graph_wrapper=seg_c,
+                )
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
