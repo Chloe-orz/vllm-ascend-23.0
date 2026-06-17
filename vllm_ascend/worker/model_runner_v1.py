@@ -3219,18 +3219,18 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
@@ -3256,17 +3256,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -3311,20 +3311,17 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
         try:
-            # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
-            # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
-            # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
+            hidden_states = seg_c(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_c_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
-            hidden_states = seg_c(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
@@ -5322,7 +5319,6 @@ class NPUModelRunner(GPUModelRunner):
         with update_pass_config(self):
             super()._check_and_update_cudagraph_mode(attention_backends, kv_cache_groups)
 
-
         capture_descs = self.cudagraph_dispatcher.get_capture_descs()
         capture_sizes = sorted({
             desc.num_tokens
@@ -5336,17 +5332,16 @@ class NPUModelRunner(GPUModelRunner):
             set_graph_params(capture_sizes)
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
+            # Edge-cloud: create per-segment params with the CORRECT batch
+            # sizes (now available).  The actual graph capture and param
+            # population happens later in capture_model → _capture_segment_graphs,
+            # which clears stale entries and re-captures each segment wrapper
+            # with graph_params_scope active.
             if self._edge_cloud_enabled:
-                wrappers = []
-                if self.edge_cloud_cfg.role == "edge":
-                    wrappers = [self.segment_a_wrapper, self.segment_e_wrapper]
-                elif self.edge_cloud_cfg.role == "cloud":
-                    wrappers = [self.segment_c_wrapper]
-                for wrapper in wrappers:
-                    if isinstance(wrapper, ACLGraphWrapper):
-                        wrapper.graph_params = make_graph_params(self.cudagraph_batch_sizes)
-                        if self.speculative_config:
-                            wrapper.draft_graph_params = make_graph_params(self.cudagraph_batch_sizes)
+                for wrapper in self._get_aclgraph_wrappers():
+                    wrapper.graph_params = make_graph_params(self.cudagraph_batch_sizes)
+                    if self.speculative_config:
+                        wrapper.draft_graph_params = make_graph_params(self.cudagraph_batch_sizes)
 
     def _get_aclgraph_wrappers(self) -> list[ACLGraphWrapper]:
         """返回所有可能残留 profile 阶段图捕获结果的 ACLGraphWrapper。"""
@@ -5380,7 +5375,108 @@ class NPUModelRunner(GPUModelRunner):
             wrapper.concrete_aclgraph_entries.clear()
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
+
+        # --- 边云 segment wrapper 独立图捕获 ---
+        # GPUModelRunner.capture_model 仅捕获 self.model，不经过 segment
+        # wrapper。此处对每个 segment 执行一次 dummy forward，触发
+        # ACLGraphWrapper 的 lazy capture，使 wrapper.graph_params 在
+        # capture 阶段就填充完毕（对齐标准流程）。之后 decode 阶段
+        # 可以安全使用 "after" 模式。
+        if self._edge_cloud_enabled:
+            self._capture_segment_graphs()
+
         return result
+
+    def _capture_segment_graphs(self) -> None:
+        """捕获 segment wrapper 的 ACL 图，用真实 attn_metadata 初始化 params。
+
+        关键：标准流程 capture_model 的 warmup 中 attention 后端通过
+        impl_cls.update_graph_params 分配 workspace/events/handles，
+        这些分配依赖于真实的 attention metadata（层数、规格等）。
+        attn_metadata=None 会导致 workspace 分配不完整 → replay 卡死。
+        这里通过 _dummy_run 复刻标准流程的 input batch 准备流程，
+        用 _run_input_preparation 生成真实 metadata，确保 capture 后
+        wrapper.params 与全局 _graph_params 具有相同的初始化完整性。
+        """
+        from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+        from vllm.config import CUDAGraphMode
+        from vllm.forward_context import BatchDescriptor, set_forward_context
+
+        device = self.device
+        hidden_size = self.model_config.get_hidden_size()
+        vocab_size = self.model_config.get_vocab_size()
+        capture_sizes = self.cudagraph_batch_sizes
+
+        set_cudagraph_capturing_enabled(True)
+        try:
+            with torch.inference_mode():
+                for num_tokens in capture_sizes:
+                    batch_desc = BatchDescriptor(num_tokens=num_tokens)
+                    positions = torch.arange(num_tokens, dtype=torch.long, device=device)
+                    input_ids = torch.randint(0, vocab_size, (num_tokens,),
+                                              dtype=torch.long, device=device)
+                    dummy_hidden = IntermediateTensors({
+                        "hidden_states": torch.randn(
+                            num_tokens, hidden_size, dtype=self.dtype, device=device
+                        ),
+                        "residual": torch.randn(
+                            num_tokens, hidden_size, dtype=self.dtype, device=device
+                        ),
+                    })
+
+                    num_reqs = self.input_batch.num_reqs
+                    req_ids = self.input_batch.req_ids
+                    if num_reqs == 0:
+                        num_reqs = 1
+                        req_ids = [0]
+                    # Distribute tokens across requests like _dummy_run
+                    min_tokens_per_req = num_tokens // num_reqs
+                    num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
+                    num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+
+                    sched = type("_DummySched", (), {})()
+                    # Use REAL req_ids as keys so _run_input_preparation
+                    # can look them up correctly
+                    sched.num_scheduled_tokens = {
+                        req_ids[i]: num_scheduled_tokens_list[i] for i in range(num_reqs)
+                    }
+                    sched.scheduled_spec_decode_tokens = {}
+                    sched.total_num_scheduled_tokens = num_tokens
+                    sched.finished_req_ids = set()
+                    sched.preempted_req_ids = set()
+                    sched.scheduled_cached_reqs = type("_DummyCached", (), {})()
+                    sched.scheduled_cached_reqs.req_ids = []
+                    sched.scheduled_encoder_inputs = {}
+
+                    cache = self._run_input_preparation(sched)
+                    attn_metadata = cache["attn_metadata"]
+
+                    # --- Capture segments with real attn_metadata ---
+                    ctx_kwargs = dict(attn_metadata=attn_metadata,
+                                      vllm_config=self.vllm_config,
+                                      num_tokens=num_tokens,
+                                      cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                                      batch_descriptor=batch_desc)
+
+                    if self.edge_cloud_cfg.role == "edge":
+                        for wrapper in (self.segment_a_wrapper, self.segment_e_wrapper):
+                            if isinstance(wrapper, ACLGraphWrapper):
+                                with set_forward_context(**ctx_kwargs):
+                                    kw = dict(positions=positions)
+                                    if wrapper is self.segment_a_wrapper:
+                                        kw["input_ids"] = input_ids
+                                    else:
+                                        kw["intermediate_tensors"] = dummy_hidden
+                                    wrapper(**kw)
+
+                    elif self.edge_cloud_cfg.role == "cloud":
+                        wrapper = self.segment_c_wrapper
+                        if isinstance(wrapper, ACLGraphWrapper):
+                            with set_forward_context(**ctx_kwargs):
+                                wrapper(positions=positions, intermediate_tensors=dummy_hidden)
+
+        finally:
+            set_cudagraph_capturing_enabled(False)
 
     def _prepare_multimodal_fields(self):
         """
