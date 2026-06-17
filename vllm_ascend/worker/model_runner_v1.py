@@ -19,7 +19,7 @@
 
 import logging
 import math
-from vllm import envs
+import os
 import sys
 import time
 from collections import defaultdict
@@ -2573,7 +2573,7 @@ class NPUModelRunner(GPUModelRunner):
                 # captured full CUDAGraph.
                 if (
                     not get_pp_group().is_first_rank
-                    and envs.VLLM_LAYER_SLICE_NUM > 0
+                    and getattr(self, "_layer_slice_enabled", False)
                     and cudagraph_mode == CUDAGraphMode.FULL
                 ):
                     cudagraph_mode = CUDAGraphMode.NONE
@@ -5325,7 +5325,10 @@ class NPUModelRunner(GPUModelRunner):
         # rebound forward is what the loaded modules actually expose.
         # Loaded on demand to keep upstream vLLM unmodified for users that
         # don't enable this feature.
-        if envs.VLLM_LAYER_SLICE_NUM > 0:
+        self._layer_slice_enabled = os.path.exists(
+            os.environ.get("VLLM_LAYER_SLICE_CONFIG", "layer_slice_config.yaml")
+        )
+        if self._layer_slice_enabled:
             import vllm_ascend.patch.models.qwen_layer_slice  # noqa: F401
 
         if self._edge_cloud_enabled:
