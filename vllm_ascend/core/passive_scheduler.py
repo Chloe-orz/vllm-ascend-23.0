@@ -153,10 +153,9 @@ class PassiveScheduler:
             "VLLM_PP_NO_INTERLEAVE", ""
         ).strip().lower() in ("1", "true", "yes")
         if not self._interleave_decode:
-            print(
+            logger.info(
                 "[PassiveScheduler] Decode interleaving is DISABLED. "
-                "Prefill slices will execute consecutively.",
-                flush=True,
+                "Prefill slices will execute consecutively."
             )
 
         # Bridge queue between the (optional) subscriber thread and the
@@ -205,16 +204,14 @@ class PassiveScheduler:
             cfg = self._load_layer_slice_config()
             if cfg is not None:
                 self._layer_slice_config = cfg
-                print(
+                logger.info(
                     f"[PassiveScheduler] Layer-slice config loaded: "
                     f"{self._layer_slice_config}",
-                    flush=True,
                 )
             else:
-                print(
+                logger.info(
                     "[PassiveScheduler] Layer-slice YAML not found; "
                     "layer slicing is disabled.",
-                    flush=True,
                 )
 
         if run_subscriber_thread:
@@ -288,10 +285,10 @@ class PassiveScheduler:
             except queue.Empty:
                 if has_ready_work:
                     break
-                print("poll_and_classify: inbox is empty", flush=True)
+                logger.info("poll_and_classify: inbox is empty")
                 scheduler_output = self._inbox.get(block=True)
             bt = scheduler_output.batch_type
-            print(f"Received scheduler_output from edge, batch_type: {bt}", flush=True)
+            logger.info(f"Received scheduler_output from edge, batch_type: {bt}")
             if bt == BatchType.EMPTY:
                 continue
             elif bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
@@ -397,10 +394,9 @@ class PassiveScheduler:
             new_cfg = self._load_layer_slice_config()
             if new_cfg is not None:
                 self._layer_slice_config = new_cfg
-                print(
+                logger.info(
                     f"[PassiveScheduler] Layer-slice config hot-reloaded: "
                     f"{self._layer_slice_config}",
-                    flush=True,
                 )
 
     def _resolve_slice_count(self, total_tokens: int) -> int:
@@ -486,20 +482,18 @@ class PassiveScheduler:
 
     def _start_prefill_middle_throttle(self) -> None:
         self._prefill_middle_throttle_started_at = time.monotonic()
-        print(
+        logger.info(
             f"[PD-PASSIVE] Prefill throttle started: waiting up to "
             f"{self._prefill_middle_throttle_seconds * 1000:.0f}ms for decode",
-            flush=True,
         )
 
     def _clear_prefill_middle_throttle(self) -> None:
         started_at = self._prefill_middle_throttle_started_at
         if started_at is not None:
             elapsed_ms = (time.monotonic() - started_at) * 1000
-            print(
+            logger.info(
                 f"[PD-PASSIVE] Prefill throttle cleared after "
                 f"{elapsed_ms:.1f}ms",
-                flush=True,
             )
         self._prefill_middle_throttle_started_at = None
 
@@ -510,17 +504,15 @@ class PassiveScheduler:
         elapsed_ms = (time.monotonic() - started_at) * 1000
         limit_ms = self._prefill_middle_throttle_seconds * 1000
         if elapsed_ms >= limit_ms:
-            print(
+            logger.info(
                 f"[PD-PASSIVE] Throttle timeout: waited {elapsed_ms:.1f}ms, "
                 f"fallback to prefill",
-                flush=True,
             )
             self._clear_prefill_middle_throttle()
             return True
-        print(
+        logger.info(
             f"[PD-PASSIVE] Throttle active: {elapsed_ms:.1f}ms / {limit_ms:.0f}ms, "
             f"still waiting for decode",
-            flush=True,
         )
         return False
 
