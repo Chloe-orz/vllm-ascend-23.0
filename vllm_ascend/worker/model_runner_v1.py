@@ -669,6 +669,38 @@ class NPUModelRunner(GPUModelRunner):
             role = "standard"
         print(f"[PP_TIMING][{role}][{stage}] {time.perf_counter()}")
 
+    # ------------------------------------------------------------------
+    # NPU event 计时：测量 replay / update / comm 的实际 NPU 耗时与重叠情况。
+    # 用 barrier（record + synchronize）串行隔离各段，确保测出的是该段独占时间，
+    # 从而判断 update_c 是否被 replay_c 覆盖、以及阻塞发生在哪一段。
+    # 开关：EDGE_CLOUD_PROFILE=1 启用；计数前 N 次后自动关闭。
+    # ------------------------------------------------------------------
+    def _ec_profile_enabled(self) -> bool:
+        if os.environ.get("EDGE_CLOUD_PROFILE", "0") != "1":
+            return False
+        max_count = int(os.environ.get("EDGE_CLOUD_PROFILE_STEPS", "20"))
+        n = getattr(self, "_ec_profile_count", 0)
+        if n >= max_count:
+            return False
+        self._ec_profile_count = n + 1
+        return True
+
+    def _ec_record(self, stream) -> torch.npu.Event:
+        ev = torch.npu.Event(enable_timing=True)
+        ev.record(stream)
+        return ev
+
+    def _ec_emit(self, tag: str, r0: torch.npu.Event, r1: torch.npu.Event,
+                 u0: torch.npu.Event | None, u1: torch.npu.Event | None) -> None:
+        torch.npu.synchronize()
+        replay_ms = r0.elapsed_time(r1)
+        update_ms = (u0.elapsed_time(u1) if (u0 is not None and u1 is not None) else 0.0)
+        overlap = "yes" if (update_ms and update_ms < replay_ms) else "no"
+        n = getattr(self, "_ec_profile_count", 1)
+        print(f"[EC_PROFILE][cloud seg_c][step {n}] {tag}: "
+              f"replay={replay_ms:.3f}ms update={update_ms:.3f}ms "
+              f"update_covered_by_replay={overlap}", flush=True)
+
     def _set_up_drafter(self):
         # Set up speculative decoding.
         self.drafter: (
@@ -2312,6 +2344,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
+        _ec_fwd_t0 = time.perf_counter() if os.environ.get(
+            "EDGE_CLOUD_PROFILE", "0") == "1" else None
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2338,6 +2372,11 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
+        if _ec_fwd_t0 is not None and self._edge_cloud_enabled:
+            torch.npu.synchronize()
+            host_ms = (time.perf_counter() - _ec_fwd_t0) * 1000.0
+            print(f"[EC_PROFILE][cloud][forward host+sync] {host_ms:.3f}ms",
+                  flush=True)
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -3362,22 +3401,42 @@ class NPUModelRunner(GPUModelRunner):
             _EXTRA_CTX.layer_idx = self.head_k
         try:
             do_update = seg_c_graph and not forward_context.capturing
+            prof = self._ec_profile_enabled()
+            ust = self.update_stream
+            if prof:
+                # comm 同步（recv hidden）的 NPU 耗时：AsyncIntermediateTensors
+                # 在 .tensors 访问时触发 wait_for_comm。包成一段单独测。
+                c0 = self._ec_record(torch.npu.current_stream())
+                intermediate_tensors.tensors  # 触发 wait_for_comm
+                c1 = self._ec_record(torch.npu.current_stream())
+
             if do_update and getattr(self, '_seg_c_post_update_mode', False):
                 # 稳态：replay 后异步 update，与下一轮 CPU 准备重叠
+                r0 = self._ec_record(torch.npu.current_stream()) if prof else None
                 hidden_states = seg_c(
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     **model_kwargs,
                 )
+                r1 = self._ec_record(torch.npu.current_stream()) if prof else None
+                u0 = self._ec_record(ust) if prof else None
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
+                u1 = self._ec_record(ust) if prof else None
+                if prof:
+                    self._ec_emit("post-update(steady)", r0, r1, u0, u1)
+                    # 单独打印 comm
+                    torch.npu.synchronize()
+                    print(f"[EC_PROFILE][cloud seg_c][step {self._ec_profile_count}] "
+                          f"comm(recv hidden)={c0.elapsed_time(c1):.3f}ms", flush=True)
             else:
                 # 首次回放：replay 前 update，用真实 attention 参数 + record event，
                 # 避免 capture 期 stale 参数（minimal intermediate_tensors）导致
                 # attention 用错误 seq_lens 访问 KV cache 越界 → 卡死
+                u0 = self._ec_record(ust) if prof else None
                 if do_update:
                     self._update_full_graph_params_if_needed(
                         forward_context, num_tokens_padded, positions,
@@ -3385,11 +3444,19 @@ class NPUModelRunner(GPUModelRunner):
                         graph_wrapper=seg_c,
                     )
                     self._seg_c_post_update_mode = True
+                u1 = self._ec_record(ust) if prof else None
+                r0 = self._ec_record(torch.npu.current_stream()) if prof else None
                 hidden_states = seg_c(
                     positions=positions,
                     intermediate_tensors=intermediate_tensors,
                     **model_kwargs,
                 )
+                r1 = self._ec_record(torch.npu.current_stream()) if prof else None
+                if prof:
+                    self._ec_emit("pre-update(first)", r0, r1, u0, u1)
+                    torch.npu.synchronize()
+                    print(f"[EC_PROFILE][cloud seg_c][step {self._ec_profile_count}] "
+                          f"comm(recv hidden)={c0.elapsed_time(c1):.3f}ms", flush=True)
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
