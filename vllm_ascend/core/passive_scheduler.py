@@ -144,20 +144,6 @@ class PassiveScheduler:
         self._prefill_middle_throttle_started_at: float | None = None
         self._prefill_middle_throttle_seconds = 0.010
 
-        # Interleave switch: when False, the cloud will NOT interleave
-        # decode batches between prefill slices.  A prefill slice chain
-        # (slice_0 → slice_1 → ... → slice_N) must finish entirely
-        # before any decode batch is scheduled.
-        # Controlled by env ``VLLM_PP_NO_INTERLEAVE=1``.
-        self._interleave_decode: bool = not os.environ.get(
-            "VLLM_PP_NO_INTERLEAVE", ""
-        ).strip().lower() in ("1", "true", "yes")
-        if not self._interleave_decode:
-            logger.info(
-                "[PassiveScheduler] Decode interleaving is DISABLED. "
-                "Prefill slices will execute consecutively."
-            )
-
         # Bridge queue between the (optional) subscriber thread and the
         # main loop. When the thread is enabled, it drains
         # `pp_subscriber.consume_new_outputs()` and pushes each SchedulerOutput
@@ -559,17 +545,6 @@ class PassiveScheduler:
         return boundaries
 
     def _schedule_expect_alternation(self) -> ScheduledBatch:
-        # Non-interleave mode: a prefill slice chain must finish entirely
-        # before any decode batch is scheduled.
-        if not self._interleave_decode:
-            if self._active_prefill_slices:
-                return self._build_active_prefill_slice_batch()
-            if self.ready_prefills:
-                return self._build_batch(self.ready_prefills.popleft())
-            if self.ready_decodes:
-                return self._build_batch(self.ready_decodes.popleft())
-            return ScheduledBatch.empty()
-
         state = self.cloud_scheduling_state
         if state == CloudSchedulingState.EXPECT_EXECUTE_PREFILL:
             if self._active_prefill_slices:
