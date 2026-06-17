@@ -3235,17 +3235,35 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                hidden_states = seg_a(
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
-                if seg_a_graph and not forward_context.capturing:
+                do_update = seg_a_graph and not forward_context.capturing
+                if do_update and getattr(self, '_seg_a_post_update_mode', False):
+                    # 稳态：replay 后异步 update，与下一轮 CPU 准备重叠
+                    hidden_states = seg_a(
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs,
+                    )
                     self._update_full_graph_params_if_needed(
                         forward_context, num_tokens_padded, positions,
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
+                    )
+                else:
+                    # 首次回放：replay 前 update，用真实 attention 参数 + record event，
+                    # 避免 capture 期 stale 参数导致 KV cache 越界卡死
+                    if do_update:
+                        self._update_full_graph_params_if_needed(
+                            forward_context, num_tokens_padded, positions,
+                            layer_indices=list(range(0, self.head_k)),
+                            graph_wrapper=seg_a,
+                        )
+                        self._seg_a_post_update_mode = True
+                    hidden_states = seg_a(
+                        input_ids=input_ids,
+                        positions=positions,
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs,
                     )
             finally:
                 if old_layer_idx is not None:
@@ -3272,16 +3290,32 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
-            if seg_e_graph and not forward_context.capturing:
+            do_update = seg_e_graph and not forward_context.capturing
+            if do_update and getattr(self, '_seg_e_post_update_mode', False):
+                # 稳态：replay 后异步 update，与下一轮 CPU 准备重叠
+                hidden_states = seg_e(
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    **model_kwargs,
+                )
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
+                )
+            else:
+                # 首次回放：replay 前 update，避免 capture 期 stale 参数越界
+                if do_update:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=tail_layer_indices,
+                        graph_wrapper=seg_e,
+                    )
+                    self._seg_e_post_update_mode = True
+                hidden_states = seg_e(
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    **model_kwargs,
                 )
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
@@ -3327,19 +3361,34 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
         try:
-            # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
-            # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
-            # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
-            hidden_states = seg_c(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
-            if seg_c_graph and not forward_context.capturing:
+            do_update = seg_c_graph and not forward_context.capturing
+            if do_update and getattr(self, '_seg_c_post_update_mode', False):
+                # 稳态：replay 后异步 update，与下一轮 CPU 准备重叠
+                hidden_states = seg_c(
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    **model_kwargs,
+                )
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
+                )
+            else:
+                # 首次回放：replay 前 update，用真实 attention 参数 + record event，
+                # 避免 capture 期 stale 参数（minimal intermediate_tensors）导致
+                # attention 用错误 seq_lens 访问 KV cache 越界 → 卡死
+                if do_update:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=cloud_layer_indices,
+                        graph_wrapper=seg_c,
+                    )
+                    self._seg_c_post_update_mode = True
+                hidden_states = seg_c(
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    **model_kwargs,
                 )
         finally:
             if old_layer_idx is not None:
@@ -5356,15 +5405,18 @@ class NPUModelRunner(GPUModelRunner):
                 wrappers = []
                 if self.edge_cloud_cfg.role == "edge":
                     wrappers = [self.segment_a_wrapper, self.segment_e_wrapper]
+                    # capture 前重置：首次回放走 pre-update（保证正确），
+                    # 之后切换到 post-update（与下一轮 CPU 准备重叠）
+                    self._seg_a_post_update_mode = False
+                    self._seg_e_post_update_mode = False
                 elif self.edge_cloud_cfg.role == "cloud":
                     wrappers = [self.segment_c_wrapper]
+                    self._seg_c_post_update_mode = False
                 for wrapper in wrappers:
                     if isinstance(wrapper, ACLGraphWrapper):
                         wrapper.graph_params = make_graph_params(self.cudagraph_batch_sizes)
-                        wrapper.graph_params._is_edge_cloud_segment = True
                         if self.speculative_config:
                             wrapper.draft_graph_params = make_graph_params(self.cudagraph_batch_sizes)
-                            wrapper.draft_graph_params._is_edge_cloud_segment = True
 
     def _get_aclgraph_wrappers(self) -> list[ACLGraphWrapper]:
         """返回所有可能残留 profile 阶段图捕获结果的 ACLGraphWrapper。"""

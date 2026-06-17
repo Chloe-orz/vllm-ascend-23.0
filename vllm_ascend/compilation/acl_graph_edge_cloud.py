@@ -136,5 +136,8 @@ class EdgeCloudACLGraphWrapper(ACLGraphWrapper):
         self.draft_graph_params: GraphParams | None = None
 
     def __call__(self, *args, **kwargs):
-        with graph_params_scope(self.graph_params, self.draft_graph_params):
+        # 使用 no_sync 变体：capture 时仅切换 _graph_params 指针供 attention 后端
+        # 填充本 segment 参数，replay 时指针切换无副作用（replay 不再读取全局指针）。
+        # 不在退出时同步主 stream，避免 replay 后 host-block 破坏 CPU-NPU 掩盖。
+        with graph_params_scope_no_sync(self.graph_params, self.draft_graph_params):
             return super().__call__(*args, **kwargs)
