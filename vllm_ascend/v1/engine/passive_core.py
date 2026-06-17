@@ -329,10 +329,9 @@ class PPSchedulerZmqChannel:
 
     def publish(self, scheduler_output: SchedulerOutput) -> None:
         """Queue a SchedulerOutput for the peer. Non-blocking."""
-        print(
-            f"Send scheduler_output to peer, batch_type: "
+        logger.info(
+            f"Send scheduler_output to edge, batch_type: "
             f"{scheduler_output.batch_type}",
-            flush=True,
         )
         self._publisher.publish(scheduler_output)
 
@@ -435,12 +434,11 @@ class PassiveEngineCoreProc:
             else:
                 _slice_info_str += "None;"
         _slice_info_str += "]"
-        print(
-            f"\r\n[Cloud] Step dispatched batch_type="
-            f"{batch.scheduler_output.batch_type.value}, "
+        logger.info(
+            f"\r\n[Cloud] Step dispatched batch_type: "
+            f"{batch.scheduler_output.batch_type}, "
             f"slices_count={len(batch.slices)}, "
             f"slice_info={_slice_info_str}",
-            flush=True,
         )
 
         for slice_info in batch.slices:
