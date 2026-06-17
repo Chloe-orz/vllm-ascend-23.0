@@ -2617,7 +2617,7 @@ class NPUModelRunner(GPUModelRunner):
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
-                    if self.cache_config.enable_prefix_caching:
+                    if self.cache_config.mamba_cache_mode == "align":
                         if vllm_version_is("0.20.2"):
                             mamba_bufs = self._get_mamba_copy_bufs()
                             preprocess_bufs = mamba_bufs
@@ -2635,24 +2635,24 @@ class NPUModelRunner(GPUModelRunner):
                             self.model.get_mamba_state_copy_func(),
                             preprocess_bufs,
                         )
-                    # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                    # for requests whose state was copied to a new block.
-                    # Re-sync to GPU so the mamba kernel reads from the
-                    # correct initial state slot (init_token_idx = 0).
-                    self.num_accepted_tokens.np[:num_reqs] = (
-                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                    )
-                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
-
-                    if mamba_bufs.postprocess_align is not None:
-                        mamba_utils.stage_postprocess_inputs_to_gpu(
-                            mamba_bufs.postprocess_align,
-                            scheduler_output,
-                            self.input_batch.req_ids,
-                            num_reqs,
-                            self.requests,
-                            self.mamba_state_idx,
+                        # preprocess_mamba resets num_accepted_tokens_cpu to 1
+                        # for requests whose state was copied to a new block.
+                        # Re-sync to GPU so the mamba kernel reads from the
+                        # correct initial state slot (init_token_idx = 0).
+                        self.num_accepted_tokens.np[:num_reqs] = (
+                            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                         )
+                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
+
+                        if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
+                            mamba_utils.stage_postprocess_inputs_to_gpu(
+                                mamba_bufs.postprocess_align,
+                                scheduler_output,
+                                self.input_batch.req_ids,
+                                num_reqs,
+                                self.requests,
+                                self.mamba_state_idx,
+                            )
                     if self.use_compress:
                         if deferred_state_corrections_fn:
                             deferred_state_corrections_fn()
