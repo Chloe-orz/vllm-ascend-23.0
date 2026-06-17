@@ -2820,13 +2820,91 @@ class NPUModelRunner(GPUModelRunner):
             deferred_state_corrections_fn = None
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
-                if not _fast_path and not _cloud_fast_path:
-                    # Fix up prev_req_id_to_index for requests that were discarded
-                    # in the previous sample_tokens step. If a request has
-                    # prev_num_draft_len > 0 but is missing from
-                    # prev_req_id_to_index, the parent _update_states would
-                    # hit a KeyError. Reset prev_num_draft_len to 0 for such
-                    # requests so they fall through safely.
+                # Fix up prev_req_id_to_index for requests that were discarded
+                # in the previous sample_tokens step. If a request has
+                # prev_num_draft_len > 0 but is missing from
+                # prev_req_id_to_index, the parent _update_states would
+                # hit a KeyError. Reset prev_num_draft_len to 0 for such
+                # requests so they fall through safely.
+                if (
+                    self.use_async_scheduling
+                    and self.num_spec_tokens
+                    and self.input_batch.prev_req_id_to_index is not None
+                ):
+                    for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                        if (
+                            req_id not in self.input_batch.prev_req_id_to_index
+                            and (req_state := self.requests.get(req_id)) is not None
+                            and req_state.prev_num_draft_len
+                        ):
+                            req_state.prev_num_draft_len = 0
+
+                # Edge-cloud tail segments (PL/DL) reuse the batch state
+                # established by their head segment (PF/DF).  Skipping
+                # _update_states prevents interleaving bugs when multiple
+                # prefills are in flight (2P1D) and avoids double-counting.
+                is_edge_tail_segment = (
+                    self._edge_cloud_enabled
+                    and is_edge_device()
+                    and scheduler_output.batch_type in (
+                        BatchType.PREFILL_LAST,
+                        BatchType.DECODE_LAST,
+                    )
+                )
+                scheduled_req_ids = tuple(scheduler_output.num_scheduled_tokens)
+                if is_edge_tail_segment:
+                    # Tail segments may reuse the input_batch row created by
+                    # the head segment.  On Ascend, add_request() initializes
+                    # num_tokens_no_spec but num_tokens may still be 0 until
+                    # sampling writes an output token.  Some downstream logic
+                    # reads num_tokens during the first tail prefill; keep it
+                    # consistent with the already-populated token_ids.
+                    for req_id in scheduled_req_ids:
+                        req_idx = self.input_batch.req_id_to_index.get(req_id)
+                        if req_idx is not None:
+                            self.input_batch.num_tokens[req_idx] = max(
+                                int(self.input_batch.num_tokens[req_idx]),
+                                int(self.input_batch.num_tokens_no_spec[req_idx]),
+                            )
+                actual_req_ids = tuple(
+                    rid for rid in self.input_batch.req_ids if rid is not None
+                )
+                skip_update_states = (
+                    is_edge_tail_segment
+                    and actual_req_ids == scheduled_req_ids
+                )
+                if skip_update_states:
+                    deferred_state_corrections_fn = None
+                else:
+                    deferred_state_corrections_fn = self._update_states(
+                        scheduler_output
+                    )
+
+                if is_edge_tail_segment:
+                    # If this tail segment was not already present in
+                    # input_batch, _update_states() just added it above.
+                    # NPUInputBatch.add_request() initializes
+                    # num_tokens_no_spec but leaves num_tokens unchanged, so
+                    # fix it here before _prepare_inputs() builds attention
+                    # metadata from input_batch state.
+                    for req_id in scheduled_req_ids:
+                        req_idx = self.input_batch.req_id_to_index.get(req_id)
+                        if req_idx is not None:
+                            self.input_batch.num_tokens[req_idx] = max(
+                                int(self.input_batch.num_tokens[req_idx]),
+                                int(self.input_batch.num_tokens_no_spec[req_idx]),
+                            )
+
+                if has_ec_transfer() and get_ec_transfer().is_producer:
+                    with self.maybe_get_ec_connector_output(
+                        scheduler_output,
+                        encoder_cache=self.encoder_cache,
+                    ) as ec_connector_output:
+                        self._execute_mm_encoder(scheduler_output)
+                        self._finalize_dump_data()
+                        return make_empty_encoder_model_runner_output(scheduler_output)
+
+                if not num_scheduled_tokens:
                     if (
                         self.use_async_scheduling
                         and self.num_spec_tokens
@@ -8207,6 +8285,24 @@ class NPUModelRunner(GPUModelRunner):
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
             )
+            # Diagnose cloud/edge KV-cache config drift.
+            _non_enc_idx = 0
+            for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+                if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
+                    continue
+                _spec_type = type(kv_cache_group.kv_cache_spec).__name__
+                _bs = block_sizes[_non_enc_idx]
+                _mb = max_num_blocks[_non_enc_idx]
+                logger.info(
+                    "[KVCacheGroup] group=%d spec=%s block_size=%d "
+                    "max_num_blocks_per_req=%d max_model_len=%d "
+                    "role=%s edge_cloud=%s",
+                    i, _spec_type, _bs, _mb, max_model_len,
+                    getattr(self.edge_cloud_cfg, "role", "none")
+                    if self._edge_cloud_enabled else "none",
+                    self._edge_cloud_enabled,
+                )
+                _non_enc_idx += 1
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,
