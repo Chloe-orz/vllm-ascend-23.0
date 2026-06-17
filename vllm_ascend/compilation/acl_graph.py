@@ -253,9 +253,11 @@ def update_full_graph_params(
     # Lazy import to avoid circular dependency:
     # acl_graph_edge_cloud.py imports ACLGraphWrapper / GraphParams from this module,
     # so we import graph_params_scope inside the function body.
-    from vllm_ascend.compilation.acl_graph_edge_cloud import graph_params_scope
+    from vllm_ascend.compilation.acl_graph_edge_cloud import (
+        graph_params_scope_no_sync,
+    )
 
-    with graph_params_scope(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
+    with graph_params_scope_no_sync(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
         impl_cls = attn_backend.get_impl_cls()
 
         # Use the caller-supplied unfiltered metadata if available;

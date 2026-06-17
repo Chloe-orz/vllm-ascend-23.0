@@ -76,6 +76,30 @@ def graph_params_scope(
         _acl_graph._draft_graph_params = old_draft_graph_params
 
 
+@contextmanager
+def graph_params_scope_no_sync(
+    graph_params: GraphParams | None,
+    draft_graph_params: GraphParams | None = None,
+):
+    """与 graph_params_scope 相同，但退出时不同步 NPU 主 stream。
+
+    仅用于 update_full_graph_params 等已知 work 全在独立 update_stream 上、
+    且不需要阻塞主 stream 的场景。图回放前仍需由调用方保证 update_stream
+    上的参数更新已全部完成。
+    """
+    old_graph_params = _acl_graph._graph_params
+    old_draft_graph_params = _acl_graph._draft_graph_params
+    if graph_params is not None:
+        _acl_graph._graph_params = graph_params
+    if draft_graph_params is not None:
+        _acl_graph._draft_graph_params = draft_graph_params
+    try:
+        yield
+    finally:
+        _acl_graph._graph_params = old_graph_params
+        _acl_graph._draft_graph_params = old_draft_graph_params
+
+
 # ============================================================
 #  边云分段 ACLGraphWrapper
 #  —— 继承标准 ACLGraphWrapper，在 __call__ 中注入
