@@ -2866,12 +2866,9 @@ class NPUModelRunner(GPUModelRunner):
                                 int(self.input_batch.num_tokens[req_idx]),
                                 int(self.input_batch.num_tokens_no_spec[req_idx]),
                             )
-                actual_req_ids = tuple(
-                    rid for rid in self.input_batch.req_ids if rid is not None
-                )
                 skip_update_states = (
                     is_edge_tail_segment
-                    and actual_req_ids == scheduled_req_ids
+                    and tuple(self.input_batch.req_ids) == scheduled_req_ids
                 )
                 if skip_update_states:
                     deferred_state_corrections_fn = None
@@ -8285,24 +8282,6 @@ class NPUModelRunner(GPUModelRunner):
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
             )
-            # Diagnose cloud/edge KV-cache config drift.
-            _non_enc_idx = 0
-            for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-                if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
-                    continue
-                _spec_type = type(kv_cache_group.kv_cache_spec).__name__
-                _bs = block_sizes[_non_enc_idx]
-                _mb = max_num_blocks[_non_enc_idx]
-                logger.info(
-                    "[KVCacheGroup] group=%d spec=%s block_size=%d "
-                    "max_num_blocks_per_req=%d max_model_len=%d "
-                    "role=%s edge_cloud=%s",
-                    i, _spec_type, _bs, _mb, max_model_len,
-                    getattr(self.edge_cloud_cfg, "role", "none")
-                    if self._edge_cloud_enabled else "none",
-                    self._edge_cloud_enabled,
-                )
-                _non_enc_idx += 1
             self.input_batch = NPUInputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,
