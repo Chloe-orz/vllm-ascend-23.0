@@ -6,7 +6,7 @@ A `PassiveScheduler` does not make scheduling decisions. It receives
 SchedulerOutputs that have already been decided by the leader rank (rank 0)
 over a ZMQ subscriber, classifies them by `batch_type`, and emits ready-to-
 dispatch payloads — optionally splitting prefill / PD-mix batches into N
-layer slices when `VLLM_LAYER_SLICE_SIZE` is set.
+layer slices when `VLLM_LAYER_SLICE_NUM` is set.
 
 The class is intentionally minimal: it shares no implementation with
 `vllm.v1.core.sched.scheduler.Scheduler` and depends only on the public
@@ -55,7 +55,7 @@ class CloudSchedulingState(enum.Enum):
 class LayerSliceInfo:
     """Metadata for a single layer slice in layerwise-disaggregated execution.
 
-    When VLLM_LAYER_SLICE_SIZE > 0, the PassiveScheduler splits the local
+    When VLLM_LAYER_SLICE_NUM > 0, the PassiveScheduler splits the local
     layer range of a single SchedulerOutput into N slices. Each slice carries
     this info so the worker / model_runner can run only the assigned layer
     range and decide whether to perform PP communication.
@@ -170,10 +170,11 @@ class PassiveScheduler:
 
         # Precompute layer-slice plan once. Mirrors the logic previously
         # inlined in `run_passive_engine_core`.
-        self._layer_slice_size = envs.VLLM_LAYER_SLICE_SIZE
+        self._layer_slice_num = envs.VLLM_LAYER_SLICE_NUM
         self._num_local_layers = 0
         self._total_slices = 0
-        if self._layer_slice_size > 0:
+        self._slice_boundaries: list[tuple[int, int]] = []
+        if self._layer_slice_num > 0:
             num_hidden_layers = (
                 vllm_config.model_config.hf_config.num_hidden_layers
             )
@@ -205,9 +206,13 @@ class PassiveScheduler:
                     num_hidden_layers, pp_size - 1, pp_size
                 )
                 self._num_local_layers = end_layer - start_layer_pp
-            self._total_slices = math.ceil(
-                self._num_local_layers / self._layer_slice_size
+
+            # Fixed slice count: distribute layers as evenly as possible.
+            # Larger slices come first (diff <= 1).
+            self._slice_boundaries = self._compute_slice_boundaries(
+                self._num_local_layers, self._layer_slice_num
             )
+            self._total_slices = len(self._slice_boundaries)
 
         if run_subscriber_thread:
             self.start_subscriber_thread()
@@ -326,10 +331,7 @@ class PassiveScheduler:
     # Slicing                                                            #
     # ------------------------------------------------------------------ #
     def _make_slice_info(self, slice_idx: int) -> LayerSliceInfo:
-        slice_start = slice_idx * self._layer_slice_size
-        slice_end = min(
-            slice_start + self._layer_slice_size, self._num_local_layers
-        )
+        slice_start, slice_end = self._slice_boundaries[slice_idx]
         return LayerSliceInfo(
             slice_index=slice_idx,
             total_slices=self._total_slices,
@@ -430,6 +432,31 @@ class PassiveScheduler:
                 return batch
 
         return ScheduledBatch.empty()
+
+    @staticmethod
+    def _compute_slice_boundaries(
+        num_local_layers: int, layer_slice_num: int
+    ) -> list[tuple[int, int]]:
+        """Compute layer slice boundaries for a fixed slice count.
+
+        Distributes ``num_local_layers`` into ``layer_slice_num`` slices
+        as evenly as possible.  Larger slices come first; the size
+        difference between any two slices is at most 1.
+
+        Returns a list of ``(start_layer, end_layer)`` tuples where
+        ``end_layer`` is exclusive.
+        """
+        if num_local_layers <= 0 or layer_slice_num <= 0:
+            return []
+        boundaries: list[tuple[int, int]] = []
+        base = num_local_layers // layer_slice_num
+        rem = num_local_layers % layer_slice_num
+        start = 0
+        for i in range(layer_slice_num):
+            size = base + 1 if i < rem else base
+            boundaries.append((start, start + size))
+            start += size
+        return boundaries
 
     def _schedule_expect_alternation(self) -> ScheduledBatch:
         # Non-interleave mode: a prefill slice chain must finish entirely
