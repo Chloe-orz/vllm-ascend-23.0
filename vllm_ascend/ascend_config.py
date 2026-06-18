@@ -911,6 +911,12 @@ class EdgeCloudConfig:
         # call sites (mainly tests) that don't have a vllm_config handy.
         self._vllm_config = vllm_config
 
+        # Keep a handle to vllm_config so _validate() can inspect orthogonal
+        # parallel features (PCP/DCP) that are incompatible with edge-cloud's
+        # metadata-free PP transfer. Optional to preserve direct-construction
+        # call sites (mainly tests) that don't have a vllm_config handy.
+        self._vllm_config = vllm_config
+
         if self.enabled:
             self._validate()
 

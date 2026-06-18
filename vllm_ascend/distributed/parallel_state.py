@@ -1289,16 +1289,23 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
     pp_group = get_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
+    ec_meta = get_edge_cloud_tensor_meta()
 
     if is_pp_npu0:
-        tensor_dict, comm_handles, comm_postprocess = pp_group.irecv_tensor_dict()
+        # PP rank 0: receive tensor data from the other side (edge/cloud)
+        # without metadata sync shapes are computed locally
+        tensor_dict, comm_handles, comm_postprocess = edge_cloud_irecv_tensor_dict(
+            num_tokens=num_tokens,
+        )
         assert tensor_dict is not None, (
             "edge_cloud_broadcast_recv_draft: PP tensor_dict is None, "
             "sender may have failed."
         )
 
-        metadata_list, _ = _split_tensor_dict(tensor_dict)
-        tp_group.broadcast_object(metadata_list, src=0)
+        # Broadcast locally-computed metadata + num_tokens to other TP ranks
+        # so they can allocate tensors (this is intra-node, fast)
+        ###metadata_list = ec_meta.metadata_list
+        ###tp_group.broadcast_object([num_tokens, metadata_list], src=0)
 
         def broadcast_postprocess():
             _, tensor_list = _split_tensor_dict(tensor_dict) if tensor_dict else (None, [])
@@ -1318,14 +1325,23 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
         comm_postprocess.append(broadcast_postprocess)
         return tensor_dict, comm_handles, comm_postprocess
 
-    metadata_list = tp_group.broadcast_object(None, src=0)
+    # Non-PP-NPU0 ranks: receive metadata from NPU 0 via TP broadcast,
+    # allocate tensors, then broadcast-recv actual data
+    ###broadcast_data = tp_group.broadcast_object(None, src=0)
+    #recv_num_tokens = broadcast_data[0]
+    #metadata_list = broadcast_data[1]
+    metadata_list = ec_meta.metadata_list
+    recv_num_tokens = num_tokens
     if metadata_list is None:
         metadata_list = []
+
     recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
 
     for key, value in metadata_list:
         if isinstance(value, TensorMetadata):
-            tensor = torch.empty(value.size, dtype=value.dtype, device=value.device)
+            # Replace placeholder dim-0 with actual num_tokens
+            actual_size = (recv_num_tokens,) + value.size[1:]
+            tensor = torch.empty(actual_size, dtype=value.dtype, device=value.device)
             recv_tensor_dict[key] = tensor
         else:
             recv_tensor_dict[key] = value
