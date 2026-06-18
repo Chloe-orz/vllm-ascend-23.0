@@ -700,14 +700,46 @@ class NPUModelRunner(GPUModelRunner):
 
     def _ec_emit(self, tag: str, r0: torch.npu.Event, r1: torch.npu.Event,
                  u0: torch.npu.Event | None, u1: torch.npu.Event | None) -> None:
-        torch.npu.synchronize()
+        # 只等 current_stream 上的 replay 尾事件 r1 就绪，不 sync update_stream，
+        # 避免强制排空 update 而污染下一轮 replay_interval 的真实流水节拍。
+        # r0/r1/prev_r0 都在 current_stream 上，r1.synchronize() 足以让它们可查询。
+        r1.synchronize()
         replay_ms = r0.elapsed_time(r1)
-        update_ms = (u0.elapsed_time(u1) if (u0 is not None and u1 is not None) else 0.0)
-        overlap = "yes" if (update_ms and update_ms < replay_ms) else "no"
+        # update 在 update_stream 上；为查 elapsed_time 需 u1 完成。但单独等 u1 会
+        # 排空 update_stream。故 update 数值仅供参考，真正判断用 replay_interval。
+        if u0 is not None and u1 is not None and u1.query():
+            update_ms = u0.elapsed_time(u1)
+            self._ec_last_update_ms = update_ms
+        else:
+            # update 未就绪（未强制 sync update_stream）：用上一次已知值兜底
+            update_ms = getattr(self, "_ec_last_update_ms", -1.0)
+        # 关键指标：连续两轮 replay 起点的间隔 = 真实每步流水线节拍。
+        # 不受 forward 末尾强制 sync 的影响（两 r0 都在 current_stream 上）。
+        #   interval ≈ replay+update  → update 串行在关键路径，未掩盖
+        #   interval ≈ max(replay,update) → 流水正常，update 被掩盖
+        prev_r0 = getattr(self, "_ec_prev_r0", None)
+        interval_ms = (prev_r0.elapsed_time(r0) if prev_r0 is not None else -1.0)
+        self._ec_prev_r0 = r0
+        # 用 interval 与 (replay+update) / max(replay,update) 的关系判断是否真重叠
+        if update_ms > 0 and interval_ms > 0:
+            serial_pred = replay_ms + update_ms
+            parallel_pred = max(replay_ms, update_ms)
+            if interval_ms >= serial_pred * 0.85:
+                verdict = "SERIALIZED(update on critical path)"
+            elif interval_ms <= parallel_pred * 1.15:
+                verdict = "OVERLAPPED(update hidden)"
+            else:
+                verdict = "PARTIAL"
+            pred_str = (f"(serial_pred={serial_pred:.1f} "
+                        f"parallel_pred={parallel_pred:.1f}) ")
+        else:
+            verdict = "NEED_MORE_STEPS"
+            pred_str = ""
         n = getattr(self, "_ec_profile_count", 1)
         print(f"[EC_PROFILE][cloud seg_c][step {n}] {tag}: "
               f"replay={replay_ms:.3f}ms update={update_ms:.3f}ms "
-              f"update_covered_by_replay={overlap}", flush=True)
+              f"replay_interval={interval_ms:.3f}ms "
+              f"{pred_str}=> {verdict}", flush=True)
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -2352,12 +2384,6 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
-        _ec_prof_on = (
-            os.environ.get("EDGE_CLOUD_PROFILE", "0") == "1"
-            and not _monitor.cudagraph_capturing_enabled
-            and self._edge_cloud_enabled
-        )
-        _ec_fwd_t0 = time.perf_counter() if _ec_prof_on else None
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2384,11 +2410,6 @@ class NPUModelRunner(GPUModelRunner):
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
             )
-        if _ec_fwd_t0 is not None and self._edge_cloud_enabled:
-            torch.npu.synchronize()
-            host_ms = (time.perf_counter() - _ec_fwd_t0) * 1000.0
-            print(f"[EC_PROFILE][cloud][forward host+sync] {host_ms:.3f}ms "
-                  f"(step {getattr(self, '_ec_profile_count', '?')})", flush=True)
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
