@@ -68,8 +68,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
-    edge_cloud_send_tensor_dict,
-    get_edge_cloud_tensor_meta,
+    edge_cloud_isend_tensor_dict,
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
 )
@@ -119,11 +118,11 @@ def _detect_has_residual(model_config) -> bool:
     # Qwen3.5 / Qwen3.5-MoE use residual connections
     if "qwen3" in model_type:
         return True
-    # DeepSeek V4 uses hc_pre/hc_post internally, but in the edge-cloud
-    # no-residual variant the residual is recomputed locally per segment and
-    # is no longer transmitted across the network.
+    # DeepSeek V4 uses hc_pre/hc_post which is equivalent to a residual
+    # stream; its IntermediateTensors always contain both hidden_states
+    # and residual.
     if model_type == "deepseek_v4":
-        return False
+        return True
     # Default: most modern decoder models produce residual
     # Can be made more specific as more models are supported
     return True
@@ -397,7 +396,6 @@ class NPUWorker(WorkerBase):
                 hidden_dtype=hidden_dtype,
                 has_residual=has_residual,
                 hc_mult=hc_mult,
-                mode=self.model_runner.edge_cloud_cfg.mode,
             )
 
     @torch.inference_mode()
@@ -823,8 +821,31 @@ class NPUWorker(WorkerBase):
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and is_first_slice:
-            if not get_pp_group().is_first_rank:
+        if forward_pass:
+            if is_cloud_device():
+                # Pre-compute input preparation while edge runs segment_a.
+                # This overlaps cloud's _update_states, _prepare_inputs,
+                # _determine_batch_execution_and_padding, and
+                # _build_attention_metadata with edge's segment_a forward.
+                tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                )
+                self.model_runner.cloud_prepare_early(scheduler_output)
+
+                if enable_sp() and (self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+                    or not self.model_runner.supports_mm_inputs):
+                    tensor_dict = {
+                        k: sequence_parallel_chunk(v)
+                        for k, v in tensor_dict.items()
+                    }
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
+            elif not get_pp_group().is_first_rank:
+                # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
+                # it will conflict with the all-gather operation in flashcomm1.
                 if enable_sp():
                     all_gather_group = None
                 else:
@@ -862,8 +883,64 @@ class NPUWorker(WorkerBase):
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
-        if not get_pp_group().is_last_rank:
-            assert parallel_config.distributed_executor_backend != "external_launcher"
+        if is_edge_device():
+            # Edge-cloud with heterogeneous SP: aggregate SP shards to full
+            # sequence before cross-PP send so cloud can re-chunk by its SP.
+            if enable_sp() and (self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+                or not self.model_runner.supports_mm_inputs):
+                _gathered = self._all_gather_tensor_dict(output.tensors)
+            else:
+                _gathered = output.tensors
+            if get_pp_group().world_size == 2:
+                # Pass scheduler total so the sender slices off any
+                # cudagraph / SP / DP padding, letting the cloud receiver
+                # allocate buffers from SchedulerOutput.total_num_scheduled_tokens
+                # without an inter-node metadata exchange.
+                self._pp_send_work = edge_cloud_isend_tensor_dict(
+                    _gathered,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                )
+            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+            )
+            if enable_sp():
+                tensor_dict = {
+                    k: sequence_parallel_chunk(v)
+                    for k, v in tensor_dict.items()
+                }
+            intermediate_tensors = AsyncIntermediateTensors(
+                tensor_dict,
+                comm_handles=comm_handles,
+                comm_postprocess=comm_postprocess,
+            )
+           
+            output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+                return output
+            return output
+
+        if is_cloud_device():
+            # Edge-cloud with heterogeneous SP: aggregate SP shards to full
+            # sequence before cross-PP send so edge can re-chunk by its SP.
+            if enable_sp():
+                _gathered = self._all_gather_tensor_dict(output.tensors)
+            else:
+                _gathered = output.tensors
+            if get_pp_group().world_size == 2:
+                # Cloud segment_c runs through full transformer layers and
+                # almost always with cudagraph / SP / DP padding enabled, so
+                # output.tensors[k].shape[0] >= scheduler_output.total. Slice
+                # back to the unpadded length on the sender side so the edge
+                # receiver can keep allocating buffers from scheduler total
+                # alone (no metadata wire transfer needed).
+                self._pp_send_work = edge_cloud_isend_tensor_dict(
+                    _gathered,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                )
+        else:
+            assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
+            # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
+            # it will conflict with the all-gather operation in flashcomm1.
             if enable_sp():
                 all_gather_group = None
             else:
