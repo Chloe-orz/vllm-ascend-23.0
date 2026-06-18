@@ -297,7 +297,6 @@ class AscendConfig:
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
         edge_cloud_config = additional_config.get("edge_cloud_config", {})
         self.edge_cloud_config = EdgeCloudConfig(edge_cloud_config, vllm_config)
-        self._check_edge_cloud_spec_decode(vllm_config)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
@@ -882,7 +881,11 @@ class PDSeparationConfig:
 class EdgeCloudConfig:
     """Configuration for edge-cloud collaborative inference."""
 
-    def __init__(self, user_config: dict | None = None, vllm_config: "VllmConfig | None" = None,):
+    def __init__(
+        self,
+        user_config: dict | None = None,
+        vllm_config: "VllmConfig | None" = None,
+    ):
         if user_config is None:
             user_config = {}
         self.enabled: bool = user_config.get("enabled", False)
@@ -894,6 +897,12 @@ class EdgeCloudConfig:
         self.transfer_config: dict = user_config.get("transfer_config", {})
         self.hidden_dtype: str = user_config.get("hidden_dtype", "bf16")
         self.cloud_enable_sp: bool = user_config.get("cloud_enable_sp", False)
+
+        # Keep a handle to vllm_config so _validate() can inspect orthogonal
+        # parallel features (PCP/DCP) that are incompatible with edge-cloud's
+        # metadata-free PP transfer. Optional to preserve direct-construction
+        # call sites (mainly tests) that don't have a vllm_config handy.
+        self._vllm_config = vllm_config
 
         # Keep a handle to vllm_config so _validate() can inspect orthogonal
         # parallel features (PCP/DCP) that are incompatible with edge-cloud's
