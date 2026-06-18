@@ -5373,19 +5373,85 @@ class NPUModelRunner(GPUModelRunner):
         # 因此这里手动清空，强制重新 capture。
         for wrapper in self._get_aclgraph_wrappers():
             wrapper.concrete_aclgraph_entries.clear()
-        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            result = GPUModelRunner.capture_model(self)
-
-        # --- 边云 segment wrapper 独立图捕获 ---
-        # GPUModelRunner.capture_model 仅捕获 self.model，不经过 segment
-        # wrapper。此处对每个 segment 执行一次 dummy forward，触发
-        # ACLGraphWrapper 的 lazy capture，使 wrapper.graph_params 在
-        # capture 阶段就填充完毕（对齐标准流程）。之后 decode 阶段
-        # 可以安全使用 "after" 模式。
+        # 边云模式：patch self.model 使得标准 capture warmup 每轮迭代
+        # 都同步运行 segment wrapper，让它们共享 warmup 的 batch 数据
+        # 和 attention metadata，确保 wrapper.params 与全局 _graph_params
+        # 同等级别初始化。
+        _orig_model = self.model
         if self._edge_cloud_enabled:
-            self._capture_segment_graphs()
+            _runner = self
+
+            class _WarmupWrapper(torch.nn.Module):
+                def forward(_self, *args, **kwargs):
+                    out = _orig_model(*args, **kwargs)
+                    try:
+                        _runner._warmup_segment_wrappers(*args, **kwargs)
+                    except Exception:
+                        pass
+                    return out
+
+            self.model = _WarmupWrapper()
+
+        try:
+            with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
+                result = GPUModelRunner.capture_model(self)
+        finally:
+            if self._edge_cloud_enabled:
+                self.model = _orig_model
 
         return result
+
+    def _warmup_segment_wrappers(self, input_ids=None, positions=None,
+                                  inputs_embeds=None, intermediate_tensors=None,
+                                  **kwargs):
+        """标准 warmup 中同步运行 segment wrapper。
+
+        每个 wrapper 独立调用，不链接（链接会导致二次调用 replay
+        而非 capture）。warmup 会多次迭代不同 batch size，
+        每种 size 自然触发一次 capture。
+        """
+        if input_ids is None and positions is None:
+            return
+        if self.edge_cloud_cfg.role == "edge":
+            for wrapper in (self.segment_a_wrapper, self.segment_e_wrapper):
+                if isinstance(wrapper, ACLGraphWrapper):
+                    kw = dict(positions=positions)
+                    if wrapper is self.segment_a_wrapper:
+                        kw["input_ids"] = input_ids
+                        kw["inputs_embeds"] = inputs_embeds
+                    else:
+                        if intermediate_tensors is None:
+                            num_tokens = positions.shape[0]
+                            hidden_size = self.model_config.get_hidden_size()
+                            intermediate_tensors = IntermediateTensors({
+                                "hidden_states": torch.zeros(
+                                    num_tokens, hidden_size,
+                                    dtype=self.dtype, device=positions.device,
+                                ),
+                                "residual": torch.zeros(
+                                    num_tokens, hidden_size,
+                                    dtype=self.dtype, device=positions.device,
+                                ),
+                            })
+                        kw["intermediate_tensors"] = intermediate_tensors
+                    wrapper(**kw)
+        elif self.edge_cloud_cfg.role == "cloud":
+            wrapper = self.segment_c_wrapper
+            if isinstance(wrapper, ACLGraphWrapper):
+                if intermediate_tensors is None:
+                    num_tokens = positions.shape[0]
+                    hidden_size = self.model_config.get_hidden_size()
+                    intermediate_tensors = IntermediateTensors({
+                        "hidden_states": torch.zeros(
+                            num_tokens, hidden_size,
+                            dtype=self.dtype, device=positions.device,
+                        ),
+                        "residual": torch.zeros(
+                            num_tokens, hidden_size,
+                            dtype=self.dtype, device=positions.device,
+                        ),
+                    })
+                wrapper(positions=positions, intermediate_tensors=intermediate_tensors)
 
     def _capture_segment_graphs(self) -> None:
         """捕获 segment wrapper 的 ACL 图，用真实 attn_metadata 初始化 params。
