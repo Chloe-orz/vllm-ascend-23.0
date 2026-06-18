@@ -4380,7 +4380,7 @@ class NPUModelRunner(GPUModelRunner):
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if enable_sp(self.vllm_config) or enable_sp_by_pass():
+        if enable_sp(self.vllm_config) or enable_sp_by_pass() or self.edge_cloud_cfg.cloud_enable_sp:
             pc = self.vllm_config.parallel_config
             # Edge-cloud mode: edge node should pad to cloud's tp_size so that
             # the full sequence after all_gather is directly chunkable by cloud SP.
@@ -4408,7 +4408,10 @@ class NPUModelRunner(GPUModelRunner):
                 "sync_and_slice_intermediate_tensors received None; "
                 "check PP/TP tensor delivery."
             )
-            if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud" and self.edge_cloud_cfg.mode == "embedding_only":
+            if (self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "cloud"
+                    and self.edge_cloud_cfg.mode == "embedding_only"
+                    and self.supports_mm_inputs):
                 for k, v in intermediate_tensors.items():
                     copy_len = num_tokens
                     self.intermediate_tensors[k][:copy_len].copy_(
@@ -5136,13 +5139,15 @@ class NPUModelRunner(GPUModelRunner):
                     # embedding-only 模式下 Cloud 从首层开始执行，输入来自 Edge 的
                     # embedding 输出，应为完整序列长度（运行时
                     # sync_and_slice_intermediate_tensors 亦使用完整 num_tokens）。
-                    if enable_sp() and self.edge_cloud_cfg.mode != "embedding_only":
+                    if enable_sp() and (self.edge_cloud_cfg.mode != "embedding_only"
+                        or not self.supports_mm_inputs):
                         tp_size = get_tensor_model_parallel_world_size()
                         intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                     if self.intermediate_tensors is None:
                         # 首次创建 intermediate_tensors，使用最大可能 token 数
                         max_actual_tokens = self.max_num_tokens
-                        if enable_sp() and self.edge_cloud_cfg.mode != "embedding_only":
+                        if enable_sp() and (self.edge_cloud_cfg.mode != "embedding_only"
+                            or not self.supports_mm_inputs):
                             max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
                         # 调用模型方法创建空的中间张量
                         self.intermediate_tensors = self.model.make_empty_intermediate_tensors(

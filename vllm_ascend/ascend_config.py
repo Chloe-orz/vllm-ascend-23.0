@@ -904,6 +904,7 @@ class EdgeCloudConfig:
         self.decode_graph_min_tokens: int = user_config.get("decode_graph_min_tokens", 1)
         self.transfer_config: dict = user_config.get("transfer_config", {})
         self.hidden_dtype: str = user_config.get("hidden_dtype", "bf16")
+        self.cloud_enable_sp: bool = user_config.get("cloud_enable_sp", False)
 
         if self.enabled:
             self._validate()
