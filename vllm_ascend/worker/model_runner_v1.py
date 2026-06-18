@@ -3219,6 +3219,14 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
+                if seg_a_graph and not forward_context.capturing:
+                    seeded = getattr(seg_a, '_graph_params_seeded', False)
+                    if not seeded:
+                        self._update_full_graph_params_if_needed(
+                            forward_context, num_tokens_padded, positions,
+                            layer_indices=list(range(0, self.head_k)),
+                            graph_wrapper=seg_a,
+                        )
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
@@ -3231,6 +3239,8 @@ class NPUModelRunner(GPUModelRunner):
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
                     )
+                    if not seeded:
+                        seg_a._graph_params_seeded = True
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
@@ -3256,6 +3266,14 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
+            if seg_e_graph and not forward_context.capturing:
+                seeded_e = getattr(seg_e, '_graph_params_seeded', False)
+                if not seeded_e:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=tail_layer_indices,
+                        graph_wrapper=seg_e,
+                    )
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -3267,6 +3285,8 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
+                if not seeded_e:
+                    seg_e._graph_params_seeded = True
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -3311,6 +3331,14 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
         try:
+            if seg_c_graph and not forward_context.capturing:
+                seeded_c = getattr(seg_c, '_graph_params_seeded', False)
+                if not seeded_c:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=cloud_layer_indices,
+                        graph_wrapper=seg_c,
+                    )
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -3322,6 +3350,8 @@ class NPUModelRunner(GPUModelRunner):
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
+                if not seeded_c:
+                    seg_c._graph_params_seeded = True
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
