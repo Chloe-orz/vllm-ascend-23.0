@@ -8268,7 +8268,7 @@ class NPUModelRunner(GPUModelRunner):
                         max_model_len,
                         self.cache_config.block_size * get_total_cp_world_size(),
                     )
-                    mamba_blocks_per_req = max(max_num_blocks_per_req, min(max_chunks, 4))
+                    mamba_blocks_per_req = max(max_num_blocks_per_req, max_chunks)
                 mamba_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
                 max_num_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
