@@ -533,9 +533,10 @@ class PassiveEngineCoreProc:
         decorate_logs()
 
         pp_subscriber: Optional[PPSchedulerZmqSubscriber] = None
-        if envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is not None:
+        scheduler_zmq_addr = os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR")
+        if scheduler_zmq_addr is not None:
             pp_subscriber = PPSchedulerZmqSubscriber(
-                envs.VLLM_PP_SCHEDULER_ZMQ_ADDR
+                scheduler_zmq_addr
             )
 
         # Cloud-side PD-separation channel is constructed inside the try
