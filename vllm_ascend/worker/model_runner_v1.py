@@ -5411,7 +5411,7 @@ class NPUModelRunner(GPUModelRunner):
                     })
                     ctx = dict(attn_metadata=None, vllm_config=self.vllm_config,
                                num_tokens=num_tokens,
-                               cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                               aclgraph_runtime_mode=CUDAGraphMode.FULL,
                                batch_descriptor=batch_desc)
 
                     if self.edge_cloud_cfg.role == "edge":
