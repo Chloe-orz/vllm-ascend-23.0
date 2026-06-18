@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 from uuid import uuid4
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import BatchType, HiddenChannelType, SchedulerOutput
@@ -17,8 +17,6 @@ from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-
-logger = init_logger(__name__)
 
 
 class PrefillState(enum.Enum):

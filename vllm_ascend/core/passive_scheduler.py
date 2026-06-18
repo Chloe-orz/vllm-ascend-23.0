@@ -23,14 +23,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 from vllm import envs
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.engine.core import PPSchedulerZmqSubscriber
-
-logger = init_logger(__name__)
 
 
 class DispatchPolicy(enum.Enum):
