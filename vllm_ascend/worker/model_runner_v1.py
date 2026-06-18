@@ -3145,6 +3145,39 @@ class NPUModelRunner(GPUModelRunner):
             num_input_tokens = cache["total_num_scheduled_tokens"]
         update_cos_sin(self.positions[:num_input_tokens])
 
+        # --- Pre-update segment_c graph params ---
+        # cloud_prepare_early 在等待 edge 数据之前已具备 update 所需
+        # 全部依赖（attn_metadata 来自 _run_input_preparation，batch
+        # size/layer_indices 已知）。在此处完成 seg_c 的 before update，
+        # 与 edge forward 并行执行，收到数据后直接回放无需再 update。
+        from vllm.forward_context import set_forward_context
+
+        sc = self.segment_c_wrapper
+        if isinstance(sc, ACLGraphWrapper):
+            cloud_layer_indices = list(
+                range(self.head_k, self.num_layers - self.tail_k)
+            )
+            pos = self.positions[:num_input_tokens]
+            with set_forward_context(
+                attn_metadata=cache["attn_metadata"],
+                vllm_config=self.vllm_config,
+                num_tokens=cache["num_tokens_padded"],
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                batch_descriptor=BatchDescriptor(num_tokens=cache["num_tokens_padded"]),
+            ):
+                update_full_graph_params(
+                    self.attn_backend,
+                    self.update_stream,
+                    get_forward_context(),
+                    cache["num_tokens_padded"],
+                    self.vllm_config,
+                    self.speculative_config,
+                    pos.shape[0],
+                    layer_indices=cloud_layer_indices,
+                    graph_params=sc.graph_params,
+                    draft_graph_params=sc.draft_graph_params,
+                )
+
         # --- Cache all results ---
         self._cloud_prepare_cache = cache
 
@@ -3220,30 +3253,36 @@ class NPUModelRunner(GPUModelRunner):
                 _EXTRA_CTX.layer_idx = 0
             try:
                 if seg_a_graph and not forward_context.capturing:
-                    seeded = getattr(seg_a, '_graph_params_seeded', False)
-                    if not seeded:
-                        self._update_full_graph_params_if_needed(
-                            forward_context, num_tokens_padded, positions,
-                            layer_indices=list(range(0, self.head_k)),
-                            graph_wrapper=seg_a,
-                        )
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
-                    if not seeded:
-                        seg_a._graph_params_seeded = True
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
+
+            # --- Move seg_e before-update here ---
+            # seg_e 的 graph params 依赖 _edge_prepare_cache 中的
+            # attn_metadata，此数据在 seg_a 执行完成后已可用。
+            # 此时进行 seg_e update 与跨节点通信（edge→cloud→edge）
+            # 并行，seg_e 收到数据后直接回放。
+            if seg_e_graph:
+                tail_layer_indices = list(range(
+                    self.num_layers - self.tail_k, self.num_layers
+                ))
+                with torch.inference_mode():
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=tail_layer_indices,
+                        graph_wrapper=seg_e,
+                    )
 
             assert isinstance(hidden_states, IntermediateTensors)
             return hidden_states
@@ -3261,32 +3300,14 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
+        # seg_e before-update 已在 seg_a 完成后执行（与通信并行），
+        # 此处仅需纯 forward
         try:
-            tail_layer_indices = list(range(
-                self.num_layers - self.tail_k,
-                self.num_layers,
-            ))
-            if seg_e_graph and not forward_context.capturing:
-                seeded_e = getattr(seg_e, '_graph_params_seeded', False)
-                if not seeded_e:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=tail_layer_indices,
-                        graph_wrapper=seg_e,
-                    )
             hidden_states = seg_e(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 **model_kwargs,
             )
-            if seg_e_graph and not forward_context.capturing:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions,
-                    layer_indices=tail_layer_indices,
-                    graph_wrapper=seg_e,
-                )
-                if not seeded_e:
-                    seg_e._graph_params_seeded = True
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -3330,28 +3351,14 @@ class NPUModelRunner(GPUModelRunner):
         old_layer_idx = _EXTRA_CTX.layer_idx
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
+        # cloud_prepare_early 已完成 seg_c 的 before update，
+        # 此处仅需纯 forward
         try:
-            if seg_c_graph and not forward_context.capturing:
-                seeded_c = getattr(seg_c, '_graph_params_seeded', False)
-                if not seeded_c:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=cloud_layer_indices,
-                        graph_wrapper=seg_c,
-                    )
             hidden_states = seg_c(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 **model_kwargs,
             )
-            if seg_c_graph and not forward_context.capturing:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions,
-                    layer_indices=cloud_layer_indices,
-                    graph_wrapper=seg_c,
-                )
-                if not seeded_c:
-                    seg_c._graph_params_seeded = True
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
