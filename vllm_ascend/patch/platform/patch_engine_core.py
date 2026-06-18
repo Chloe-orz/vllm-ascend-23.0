@@ -471,7 +471,7 @@ def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
         if (
             parallel_config.pipeline_parallel_size > 1
             and getattr(parallel_config, "nnodes_within_dp", 1) > 1
-            and envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is None
+            and os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR") is None
         ):
             pp_zmq_port = int(
                 os.getenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "5558")
