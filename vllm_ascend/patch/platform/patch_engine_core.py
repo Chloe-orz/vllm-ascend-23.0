@@ -130,11 +130,15 @@ def _patched_engine_core_init(self, *args, **kwargs):
             pd_enabled,
         )
 
+    # Load PD-separation configuration from environment variables
+    from vllm_ascend.pd_separation_config import PDSeparationConfig
+    pd_config = PDSeparationConfig.from_env()
+
     # PP scheduler ZMQ publisher (pp rank0 → pp rank1 PassiveEngineCore).
     self._pp_scheduler_zmq_publisher = None
-    if envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is not None:
+    if pd_config.scheduler_zmq_addr is not None:
         self._pp_scheduler_zmq_publisher = PPSchedulerZmqPublisher(
-            envs.VLLM_PP_SCHEDULER_ZMQ_ADDR
+            pd_config.scheduler_zmq_addr
         )
 
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
@@ -156,10 +160,8 @@ def _patched_engine_core_init(self, *args, **kwargs):
         cloud_addr = _addr_store.get("cloud_ip").decode()
         del _addr_store
 
-        pre_out = f"tcp://*:{envs.VLLM_PP_PRE_OUT_ZMQ_PORT}"
-        post_out = (
-            f"tcp://{cloud_addr}:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
-        )
+        pre_out = pd_config.get_pre_out_bind_addr()
+        post_out = pd_config.get_post_out_connect_addr(cloud_addr)
         self._pp_pd_channel = PPSchedulerZmqChannel(
             send_endpoint=pre_out,
             recv_endpoint=post_out,

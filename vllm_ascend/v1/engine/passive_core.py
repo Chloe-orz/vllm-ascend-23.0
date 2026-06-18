@@ -567,15 +567,16 @@ class PassiveEngineCoreProc:
 
                 passive_scheduler_module = _import_passive_scheduler_module()
                 dispatch_policy_cls = passive_scheduler_module.DispatchPolicy
+                # Load PD-separation configuration from environment variables
+                from vllm_ascend.pd_separation_config import PDSeparationConfig
+                pd_config = PDSeparationConfig.from_env()
                 try:
-                    policy = dispatch_policy_cls(
-                        envs.VLLM_PP_PASSIVE_DISPATCH_POLICY
-                    )
+                    policy = dispatch_policy_cls(pd_config.dispatch_policy)
                 except ValueError:
                     logger.warning(
                         "Unknown VLLM_PP_PASSIVE_DISPATCH_POLICY=%r; "
                         "falling back to expect_alternation.",
-                        envs.VLLM_PP_PASSIVE_DISPATCH_POLICY,
+                        pd_config.dispatch_policy,
                     )
                     policy = dispatch_policy_cls.EXPECT_ALTERNATION
 
@@ -619,13 +620,8 @@ class PassiveEngineCoreProc:
                     _addr_store.set("cloud_ip", get_ip())
                     del _addr_store
 
-                    post_out_bind = (
-                        f"tcp://*:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
-                    )
-                    pre_out_connect = (
-                        f"tcp://{master_addr}:"
-                        f"{envs.VLLM_PP_PRE_OUT_ZMQ_PORT}"
-                    )
+                    post_out_bind = pd_config.get_post_out_bind_addr()
+                    pre_out_connect = pd_config.get_pre_out_connect_addr(master_addr)
                     pp_pd_channel = PPSchedulerZmqChannel(
                         send_endpoint=post_out_bind,
                         recv_endpoint=pre_out_connect,
