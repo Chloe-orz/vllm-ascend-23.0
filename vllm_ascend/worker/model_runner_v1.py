@@ -5386,7 +5386,11 @@ class NPUModelRunner(GPUModelRunner):
         """边云模式：仅捕获 segment wrapper 的 ACL 图。"""
         from vllm.compilation.monitor import set_cudagraph_capturing_enabled
         from vllm.config import CUDAGraphMode
-        from vllm.forward_context import BatchDescriptor, set_forward_context
+        # Use set_ascend_forward_context (not vllm's set_forward_context)
+        # so that _EXTRA_CTX.moe_comm_method is correctly initialized
+        # for MoE models during segment graph capture.
+        from vllm.forward_context import BatchDescriptor
+        from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
         set_cudagraph_capturing_enabled(True)
         try:
@@ -5413,10 +5417,7 @@ class NPUModelRunner(GPUModelRunner):
                     if self.edge_cloud_cfg.role == "edge":
                         for wrapper in (self.segment_a_wrapper, self.segment_e_wrapper):
                             if isinstance(wrapper, ACLGraphWrapper):
-                                with set_forward_context(**ctx):
-                                    fwd_ctx = get_forward_context()
-                                    fwd_ctx.flash_comm_v1_enabled = False
-                                    fwd_ctx.flash_comm_v2_enabled = False
+                                with set_ascend_forward_context(**ctx):
                                     if wrapper is self.segment_a_wrapper:
                                         wrapper(input_ids=input_ids, positions=positions)
                                     else:
@@ -5424,10 +5425,7 @@ class NPUModelRunner(GPUModelRunner):
                     elif self.edge_cloud_cfg.role == "cloud":
                         wrapper = self.segment_c_wrapper
                         if isinstance(wrapper, ACLGraphWrapper):
-                            with set_forward_context(**ctx):
-                                fwd_ctx = get_forward_context()
-                                fwd_ctx.flash_comm_v1_enabled = False
-                                fwd_ctx.flash_comm_v2_enabled = False
+                            with set_ascend_forward_context(**ctx):
                                 wrapper(positions=positions, intermediate_tensors=dummy_tensors)
         finally:
             set_cudagraph_capturing_enabled(False)
