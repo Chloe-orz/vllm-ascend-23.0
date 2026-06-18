@@ -678,6 +678,14 @@ class NPUModelRunner(GPUModelRunner):
     def _ec_profile_enabled(self) -> bool:
         if os.environ.get("EDGE_CLOUD_PROFILE", "0") != "1":
             return False
+        # 跳过 warmup / graph capture 阶段（含 _dummy_run）：
+        # capture 期间 cudagraph_capturing_enabled 为 True，且 forward_context
+        # 带 in_profile_run。仅在实际请求推理时才计数，否则配额被 warmup 耗尽。
+        if _monitor.cudagraph_capturing_enabled:
+            return False
+        fwd = get_forward_context()
+        if fwd is not None and getattr(fwd, "in_profile_run", False):
+            return False
         max_count = int(os.environ.get("EDGE_CLOUD_PROFILE_STEPS", "20"))
         n = getattr(self, "_ec_profile_count", 0)
         if n >= max_count:
@@ -2344,8 +2352,12 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
-        _ec_fwd_t0 = time.perf_counter() if os.environ.get(
-            "EDGE_CLOUD_PROFILE", "0") == "1" else None
+        _ec_prof_on = (
+            os.environ.get("EDGE_CLOUD_PROFILE", "0") == "1"
+            and not _monitor.cudagraph_capturing_enabled
+            and self._edge_cloud_enabled
+        )
+        _ec_fwd_t0 = time.perf_counter() if _ec_prof_on else None
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2375,8 +2387,8 @@ class NPUModelRunner(GPUModelRunner):
         if _ec_fwd_t0 is not None and self._edge_cloud_enabled:
             torch.npu.synchronize()
             host_ms = (time.perf_counter() - _ec_fwd_t0) * 1000.0
-            print(f"[EC_PROFILE][cloud][forward host+sync] {host_ms:.3f}ms",
-                  flush=True)
+            print(f"[EC_PROFILE][cloud][forward host+sync] {host_ms:.3f}ms "
+                  f"(step {getattr(self, '_ec_profile_count', '?')})", flush=True)
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
