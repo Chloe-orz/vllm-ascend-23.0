@@ -5360,8 +5360,6 @@ class NPUModelRunner(GPUModelRunner):
         return wrappers
 
     def capture_model(self) -> int:
-        # 边云模式的 ACL Graph 仍依赖父类 capture 循环触发 _dummy_run。
-        # 实际捕获发生在 segment 级 ACLGraphWrapper 内，通信保持在图外。
         if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
             return 0
 
@@ -5369,18 +5367,64 @@ class NPUModelRunner(GPUModelRunner):
         if gpu_model_runner_cls is None:
             raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
         parent_module_name = gpu_model_runner_cls.__module__
-        # profile_cudagraph_memory 阶段 ACLGraphWrapper 已捕获过图，
-        # 但 CUDAGraphWrapper.clear_all_graphs() 不清除 ACLGraphWrapper
-        # 的 concrete_aclgraph_entries。保留的 entry 会导致 capture_model
-        # 中 _warmup_and_capture 走 REPLAY 而非 CAPTURE 路径，
-        # REPLAY 时 forward_context.capturing 保持 False，
-        # 使得 _update_full_graph_params_if_needed 错误执行 → 挂死。
-        # 因此这里手动清空，强制重新 capture。
+        # ACLGraphWrapper 保留的 stale entry 会导致 _warmup_and_capture
+        # 走 REPLAY 而非 CAPTURE，手动清空。
         for wrapper in self._get_aclgraph_wrappers():
             wrapper.concrete_aclgraph_entries.clear()
-        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            result = GPUModelRunner.capture_model(self)
-        return result
+
+        if self._edge_cloud_enabled:
+            # 边云模式：只捕获 segment wrapper 图。
+            # self.model 全模型图在边云推理中不参与回放，跳过标准 capture
+            # 节省一份完整图的显存（云侧约数 GB）。
+            self._capture_segment_graphs()
+            return 0
+        else:
+            with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
+                return GPUModelRunner.capture_model(self)
+
+    def _capture_segment_graphs(self) -> None:
+        """边云模式：仅捕获 segment wrapper 的 ACL 图。"""
+        from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+        from vllm.config import CUDAGraphMode
+        from vllm.forward_context import BatchDescriptor, set_forward_context
+
+        set_cudagraph_capturing_enabled(True)
+        try:
+            with torch.inference_mode():
+                device = self.device
+                hidden_size = self.model_config.get_hidden_size()
+                vocab_size = self.model_config.get_vocab_size()
+                for num_tokens in self.cudagraph_batch_sizes:
+                    batch_desc = BatchDescriptor(num_tokens=num_tokens)
+                    positions = torch.arange(num_tokens, dtype=torch.long, device=device)
+                    input_ids = torch.randint(0, vocab_size, (num_tokens,),
+                                              dtype=torch.long, device=device)
+                    dummy_tensors = IntermediateTensors({
+                        "hidden_states": torch.randn(num_tokens, hidden_size,
+                                                    dtype=self.dtype, device=device),
+                        "residual": torch.randn(num_tokens, hidden_size,
+                                               dtype=self.dtype, device=device),
+                    })
+                    ctx = dict(attn_metadata=None, vllm_config=self.vllm_config,
+                               num_tokens=num_tokens,
+                               cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                               batch_descriptor=batch_desc)
+
+                    if self.edge_cloud_cfg.role == "edge":
+                        for wrapper in (self.segment_a_wrapper, self.segment_e_wrapper):
+                            if isinstance(wrapper, ACLGraphWrapper):
+                                with set_forward_context(**ctx):
+                                    if wrapper is self.segment_a_wrapper:
+                                        wrapper(input_ids=input_ids, positions=positions)
+                                    else:
+                                        wrapper(positions=positions, intermediate_tensors=dummy_tensors)
+                    elif self.edge_cloud_cfg.role == "cloud":
+                        wrapper = self.segment_c_wrapper
+                        if isinstance(wrapper, ACLGraphWrapper):
+                            with set_forward_context(**ctx):
+                                wrapper(positions=positions, intermediate_tensors=dummy_tensors)
+        finally:
+            set_cudagraph_capturing_enabled(False)
 
     def _prepare_multimodal_fields(self):
         """
