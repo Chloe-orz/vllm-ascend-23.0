@@ -5133,6 +5133,17 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 for k, v in intermediate_tensors.items():
                     copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                    # Clamp copy_len to the source tensor's actual dim-0 size.
+                    # In edge-cloud mode the received intermediate_tensors may have
+                    # fewer tokens than the padded num_tokens (the sender strips
+                    # padding before transmission).  On GPUs the out-of-bounds
+                    # slice v[:copy_len] is silently clamped, but on NPUs the
+                    # stricter shape check causes a runtime error when dst and src
+                    # shapes differ (e.g. 3D tensors with hc_mult dimension in
+                    # DeepSeek V4).
+                    src_len = v.shape[0]
+                    if copy_len > src_len:
+                        copy_len = src_len
                     dst = self.intermediate_tensors[k][:copy_len]
                     # Senders may transmit only real tokens; fill graph padding locally.
                     recv_len = min(v.shape[0], copy_len)
