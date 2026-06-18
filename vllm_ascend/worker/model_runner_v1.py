@@ -622,6 +622,8 @@ class NPUModelRunner(GPUModelRunner):
             self._is_qwen3_5 = "qwen3_5" in model_type
             self._is_deepseek_v2 = "deepseek" in model_type
             self._is_kimi_k25 = "kimi_k25" in outer_model_type or "kimi_k25" in model_type
+            self._is_glm4_moe = "glm4_moe" in model_type or "glm_moe_dsa" in model_type
+            self._is_minimax_m2 = "minimax_m2" in model_type
             self.num_layers = 0
             self.segment_a: Any = None
             self.segment_e: Any = None
@@ -640,6 +642,8 @@ class NPUModelRunner(GPUModelRunner):
             self._is_qwen3_5 = False
             self._is_deepseek_v2 = False
             self._is_kimi_k25 = False
+            self._is_glm4_moe = False
+            self._is_minimax_m2 = False
             if self.parallel_config.enable_edge_cloud:
                 raise ValueError(
                     "--enable-edge-cloud requires "
@@ -784,10 +788,11 @@ class NPUModelRunner(GPUModelRunner):
           2. get_model → BaseModelLoader.load_model（标准 NPU 上初始化+加载）
           3. 创建分段 callable 并按需包装 ACLGraphWrapper
         """
-        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25):
+        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25 
+                or self._is_glm4_moe or self._is_minimax_m2):
             raise NotImplementedError(
                 "edge-cloud mode currently supports Qwen3.5, DeepseekV2/V3, "
-                "and Kimi-K2.5/K2.6 models."
+                "Kimi-K2.5/K2.6, GLM-4/GLM-5 models, and MiniMax-M2 models."
             )
 
         logger.info(
@@ -805,6 +810,13 @@ class NPUModelRunner(GPUModelRunner):
             import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
         if self._is_kimi_k25:
             import vllm_ascend.patch.models.kimi_k25_edge_cloud  # noqa: F401
+        if self._is_glm4_moe:
+            hf_text_config = getattr(self.model_config, "hf_text_config", None)
+            text_model_type = getattr(hf_text_config, "model_type", "")
+            if "glm_moe_dsa" in text_model_type:
+                import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
+        if self._is_minimax_m2:
+            import vllm_ascend.patch.models.minimax_m2_edge_cloud  # noqa: F401
 
         # 1. 存储 head_k / tail_k 到 parallel_state 全局变量，
         #    使 make_layers() 在模型 __init__ 中能直接读取并创建正确的
@@ -2163,7 +2175,7 @@ class NPUModelRunner(GPUModelRunner):
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
-                    if self.cache_config.enable_prefix_caching:
+                    if self.cache_config.mamba_cache_mode == "align":
                         if vllm_version_is("0.20.2"):
                             mamba_bufs = self._get_mamba_copy_bufs()
                             preprocess_bufs = mamba_bufs
@@ -2181,24 +2193,24 @@ class NPUModelRunner(GPUModelRunner):
                             self.model.get_mamba_state_copy_func(),
                             preprocess_bufs,
                         )
-                    # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                    # for requests whose state was copied to a new block.
-                    # Re-sync to GPU so the mamba kernel reads from the
-                    # correct initial state slot (init_token_idx = 0).
-                    self.num_accepted_tokens.np[:num_reqs] = (
-                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                    )
-                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
-
-                    if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
-                        mamba_utils.stage_postprocess_inputs_to_gpu(
-                            mamba_bufs.postprocess_align,
-                            scheduler_output,
-                            self.input_batch.req_ids,
-                            num_reqs,
-                            self.requests,
-                            self.mamba_state_idx,
+                        # preprocess_mamba resets num_accepted_tokens_cpu to 1
+                        # for requests whose state was copied to a new block.
+                        # Re-sync to GPU so the mamba kernel reads from the
+                        # correct initial state slot (init_token_idx = 0).
+                        self.num_accepted_tokens.np[:num_reqs] = (
+                            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                         )
+                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
+
+                        if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
+                            mamba_utils.stage_postprocess_inputs_to_gpu(
+                                mamba_bufs.postprocess_align,
+                                scheduler_output,
+                                self.input_batch.req_ids,
+                                num_reqs,
+                                self.requests,
+                                self.mamba_state_idx,
+                            )
                     if self.use_compress:
                         if deferred_state_corrections_fn:
                             deferred_state_corrections_fn()
@@ -3338,6 +3350,11 @@ class NPUModelRunner(GPUModelRunner):
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         if enable_sp(self.vllm_config) or enable_sp_by_pass():
+            pc = self.vllm_config.parallel_config
+            # Edge-cloud mode: edge node should pad to cloud's tp_size so that
+            # the full sequence after all_gather is directly chunkable by cloud SP.
+            if pc.enable_edge_cloud and pc.is_edge_node:
+                tp_size = max(tp_size, pc.cloud_npu_count)
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -3360,15 +3377,28 @@ class NPUModelRunner(GPUModelRunner):
                 "sync_and_slice_intermediate_tensors received None; "
                 "check PP/TP tensor delivery."
             )
-            for k, v in intermediate_tensors.items():
-                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
-                dst = self.intermediate_tensors[k][:copy_len]
-                # Senders may transmit only real tokens; fill graph padding locally.
-                recv_len = min(v.shape[0], copy_len)
-                if recv_len:
-                    dst[:recv_len].copy_(v[:recv_len], non_blocking=True)
-                if recv_len < copy_len:
-                    dst[recv_len:].zero_()
+            if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud" and self.edge_cloud_cfg.mode == "embedding_only":
+                for k, v in intermediate_tensors.items():
+                    copy_len = num_tokens
+                    self.intermediate_tensors[k][:copy_len].copy_(
+                        v[:copy_len], non_blocking=True
+                    )
+                return IntermediateTensors(
+                    {
+                        k: v[:num_tokens]
+                        for k, v in self.intermediate_tensors.items()
+                    }
+                )
+            else:
+                for k, v in intermediate_tensors.items():
+                    copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                    dst = self.intermediate_tensors[k][:copy_len]
+                    # Senders may transmit only real tokens; fill graph padding locally.
+                    recv_len = min(v.shape[0], copy_len)
+                    if recv_len:
+                        dst[:recv_len].copy_(v[:recv_len], non_blocking=True)
+                    if recv_len < copy_len:
+                        dst[recv_len:].zero_()
 
         return IntermediateTensors(
             {
@@ -3944,6 +3974,18 @@ class NPUModelRunner(GPUModelRunner):
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
+
+        # SP padding or cudagraph dispatcher may increase num_reqs_padded
+        # beyond the length of num_scheduled_tokens. Ensure they match.
+        if len(num_scheduled_tokens) < num_reqs_padded:
+            if num_tokens_padded == num_reqs_padded * max_query_len:
+                # Uniform decode: each request (including padded) has max_query_len tokens
+                num_scheduled_tokens = np.full(num_reqs_padded, max_query_len, dtype=num_scheduled_tokens.dtype)
+            else:
+                # Mixed batch: padded requests have 0 scheduled tokens
+                extended = np.zeros(num_reqs_padded, dtype=num_scheduled_tokens.dtype)
+                extended[:len(num_scheduled_tokens)] = num_scheduled_tokens
+                num_scheduled_tokens = extended
         # vllm-ascend does not support ubatch now
         ubatch_slices, ubatch_slices_padded = None, None
         attn_metadata: PerLayerAttnMetadata | None = None
@@ -4046,14 +4088,16 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     # Cloud 端：需要中间张量
                     intermediate_tokens = num_tokens_padded
-                    if enable_sp():
-                        # 如果启用序列并行（SP），token 数需要除以 tp_size（向上取整）
+                    # embedding-only 模式下 Cloud 从首层开始执行，输入来自 Edge 的
+                    # embedding 输出，应为完整序列长度（运行时
+                    # sync_and_slice_intermediate_tensors 亦使用完整 num_tokens）。
+                    if enable_sp() and self.edge_cloud_cfg.mode != "embedding_only":
                         tp_size = get_tensor_model_parallel_world_size()
                         intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
                     if self.intermediate_tensors is None:
                         # 首次创建 intermediate_tensors，使用最大可能 token 数
                         max_actual_tokens = self.max_num_tokens
-                        if enable_sp():
+                        if enable_sp() and self.edge_cloud_cfg.mode != "embedding_only":
                             max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
                         # 调用模型方法创建空的中间张量
                         self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
