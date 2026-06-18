@@ -291,6 +291,18 @@ class PDSeparatedScheduler(Scheduler):
             if scheduler_output is not None:
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     scheduler_output.batch_type = BatchType.EMPTY
+                    # No request was actually scheduled this round.
+                    # self.running currently holds saved_chunk_prefill_first
+                    # (requests already scheduled at least once before),
+                    # plus any newly-scheduled requests appended by the base
+                    # class. Since total_num_scheduled_tokens == 0, the latter
+                    # set is empty, so we only restore the former.
+                    for req in self.running:
+                        if req.is_prefill_chunk:
+                            self.chunk_prefill_first.append(req)
+                        else:
+                            # Prefill finished but not yet moved to running.
+                            self.prefill_last_pending.append(req)
                 else:
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
                     scheduler_output.head_token = uuid4().hex
@@ -300,19 +312,27 @@ class PDSeparatedScheduler(Scheduler):
                         )
                     )
                     self.prefill_inflight_count += 1
-                new_chunk_prefill_first = [
-                    req for req in self.running if req.is_prefill_chunk
-                ]
-                new_prefill_completed = [
-                    req for req in self.running if not req.is_prefill_chunk
-                ]
-                for req in self.chunk_prefill_first:
-                    if req not in new_chunk_prefill_first:
-                        new_chunk_prefill_first.append(req)
-                self.chunk_prefill_first = new_chunk_prefill_first
-                # PF 首段完成但 PL 尾段未完成的请求进入缓冲队列，
-                # 不直接加入 running，避免 decode 调度器误调度。
-                self.prefill_last_pending.extend(new_prefill_completed)
+
+                    # === 核心修改 ===
+                    # All requests scheduled in this PF batch enter
+                    # prefill_last_pending immediately. They may NOT be
+                    # re-scheduled for the next chunk until the cloud
+                    # returns the matching PL (PREFILL_LAST).
+                    scheduled_req_ids = set(
+                        scheduler_output.num_scheduled_tokens.keys()
+                    )
+                    for req in self.running:
+                        if req.request_id in scheduled_req_ids:
+                            self.prefill_last_pending.append(req)
+                        elif req.is_prefill_chunk:
+                            # Not scheduled this round (e.g. token budget
+                            # exhausted), keep in chunk_prefill_first.
+                            self.chunk_prefill_first.append(req)
+                        else:
+                            # Completed but not scheduled – defensive.
+                            self.prefill_last_pending.append(req)
+                    # ================
+
                 self.running = saved_running
 
 
@@ -515,30 +535,28 @@ class PDSeparatedScheduler(Scheduler):
                 self.hidden_channel_manager.release_prefill(
                     scheduler_output.head_token
                 )
-            # Move completed requests from prefill_last_pending to running.
+            # === 核心修改 ===
+            # Requests whose PL just returned are removed from
+            # prefill_last_pending and routed directly:
+            #   - still has more chunks -> chunk_prefill_first
+            #   - prefill fully done    -> running
             completed_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
-            newly_running = [
-                req for req in self.prefill_last_pending
-                if req.request_id in completed_req_ids
-            ]
-            self.prefill_last_pending = [
-                req for req in self.prefill_last_pending
-                if req.request_id not in completed_req_ids
-            ]
-            self.running.extend(newly_running)
-            # Chunked prefill requests that still have more chunks to process
-            # need to go back to chunk_prefill_first for the next chunk.
-            # They were removed from chunk_prefill_first by
-            # _pick_prefill_last_batch, and are not in prefill_last_pending
-            # (they go to chunk_prefill_first, not prefill_last_pending,
-            # in _pick_prefill_first_batch). Without this, chunked requests
-            # would be lost after their first PREFILL_LAST completes.
-            newly_chunked = []
-            for req_id in completed_req_ids:
-                req = self.requests.get(req_id)
-                if req and req.is_prefill_chunk and req not in self.chunk_prefill_first:
-                    self.chunk_prefill_first.append(req)
-                    newly_chunked.append(req)
+            newly_running: list[Request] = []
+            newly_chunked: list[Request] = []
+            remaining_pending: list[Request] = []
+            for req in self.prefill_last_pending:
+                if req.request_id in completed_req_ids:
+                    if req.is_prefill_chunk:
+                        self.chunk_prefill_first.append(req)
+                        newly_chunked.append(req)
+                    else:
+                        self.running.append(req)
+                        newly_running.append(req)
+                else:
+                    remaining_pending.append(req)
+            self.prefill_last_pending = remaining_pending
+            # ================
+
             logger.info(
                 f"[PD] update_from_output PREFILL_LAST done, "
                 f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
