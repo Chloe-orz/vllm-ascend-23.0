@@ -5414,6 +5414,9 @@ class NPUModelRunner(GPUModelRunner):
                         for wrapper in (self.segment_a_wrapper, self.segment_e_wrapper):
                             if isinstance(wrapper, ACLGraphWrapper):
                                 with set_forward_context(**ctx):
+                                    fwd_ctx = get_forward_context()
+                                    fwd_ctx.flash_comm_v1_enabled = False
+                                    fwd_ctx.flash_comm_v2_enabled = False
                                     if wrapper is self.segment_a_wrapper:
                                         wrapper(input_ids=input_ids, positions=positions)
                                     else:
@@ -5422,6 +5425,9 @@ class NPUModelRunner(GPUModelRunner):
                         wrapper = self.segment_c_wrapper
                         if isinstance(wrapper, ACLGraphWrapper):
                             with set_forward_context(**ctx):
+                                fwd_ctx = get_forward_context()
+                                fwd_ctx.flash_comm_v1_enabled = False
+                                fwd_ctx.flash_comm_v2_enabled = False
                                 wrapper(positions=positions, intermediate_tensors=dummy_tensors)
         finally:
             set_cudagraph_capturing_enabled(False)
