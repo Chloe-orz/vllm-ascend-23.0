@@ -329,10 +329,9 @@ class PPSchedulerZmqChannel:
 
     def publish(self, scheduler_output: SchedulerOutput) -> None:
         """Queue a SchedulerOutput for the peer. Non-blocking."""
-        print(
-            f"Send scheduler_output to peer, batch_type: "
+        logger.info(
+            f"Send scheduler_output to edge, batch_type: "
             f"{scheduler_output.batch_type}",
-            flush=True,
         )
         self._publisher.publish(scheduler_output)
 
@@ -435,12 +434,11 @@ class PassiveEngineCoreProc:
             else:
                 _slice_info_str += "None;"
         _slice_info_str += "]"
-        print(
-            f"\r\n[Cloud] Step dispatched batch_type="
-            f"{batch.scheduler_output.batch_type.value}, "
+        logger.info(
+            f"\r\n[Cloud] Step dispatched batch_type: "
+            f"{batch.scheduler_output.batch_type}, "
             f"slices_count={len(batch.slices)}, "
             f"slice_info={_slice_info_str}",
-            flush=True,
         )
 
         for slice_info in batch.slices:
@@ -486,9 +484,17 @@ class PassiveEngineCoreProc:
                 scheduler_output, batch_type=BatchType.PREFILL_LAST
             )
         elif bt == BatchType.DECODE_FIRST:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.DECODE_LAST
+            # === Decode-first self-posting optimization ===
+            # Edge always pre-generates DECODE_LAST locally and stores it
+            # in decodes_last_ready.  Cloud never needs to send DECODE_LAST
+            # back via POST_OUT, eliminating control-plane round-trip.
+            logger.debug(
+                "[Cloud] Skipping POST_OUT for DECODE_FIRST "
+                "head_token=%s (edge pre-generates DECODE_LAST)",
+                scheduler_output.head_token,
             )
+            return
+            # ===============================================
         else:
             return
         # Echo the head_token back so the edge can correlate the tail
@@ -535,9 +541,10 @@ class PassiveEngineCoreProc:
         decorate_logs()
 
         pp_subscriber: Optional[PPSchedulerZmqSubscriber] = None
-        if envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is not None:
+        scheduler_zmq_addr = os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR")
+        if scheduler_zmq_addr is not None:
             pp_subscriber = PPSchedulerZmqSubscriber(
-                envs.VLLM_PP_SCHEDULER_ZMQ_ADDR
+                scheduler_zmq_addr
             )
 
         # Cloud-side PD-separation channel is constructed inside the try
@@ -569,15 +576,16 @@ class PassiveEngineCoreProc:
 
                 passive_scheduler_module = _import_passive_scheduler_module()
                 dispatch_policy_cls = passive_scheduler_module.DispatchPolicy
+                # Load PD-separation configuration from environment variables
+                from vllm_ascend.pd_separation_config import PDSeparationConfig
+                pd_config = PDSeparationConfig.from_env()
                 try:
-                    policy = dispatch_policy_cls(
-                        envs.VLLM_PP_PASSIVE_DISPATCH_POLICY
-                    )
+                    policy = dispatch_policy_cls(pd_config.dispatch_policy)
                 except ValueError:
                     logger.warning(
                         "Unknown VLLM_PP_PASSIVE_DISPATCH_POLICY=%r; "
                         "falling back to expect_alternation.",
-                        envs.VLLM_PP_PASSIVE_DISPATCH_POLICY,
+                        pd_config.dispatch_policy,
                     )
                     policy = dispatch_policy_cls.EXPECT_ALTERNATION
 
@@ -621,13 +629,8 @@ class PassiveEngineCoreProc:
                     _addr_store.set("cloud_ip", get_ip())
                     del _addr_store
 
-                    post_out_bind = (
-                        f"tcp://*:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
-                    )
-                    pre_out_connect = (
-                        f"tcp://{master_addr}:"
-                        f"{envs.VLLM_PP_PRE_OUT_ZMQ_PORT}"
-                    )
+                    post_out_bind = pd_config.get_post_out_bind_addr()
+                    pre_out_connect = pd_config.get_pre_out_connect_addr(master_addr)
                     pp_pd_channel = PPSchedulerZmqChannel(
                         send_endpoint=post_out_bind,
                         recv_endpoint=pre_out_connect,

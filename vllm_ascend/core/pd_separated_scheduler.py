@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from typing import Any
 from uuid import uuid4
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import BatchType, HiddenChannelType, SchedulerOutput
@@ -17,8 +17,6 @@ from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-
-logger = init_logger(__name__)
 
 
 class PrefillState(enum.Enum):
@@ -61,11 +59,6 @@ class HiddenChannelManager:
             )
         channel = self._free_prefills.popleft()
         self._head_token_to_channel[head_token] = channel
-        print(
-            f"\r\n[PD-CHAN] allocate prefill channel={channel.value} "
-            f"head_token={head_token}",
-            flush=True,
-        )
         return channel
 
     def release_prefill(self, head_token: str) -> HiddenChannelType | None:
@@ -75,11 +68,6 @@ class HiddenChannelManager:
         if channel is None:
             return None
         self._free_prefills.append(channel)
-        print(
-            f"[PD-CHAN] release prefill channel={channel.value} "
-            f"head_token={head_token}",
-            flush=True,
-        )
         return channel
 
     def has_free_prefill(self) -> bool:
@@ -175,7 +163,18 @@ class PDSeparatedScheduler(Scheduler):
         if state == PrefillState.IDLE:
             # IDLE: P首/chunk0首 > D首 > D尾 > Empty.
             if self._can_schedule_prefill_first():
-                return self._pick_prefill_first_batch()
+                so = self._pick_prefill_first_batch()
+                if so.total_num_scheduled_tokens > 0:
+                    return so
+                # P首 returned empty (e.g. KV cache exhausted). Preserve
+                # finished_req_ids and fall through to decode tasks to avoid
+                # a tight busy-loop where the edge spins on empty prefill.
+                logger.warning(
+                    "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
+                    "This usually means KV cache blocks are exhausted by running decode "
+                    "requests. Prefill work will be deferred until resources are freed."
+                )
+                self.finished_req_ids.update(so.finished_req_ids)
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
             if self.decodes_last_ready:
@@ -185,7 +184,15 @@ class PDSeparatedScheduler(Scheduler):
         if state == PrefillState.LOW:
             # LOW: chunk/P首(when slot available) > P尾 > D首 > D尾 > Empty.
             if self._can_schedule_prefill_first():
-                return self._pick_prefill_first_batch()
+                so = self._pick_prefill_first_batch()
+                if so.total_num_scheduled_tokens > 0:
+                    return so
+                logger.warning(
+                    "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
+                    "This usually means KV cache blocks are exhausted by running decode "
+                    "requests. Prefill work will be deferred until resources are freed."
+                )
+                self.finished_req_ids.update(so.finished_req_ids)
             if self.prefills_last_ready:
                 return self._pick_prefill_last_batch()
             if self._can_schedule_decode_first():
@@ -232,10 +239,16 @@ class PDSeparatedScheduler(Scheduler):
         return bool(self.chunk_prefill_first or self.waiting)
 
     def _can_schedule_prefill_first(self) -> bool:
+        # When running decode requests already fill max_num_running_reqs,
+        # super().schedule() inside _pick_prefill_first_batch will return an
+        # empty batch, causing a tight-loop.  Pre-check capacity to avoid
+        # the useless call.
+        effective_capacity = self.max_num_running_reqs - len(self.running)
         return (
             self._has_prefill_work()
             and self.prefill_inflight_count < self.prefill_inflight_limit
             and self.hidden_channel_manager.has_free_prefill()
+            and effective_capacity > 0
         )
 
     def _can_schedule_decode_first(self) -> bool:
@@ -246,7 +259,7 @@ class PDSeparatedScheduler(Scheduler):
 
     def _log_scheduler_state(self, state: PrefillState, batch_type: BatchType) -> None:
         self._step_counter += 1
-        print(
+        logger.info(
             f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
             f"waiting[]: {len(self.waiting)}, "
             f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
@@ -256,71 +269,38 @@ class PDSeparatedScheduler(Scheduler):
             f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
             f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
             f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
-            flush=True,
         )
-        for req in self.chunk_prefill_first:
-            print(
-                f"[PD] chunk_prefill_first[{req.request_id}],    "
-                f"num_prompt_tokens: {req.num_prompt_tokens}, "
-                f"num_tokens: {req.num_tokens}, "
-                f"num_computed_tokens: {req.num_computed_tokens}, "
-                f"chunk_num: {req.chunk_num}",
-                flush=True,
-            )
-        for req in self.running:
-            print(
-                f"[PD] running[{req.request_id}],    "
-                f"num_prompt_tokens: {req.num_prompt_tokens}, "
-                f"num_tokens: {req.num_tokens}, "
-                f"num_computed_tokens: {req.num_computed_tokens}, "
-                f"chunk_num: {req.chunk_num}",
-                flush=True,
-            )
 
     def _pick_prefill_first_batch(self) -> SchedulerOutput:
         saved_running = self.running
         saved_chunk_prefill_first = self.chunk_prefill_first
         saved_max_num_running_reqs = self.max_num_running_reqs
 
-        # 保存父调度器的chunking相关参数，临时禁用以确保
-        # 每个prefill请求一步内完整调度（is_prefill_chunk始终为False）。
-        # PD分离下chunked prefill需要多次edge→cloud→edge往返，极其低效。
-        #
-        # 禁用策略（精准，不绕过token_budget）：
-        #   1. long_prefill_token_threshold=0 → 移除单请求token上限（chunking主因）
-        #   2. enable_chunked_prefill=False → waiting请求装不下就不调度，不部分调度
-        # 注意：不扩大max_num_scheduled_tokens，因为model_runner的预分配buffer
-        # （positions、query_pos等）按max_num_batched_tokens分配，超限会导致越界。
-        saved_long_prefill_token_threshold = (
-            self.scheduler_config.long_prefill_token_threshold
-        )
-        saved_enable_chunked_prefill = (
-            self.scheduler_config.enable_chunked_prefill
-        )
-
         self.running = list(saved_chunk_prefill_first)
         self.chunk_prefill_first = []
         self.max_num_running_reqs -= len(saved_running)
-
-        self.scheduler_config.long_prefill_token_threshold = 0
-        self.scheduler_config.enable_chunked_prefill = False
 
         scheduler_output = None
         try:
             scheduler_output = super().schedule()
         finally:
             self.max_num_running_reqs = saved_max_num_running_reqs
-            # 恢复父调度器的chunking参数
-            self.scheduler_config.long_prefill_token_threshold = (
-                saved_long_prefill_token_threshold
-            )
-            self.scheduler_config.enable_chunked_prefill = (
-                saved_enable_chunked_prefill
-            )
 
             if scheduler_output is not None:
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     scheduler_output.batch_type = BatchType.EMPTY
+                    # No request was actually scheduled this round.
+                    # self.running currently holds saved_chunk_prefill_first
+                    # (requests already scheduled at least once before),
+                    # plus any newly-scheduled requests appended by the base
+                    # class. Since total_num_scheduled_tokens == 0, the latter
+                    # set is empty, so we only restore the former.
+                    for req in self.running:
+                        if req.is_prefill_chunk:
+                            self.chunk_prefill_first.append(req)
+                        else:
+                            # Prefill finished but not yet moved to running.
+                            self.prefill_last_pending.append(req)
                 else:
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
                     scheduler_output.head_token = uuid4().hex
@@ -330,50 +310,30 @@ class PDSeparatedScheduler(Scheduler):
                         )
                     )
                     self.prefill_inflight_count += 1
-                new_chunk_prefill_first = [
-                    req for req in self.running if req.is_prefill_chunk
-                ]
-                new_prefill_completed = [
-                    req for req in self.running if not req.is_prefill_chunk
-                ]
-                # 防御性检查：PD分离下不应出现chunked prefill
-                if new_chunk_prefill_first:
-                    logger.warning(
-                        "[PD] %d request(s) still have is_prefill_chunk=True "
-                        "after disabling chunking limits. This should not "
-                        "happen and may indicate a bug or KV cache exhaustion.",
-                        len(new_chunk_prefill_first),
+
+                    # === 核心修改 ===
+                    # All requests scheduled in this PF batch enter
+                    # prefill_last_pending immediately. They may NOT be
+                    # re-scheduled for the next chunk until the cloud
+                    # returns the matching PL (PREFILL_LAST).
+                    scheduled_req_ids = set(
+                        scheduler_output.num_scheduled_tokens.keys()
                     )
-                for req in self.chunk_prefill_first:
-                    if req not in new_chunk_prefill_first:
-                        new_chunk_prefill_first.append(req)
-                self.chunk_prefill_first = new_chunk_prefill_first
-                # PF 首段完成但 PL 尾段未完成的请求进入缓冲队列，
-                # 不直接加入 running，避免 decode 调度器误调度。
-                self.prefill_last_pending.extend(new_prefill_completed)
+                    for req in self.running:
+                        if req.request_id in scheduled_req_ids:
+                            self.prefill_last_pending.append(req)
+                        elif req.is_prefill_chunk:
+                            # Not scheduled this round (e.g. token budget
+                            # exhausted), keep in chunk_prefill_first.
+                            self.chunk_prefill_first.append(req)
+                        else:
+                            # Completed but not scheduled – defensive.
+                            self.prefill_last_pending.append(req)
+                    # ================
+
                 self.running = saved_running
-                print(
-                    f"[PD] _pick_prefill_first_batch done: "
-                    f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
-                    f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
-                    f"running[]: {len(self.running)}, "
-                    f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}",
-                    flush=True,
-                )
-                for (
-                    req_id,
-                    num_scheduled_token,
-                ) in scheduler_output.num_scheduled_tokens.items():
-                    req = self.requests[req_id]
-                    print(
-                        f"[PD] Scheduled[{req_id}], "
-                        f"num_tokens: {req.num_tokens}, "
-                        f"num_scheduled_token: {num_scheduled_token}, "
-                        f"num_computed_tokens: {req.num_computed_tokens}, "
-                        f"is_prefill_chunk: {req.is_prefill_chunk}, "
-                        f"chunk_num: {req.chunk_num}",
-                        flush=True,
-                    )
+
+
             else:
                 self.chunk_prefill_first = saved_chunk_prefill_first
                 self.running = saved_running
@@ -404,13 +364,6 @@ class PDSeparatedScheduler(Scheduler):
                 if req.request_id not in last_req_ids
             ]
         self._validate_prefill_tail_channel(so)
-        print(
-            f"\r\n[PD] _pick_prefill_last_batch popped {len(last_req_ids)} reqs; "
-            f"remaining prefills_last_ready[]: {len(self.prefills_last_ready)}, "
-            f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
-            f"hidden_channel: {so.hidden_channel}",
-            flush=True,
-        )
         return so
 
     def _validate_prefill_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
@@ -444,12 +397,6 @@ class PDSeparatedScheduler(Scheduler):
             f"decodes_last_ready expects DECODE_LAST, got {so.batch_type}"
         )
         self._validate_decode_tail_channel(so)
-        print(
-            f"\r\n[PD] _pick_decode_last_batch popped "
-            f"{len(so.num_scheduled_tokens)} reqs; "
-            f"remaining decodes_last_ready[]: {len(self.decodes_last_ready)}",
-            flush=True,
-        )
         return so
 
     def _ensure_cached_all_token_ids(
@@ -507,6 +454,12 @@ class PDSeparatedScheduler(Scheduler):
             if scheduler_output is not None:
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     scheduler_output.batch_type = BatchType.EMPTY
+                    logger.error(
+                        "DECODE_FIRST returned empty batch (total_num_scheduled_tokens=0) "
+                        "despite %d running requests. This indicates a severe KV cache "
+                        "shortage or scheduler budget exhaustion.",
+                        len(self.running),
+                    )
                 else:
                     scheduler_output.batch_type = BatchType.DECODE_FIRST
                     scheduler_output.head_token = uuid4().hex
@@ -515,32 +468,26 @@ class PDSeparatedScheduler(Scheduler):
                     )
                     self._ensure_cached_all_token_ids(scheduler_output)
                     self.decode_inflight_count += 1
+
+                    # === Decode-first self-posting optimization ===
+                    # Cloud's _maybe_publish_post_out merely replaces
+                    # batch_type with DECODE_LAST.  We pre-generate it on
+                    # the edge side and stash it in decodes_last_ready so
+                    # that scheduling DECODE_LAST needs no round-trip
+                    # through POST_OUT.  The cloud unconditionally skips
+                    # POST_OUT for all DECODE_FIRST batches.
+                    from dataclasses import replace
+                    decode_last = replace(
+                        scheduler_output,
+                        batch_type=BatchType.DECODE_LAST,
+                    )
+                    self.decodes_last_ready.append(decode_last)
+                    # ===============================================
                 for req in list(self.waiting):
                     saved_waiting.prepend_request(req)
                 self.chunk_prefill_first = saved_chunk_prefill_first
                 self.waiting = saved_waiting
                 self.skipped_waiting = saved_skipped
-                print(
-                    f"\r\n[PD] _pick_decode_first_batch done: "
-                    f"running: {len(self.running)}, "
-                    f"chunk_prefill_first: {len(self.chunk_prefill_first)}, "
-                    f"prefill_last_pending: {len(self.prefill_last_pending)}",
-                    flush=True,
-                )
-                for (
-                    req_id,
-                    num_scheduled_token,
-                ) in scheduler_output.num_scheduled_tokens.items():
-                    req = self.requests[req_id]
-                    print(
-                        f"[PD] Scheduled[{req_id}],    "
-                        f"num_tokens: {req.num_tokens}, "
-                        f"num_scheduled_token: {num_scheduled_token}, "
-                        f"num_computed_tokens: {req.num_computed_tokens}, "
-                        f"is_prefill_chunk: {req.is_prefill_chunk}, "
-                        f"chunk_num: {req.chunk_num}",
-                        flush=True,
-                    )
             else:
                 self.chunk_prefill_first = saved_chunk_prefill_first
                 self.waiting = saved_waiting
@@ -552,12 +499,6 @@ class PDSeparatedScheduler(Scheduler):
         completed = [
             req for req in self.chunk_prefill_first if not req.is_prefill_chunk
         ]
-        if completed:
-            print(
-                f"[PD] _migrate_prefill_to_running: moving {len(completed)} "
-                f"requests from chunk_prefill_first to running",
-                flush=True,
-            )
         for req in completed:
             self.chunk_prefill_first.remove(req)
             self.running.append(req)
@@ -576,19 +517,8 @@ class PDSeparatedScheduler(Scheduler):
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
         if request.is_prefill_chunk:
-            print(
-                f"[PD] _preempt_request: request {request.request_id} "
-                f"stays in chunk_prefill_first "
-                f"(computed={request.num_computed_tokens})",
-                flush=True,
-            )
             self.chunk_prefill_first.append(request)
         else:
-            print(
-                f"[PD] _preempt_request: request {request.request_id} "
-                f"goes back to waiting (decode or finished prefill)",
-                flush=True,
-            )
             request.num_computed_tokens = 0
             self.waiting.prepend_request(request)
 
@@ -602,15 +532,6 @@ class PDSeparatedScheduler(Scheduler):
         for req_id, num_scheduled_token in scheduler_output.num_scheduled_tokens.items():
             if was_prefill_map[req_id] and num_scheduled_token > 0:
                 self.requests[req_id].chunk_num += 1
-                print(
-                    f"[PD] _update_after_schedule: request {req_id} "
-                    f"chunk_num={self.requests[req_id].chunk_num} "
-                    f"tokens={self.requests[req_id].num_tokens} "
-                    f"scheduled={num_scheduled_token} "
-                    f"computed={self.requests[req_id].num_computed_tokens} "
-                    f"is_prefill_chunk={self.requests[req_id].is_prefill_chunk}",
-                    flush=True,
-                )
 
         self._migrate_prefill_to_running()
         self.finished_req_ids = set()
@@ -627,30 +548,42 @@ class PDSeparatedScheduler(Scheduler):
                 self.hidden_channel_manager.release_prefill(
                     scheduler_output.head_token
                 )
-            # Move completed requests from prefill_last_pending to running.
+            # === 核心修改 ===
+            # Requests whose PL just returned are removed from
+            # prefill_last_pending and routed directly:
+            #   - still has more chunks -> chunk_prefill_first
+            #   - prefill fully done    -> running
             completed_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
-            newly_running = [
-                req for req in self.prefill_last_pending
-                if req.request_id in completed_req_ids
-            ]
-            self.prefill_last_pending = [
-                req for req in self.prefill_last_pending
-                if req.request_id not in completed_req_ids
-            ]
-            self.running.extend(newly_running)
-            print(
+            newly_running: list[Request] = []
+            newly_chunked: list[Request] = []
+            remaining_pending: list[Request] = []
+            for req in self.prefill_last_pending:
+                if req.request_id in completed_req_ids:
+                    if req.is_prefill_chunk:
+                        self.chunk_prefill_first.append(req)
+                        newly_chunked.append(req)
+                    else:
+                        self.running.append(req)
+                        newly_running.append(req)
+                else:
+                    remaining_pending.append(req)
+            self.prefill_last_pending = remaining_pending
+            # ================
+
+            logger.info(
                 f"[PD] update_from_output PREFILL_LAST done, "
                 f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
-                f"moved {len(newly_running)} reqs to running[], running[]: {len(self.running)}",
-                flush=True,
+                f"moved {len(newly_running)} reqs to running[], "
+                f"moved {len(newly_chunked)} reqs to chunk_prefill_first[], "
+                f"running[]: {len(self.running)}, "
+                f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
             )
         if scheduler_output.batch_type == BatchType.DECODE_LAST:
             if self.decode_inflight_count > 0:
                 self.decode_inflight_count -= 1
-            print(
+            logger.info(
                 f"[PD] update_from_output DECODE_LAST done, "
                 f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
-                flush=True,
             )
         outputs = super().update_from_output(scheduler_output, model_runner_output)
         self.chunk_prefill_first = [

@@ -130,11 +130,15 @@ def _patched_engine_core_init(self, *args, **kwargs):
             pd_enabled,
         )
 
+    # Load PD-separation configuration from environment variables
+    from vllm_ascend.pd_separation_config import PDSeparationConfig
+    pd_config = PDSeparationConfig.from_env()
+
     # PP scheduler ZMQ publisher (pp rank0 → pp rank1 PassiveEngineCore).
     self._pp_scheduler_zmq_publisher = None
-    if envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is not None:
+    if pd_config.scheduler_zmq_addr is not None:
         self._pp_scheduler_zmq_publisher = PPSchedulerZmqPublisher(
-            envs.VLLM_PP_SCHEDULER_ZMQ_ADDR
+            pd_config.scheduler_zmq_addr
         )
 
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
@@ -156,10 +160,8 @@ def _patched_engine_core_init(self, *args, **kwargs):
         cloud_addr = _addr_store.get("cloud_ip").decode()
         del _addr_store
 
-        pre_out = f"tcp://*:{envs.VLLM_PP_PRE_OUT_ZMQ_PORT}"
-        post_out = (
-            f"tcp://{cloud_addr}:{envs.VLLM_PP_POST_OUT_ZMQ_PORT}"
-        )
+        pre_out = pd_config.get_pre_out_bind_addr()
+        post_out = pd_config.get_post_out_connect_addr(cloud_addr)
         self._pp_pd_channel = PPSchedulerZmqChannel(
             send_endpoint=pre_out,
             recv_endpoint=post_out,
@@ -189,10 +191,7 @@ def _drain_pd_channel_inbox(self) -> None:
     new_outputs = self._pp_pd_channel.consume_new_outputs()
     for _seq, so in new_outputs:
         bt = so.batch_type
-        print(
-            f"Received scheduler_output from cloud, batch_type: {bt}",
-            flush=True,
-        )
+        logger.info(f"Received scheduler_output from cloud, batch_type: {bt}")
         if bt == BatchType.PREFILL_LAST:
             self.scheduler.prefills_last_ready.append(so)
         elif bt == BatchType.DECODE_LAST:
@@ -472,7 +471,7 @@ def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
         if (
             parallel_config.pipeline_parallel_size > 1
             and getattr(parallel_config, "nnodes_within_dp", 1) > 1
-            and envs.VLLM_PP_SCHEDULER_ZMQ_ADDR is None
+            and os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR") is None
         ):
             pp_zmq_port = int(
                 os.getenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "5558")
@@ -533,11 +532,7 @@ def _patched_process_input_queue(self):
 
         try:
             if block and self.input_queue.empty():
-                print(
-                    "input_queue is empty, "
-                    "EngineCore waiting for work.",
-                    flush=True,
-                )
+                logger.info("input_queue is empty, EngineCore waiting for work.")
             req = self.input_queue.get(block=block)
             self._handle_client_request(*req)
         except _queue_mod.Empty:

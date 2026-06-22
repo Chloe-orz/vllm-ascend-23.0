@@ -18,7 +18,7 @@
 #
 
 import math
-from vllm import envs
+import os
 import sys
 import time
 from collections import defaultdict
@@ -96,7 +96,7 @@ from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.20.2"):
     from vllm.v1.outputs import RoutedExpertsLists
-from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
+from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -342,6 +342,84 @@ class HeadState:
     head_token: str
     scheduler_output: "SchedulerOutput"
     req_ids: tuple[str, ...]
+
+
+def _clone_gdn_attn_metadata(meta):
+    """Deep-clone device tensors inside GDNAttentionMetadata.
+
+    GDN metadata holds device tensors that are views into shared
+    ``common_attn_metadata`` buffers (e.g. ``query_start_loc``,
+    ``state_indices``).  These buffers are rebuilt on every batch, so a
+    decode batch interleaved between two prefill slices would silently
+    overwrite the data still referenced by the saved
+    ``_layerwise_attn_metadata``.  Cloning at **save time** preserves
+    the correct prefill-length values.
+    """
+    import copy
+    from dataclasses import fields
+
+    # Use dataclass replacement to create a shallow copy first,
+    # then deep-clone the device tensor fields.
+    cloned = copy.copy(meta)
+
+    # Device tensor fields that must be cloned to decouple from
+    # shared common_attn_metadata buffers.
+    _DEVICE_TENSOR_FIELDS = (
+        "has_initial_state",
+        "spec_query_start_loc",
+        "non_spec_query_start_loc",
+        "spec_state_indices_tensor",
+        "non_spec_state_indices_tensor",
+        "spec_sequence_masks",
+        "spec_token_indx",
+        "non_spec_token_indx",
+        "num_accepted_tokens",
+        "chunk_indices",
+        "chunk_offsets",
+    )
+    for field_name in _DEVICE_TENSOR_FIELDS:
+        tensor = getattr(cloned, field_name, None)
+        if tensor is not None and isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
+            setattr(cloned, field_name, tensor.clone())
+
+    # The non_spec_prefill_fallback_meta contains pooled device tensors
+    # for causal_conv1d host args and chunked prefill metadata.
+    fallback_meta = getattr(cloned, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is not None:
+        cloned_fallback = copy.copy(fallback_meta)
+
+        # Clone causal_conv1d host metadata (CPU pinned tensors)
+        causal_conv1d = getattr(cloned_fallback, "causal_conv1d", None)
+        if causal_conv1d is not None:
+            cloned_causal = copy.copy(causal_conv1d)
+            for attr in ("query_start_loc_cpu", "cache_indices_cpu", "has_initial_state_cpu"):
+                t = getattr(cloned_causal, attr, None)
+                if t is not None and isinstance(t, torch.Tensor):
+                    setattr(cloned_causal, attr, t.clone())
+            cloned_fallback.causal_conv1d = cloned_causal
+
+        # Clone chunked prefill metadata (device tensors from 2-slot pool)
+        chunk_meta = getattr(cloned_fallback, "chunk", None)
+        if chunk_meta is not None:
+            cloned_chunk = copy.copy(chunk_meta)
+            for attr in (
+                "chunk_indices_chunk64",
+                "chunk_offsets_chunk64",
+                "update_chunk_offsets_chunk64",
+                "final_chunk_indices_chunk64",
+                "chunk_indices_large_block",
+                "block_indices_cumsum",
+            ):
+                t = getattr(cloned_chunk, attr, None)
+                if t is not None and isinstance(t, torch.Tensor) and t.device.type != "cpu":
+                    setattr(cloned_chunk, attr, t.clone())
+            # Decouple from pool so the pool slot can be reused safely
+            cloned_chunk._buffer_slot = None
+            cloned_fallback.chunk = cloned_chunk
+
+        cloned.non_spec_prefill_fallback_meta = cloned_fallback
+
+    return cloned
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -2426,7 +2504,22 @@ class NPUModelRunner(GPUModelRunner):
         # Save per-step state for layer slice continuation.
         if layer_slice_info is not None and not layer_slice_info.is_last_slice:
             self._layerwise_positions = positions
-            self._layerwise_attn_metadata = attn_metadata
+            # Deep-clone device tensors inside attn_metadata to prevent
+            # corruption by subsequent decode batches.  The metadata's
+            # device tensors (query_start_loc, state_indices, etc.) are
+            # views into shared common_attn_metadata buffers that get
+            # rebuilt on every batch.  If a decode batch runs between
+            # two prefill slices, it overwrites these buffers in-place,
+            # corrupting the saved metadata.  Cloning at save time
+            # preserves the correct prefill values.
+            if isinstance(attn_metadata, dict):
+                self._layerwise_attn_metadata = {
+                    k: _clone_gdn_attn_metadata(v) for k, v in attn_metadata.items()
+                }
+            elif attn_metadata is not None:
+                self._layerwise_attn_metadata = _clone_gdn_attn_metadata(attn_metadata)
+            else:
+                self._layerwise_attn_metadata = attn_metadata
             self._layerwise_num_tokens_padded = num_tokens_padded
             self._layerwise_num_tokens_across_dp = num_tokens_across_dp
             self._layerwise_batch_desc = batch_desc
@@ -2544,110 +2637,8 @@ class NPUModelRunner(GPUModelRunner):
                     self._finalize_dump_data()
                     return output
 
-                # Work around first real edge-tail execution using stale lazy
-                # kernel state by warming segment_e/lm_head once with the same
-                # shape and discarding the result.  Only run once per worker.
-                if (
-                    self._edge_cloud_enabled
-                    and self.edge_cloud_cfg.role == "edge"
-                    and scheduler_output.batch_type in (
-                        BatchType.PREFILL_LAST, BatchType.DECODE_LAST,
-                    )
-                    and not getattr(self, "_edge_tail_real_shape_warmed", False)
-                ):
-                    _ = self.model.compute_logits(hidden_states[logits_indices])
-                    torch.npu.synchronize()
-                    self._edge_tail_real_shape_warmed = True
-                    logger.info("[EdgeCloud] Warmed edge tail logits real shape")
-
                 sample_hidden_states = hidden_states[logits_indices]
-
-                debug_edge_tail = (
-                    self._edge_cloud_enabled
-                    and self.edge_cloud_cfg.role == "edge"
-                    and scheduler_output.batch_type in (
-                        BatchType.PREFILL_LAST, BatchType.DECODE_LAST,
-                    )
-                )
-                debug_cnt = getattr(self, "_edge_tail_debug_count", 0)
-                if debug_edge_tail:
-                    for req_id in scheduler_output.num_scheduled_tokens:
-                        req_idx = self.input_batch.req_id_to_index.get(req_id)
-                        if req_idx is not None:
-                            before = int(self.input_batch.num_tokens[req_idx])
-                            no_spec = int(
-                                self.input_batch.num_tokens_no_spec[req_idx]
-                            )
-                            if before < no_spec:
-                                self.input_batch.num_tokens[req_idx] = no_spec
-                            after = int(self.input_batch.num_tokens[req_idx])
-                            if debug_cnt < 4:
-                                print(
-                                    f"[EC-TAIL-FIXUP] req_id={req_id} "
-                                    f"req_idx={req_idx} before={before} "
-                                    f"num_tokens_no_spec={no_spec} after={after}",
-                                    flush=True,
-                                )
-                        elif debug_cnt < 4:
-                            print(
-                                f"[EC-TAIL-FIXUP] req_id={req_id} missing "
-                                f"from input_batch index; input_req_ids="
-                                f"{self.input_batch.req_ids}",
-                                flush=True,
-                            )
-                if debug_edge_tail and debug_cnt < 4:
-                    req_debug = {}
-                    for req_id in self.input_batch.req_ids:
-                        req_state = self.requests.get(req_id)
-                        req_idx = self.input_batch.req_id_to_index.get(req_id)
-                        if req_state is not None and req_idx is not None:
-                            num_tokens_no_spec = int(
-                                self.input_batch.num_tokens_no_spec[req_idx]
-                            )
-                            num_tokens = int(
-                                self.input_batch.num_tokens[req_idx]
-                            )
-                            token_tail_no_spec = self.input_batch.token_ids_cpu[
-                                req_idx,
-                                max(0, num_tokens_no_spec - 8):num_tokens_no_spec,
-                            ].tolist()
-                            token_tail_num_tokens = self.input_batch.token_ids_cpu[
-                                req_idx,
-                                max(0, num_tokens - 8):num_tokens,
-                            ].tolist()
-                            req_debug[req_id] = {
-                                "req_num_tokens": req_state.num_tokens,
-                                "req_num_prompt_tokens": req_state.num_prompt_tokens,
-                                "req_num_computed_tokens": req_state.num_computed_tokens,
-                                "num_tokens_no_spec": num_tokens_no_spec,
-                                "num_tokens": num_tokens,
-                                "token_tail_no_spec": token_tail_no_spec,
-                                "token_tail_num_tokens": token_tail_num_tokens,
-                            }
-                    print(
-                        f"[EC-TAIL-DEBUG] batch_type={scheduler_output.batch_type} "
-                        f"logits_indices={logits_indices.cpu().tolist()} "
-                        f"req_debug={req_debug} "
-                        f"hs_mean={hidden_states.float().mean().item():.6f} "
-                        f"hs_std={hidden_states.float().std().item():.6f} "
-                        f"sample_hs_mean={sample_hidden_states.float().mean().item():.6f} "
-                        f"sample_hs_std={sample_hidden_states.float().std().item():.6f}",
-                        flush=True,
-                    )
-
                 logits = self.model.compute_logits(sample_hidden_states)
-
-                if debug_edge_tail and debug_cnt < 4:
-                    top_ids = logits.topk(k=5, dim=-1).indices[0].tolist()
-                    top_vals = logits.topk(k=5, dim=-1).values[0].tolist()
-                    print(
-                        f"[EC-TAIL-DEBUG] after compute_logits "
-                        f"logits_mean={logits.float().mean().item():.6f} "
-                        f"logits_std={logits.float().std().item():.6f} "
-                        f"top_ids={top_ids} top_vals={top_vals}",
-                        flush=True,
-                    )
-                    self._edge_tail_debug_count = debug_cnt + 1
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -2757,44 +2748,8 @@ class NPUModelRunner(GPUModelRunner):
             apply_grammar_bitmask(scheduler_output, grammar_output, self.input_batch, logits)
             logits = logits.to(self.device).to(logits_dtype)
 
-        debug_tail_sampling = (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "edge"
-            and scheduler_output.batch_type in (
-                BatchType.PREFILL_LAST, BatchType.DECODE_LAST,
-            )
-        )
-        debug_count = getattr(self, "_edge_cloud_sampling_debug_count", 0)
-        if debug_tail_sampling and debug_count < 4:
-            top_k = min(5, logits.shape[-1])
-            top_vals, top_ids = torch.topk(logits.float(), k=top_k, dim=-1)
-            stop_info = {}
-            for req_id in self.input_batch.req_ids:
-                req = self.requests.get(req_id)
-                if req is not None and req.sampling_params is not None:
-                    stop_info[req_id] = {
-                        "eos": req.sampling_params.eos_token_id,
-                        "stop": list(req.sampling_params.stop_token_ids or []),
-                        "all_stop": list(req.sampling_params.all_stop_token_ids),
-                    }
-            print(
-                f"[EC-SAMPLE-DEBUG] before sample batch_type="
-                f"{scheduler_output.batch_type} req_ids={self.input_batch.req_ids} "
-                f"top_ids={top_ids.cpu().tolist()} "
-                f"top_vals={top_vals.cpu().tolist()} stop_info={stop_info}",
-                flush=True,
-            )
-
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
-
-        if debug_tail_sampling and debug_count < 4:
-            print(
-                f"[EC-SAMPLE-DEBUG] after sample sampled="
-                f"{sampler_output.sampled_token_ids.cpu().tolist()}",
-                flush=True,
-            )
-            self._edge_cloud_sampling_debug_count = debug_count + 1
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -4932,18 +4887,9 @@ class NPUModelRunner(GPUModelRunner):
                     batch_descriptor=batch_desc,
                     model_instance=self.model,
                 ):
-                    from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-                    old_layer_idx = _EXTRA_CTX.layer_idx
-                    if _EXTRA_CTX.layer_idx is not None:
-                        _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
-                    try:
-                        outputs = self._model_forward(
-                            num_tokens_padded, input_ids, positions,
-                            intermediate_tensors, inputs_embeds
-                        )
-                    finally:
-                        if old_layer_idx is not None:
-                            _EXTRA_CTX.layer_idx = old_layer_idx
+                    outputs = self._model_forward(
+                        num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    )
                 if self.use_aux_hidden_state_outputs:
                     hidden_states, _ = outputs
                 elif isinstance(outputs, IntermediateTensors):
@@ -4982,60 +4928,19 @@ class NPUModelRunner(GPUModelRunner):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # The dummy hidden states may contain special values, like inf or nan.
-        # Use random values and actually run sampler warmup so the first real
-        # edge-cloud tail sampling step does not pay lazy kernel initialization.
-        hidden_states = torch.rand_like(hidden_states)
+        output = None
 
+        # For profile, have maximum num_reqs and that collectively have
+        # maximum num_tokens.
         min_tokens_per_req = self.max_num_tokens // self.max_num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * self.max_num_reqs
         num_scheduled_tokens_list[-1] += self.max_num_tokens % self.max_num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
-        logits_indices = np.cumsum(num_scheduled_tokens) - 1
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states)
-        num_reqs = logits.size(0)
-
-        dummy_float_tensors = lambda v: torch.full(
-            (num_reqs,), v, device=self.device
-        )
-        dummy_int_tensors = lambda v: torch.full(
-            (num_reqs,), v, dtype=torch.int32, device=self.device
-        )
-        dummy_metadata = SamplingMetadata(
-            temperature=dummy_float_tensors(0.5),
-            all_greedy=False,
-            all_random=False,
-            top_p=dummy_float_tensors(0.9),
-            top_k=dummy_int_tensors(logits.size(1) - 1),
-            generators={},
-            max_num_logprobs=None,
-            logprob_token_ids=None,
-            no_penalties=True,
-            prompt_token_ids=None,
-            frequency_penalties=dummy_float_tensors(0.1),
-            presence_penalties=dummy_float_tensors(0.1),
-            repetition_penalties=dummy_float_tensors(0.1),
-            output_token_ids=[[] for _ in range(num_reqs)],
-            spec_token_ids=[[] for _ in range(num_reqs)],
-            allowed_token_ids_mask=None,
-            bad_words_token_ids={},
-            logitsprocs=LogitsProcessors(),
-        )
-        self.sampler(logits=logits, sampling_metadata=dummy_metadata)
-        if self.sampler.logprobs_mode not in (
-            "processed_logits", "processed_logprobs"
-        ):
-            self.sampler(
-                logits=logits,
-                sampling_metadata=replace(
-                    dummy_metadata,
-                    generators={
-                        0: torch.Generator(device=self.device).manual_seed(0)
-                    },
-                ),
-            )
-        return logits
+        logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        # TODO: need to rum a dummy sampler for generate task
+        hidden_states = hidden_states[logit_indices]
+        output = self.model.compute_logits(hidden_states)
+        return output
 
     def profile_run(self) -> None:
         self.eplb_warmup()
@@ -5077,7 +4982,10 @@ class NPUModelRunner(GPUModelRunner):
         # rebound forward is what the loaded modules actually expose.
         # Loaded on demand to keep upstream vLLM unmodified for users that
         # don't enable this feature.
-        if envs.VLLM_LAYER_SLICE_SIZE > 0:
+        self._layer_slice_enabled = os.path.exists(
+            os.environ.get("VLLM_LAYER_SLICE_CONFIG", "layer_slice_config.yaml")
+        )
+        if self._layer_slice_enabled:
             import vllm_ascend.patch.models.qwen_layer_slice  # noqa: F401
 
         if self._edge_cloud_enabled:
