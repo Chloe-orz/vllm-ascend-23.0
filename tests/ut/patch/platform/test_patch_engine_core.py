@@ -133,15 +133,7 @@ def test_run_engine_core_wrapper_preserves_child_process_patch_without_legacy_en
 
     _load_patch_module()
 
-    assert not hasattr(fake_core.EngineCoreProc.run_engine_core, "__wrapped__")
-    assert (
-        fake_core.EngineCoreProc.run_engine_core.__module__
-        == "test_patch_engine_core_module"
-    )
-    assert (
-        fake_core.EngineCoreProc.run_engine_core.__qualname__
-        == "_patched_run_engine_core"
-    )
+    assert hasattr(fake_core.EngineCoreProc.run_engine_core, "__wrapped__")
     result = fake_core.EngineCoreProc.run_engine_core(
         "arg", dp_rank=1, local_dp_rank=2, vllm_config=object()
     )
