@@ -10,29 +10,53 @@
 
 ## 文件
 
-- `pingpong_send.py` —— 发送端 (rank 0)，下发 N 个 tensor_dict、收回 N 个，打印分项耗时。
-- `pingpong_recv.py` —— 接收端 (rank 1)，收到 N 个后原样回发。
+两套脚本，二选一或都跑：
+
+- `pingpong_send.py` / `pingpong_recv.py` —— 双向 ping-pong 版。sender 下发 N 个 tensor_dict、收回 N 个，打印 RTT 分项耗时。
+- `oneway_send.py`   / `oneway_recv.py`   —— 单程版。sender 只发不收，receiver 只收不回。收齐后用一次 `dist.barrier()` 作为 ACK。**用来区分"同方向串行 / 双向流水"**——如果 ping-pong 版的 HCCL wait 增长跟单程版基本一致，说明 send 和 recv 在 NPU 上确实共用一条 stream、彼此串行；如果 ping-pong 版增长慢于单程版的两倍，说明双向能重叠。
 
 两个脚本都自动探测 `torch_npu`，有就走 HCCL，否则回落到 NCCL/CUDA，便于在 GPU 机器上自测脚本逻辑。
 
 ## 用法
 
-两台机器都装好 `torch + torch_npu + vllm`（vllm 必须可 `import`），IP 互通。下面假设 receiver IP 为 `192.168.1.10`，运行 CWD 是各自的 vllm 仓根目录。
+两台机器都装好 `torch + torch_npu + vllm`（vllm 必须可 `import`），IP 互通。下面假设 sender IP = `1.1.1.1`、receiver IP = `2.2.2.2`，端口 `3004`。
 
-**Receiver 机器：**
+> ⚠️ PyTorch 分布式约定里 `MASTER_ADDR` 是 rank 0（sender）的地址，**两端 `--master-addr` 都填 sender IP `1.1.1.1`**，不是 receiver。
+
+### ping-pong 版 (双向 RTT)
+
+**Receiver (2.2.2.2):**
 
 ```bash
 python <vllm-ascend>/tests/comm_pingpong/pingpong_recv.py \
-    --master-addr 192.168.1.10 --master-port 29500 \
-    --size-mb 4 --count 1 --iters 20
+    --master-addr 1.1.1.1 --master-port 3004 \
+    --size-mb 4 --count 1 --iters 20 --warmup 5
 ```
 
-**Sender 机器：**
+**Sender (1.1.1.1):**
 
 ```bash
 python <vllm-ascend>/tests/comm_pingpong/pingpong_send.py \
-    --master-addr 192.168.1.10 --master-port 29500 \
-    --size-mb 4 --count 1 --iters 20
+    --master-addr 1.1.1.1 --master-port 3004 \
+    --size-mb 4 --count 1 --iters 20 --warmup 5
+```
+
+### one-way 版 (单程 send)
+
+**Receiver (2.2.2.2):**
+
+```bash
+python <vllm-ascend>/tests/comm_pingpong/oneway_recv.py \
+    --master-addr 1.1.1.1 --master-port 3004 \
+    --size-mb 4 --count 1 --iters 20 --warmup 5
+```
+
+**Sender (1.1.1.1):**
+
+```bash
+python <vllm-ascend>/tests/comm_pingpong/oneway_send.py \
+    --master-addr 1.1.1.1 --master-port 3004 \
+    --size-mb 4 --count 1 --iters 20 --warmup 5
 ```
 
 参数：
@@ -49,6 +73,8 @@ python <vllm-ascend>/tests/comm_pingpong/pingpong_send.py \
 
 ## 输出读法（sender 端）
 
+### ping-pong 版
+
 每轮 sender 会拆出三段耗时，挑要紧的看：
 
 | 指标 | 含义 |
@@ -57,17 +83,31 @@ python <vllm-ascend>/tests/comm_pingpong/pingpong_send.py \
 | `HCCL wait`   | 等所有 isend/irecv handle + `device_synchronize` 完成的时间，反映 NPU 上 HCCL 的串/并行行为。**这是回答本问题的关键指标**。 |
 | `full round-trip` | 端到端 RTT，等于 `CPU issue + HCCL wait`。 |
 
+### one-way 版
+
+| 指标 | 含义 |
+| --- | --- |
+| `CPU issue N`      | N 个 `isend_tensor_dict` 的下发时间 (含 N 次同步 `send_object`)。 |
+| `NPU send wait`    | `isend handle.wait() + device_synchronize` 的时间，代表 **本端 NPU 上 send 操作的完成时间**。这一项最适合回答 "NPU 上 send 是否串行"。 |
+| `end-to-end 1-way` | 加上一次 ACK barrier 之后的时间，代表数据真正抵达对端 NPU 的端到端单程时间。 |
+
 ## 如何判读结果
 
-固定 `--size-mb`，分别跑 `--count 1 / 2 / 3 / 4`，把 sender 打印的 `HCCL wait` 列成表：
+固定 `--size-mb`，分别跑 `--count 1 / 2 / 3 / 4`，把 sender 打印的 `HCCL wait` (ping-pong 版) 或 `NPU send wait` (one-way 版) 列成表：
 
-| count | HCCL wait 实测 | N × HCCL wait(count=1) | 结论 |
+| count | wait 实测 | N × wait(count=1) | 结论 |
 | --- | --- | --- | --- |
 | 1 | 5 ms  | 5 ms  | 基准 |
 | 2 | ~10 ms | 10 ms | **NPU 上串行执行 → 后续 HCCL 传输被阻塞** |
 | 2 | ~5–6 ms | 10 ms | NPU 上可并行/流水 → 不阻塞 |
 
-不建议看 `full round-trip` 直接做线性外推，因为里面包含了 2N 次 metadata 握手，握手部分本身就近似线性增长，会把"NPU 是否串行"的信号污染。
+不建议看 `full round-trip` / `end-to-end 1-way` 直接做线性外推，因为里面包含了 metadata 握手 / ACK barrier，它们本身就近似线性增长，会把"NPU 是否串行"的信号污染。
+
+**进一步区分发送方向 vs 接收方向：** 用 one-way 版的 `NPU send wait` 和 ping-pong 版的 `HCCL wait` 对照——
+
+- 若 ping-pong `HCCL wait` ≈ 2 × one-way `NPU send wait` → send 和 recv 在 NPU 上串行（共用一条 stream）。
+- 若 ping-pong `HCCL wait` ≈ one-way `NPU send wait` → send/recv 双向能完全重叠。
+- 介于两者之间 → 部分重叠。
 
 ## 几个容易踩的坑
 
