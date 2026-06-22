@@ -311,11 +311,25 @@ class PDSeparatedScheduler(Scheduler):
                     )
                     self.prefill_inflight_count += 1
 
-                    # === 核心修改 ===
+                    # === Prefill-last self-posting optimization ===
+                    # Cloud's _maybe_publish_post_out merely replaces
+                    # batch_type with PREFILL_LAST.  We pre-generate it on
+                    # the edge side and stash it in prefills_last_ready so
+                    # that scheduling PREFILL_LAST needs no round-trip
+                    # through POST_OUT.  The cloud unconditionally skips
+                    # POST_OUT for all PREFILL_FIRST batches.
+                    from dataclasses import replace
+                    prefill_last = replace(
+                        scheduler_output,
+                        batch_type=BatchType.PREFILL_LAST,
+                    )
+                    self.prefills_last_ready.append(prefill_last)
+                    # ================================================
+
                     # All requests scheduled in this PF batch enter
                     # prefill_last_pending immediately. They may NOT be
-                    # re-scheduled for the next chunk until the cloud
-                    # returns the matching PL (PREFILL_LAST).
+                    # re-scheduled for the next chunk until the matching
+                    # PL (PREFILL_LAST) is consumed from prefills_last_ready.
                     scheduled_req_ids = set(
                         scheduler_output.num_scheduled_tokens.keys()
                     )
@@ -329,7 +343,6 @@ class PDSeparatedScheduler(Scheduler):
                         else:
                             # Completed but not scheduled – defensive.
                             self.prefill_last_pending.append(req)
-                    # ================
 
                 self.running = saved_running
 
