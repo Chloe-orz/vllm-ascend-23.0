@@ -5415,11 +5415,15 @@ class NPUModelRunner(GPUModelRunner):
 
         from tqdm import tqdm
         role = self.edge_cloud_cfg.role
-        seg_names = ['seg_a', 'seg_e'] if role == 'edge' else ['seg_c']
-        total = len(unique_descs) * len(seg_names)
-        progress = tqdm(total=total,
-                        desc=f"Capturing edge-cloud {role} graphs",
-                        unit="graph")
+        # Only rank 0 within each node shows progress
+        is_main_local_rank = getattr(self, 'local_rank', 0) == 0
+        total_sizes = len(unique_descs)
+        if is_main_local_rank:
+            progress = tqdm(total=total_sizes,
+                            desc=f"Capturing edge-cloud {role} graphs",
+                            unit="size")
+        else:
+            progress = None
 
         set_cudagraph_capturing_enabled(True)
         captured_count = 0
@@ -5460,19 +5464,23 @@ class NPUModelRunner(GPUModelRunner):
                                     else:
                                         wrapper(positions=positions, intermediate_tensors=dummy_tensors)
                                 captured_count += 1
-                                progress.update(1)
                     elif self.edge_cloud_cfg.role == "cloud":
                         wrapper = self.segment_c_wrapper
                         if isinstance(wrapper, ACLGraphWrapper):
                             with set_ascend_forward_context(**ctx):
                                 wrapper(positions=positions, intermediate_tensors=dummy_tensors)
                             captured_count += 1
-                            progress.update(1)
+                    if progress is not None:
+                        progress.update(1)
         finally:
-            progress.close()
+            if progress is not None:
+                progress.close()
             set_cudagraph_capturing_enabled(False)
-            logger.info("Edge-cloud %s: captured %d graphs across %d batch descriptors",
-                        role, captured_count, len(unique_descs))
+            if is_main_local_rank:
+                logger.info(
+                    "Edge-cloud %s: captured %d graphs across %d batch sizes",
+                    role, captured_count, total_sizes,
+                )
 
     def _prepare_multimodal_fields(self):
         """
