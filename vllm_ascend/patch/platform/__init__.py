@@ -16,6 +16,8 @@
 
 import os
 
+print("### PDDBG vllm_ascend.patch.platform loaded", __file__, flush=True)
+
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
@@ -52,7 +54,9 @@ if (
 # process has no env-level signal at platform-init time that PD/edge-cloud is
 # requested — the flag is set on
 # the VllmConfig only and reaches us via ``EngineCore.__init__``.
+print("### PDDBG importing patch_engine_core", flush=True)
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
+print("### PDDBG imported patch_engine_core", flush=True)
 
 if envs.VLLM_ASCEND_BALANCE_SCHEDULING:
     import vllm_ascend.patch.platform.patch_balance_schedule  # noqa

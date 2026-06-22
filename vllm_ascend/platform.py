@@ -182,10 +182,13 @@ class NPUPlatform(Platform):
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
+        print("### PDDBG NPUPlatform.pre_register_and_update", __file__, flush=True)
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
 
+        print("### PDDBG calling adapt_patch(is_global_patch=True)", flush=True)
         adapt_patch(is_global_patch=True)
+        print("### PDDBG returned from adapt_patch(is_global_patch=True)", flush=True)
 
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
