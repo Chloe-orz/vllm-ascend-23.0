@@ -23,8 +23,7 @@ This patch is the home of every line that the vllm-pdmix downstream fork
 used to maintain inside ``vllm/v1/engine/core.py`` of vLLM:
 
 * ``EngineCore.__init__`` — late-stage construction of the optional
-  PP-scheduler ZMQ publisher + edge-cloud PD-separation channel
-  (``self._pp_scheduler_zmq_publisher`` / ``self._pp_pd_channel``).
+  edge-cloud PD-separation channel (``self._pp_pd_channel``).
 * ``EngineCore.step`` / ``EngineCore.step_with_batch_queue`` — drain
   cloud-returned batches into the local PD scheduler, publish
   head-segment batches on PRE_OUT, skip ``sample_tokens`` for head
@@ -33,10 +32,8 @@ used to maintain inside ``vllm/v1/engine/core.py`` of vLLM:
   ``EngineCore._maybe_publish_pre_out`` /
   ``EngineCore._needs_sample_tokens`` — three new helper methods used by
   the two ``step*`` paths above.
-* ``EngineCore.shutdown`` — release the publisher / channel before the
-  rest of the engine resources.
-* ``EngineCoreProc.run_engine_core`` — auto-derive
-  ``VLLM_PP_SCHEDULER_ZMQ_ADDR`` for pp_size>1 + nnodes_within_dp>1.
+* ``EngineCore.shutdown`` — release the channel before the rest of the
+  engine resources.
 * ``EngineCoreProc._process_input_queue`` — force a blocking
   ``input_queue.get`` when the engine has nothing local to do, so the
   edge node never busy-spins while waiting for the next client request.
@@ -67,22 +64,17 @@ source and re-apply the dest-only inserts.
 from __future__ import annotations
 
 import functools
-import os
 from concurrent.futures import Future
 from typing import cast
 from uuid import uuid4
 
-from vllm import envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.outputs import ModelRunnerOutput
 
-from vllm_ascend.v1.engine.passive_core import (
-    PPSchedulerZmqChannel,
-    PPSchedulerZmqPublisher,
-)
+from vllm_ascend.v1.engine.passive_core import PPSchedulerZmqChannel
 
 logger = init_logger(__name__)
 
@@ -97,7 +89,6 @@ _INSTALLED_FLAG = "_vllm_ascend_engine_core_patched"
 # -----------------------------------------------------------------------#
 _ORIG_ENGINE_CORE_INIT = EngineCore.__init__
 _ORIG_ENGINE_CORE_SHUTDOWN = EngineCore.shutdown
-_ORIG_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
 
 
 # =======================================================================#
@@ -133,13 +124,6 @@ def _patched_engine_core_init(self, *args, **kwargs):
     # Load PD-separation configuration from environment variables
     from vllm_ascend.pd_separation_config import PDSeparationConfig
     pd_config = PDSeparationConfig.from_env()
-
-    # PP scheduler ZMQ publisher (pp rank0 → pp rank1 PassiveEngineCore).
-    self._pp_scheduler_zmq_publisher = None
-    if pd_config.scheduler_zmq_addr is not None:
-        self._pp_scheduler_zmq_publisher = PPSchedulerZmqPublisher(
-            pd_config.scheduler_zmq_addr
-        )
 
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
     self._pp_pd_channel = None
@@ -260,15 +244,6 @@ def _patched_step(self):
 
     scheduler_output = self.scheduler.schedule()
 
-    # [ascend insert] Publish SchedulerOutput to pp rank1 if ZMQ is
-    # configured.
-    bt = scheduler_output.batch_type
-    pub = getattr(self, "_pp_scheduler_zmq_publisher", None)
-    if pub is not None and bt in (
-        BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST
-    ):
-        pub.publish(scheduler_output)
-
     # [ascend insert] Forward head-segment batches on the PRE_OUT
     # (edge → cloud) channel.
     self._maybe_publish_pre_out(scheduler_output)
@@ -329,14 +304,6 @@ def _patched_step_with_batch_queue(self):
             and not getattr(scheduler_output, "head_token", None)
         ):
             scheduler_output.head_token = uuid4().hex
-
-        # [ascend insert] Publish SchedulerOutput to pp rank1 if ZMQ is
-        # configured.
-        pub = getattr(self, "_pp_scheduler_zmq_publisher", None)
-        if pub is not None and scheduler_output.batch_type in (
-            BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST
-        ):
-            pub.publish(scheduler_output)
 
         # [ascend insert] Forward head-segment batches on PRE_OUT.
         self._maybe_publish_pre_out(scheduler_output)
@@ -423,16 +390,6 @@ def _patched_step_with_batch_queue(self):
 # =======================================================================#
 @functools.wraps(_ORIG_ENGINE_CORE_SHUTDOWN)
 def _patched_engine_core_shutdown(self):
-    pub = getattr(self, "_pp_scheduler_zmq_publisher", None)
-    if pub is not None:
-        try:
-            pub.shutdown()
-        except Exception:
-            logger.exception(
-                "Error while shutting down PP scheduler ZMQ publisher"
-            )
-        self._pp_scheduler_zmq_publisher = None
-
     ch = getattr(self, "_pp_pd_channel", None)
     if ch is not None:
         try:
@@ -444,50 +401,6 @@ def _patched_engine_core_shutdown(self):
         self._pp_pd_channel = None
 
     _ORIG_ENGINE_CORE_SHUTDOWN(self)
-
-
-# =======================================================================#
-# EngineCoreProc.run_engine_core — auto-derive ZMQ address.               #
-# =======================================================================#
-def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
-                             **kwargs):
-    """Wrap upstream ``run_engine_core`` to derive the PP scheduler ZMQ
-    address before the engine subprocess is created.
-
-    This intentionally short-circuits *before* the (lengthy) original
-    bootstrapping happens, so that ``envs.VLLM_PP_SCHEDULER_ZMQ_ADDR`` is
-    visible to ``EngineCore.__init__`` running in the subprocess.
-    """
-    vllm_config: VllmConfig | None = kwargs.get("vllm_config")
-    if vllm_config is None and args:
-        # Best-effort positional fallback. Upstream always passes
-        # vllm_config via kwargs, so this is just defensive.
-        for arg in args:
-            if isinstance(arg, VllmConfig):
-                vllm_config = arg
-                break
-    if vllm_config is not None:
-        parallel_config = vllm_config.parallel_config
-        if (
-            parallel_config.pipeline_parallel_size > 1
-            and getattr(parallel_config, "nnodes_within_dp", 1) > 1
-            and os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR") is None
-        ):
-            pp_zmq_port = int(
-                os.getenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "5558")
-            )
-            os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"] = (
-                f"tcp://*:{pp_zmq_port}"
-            )
-            envs.disable_envs_cache()
-            logger.info(
-                "PP scheduler ZMQ publisher address: %s",
-                os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"],
-            )
-
-    return _ORIG_RUN_ENGINE_CORE(
-        *args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs
-    )
 
 
 # =======================================================================#
@@ -564,7 +477,6 @@ def install() -> None:
     EngineCore.step_with_batch_queue = _patched_step_with_batch_queue
     EngineCore.shutdown = _patched_engine_core_shutdown
 
-    EngineCoreProc.run_engine_core = staticmethod(_patched_run_engine_core)
     EngineCoreProc._process_input_queue = _patched_process_input_queue
 
     setattr(EngineCore, _INSTALLED_FLAG, True)
