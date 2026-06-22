@@ -536,10 +536,15 @@ def attention_calculation_stream() -> torch.npu.Stream:
 
 
 def adapt_patch(is_global_patch: bool = False):
+    print(f"### PDDBG adapt_patch enter is_global_patch={is_global_patch}", flush=True)
     if is_global_patch:
+        print("### PDDBG importing vllm_ascend.patch.platform", flush=True)
         from vllm_ascend.patch import platform  # noqa: F401
+        print("### PDDBG imported vllm_ascend.patch.platform", flush=True)
     else:
+        print("### PDDBG importing vllm_ascend.patch.worker", flush=True)
         from vllm_ascend.patch import worker  # noqa: F401
+        print("### PDDBG imported vllm_ascend.patch.worker", flush=True)
 
 
 def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None) -> None:
