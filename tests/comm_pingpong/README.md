@@ -10,11 +10,16 @@
 
 ## 文件
 
-两套脚本，二选一或都跑：
+四套脚本，按需取用——一共两个维度（vllm wrapper vs raw、双向 ping-pong vs 单程 one-way）的笛卡尔积：
 
-- `pingpong_send.py` / `pingpong_recv.py` —— 双向 ping-pong 版。sender 下发 N 个 tensor_dict、收回 N 个，打印 RTT 分项耗时。
-- `oneway_send.py`   / `oneway_recv.py`   —— 单程版。sender 只发不收，receiver 只收不回。收齐后用一次 `dist.barrier()` 作为 ACK。**用来区分"同方向串行 / 双向流水"**——如果 ping-pong 版的 HCCL wait 增长跟单程版基本一致，说明 send 和 recv 在 NPU 上确实共用一条 stream、彼此串行；如果 ping-pong 版增长慢于单程版的两倍，说明双向能重叠。
-- `raw_pingpong_send.py` / `raw_pingpong_recv.py` —— 原生接口对照版。直接用 `torch.distributed.isend / irecv` 发送/接收单个 tensor，**不经 vllm 任何 wrapper**（不走 `GroupCoordinator`、不走 `send_object` metadata 握手）。用来定位"串行"瓶颈到底在 HCCL ProcessGroup 还是在 vllm 的 metadata 握手层：如果 raw 版的 `HCCL wait` 仍随 N 线性增长，说明 ProcessGroupHCCL 本身就只有一条 P2P stream；如果 raw 版能并行而 vllm 版串行，那瓶颈在 vllm wrapper。
+| | **vllm wrapper** | **raw torch.distributed** |
+|---|---|---|
+| **双向 RTT** | `pingpong_send.py` / `pingpong_recv.py` | `raw_pingpong_send.py` / `raw_pingpong_recv.py` |
+| **单程 send** | `oneway_send.py`   / `oneway_recv.py` | `raw_oneway_send.py`   / `raw_oneway_recv.py` |
+
+- **vllm wrapper** 走的是 `GroupCoordinator.isend_tensor_dict / irecv_tensor_dict`，每次发送前会经过同步的 `send_object(metadata)` 握手，跟生产代码行为一致。
+- **raw** 直接调用 `torch.distributed.isend / irecv` 发送一个完整 tensor，不经任何 wrapper，用来定位串行瓶颈到底在 ProcessGroupHCCL 还是 vllm 的握手层。
+- **ping-pong** 测端到端 RTT，**one-way** 用 receiver 端的一次 `dist.barrier()` 作 ACK，**用来区分"同方向串行 / 双向流水"**。
 
 两个脚本都自动探测 `torch_npu`，有就走 HCCL，否则回落到 NCCL/CUDA，便于在 GPU 机器上自测脚本逻辑。
 
@@ -74,6 +79,24 @@ python <vllm-ascend>/tests/comm_pingpong/raw_pingpong_recv.py \
 
 ```bash
 python <vllm-ascend>/tests/comm_pingpong/raw_pingpong_send.py \
+    --master-addr 1.1.1.1 --master-port 3004 \
+    --size-bytes 4194304 --count 1 --iters 20 --warmup 5
+```
+
+### raw one-way 版 (原生 isend, 单程 send)
+
+**Receiver (2.2.2.2):**
+
+```bash
+python <vllm-ascend>/tests/comm_pingpong/raw_oneway_recv.py \
+    --master-addr 1.1.1.1 --master-port 3004 \
+    --size-bytes 4194304 --count 1 --iters 20 --warmup 5
+```
+
+**Sender (1.1.1.1):**
+
+```bash
+python <vllm-ascend>/tests/comm_pingpong/raw_oneway_send.py \
     --master-addr 1.1.1.1 --master-port 3004 \
     --size-bytes 4194304 --count 1 --iters 20 --warmup 5
 ```
