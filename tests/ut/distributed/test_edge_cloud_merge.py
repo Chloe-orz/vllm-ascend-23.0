@@ -22,18 +22,12 @@ from vllm_ascend.distributed import parallel_state as ps
 
 @pytest.fixture(autouse=True)
 def _reset_meta():
-    """Each test gets a fresh edge-cloud tensor meta."""
-    saved_e2c = ps._EDGE_CLOUD_TENSOR_META_E2C
-    saved_c2e = ps._EDGE_CLOUD_TENSOR_META_C2E
+    """Each test gets a fresh _EDGE_CLOUD_TENSOR_META."""
     saved = ps._EDGE_CLOUD_TENSOR_META
-    ps._EDGE_CLOUD_TENSOR_META_E2C = None
-    ps._EDGE_CLOUD_TENSOR_META_C2E = None
     ps._EDGE_CLOUD_TENSOR_META = None
     try:
         yield
     finally:
-        ps._EDGE_CLOUD_TENSOR_META_E2C = saved_e2c
-        ps._EDGE_CLOUD_TENSOR_META_C2E = saved_c2e
         ps._EDGE_CLOUD_TENSOR_META = saved
 
 
@@ -203,56 +197,3 @@ def test_split_3d_hc_mult_layout():
     split = ps._split_merged_buffer_into_dict(merged, meta, contiguous=True)
     assert torch.equal(split["hidden_states"], hidden)
     assert torch.equal(split["residual"], residual)
-
-
-# ---------------------------------------------------------------------------
-# Direction-aware meta: embedding_only drops residual on edge→cloud only
-# ---------------------------------------------------------------------------
-
-def test_init_meta_direction_aware_embedding_only():
-    """embedding_only: e2c omits residual on the wire but receiver still
-    allocates a zero residual buffer; c2e keeps it on the wire."""
-    ps.init_edge_cloud_tensor_meta(
-        hidden_size=128,
-        hidden_dtype=torch.bfloat16,
-        has_residual=True,
-        hc_mult=1,
-        mode="embedding_only",
-    )
-    e2c = ps.get_edge_cloud_tensor_meta("e2c")
-    c2e = ps.get_edge_cloud_tensor_meta("c2e")
-    # Receiver allocates both buffers so model layers stay unchanged.
-    assert e2c.tensor_keys == ["hidden_states", "residual"]
-    # Sender only puts hidden_states on the wire.
-    assert e2c.send_tensor_keys == ["hidden_states"]
-    assert e2c.merge_payload is False  # only one tensor is sent
-    assert c2e.tensor_keys == ["hidden_states", "residual"]
-    assert c2e.send_tensor_keys == ["hidden_states", "residual"]
-    # Backward-compatible (no-arg) accessor returns the dense c2e meta.
-    assert ps.get_edge_cloud_tensor_meta().tensor_keys == c2e.tensor_keys
-
-
-def test_init_meta_direction_aware_head_tail():
-    """head_tail: both directions carry residual (identical)."""
-    with patch.object(
-        ps.envs_ascend := __import__(
-            "vllm_ascend.envs", fromlist=["VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD"]
-        ),
-        "VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD",
-        True,
-    ):
-        ps.init_edge_cloud_tensor_meta(
-            hidden_size=128,
-            hidden_dtype=torch.bfloat16,
-            has_residual=True,
-            hc_mult=1,
-            mode="head_tail",
-        )
-    e2c = ps.get_edge_cloud_tensor_meta("e2c")
-    c2e = ps.get_edge_cloud_tensor_meta("c2e")
-    assert e2c.tensor_keys == ["hidden_states", "residual"]
-    assert e2c.send_tensor_keys == ["hidden_states", "residual"]
-    assert c2e.tensor_keys == ["hidden_states", "residual"]
-    assert c2e.send_tensor_keys == ["hidden_states", "residual"]
-    assert e2c.merge_payload is True
-    assert c2e.merge_payload is True
