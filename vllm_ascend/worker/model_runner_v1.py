@@ -5480,9 +5480,15 @@ class NPUModelRunner(GPUModelRunner):
                 # 边侧 captured_count 是 seg_a + seg_e 之和，
                 # 与配置的 batch_sizes 对齐时除以 wrapper 数。
                 graphs_per_size = 2 if role == "edge" else 1
+                per_wrapper = captured_count // graphs_per_size
+                _a = torch.npu.memory_allocated
+                _r = torch.npu.memory_reserved
                 logger.info(
-                    "Edge-cloud %s: captured %d graphs (per wrapper) across %d batch sizes",
-                    role, captured_count // graphs_per_size, total_sizes,
+                    "Edge-cloud %s: captured %d graphs (per wrapper) "
+                    "across %d batch sizes | "
+                    "mem alloc=%.2fGB reserved=%.2fGB",
+                    role, per_wrapper, total_sizes,
+                    _a() / 1e9, _r() / 1e9,
                 )
 
     def _prepare_multimodal_fields(self):
