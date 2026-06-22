@@ -517,7 +517,6 @@ class PassiveEngineCoreProc:
         vllm_config: "VllmConfig",
         ready_pipe,  # multiprocessing.Connection for signaling readiness
     ):
-        print("### PDDBG enter PassiveEngineCoreProc.run_passive_engine_core", __file__, flush=True)
         """Entry point for the passive EngineCore process.
 
         Creates a MultiprocExecutor to spawn workers, wires up the
@@ -615,12 +614,6 @@ class PassiveEngineCoreProc:
                 import torch.distributed as dist
                 from datetime import timedelta
                 from vllm.utils.network_utils import get_ip
-                print(
-                    "### PDDBG before cloud TCPStore client",
-                    master_addr,
-                    master_port + 1,
-                    flush=True,
-                )
                 _addr_store = dist.TCPStore(
                     host_name=master_addr,
                     port=master_port + 1,
@@ -628,9 +621,7 @@ class PassiveEngineCoreProc:
                     is_master=False,
                     timeout=timedelta(seconds=300),
                 )
-                print("### PDDBG after cloud TCPStore client", flush=True)
                 _addr_store.set("cloud_ip", get_ip())
-                print("### PDDBG cloud_ip set", flush=True)
                 del _addr_store
 
                 post_out_bind = pd_config.get_post_out_bind_addr()
