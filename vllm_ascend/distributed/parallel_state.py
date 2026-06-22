@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Callable
+import time
 
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
@@ -16,7 +17,12 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, flashcomm2_enable
+from vllm_ascend.utils import (
+    enable_dsa_cp_with_layer_shard,
+    flashcomm2_enable,
+    pp_timing_enabled,
+    pp_timing_sync,
+)
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -557,7 +563,7 @@ def edge_cloud_isend_tensor_dict(
                 break
 
     handles: list[Handle] = []
-    for _, value in tensor_dict.items():
+    for key, value in tensor_dict.items():
         if not isinstance(value, torch.Tensor):
             continue
         if value.numel() == 0:
@@ -580,6 +586,14 @@ def edge_cloud_isend_tensor_dict(
         if value.is_cuda:
             value.record_stream(torch.cuda.current_stream(value.device))
         handles.append(handle)
+        # [PP_TIMING] 每个数据 (hidden_states / residual) 发送完成时间。
+        # trace 开启时单独 wait 该 handle 以测得真实完成时刻; wait 幂等,
+        # 后续 worker 延迟 wait 立即返回, 不影响正确性。trace 关闭时保持
+        # 原有纯异步行为。
+        if pp_timing_enabled():
+            handle.wait()
+            pp_timing_sync()
+            print(f"[PP_TIMING][send][{key}] {time.perf_counter()}")
 
     return handles
 
@@ -631,6 +645,14 @@ def edge_cloud_irecv_tensor_dict(
             )
             handles.append(handle)
             tensor_dict[key] = full_tensor
+            # [PP_TIMING] 每个数据 (hidden_states / residual) 接收完成时间。
+            # trace 开启时单独 wait 该 handle 以测得真实完成时刻; wait 幂等,
+            # 后续 AsyncIntermediateTensors.wait_for_comm() 立即返回, 不影响
+            # 正确性。trace 关闭时保持原有纯异步行为。
+            if pp_timing_enabled():
+                handle.wait()
+                pp_timing_sync()
+                print(f"[PP_TIMING][recv][{key}] {time.perf_counter()}")
         else:
             tensor_dict[key] = value
 
