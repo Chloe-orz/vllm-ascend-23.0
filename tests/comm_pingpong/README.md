@@ -30,7 +30,7 @@
 ```bash
 python <vllm-ascend>/tests/comm_pingpong/pingpong_recv.py \
     --master-addr 1.1.1.1 --master-port 3004 \
-    --size-mb 4 --count 1 --iters 20 --warmup 5
+    --size-bytes 4194304 --count 1 --iters 20 --warmup 5
 ```
 
 **Sender (1.1.1.1):**
@@ -38,7 +38,7 @@ python <vllm-ascend>/tests/comm_pingpong/pingpong_recv.py \
 ```bash
 python <vllm-ascend>/tests/comm_pingpong/pingpong_send.py \
     --master-addr 1.1.1.1 --master-port 3004 \
-    --size-mb 4 --count 1 --iters 20 --warmup 5
+    --size-bytes 4194304 --count 1 --iters 20 --warmup 5
 ```
 
 ### one-way 版 (单程 send)
@@ -48,7 +48,7 @@ python <vllm-ascend>/tests/comm_pingpong/pingpong_send.py \
 ```bash
 python <vllm-ascend>/tests/comm_pingpong/oneway_recv.py \
     --master-addr 1.1.1.1 --master-port 3004 \
-    --size-mb 4 --count 1 --iters 20 --warmup 5
+    --size-bytes 4194304 --count 1 --iters 20 --warmup 5
 ```
 
 **Sender (1.1.1.1):**
@@ -56,20 +56,20 @@ python <vllm-ascend>/tests/comm_pingpong/oneway_recv.py \
 ```bash
 python <vllm-ascend>/tests/comm_pingpong/oneway_send.py \
     --master-addr 1.1.1.1 --master-port 3004 \
-    --size-mb 4 --count 1 --iters 20 --warmup 5
+    --size-bytes 4194304 --count 1 --iters 20 --warmup 5
 ```
 
 参数：
 
 | 参数 | 含义 |
 | --- | --- |
-| `--size-mb`     | 每个 tensor_dict 中 tensor 的大小 (MB) |
+| `--size-bytes`  | 每个 tensor_dict 中 tensor 的大小 (字节, 默认 `4194304` 即 4 MiB) |
 | `--count`       | 一轮里下发/接收的 tensor_dict 个数 |
 | `--iters`       | 正式测量轮数 |
 | `--warmup`      | 预热轮数 (不计入统计) |
 | `--local-device`| 本机使用的卡号 (默认 0) |
 
-> 两端 `--size-mb` 和 `--count` 必须严格一致，否则 recv buffer 形状对不上会挂。
+> 两端 `--size-bytes` 和 `--count` 必须严格一致，否则 recv buffer 形状对不上会挂。
 
 ## 输出读法（sender 端）
 
@@ -93,7 +93,7 @@ python <vllm-ascend>/tests/comm_pingpong/oneway_send.py \
 
 ## 如何判读结果
 
-固定 `--size-mb`，分别跑 `--count 1 / 2 / 3 / 4`，把 sender 打印的 `HCCL wait` (ping-pong 版) 或 `NPU send wait` (one-way 版) 列成表：
+固定 `--size-bytes`，分别跑 `--count 1 / 2 / 3 / 4`，把 sender 打印的 `HCCL wait` (ping-pong 版) 或 `NPU send wait` (one-way 版) 列成表：
 
 | count | wait 实测 | N × wait(count=1) | 结论 |
 | --- | --- | --- | --- |

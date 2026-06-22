@@ -9,10 +9,10 @@ vllm 根目录上 PYTHONPATH 已加好)。
 用法 (在 sender 机器上):
     python pingpong_send.py \
         --master-addr <recv_ip> --master-port 29500 \
-        --size-mb 4 --count 4 --iters 20 --warmup 5
+        --size-bytes 4194304 --count 4 --iters 20 --warmup 5
 
 观察思路:
-    固定 ``--size-mb``，分别跑 ``--count 1,2,3,4,...``，比较 round-trip 耗时。
+    固定 ``--size-bytes``，分别跑 ``--count 1,2,3,4,...``，比较 round-trip 耗时。
         若 count=N 的耗时 ≈ N × (count=1 的耗时)  -> HCCL 在 NPU 上串行 (阻塞)
         若 count=N 的耗时 << N × (count=1 的耗时) -> NPU 上可并行/流水
 
@@ -56,10 +56,10 @@ from vllm.distributed.parallel_state import (  # noqa: E402
 )
 
 
-def build_tensor_dict(size_mb, dtype=torch.float16, fill=1.0):
-    """每个 dict 内放一个 size_mb 大小的 tensor (键名固定, 便于双端 metadata 对齐)。"""
+def build_tensor_dict(size_bytes, dtype=torch.float16, fill=1.0):
+    """每个 dict 内放一个 size_bytes 字节的 tensor (键名固定, 便于双端 metadata 对齐)。"""
     elem = torch.tensor([], dtype=dtype).element_size()
-    numel = int(size_mb * 1024 * 1024 / elem)
+    numel = int(size_bytes // elem)
     return {"data": torch.full((numel,), fill, dtype=dtype, device=DEVICE)}
 
 
@@ -67,8 +67,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--master-addr", required=True)
     parser.add_argument("--master-port", default="29500")
-    parser.add_argument("--size-mb", type=float, default=4.0,
-                        help="每个 tensor_dict 中 tensor 的大小 (MB)")
+    parser.add_argument("--size-bytes", type=int, default=4 * 1024 * 1024,
+                        help="每个 tensor_dict 中 tensor 的大小 (字节, 默认 4 MiB = 4194304)")
     parser.add_argument("--count", type=int, default=1,
                         help="一轮里发送的 tensor_dict 个数")
     parser.add_argument("--iters", type=int, default=20, help="正式测量轮数")
@@ -100,7 +100,7 @@ def main():
     # ----------------------- warmup -----------------------
     for w in range(args.warmup):
         send_dicts = [
-            build_tensor_dict(args.size_mb, fill=float(w * 1000 + i))
+            build_tensor_dict(args.size_bytes, fill=float(w * 1000 + i))
             for i in range(args.count)
         ]
         send_handles = []
@@ -123,7 +123,7 @@ def main():
     issue_times, wait_times, rtt_times = [], [], []
     for it in range(args.iters):
         send_dicts = [
-            build_tensor_dict(args.size_mb, fill=float(it * 1000 + i))
+            build_tensor_dict(args.size_bytes, fill=float(it * 1000 + i))
             for i in range(args.count)
         ]
         device_synchronize()
@@ -169,12 +169,14 @@ def main():
     rtt_a, rtt_p50, rtt_p90, rtt_lo, rtt_hi = stats(rtt_times)
     iss_a, iss_p50, iss_p90, iss_lo, iss_hi = stats(issue_times)
     wt_a,  wt_p50,  wt_p90,  wt_lo,  wt_hi  = stats(wait_times)
-    payload = args.size_mb * args.count
+    payload = args.size_bytes * args.count
     print("=" * 72)
-    print(f"[sender] size/tensor = {args.size_mb} MB, count = {args.count}, "
+    print(f"[sender] size/tensor = {args.size_bytes} bytes "
+          f"({args.size_bytes/1024/1024:.3f} MiB), count = {args.count}, "
           f"backend = {BACKEND}")
-    print(f"[sender] payload per direction = {payload:.2f} MB "
-          f"(round-trip = {2*payload:.2f} MB)")
+    print(f"[sender] payload per direction = {payload} bytes "
+          f"({payload/1024/1024:.3f} MiB)  "
+          f"(round-trip = {2*payload} bytes / {2*payload/1024/1024:.3f} MiB)")
     print("-" * 72)
     print(f"[sender] CPU issue N (incl. {args.count} sync send_object/recv_object):")
     print(f"           avg={iss_a:.3f} ms  p50={iss_p50:.3f}  p90={iss_p90:.3f}  "

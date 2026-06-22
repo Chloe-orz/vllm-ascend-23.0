@@ -8,7 +8,7 @@ isend_tensor_dict 单程阻塞测试 —— 发送端 (rank 0)
 用法 (sender 机器):
     python oneway_send.py \
         --master-addr 1.1.1.1 --master-port 3004 \
-        --size-mb 4 --count 2 --iters 20 --warmup 5
+        --size-bytes 4194304 --count 2 --iters 20 --warmup 5
 
 与 ping-pong 版的区别:
     * receiver 只收不回发, 所以本脚本测的是 *单程* 的 send 时间。
@@ -53,9 +53,9 @@ from vllm.distributed.parallel_state import (  # noqa: E402
 )
 
 
-def build_tensor_dict(size_mb, dtype=torch.float16, fill=1.0):
+def build_tensor_dict(size_bytes, dtype=torch.float16, fill=1.0):
     elem = torch.tensor([], dtype=dtype).element_size()
-    numel = int(size_mb * 1024 * 1024 / elem)
+    numel = int(size_bytes // elem)
     return {"data": torch.full((numel,), fill, dtype=dtype, device=DEVICE)}
 
 
@@ -63,8 +63,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--master-addr", required=True)
     parser.add_argument("--master-port", default="29500")
-    parser.add_argument("--size-mb", type=float, default=4.0,
-                        help="每个 tensor_dict 中 tensor 的大小 (MB)")
+    parser.add_argument("--size-bytes", type=int, default=4 * 1024 * 1024,
+                        help="每个 tensor_dict 中 tensor 的大小 (字节, 默认 4 MiB = 4194304)")
     parser.add_argument("--count", type=int, default=1,
                         help="一轮里发送的 tensor_dict 个数")
     parser.add_argument("--iters", type=int, default=20)
@@ -94,7 +94,7 @@ def main():
     # ----------------------- warmup -----------------------
     for w in range(args.warmup):
         send_dicts = [
-            build_tensor_dict(args.size_mb, fill=float(w * 1000 + i))
+            build_tensor_dict(args.size_bytes, fill=float(w * 1000 + i))
             for i in range(args.count)
         ]
         send_handles = []
@@ -110,7 +110,7 @@ def main():
     issue_ms, send_wait_ms, e2e_ms = [], [], []
     for it in range(args.iters):
         send_dicts = [
-            build_tensor_dict(args.size_mb, fill=float(it * 1000 + i))
+            build_tensor_dict(args.size_bytes, fill=float(it * 1000 + i))
             for i in range(args.count)
         ]
         device_synchronize()
@@ -148,11 +148,13 @@ def main():
     ia, ip50, ip90, ilo, ihi = stats(issue_ms)
     sa, sp50, sp90, slo, shi = stats(send_wait_ms)
     ea, ep50, ep90, elo, ehi = stats(e2e_ms)
-    payload = args.size_mb * args.count
+    payload = args.size_bytes * args.count
     print("=" * 72)
-    print(f"[sender] size/tensor = {args.size_mb} MB, count = {args.count}, "
+    print(f"[sender] size/tensor = {args.size_bytes} bytes "
+          f"({args.size_bytes/1024/1024:.3f} MiB), count = {args.count}, "
           f"backend = {BACKEND}  (one-way, send only)")
-    print(f"[sender] payload one-way = {payload:.2f} MB")
+    print(f"[sender] payload one-way = {payload} bytes "
+          f"({payload/1024/1024:.3f} MiB)")
     print("-" * 72)
     print(f"[sender] CPU issue N (incl. {args.count} sync send_object):")
     print(f"           avg={ia:.3f} ms  p50={ip50:.3f}  p90={ip90:.3f}  "

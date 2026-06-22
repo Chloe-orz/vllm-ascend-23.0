@@ -4,10 +4,10 @@ isend_tensor_dict / irecv_tensor_dict NPU 阻塞测试 —— 接收端 (rank 1)
 直接调用 vllm 仓中的 ``GroupCoordinator.isend_tensor_dict /
 GroupCoordinator.irecv_tensor_dict``，保证与生产代码行为一致。
 
-用法 (在 receiver 机器上, 注意 --size-mb / --count 必须与 sender 完全一致):
+用法 (在 receiver 机器上, 注意 --size-bytes / --count 必须与 sender 完全一致):
     python pingpong_recv.py \
         --master-addr <recv_ip> --master-port 29500 \
-        --size-mb 4 --count 4 --iters 20 --warmup 5
+        --size-bytes 4194304 --count 4 --iters 20 --warmup 5
 
 逻辑:
     1) 用 irecv_tensor_dict 收 N 个 dict (handle.wait + 跑 postprocess)
@@ -42,14 +42,14 @@ from vllm.distributed.parallel_state import (  # noqa: E402
 )
 
 
-def build_tensor_dict(size_mb, dtype=torch.float16, fill=0.0):
-    """构造一个 size_mb 大小的 dict, 用作 fallback 回送 buffer。
+def build_tensor_dict(size_bytes, dtype=torch.float16, fill=0.0):
+    """构造一个 size_bytes 字节大小的 dict, 用作 fallback 回送 buffer。
 
     实际跑测试时, receiver 用 irecv_tensor_dict 收来的 dict 作为发回内容,
     这个函数主要在 warmup 阶段以及发回 dict 缺失关键 metadata 时兜底。
     """
     elem = torch.tensor([], dtype=dtype).element_size()
-    numel = int(size_mb * 1024 * 1024 / elem)
+    numel = int(size_bytes // elem)
     return {"data": torch.full((numel,), fill, dtype=dtype, device=DEVICE)}
 
 
@@ -57,7 +57,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--master-addr", required=True)
     parser.add_argument("--master-port", default="29500")
-    parser.add_argument("--size-mb", type=float, default=4.0)
+    parser.add_argument("--size-bytes", type=int, default=4 * 1024 * 1024,
+                        help="每个 tensor_dict 中 tensor 的大小 (字节, 必须与 sender 一致)")
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=5)
@@ -113,7 +114,8 @@ def main():
         run_one_round()
         device_synchronize()
 
-    print(f"[receiver] done. size={args.size_mb}MB count={args.count} "
+    print(f"[receiver] done. size={args.size_bytes} bytes "
+          f"({args.size_bytes/1024/1024:.3f} MiB) count={args.count} "
           f"iters={args.iters} backend={BACKEND}")
     dist.destroy_process_group()
 

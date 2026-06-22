@@ -4,10 +4,10 @@ isend_tensor_dict 单程阻塞测试 —— 接收端 (rank 1)
 只 irecv, 不回发, 收齐 N 个后做一次 ``dist.barrier()`` 作为 ACK,
 通知 sender "对端 NPU 上数据收齐了"。
 
-用法 (receiver 机器, --size-mb / --count / --iters / --warmup 必须与 sender 一致):
+用法 (receiver 机器, --size-bytes / --count / --iters / --warmup 必须与 sender 一致):
     python oneway_recv.py \
         --master-addr 1.1.1.1 --master-port 3004 \
-        --size-mb 4 --count 2 --iters 20 --warmup 5
+        --size-bytes 4194304 --count 2 --iters 20 --warmup 5
 """
 
 import argparse
@@ -41,7 +41,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--master-addr", required=True)
     parser.add_argument("--master-port", default="29500")
-    parser.add_argument("--size-mb", type=float, default=4.0)
+    parser.add_argument("--size-bytes", type=int, default=4 * 1024 * 1024,
+                        help="每个 tensor_dict 中 tensor 的大小 (字节, 必须与 sender 一致)")
     parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--warmup", type=int, default=5)
@@ -90,7 +91,8 @@ def main():
         dist.barrier()  # 与 sender 对齐起跑线
         run_one_round()
 
-    print(f"[receiver] done. size={args.size_mb}MB count={args.count} "
+    print(f"[receiver] done. size={args.size_bytes} bytes "
+          f"({args.size_bytes/1024/1024:.3f} MiB) count={args.count} "
           f"iters={args.iters} backend={BACKEND}  (one-way, recv only)")
     dist.destroy_process_group()
 
