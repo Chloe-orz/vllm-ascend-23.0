@@ -5477,9 +5477,12 @@ class NPUModelRunner(GPUModelRunner):
                 progress.close()
             set_cudagraph_capturing_enabled(False)
             if is_main_local_rank:
+                # 边侧 captured_count 是 seg_a + seg_e 之和，
+                # 与配置的 batch_sizes 对齐时除以 wrapper 数。
+                graphs_per_size = 2 if role == "edge" else 1
                 logger.info(
-                    "Edge-cloud %s: captured %d graphs across %d batch sizes",
-                    role, captured_count, total_sizes,
+                    "Edge-cloud %s: captured %d graphs (per wrapper) across %d batch sizes",
+                    role, captured_count // graphs_per_size, total_sizes,
                 )
 
     def _prepare_multimodal_fields(self):
