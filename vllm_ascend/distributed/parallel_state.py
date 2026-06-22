@@ -62,6 +62,20 @@ class EdgeCloudTensorMeta:
     # HC multiplier: DeepSeek V4 uses hc_mult > 1 (intermediate tensors are 3D);
     # standard models (Qwen3.5, Llama, etc.) use hc_mult = 1 (2D tensors).
     hc_mult: int
+    # Whether to merge multiple tensors into a single send/recv to reduce HCCL
+    # P2P protocol RTTs.  When True, edge_cloud_isend_tensor_dict concatenates
+    # all tensors along dim=-1 before sending, and edge_cloud_irecv_tensor_dict
+    # receives a single merged buffer then splits it back via narrow views.
+    merge_payload: bool = False
+    # Dtype of the merged tensor (same as hidden_dtype).
+    merged_dtype: torch.dtype | None = None
+    # Shape tail of the merged tensor (everything except dim-0).  For standard
+    # 2D models this is (N * hidden_size,); for 3D (DeepSeek V4) this is
+    # (hc_mult, N * hidden_size).
+    merged_shape_tail: tuple[int, ...] | None = None
+    # Per-tensor size along the concatenation dim=-1.  Used to narrow the
+    # merged buffer back into individual logical tensors.
+    split_sizes: list[int] | None = None
 
 
 def init_edge_cloud_tensor_meta(
@@ -113,18 +127,69 @@ def init_edge_cloud_tensor_meta(
         )
         tensor_keys.append("residual")
 
+    # Decide whether to merge all tensors into one send/recv.  Conditions:
+    #   1) at least 2 tensors to merge,
+    #   2) all share the same dtype and same non-last-dim shape (the
+    #      EdgeCloudTensorMeta path guarantees this — both hidden_states and
+    #      residual share the exact same TensorMetadata),
+    #   3) env switch enabled (default True).
+    # The merged buffer is allocated along dim=-1, so each tensor's contribution
+    # is (hidden_size) bytes along that axis. The leading dims (num_tokens for
+    # 2D, num_tokens x hc_mult for 3D) are preserved.
+    from vllm_ascend import envs as envs_ascend
+    env_enabled = envs_ascend.VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD
+    merge_payload = env_enabled and len(tensor_keys) >= 2
+    merged_dtype: torch.dtype | None = None
+    merged_shape_tail: tuple[int, ...] | None = None
+    split_sizes: list[int] | None = None
+    if merge_payload:
+        # Sanity: all metadata entries that are TensorMetadata must agree on
+        # dtype and non-last-dim shape.  Different shape on the last dim is
+        # allowed (we are concatenating along dim=-1).
+        first_meta = next(
+            v for _, v in metadata_list if isinstance(v, TensorMetadata)
+        )
+        merged_dtype = first_meta.dtype
+        leading_dims = first_meta.size[:-1]  # everything except hidden_size
+        last_dim_sum = 0
+        sizes: list[int] = []
+        for _, meta_v in metadata_list:
+            if not isinstance(meta_v, TensorMetadata):
+                continue
+            if meta_v.dtype != merged_dtype or meta_v.size[:-1] != leading_dims:
+                # Heterogeneous, fall back to no merge.
+                merge_payload = False
+                merged_dtype = None
+                merged_shape_tail = None
+                sizes = []
+                break
+            sizes.append(meta_v.size[-1])
+            last_dim_sum += meta_v.size[-1]
+        if merge_payload:
+            # leading_dims keeps the placeholder 0 in dim 0; the runtime
+            # tensor will use the real num_tokens.  merged_shape_tail is the
+            # part *after* dim 0, so we drop the leading 0.
+            merged_shape_tail = leading_dims[1:] + (last_dim_sum,)
+            split_sizes = sizes
+
     _EDGE_CLOUD_TENSOR_META = EdgeCloudTensorMeta(
         metadata_list=metadata_list,
         tensor_keys=tensor_keys,
         hc_mult=hc_mult,
+        merge_payload=merge_payload,
+        merged_dtype=merged_dtype,
+        merged_shape_tail=merged_shape_tail,
+        split_sizes=split_sizes,
     )
     logger.info(
         "[EdgeCloud] Initialized tensor meta: keys=%s, dtype=%s, "
-        "hidden_size=%d, hc_mult=%d",
+        "hidden_size=%d, hc_mult=%d, merge_payload=%s, split_sizes=%s",
         tensor_keys,
         dtype,
         hidden_size,
         hc_mult,
+        merge_payload,
+        split_sizes,
     )
 
 
@@ -603,6 +668,41 @@ def edge_cloud_isend_tensor_dict(
                 break
 
     handles: list[Handle] = []
+
+    if ec_meta.merge_payload:
+        # Fast path: concatenate all tensors along dim=-1 and send the
+        # merged buffer in a single isend.  Saves (N-1) HCCL P2P RTTs.
+        # Both sides must compute the same merged shape, which they do via
+        # the shared EdgeCloudTensorMeta initialized in worker setup.
+        pieces: list[torch.Tensor] = []
+        for key in ec_meta.tensor_keys:
+            value = tensor_dict[key]
+            if not isinstance(value, torch.Tensor) or value.numel() == 0:
+                # The receiver expects every tensor key to contribute its
+                # slice to the merged buffer.  Empty tensors break the
+                # layout, so refuse to merge in that edge case.
+                assert False, (
+                    "edge_cloud_isend_tensor_dict: merge_payload=True but "
+                    f"tensor '{key}' is missing or empty; re-init "
+                    "EdgeCloudTensorMeta or unset "
+                    "VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD."
+                )
+            if num_tokens is not None and value.shape[0] > num_tokens:
+                value = value[:num_tokens]
+            if not value.is_contiguous():
+                value = value.contiguous()
+            pieces.append(value)
+        merged = torch.cat(pieces, dim=-1)
+        # cat with multiple inputs always allocates a fresh contiguous buffer.
+        assert merged.is_contiguous()
+        handle = torch.distributed.isend(
+            merged, dst=pp_group.ranks[dst], group=group
+        )
+        if merged.is_cuda:
+            merged.record_stream(torch.cuda.current_stream(merged.device))
+        handles.append(handle)
+        return handles
+
     for _, value in tensor_dict.items():
         if not isinstance(value, torch.Tensor):
             continue
@@ -630,6 +730,54 @@ def edge_cloud_isend_tensor_dict(
     return handles
 
 
+def _allocate_merged_recv_buffer(
+    ec_meta: "EdgeCloudTensorMeta",
+    num_tokens: int,
+) -> torch.Tensor:
+    """Allocate the merged P2P recv buffer that matches the sender's cat layout.
+
+    The buffer's leading dim is num_tokens; the remaining dims come from
+    ec_meta.merged_shape_tail (which already encodes hc_mult for 3D models
+    and the total last-dim concatenation for either 2D or 3D).
+    """
+    assert ec_meta.merge_payload
+    assert ec_meta.merged_dtype is not None
+    assert ec_meta.merged_shape_tail is not None
+    full_shape = (num_tokens,) + ec_meta.merged_shape_tail
+    return torch.empty(full_shape, dtype=ec_meta.merged_dtype, device="npu")
+
+
+def _split_merged_buffer_into_dict(
+    merged: torch.Tensor,
+    ec_meta: "EdgeCloudTensorMeta",
+    *,
+    contiguous: bool = True,
+) -> dict[str, torch.Tensor]:
+    """Slice the merged buffer into per-key sub-tensors along dim=-1.
+
+    When ``contiguous`` is True (default), each slice is materialized via
+    ``.contiguous()`` so downstream kernels do not have to handle a strided
+    view.  The copy is small (one hidden_size-shaped slab per tensor) and
+    happens on the NPU compute stream after the irecv handle has resolved,
+    so it does not extend the critical path beyond what an un-merged path
+    would already have spent on the protocol RTT we just saved.
+
+    When ``contiguous`` is False the resulting tensors are zero-copy views
+    that share storage with ``merged``; downstream code must tolerate
+    non-contiguous strides.
+    """
+    assert ec_meta.split_sizes is not None
+    out: dict[str, torch.Tensor] = {}
+    offset = 0
+    for key, length in zip(ec_meta.tensor_keys, ec_meta.split_sizes):
+        sub = merged.narrow(-1, offset, length)
+        if contiguous:
+            sub = sub.contiguous()
+        out[key] = sub
+        offset += length
+    return out
+
+
 def edge_cloud_irecv_tensor_dict(
     num_tokens: int,
     src: int | None = None,
@@ -655,6 +803,36 @@ def edge_cloud_irecv_tensor_dict(
 
     ec_meta = get_edge_cloud_tensor_meta()
     group = pp_group.device_group
+
+    if ec_meta.merge_payload:
+        # Fast path: single irecv of the merged buffer, then split via
+        # narrow into per-key tensors.  The split is appended to the
+        # comm_postprocess list so it runs *after* the irecv handle is
+        # waited on by AsyncIntermediateTensors.wait_for_comm().
+        merged = _allocate_merged_recv_buffer(ec_meta, num_tokens)
+        handle = torch.distributed.irecv(
+            merged, src=pp_group.ranks[src], group=group
+        )
+
+        # Pre-populate the dict with empty placeholders so callers can see
+        # the expected keys even before postprocess runs.  We replace them
+        # with the real (contiguous) views below.
+        tensor_dict: dict[str, Any] = {}
+        for key, value in ec_meta.metadata_list:
+            if not isinstance(value, TensorMetadata):
+                tensor_dict[key] = value
+        # The split callback runs after irecv has populated `merged`.
+        def _split_into_dict() -> None:
+            split = _split_merged_buffer_into_dict(merged, ec_meta)
+            tensor_dict.update(split)
+
+        # Stash the merged tensor on the dict (via a private key) so
+        # edge_cloud_broadcast_recv can hand it to the TP broadcast path.
+        # This key is consumed and removed there; downstream consumers
+        # never see it.
+        tensor_dict["__merged_payload__"] = merged
+
+        return tensor_dict, [handle], [_split_into_dict]
 
     tensor_dict: dict[str, Any] = {}
     handles: list[Handle] = []
@@ -718,6 +896,34 @@ def edge_cloud_broadcast_recv(
         ###metadata_list = ec_meta.metadata_list
         ###tp_group.broadcast_object([num_tokens, metadata_list], src=0)
 
+        if ec_meta.merge_payload:
+            # Pop the private merged-buffer handle that
+            # edge_cloud_irecv_tensor_dict stashed for us; broadcast that
+            # single contiguous buffer across the TP group (1 op instead of
+            # one per key), then re-split into the public dict.
+            merged_buf = tensor_dict.pop("__merged_payload__")
+
+            def broadcast_postprocess(
+                merged_buf=merged_buf,
+                tensor_dict=tensor_dict,
+            ):
+                tp_dev_group = tp_group.device_group
+                handle = torch.distributed.broadcast(
+                    merged_buf,
+                    src=tp_group.ranks[0],
+                    group=tp_dev_group,
+                    async_op=True,
+                )
+                handle.wait()
+                # Re-split into the user-visible dict.  We update in place
+                # because callers may have captured the dict reference.
+                tensor_dict.update(
+                    _split_merged_buffer_into_dict(merged_buf, ec_meta)
+                )
+
+            comm_postprocess.append(broadcast_postprocess)
+            return tensor_dict, comm_handles, comm_postprocess
+
         def broadcast_postprocess():
             _, tensor_list = _split_tensor_dict(tensor_dict) if tensor_dict else (None, [])
             handles = []
@@ -741,6 +947,36 @@ def edge_cloud_broadcast_recv(
     ###broadcast_data = tp_group.broadcast_object(None, src=0)
     #recv_num_tokens = broadcast_data[0]
     #metadata_list = broadcast_data[1]
+
+    if ec_meta.merge_payload:
+        # Non-PP-rank-0 path on the merged fast path: allocate a single
+        # merged buffer with the same shape as PP rank 0's, broadcast-recv
+        # into it, then split.  Avoids one broadcast per key.
+        merged_buf = _allocate_merged_recv_buffer(ec_meta, num_tokens)
+        recv_tensor_dict: dict[str, torch.Tensor | Any] = {
+            key: value
+            for key, value in ec_meta.metadata_list
+            if not isinstance(value, TensorMetadata)
+        }
+
+        def broadcast_postprocess(
+            merged_buf=merged_buf,
+            recv_tensor_dict=recv_tensor_dict,
+        ):
+            tp_dev_group = tp_group.device_group
+            handle = torch.distributed.broadcast(
+                merged_buf,
+                src=tp_group.ranks[0],
+                group=tp_dev_group,
+                async_op=True,
+            )
+            handle.wait()
+            recv_tensor_dict.update(
+                _split_merged_buffer_into_dict(merged_buf, ec_meta)
+            )
+
+        return recv_tensor_dict, [], [broadcast_postprocess]
+
     metadata_list = ec_meta.metadata_list
     recv_num_tokens = num_tokens
     if metadata_list is None:
