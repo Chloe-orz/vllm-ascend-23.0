@@ -484,9 +484,17 @@ class PassiveEngineCoreProc:
                 scheduler_output, batch_type=BatchType.PREFILL_LAST
             )
         elif bt == BatchType.DECODE_FIRST:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.DECODE_LAST
+            # === Decode-first self-posting optimization ===
+            # Edge always pre-generates DECODE_LAST locally and stores it
+            # in decodes_last_ready.  Cloud never needs to send DECODE_LAST
+            # back via POST_OUT, eliminating control-plane round-trip.
+            logger.debug(
+                "[Cloud] Skipping POST_OUT for DECODE_FIRST "
+                "head_token=%s (edge pre-generates DECODE_LAST)",
+                scheduler_output.head_token,
             )
+            return
+            # ===============================================
         else:
             return
         # Echo the head_token back so the edge can correlate the tail
