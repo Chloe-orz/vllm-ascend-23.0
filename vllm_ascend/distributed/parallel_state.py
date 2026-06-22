@@ -1391,7 +1391,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
         return recv_tensor_dict, [], [broadcast_postprocess]
 
     metadata_list = ec_meta.metadata_list
-    recv_num_tokens = num_tokens
+    recv_num_tokens = _pad_num_tokens_to_tp_multiple(num_tokens)
     if metadata_list is None:
         metadata_list = []
 
@@ -1399,9 +1399,10 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
 
     for key, value in metadata_list:
         if isinstance(value, TensorMetadata):
-            # Replace placeholder dim-0 with actual num_tokens
-            actual_size = (recv_num_tokens,) + value.size[1:]
-            tensor = torch.empty(actual_size, dtype=value.dtype, device=value.device)
+            # Replace placeholder dim-0 with the TP-padded size so the
+            # intra-node broadcast matches the tensor allocated by PP NPU0.
+            full_size = (recv_num_tokens,) + value.size[1:]
+            tensor = torch.empty(full_size, dtype=value.dtype, device=value.device)
             recv_tensor_dict[key] = tensor
         else:
             recv_tensor_dict[key] = value
