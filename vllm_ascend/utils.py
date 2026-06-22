@@ -487,6 +487,61 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
+# ── PP Timing 动态控制 ──────────────────────────────────────────────────
+# 两个开关均支持运行时动态切换，优先级: 文件 > 环境变量
+#   echo 1 > /tmp/vllm_pp_timing_enable   → 开启打点
+#   echo 0 > /tmp/vllm_pp_timing_enable   → 关闭打点
+#   echo 1 > /tmp/vllm_pp_timing_sync     → 开启 NPU 同步
+#   echo 0 > /tmp/vllm_pp_timing_sync     → 关闭 NPU 同步
+#   rm /tmp/vllm_pp_timing_*              → 回退到环境变量
+_PP_ENABLE_FILE = "/tmp/vllm_pp_timing_enable"
+_PP_SYNC_FILE = "/tmp/vllm_pp_timing_sync"
+_pp_enable_cached: bool | None = None
+_pp_sync_cached: bool | None = None
+_pp_cache_ts: float = 0.0
+
+
+def _pp_read_cache() -> None:
+    """Refresh cached values (called max once per second)."""
+    import time
+
+    global _pp_enable_cached, _pp_sync_cached, _pp_cache_ts
+    now = time.monotonic()
+    if now - _pp_cache_ts < 1.0:
+        return
+    _pp_cache_ts = now
+    for var, filepath, cache_attr in [
+        ("PP_TIMING_ENABLE", _PP_ENABLE_FILE, "_pp_enable_cached"),
+        ("PP_TIMING_SYNC", _PP_SYNC_FILE, "_pp_sync_cached"),
+    ]:
+        if os.path.exists(filepath):
+            with open(filepath) as f:
+                val = f.read().strip() == "1"
+        else:
+            val = os.environ.get(var, "0") == "1"
+        globals()[cache_attr] = val
+
+
+def pp_timing_enabled() -> bool:
+    """Returns True if PP_TIMING_ENABLE is active (runtime file or env)."""
+    _pp_read_cache()
+    return _pp_enable_cached or False
+
+
+def should_pp_timing_sync() -> bool:
+    """Returns True if NPU sync should be performed for timing markers."""
+    _pp_read_cache()
+    return _pp_sync_cached or False
+
+
+def pp_timing_sync() -> None:
+    """Perform NPU synchronize if timing sync is enabled."""
+    if should_pp_timing_sync():
+        import torch
+
+        torch.npu.synchronize()
+
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
