@@ -695,6 +695,22 @@ def edge_cloud_isend_tensor_dict(
         merged = torch.cat(pieces, dim=-1)
         # cat with multiple inputs always allocates a fresh contiguous buffer.
         assert merged.is_contiguous()
+        # Belt-and-suspenders: verify the merged buffer's non-dim-0 shape
+        # matches what the receiver pre-allocated from ec_meta.  The earlier
+        # per-tensor shape assert already guarantees each piece matches its
+        # TensorMetadata, and merged_shape_tail is derived from that same
+        # metadata in init_edge_cloud_tensor_meta, so this should always
+        # hold — but a future change to the derivation logic could silently
+        # desync the wire layout.  Fail loudly here instead of corrupting
+        # data on the receiver.
+        assert ec_meta.merged_shape_tail is not None
+        assert merged.shape[1:] == ec_meta.merged_shape_tail, (
+            "edge_cloud_isend_tensor_dict: merged shape tail "
+            f"{tuple(merged.shape[1:])} != ec_meta.merged_shape_tail "
+            f"{ec_meta.merged_shape_tail}. EdgeCloudTensorMeta is stale or "
+            "was initialized with inconsistent per-tensor shapes; re-init "
+            "it or unset VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD."
+        )
         handle = torch.distributed.isend(
             merged, dst=pp_group.ranks[dst], group=group
         )
