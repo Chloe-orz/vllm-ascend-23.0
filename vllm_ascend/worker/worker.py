@@ -442,17 +442,25 @@ class NPUWorker(WorkerBase):
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass:
             if is_cloud_device():
-                # Pre-compute input preparation while edge runs segment_a.
-                # This overlaps cloud's _update_states, _prepare_inputs,
-                # _determine_batch_execution_and_padding, and
-                # _build_attention_metadata with edge's segment_a forward.
+                _mb = lambda n: f"{n/1e9:.2f}GB"
+                _ma = torch.npu.memory_allocated
+                _mr = torch.npu.memory_reserved
+                _ts = scheduler_output.total_num_scheduled_tokens
+                logger.info("[mem] cloud before prepare: alloc=%s reserved=%s num_tokens=%d",
+                            _mb(_ma()), _mb(_mr()), _ts)
                 self.model_runner.cloud_prepare_early(scheduler_output)
+                logger.info("[mem] cloud after prepare: alloc=%s reserved=%s",
+                            _mb(_ma()), _mb(_mr()))
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+                logger.info("[mem] cloud after recv: alloc=%s reserved=%s",
+                            _mb(_ma()), _mb(_mr()))
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
                     comm_handles=comm_handles,
                     comm_postprocess=comm_postprocess,
                 )
+                logger.info("[mem] cloud after async_tensors: alloc=%s reserved=%s",
+                            _mb(_ma()), _mb(_mr()))
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
                 # it will conflict with the all-gather operation in flashcomm1.
@@ -476,7 +484,17 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
+        if is_cloud_device() or is_edge_device():
+            _mb = lambda n: f"{n/1e9:.2f}GB"
+            _ma = torch.npu.memory_allocated
+            _mr = torch.npu.memory_reserved
+            _role = "cloud" if is_cloud_device() else "edge"
+            logger.info("[mem] %s before execute_model: alloc=%s reserved=%s",
+                        _role, _mb(_ma()), _mb(_mr()))
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if is_cloud_device() or is_edge_device():
+            logger.info("[mem] %s after execute_model: alloc=%s reserved=%s",
+                        _role, _mb(_ma()), _mb(_mr()))
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -485,14 +503,22 @@ class NPUWorker(WorkerBase):
         if is_edge_device():
             if get_pp_group().world_size == 2:
                 self._pp_send_work = get_pp_group().isend_tensor_dict(output.tensors)
+            logger.info("[mem] edge after seg_a: alloc=%s reserved=%s",
+                        _mb(_ma()), _mb(_mr()))
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv()
+            logger.info("[mem] edge after recv: alloc=%s reserved=%s",
+                        _mb(_ma()), _mb(_mr()))
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
-           
+
+            logger.info("[mem] edge before seg_e: alloc=%s reserved=%s",
+                        _mb(_ma()), _mb(_mr()))
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            logger.info("[mem] edge after seg_e: alloc=%s reserved=%s",
+                        _mb(_ma()), _mb(_mr()))
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
