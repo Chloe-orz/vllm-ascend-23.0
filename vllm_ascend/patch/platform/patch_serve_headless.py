@@ -15,10 +15,7 @@
 # limitations under the License.
 #
 
-import os
-
 import vllm
-from vllm import envs
 from vllm.entrypoints.cli import serve
 from vllm.usage.usage_lib import UsageContext
 
@@ -58,16 +55,6 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     parallel_config = vllm_config.parallel_config
     host = parallel_config.master_addr
     head_node_address = f"{host}:{parallel_config.master_port}"
-
-    if os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR") is None:
-        pp_zmq_port = int(os.getenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "5558"))
-        os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"] = f"tcp://{host}:{pp_zmq_port}"
-        if hasattr(envs, "disable_envs_cache"):
-            envs.disable_envs_cache()
-        serve.logger.info(
-            "PP scheduler ZMQ subscriber address: %s",
-            os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"],
-        )
 
     serve.logger.info(
         "Launching vLLM (v%s) headless passive EngineCore, "
