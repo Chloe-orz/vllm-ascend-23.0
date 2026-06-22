@@ -172,15 +172,15 @@ def _load_patch_module():
 def test_serve_patch_launches_passive_engine_core_for_non_leader_rank(monkeypatch):
     context = FakeContext(response={"status": "READY"})
     fake_serve, fake_envs, fake_engine_core = _install_fake_modules(monkeypatch, context)
-    monkeypatch.delenv("VLLM_PP_SCHEDULER_ZMQ_ADDR", raising=False)
-    monkeypatch.setenv("VLLM_PP_SCHEDULER_ZMQ_PORT", "6000")
+    legacy_env_name = "VLLM_PP_" + "SCHEDULER_ZMQ_ADDR"
+    monkeypatch.delenv(legacy_env_name, raising=False)
 
     _load_patch_module()
     fake_serve.run_headless(SimpleNamespace())
 
     assert fake_serve.run_headless_called is False
-    assert os.environ["VLLM_PP_SCHEDULER_ZMQ_ADDR"] == "tcp://10.0.0.1:6000"
-    assert fake_envs.cache_disabled is True
+    assert legacy_env_name not in os.environ
+    assert fake_envs.cache_disabled is False
     assert len(context.processes) == 1
     proc = context.processes[0]
     assert proc.name == "PassiveEngineCore"

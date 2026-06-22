@@ -24,7 +24,6 @@ from environment variables with sensible defaults.
 
 import os
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -50,10 +49,6 @@ class PDSeparationConfig:
     # Default: "expect_alternation" - implements EEP/EED PD-covering state machine
     dispatch_policy: str = "expect_alternation"
 
-    # Legacy single-channel ZMQ address for Phase 1 PD-separation.
-    # Deprecated in Phase 2-3 in favor of dual-port (PRE_OUT/POST_OUT) topology.
-    scheduler_zmq_addr: Optional[str] = None
-
     @classmethod
     def from_env(cls) -> "PDSeparationConfig":
         """
@@ -63,7 +58,6 @@ class PDSeparationConfig:
             VLLM_PP_PRE_OUT_ZMQ_PORT: PRE_OUT channel port (default: 5558)
             VLLM_PP_POST_OUT_ZMQ_PORT: POST_OUT channel port (default: 5559)
             VLLM_PP_PASSIVE_DISPATCH_POLICY: PassiveScheduler dispatch policy
-            VLLM_PP_SCHEDULER_ZMQ_ADDR: Legacy single-channel ZMQ address
 
         Returns:
             PDSeparationConfig: Loaded configuration
@@ -76,7 +70,6 @@ class PDSeparationConfig:
             dispatch_policy=os.getenv(
                 "VLLM_PP_PASSIVE_DISPATCH_POLICY", cls.dispatch_policy
             ),
-            scheduler_zmq_addr=os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR"),
         )
 
     def get_pre_out_bind_addr(self) -> str:
