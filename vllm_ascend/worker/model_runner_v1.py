@@ -5403,12 +5403,23 @@ class NPUModelRunner(GPUModelRunner):
                     positions = torch.arange(num_tokens, dtype=torch.long, device=device)
                     input_ids = torch.randint(0, vocab_size, (num_tokens,),
                                               dtype=torch.long, device=device)
-                    dummy_tensors = IntermediateTensors({
-                        "hidden_states": torch.randn(num_tokens, hidden_size,
-                                                    dtype=self.dtype, device=device),
-                        "residual": torch.randn(num_tokens, hidden_size,
-                                               dtype=self.dtype, device=device),
-                    })
+                    # IntermediateTensors shape varies by model. Try to match
+                    # the real shape produced by make_empty_intermediate_tensors
+                    # via the model's own factory (handles DeepseekV4's 3D
+                    # (batch, hc_mult, hidden_size) layout).
+                    if hasattr(self.model, "make_empty_intermediate_tensors"):
+                        dummy_tensors = self.model.make_empty_intermediate_tensors(
+                            batch_size=num_tokens,
+                            dtype=self.dtype,
+                            device=device,
+                        )
+                    else:
+                        dummy_tensors = IntermediateTensors({
+                            "hidden_states": torch.randn(num_tokens, hidden_size,
+                                                        dtype=self.dtype, device=device),
+                            "residual": torch.randn(num_tokens, hidden_size,
+                                                   dtype=self.dtype, device=device),
+                        })
                     ctx = dict(attn_metadata=None, vllm_config=self.vllm_config,
                                num_tokens=num_tokens,
                                aclgraph_runtime_mode=CUDAGraphMode.FULL,
