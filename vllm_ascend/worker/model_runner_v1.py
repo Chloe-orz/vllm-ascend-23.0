@@ -5392,21 +5392,47 @@ class NPUModelRunner(GPUModelRunner):
         from vllm.forward_context import BatchDescriptor
         from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
+        # Collect the actual BatchDescriptors used during decode replay
+        # from the cudagraph dispatcher.  Using these descriptors (not
+        # bare BatchDescriptor(num_tokens=X)) ensures the dict keys in
+        # concrete_aclgraph_entries match runtime lookups.
+        capture_descs = []
+        if hasattr(self, 'cudagraph_dispatcher'):
+            for _, descs in self.cudagraph_dispatcher.get_capture_descs():
+                capture_descs.extend(descs)
+        if not capture_descs:
+            # Fallback: synthesize from cudagraph_batch_sizes
+            capture_descs = [BatchDescriptor(num_tokens=n)
+                             for n in self.cudagraph_batch_sizes]
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_descs = []
+        for d in capture_descs:
+            if d not in seen:
+                seen.add(d)
+                unique_descs.append(d)
+
+        from tqdm import tqdm
+        role = self.edge_cloud_cfg.role
+        seg_names = ['seg_a', 'seg_e'] if role == 'edge' else ['seg_c']
+        total = len(unique_descs) * len(seg_names)
+        progress = tqdm(total=total,
+                        desc=f"Capturing edge-cloud {role} graphs",
+                        unit="graph")
+
         set_cudagraph_capturing_enabled(True)
+        captured_count = 0
         try:
             with torch.inference_mode():
                 device = self.device
                 hidden_size = self.model_config.get_hidden_size()
                 vocab_size = self.model_config.get_vocab_size()
-                for num_tokens in self.cudagraph_batch_sizes:
-                    batch_desc = BatchDescriptor(num_tokens=num_tokens)
+                for batch_desc in unique_descs:
+                    num_tokens = batch_desc.num_tokens
                     positions = torch.arange(num_tokens, dtype=torch.long, device=device)
                     input_ids = torch.randint(0, vocab_size, (num_tokens,),
                                               dtype=torch.long, device=device)
-                    # IntermediateTensors shape varies by model. Try to match
-                    # the real shape produced by make_empty_intermediate_tensors
-                    # via the model's own factory (handles DeepseekV4's 3D
-                    # (batch, hc_mult, hidden_size) layout).
                     if hasattr(self.model, "make_empty_intermediate_tensors"):
                         dummy_tensors = self.model.make_empty_intermediate_tensors(
                             batch_size=num_tokens,
@@ -5433,13 +5459,20 @@ class NPUModelRunner(GPUModelRunner):
                                         wrapper(input_ids=input_ids, positions=positions)
                                     else:
                                         wrapper(positions=positions, intermediate_tensors=dummy_tensors)
+                                captured_count += 1
+                                progress.update(1)
                     elif self.edge_cloud_cfg.role == "cloud":
                         wrapper = self.segment_c_wrapper
                         if isinstance(wrapper, ACLGraphWrapper):
                             with set_ascend_forward_context(**ctx):
                                 wrapper(positions=positions, intermediate_tensors=dummy_tensors)
+                            captured_count += 1
+                            progress.update(1)
         finally:
+            progress.close()
             set_cudagraph_capturing_enabled(False)
+            logger.info("Edge-cloud %s: captured %d graphs across %d batch descriptors",
+                        role, captured_count, len(unique_descs))
 
     def _prepare_multimodal_fields(self):
         """
