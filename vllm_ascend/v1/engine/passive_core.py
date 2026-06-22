@@ -480,9 +480,17 @@ class PassiveEngineCoreProc:
         from dataclasses import replace
         bt = scheduler_output.batch_type
         if bt == BatchType.PREFILL_FIRST:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.PREFILL_LAST
+            # === Prefill-last self-posting optimization ===
+            # Edge always pre-generates PREFILL_LAST locally and
+            # stores it in prefills_last_ready.  Cloud never
+            # sends PREFILL_LAST back via POST_OUT.
+            logger.debug(
+                "[Cloud] Skipping POST_OUT for PREFILL_FIRST "
+                "head_token=%s (edge pre-generates PREFILL_LAST)",
+                scheduler_output.head_token,
             )
+            return
+            # ================================================
         elif bt == BatchType.DECODE_FIRST:
             # === Decode-first self-posting optimization ===
             # Edge always pre-generates DECODE_LAST locally and stores it
