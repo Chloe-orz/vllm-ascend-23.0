@@ -77,6 +77,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm_ascend.v1.engine.passive_core import PPSchedulerZmqChannel
 
 logger = init_logger(__name__)
+print("### PDDBG patch_engine_core loaded", __file__, flush=True)
 
 
 # Idempotency guard: re-importing this module (e.g. from a child process)
@@ -97,7 +98,10 @@ _ORIG_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
 # =======================================================================#
 @functools.wraps(_ORIG_ENGINE_CORE_INIT)
 def _patched_engine_core_init(self, *args, **kwargs):
+    print("### PDDBG enter _patched_engine_core_init", __file__, flush=True)
+    print("### PDDBG before _ORIG_ENGINE_CORE_INIT", flush=True)
     _ORIG_ENGINE_CORE_INIT(self, *args, **kwargs)
+    print("### PDDBG after _ORIG_ENGINE_CORE_INIT", flush=True)
 
     parallel_config: ParallelConfig = self.vllm_config.parallel_config
 
@@ -116,6 +120,15 @@ def _patched_engine_core_init(self, *args, **kwargs):
         and edge_cloud.pd_separation.enabled
     )
 
+    print(
+        "### PDDBG edge flags",
+        "enable_edge_cloud=", getattr(parallel_config, "enable_edge_cloud", None),
+        "is_edge_node=", getattr(parallel_config, "is_edge_node", None),
+        "pd_enabled=", pd_enabled,
+        "master_addr=", getattr(parallel_config, "master_addr", None),
+        "master_port=", getattr(parallel_config, "master_port", None),
+        flush=True,
+    )
     if getattr(parallel_config, "enable_edge_cloud", False):
         logger.info(
             "Edge-cloud mode enabled (pd_separation=%s)",
@@ -135,6 +148,12 @@ def _patched_engine_core_init(self, *args, **kwargs):
         # passive_core.py for the symmetric writer side.
         import torch.distributed as dist
         from datetime import timedelta
+        print(
+            "### PDDBG before edge TCPStore master",
+            parallel_config.master_addr,
+            parallel_config.master_port + 1,
+            flush=True,
+        )
         _addr_store = dist.TCPStore(
             host_name=parallel_config.master_addr,
             port=parallel_config.master_port + 1,
@@ -142,7 +161,9 @@ def _patched_engine_core_init(self, *args, **kwargs):
             is_master=True,
             timeout=timedelta(seconds=300),
         )
+        print("### PDDBG after edge TCPStore master, waiting cloud_ip", flush=True)
         cloud_addr = _addr_store.get("cloud_ip").decode()
+        print("### PDDBG got cloud_ip", cloud_addr, flush=True)
         del _addr_store
 
         pre_out = pd_config.get_pre_out_bind_addr()
@@ -413,6 +434,13 @@ def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
     """Delegate to upstream while keeping this patch module as the process
     target so spawn-based child processes import and install the patches.
     """
+    print(
+        "### PDDBG enter _patched_run_engine_core",
+        "dp_rank=", dp_rank,
+        "local_dp_rank=", local_dp_rank,
+        "has_vllm_config=", "vllm_config" in kwargs,
+        flush=True,
+    )
     return _ORIG_RUN_ENGINE_CORE(
         *args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs
     )
@@ -481,9 +509,12 @@ def _patched_process_input_queue(self):
 # Install                                                                  #
 # =======================================================================#
 def install() -> None:
+    print("### PDDBG enter patch_engine_core.install", flush=True)
     if getattr(EngineCore, _INSTALLED_FLAG, False):
+        print("### PDDBG patch_engine_core.install skipped already installed", flush=True)
         return
 
+    print("### PDDBG installing EngineCore patches", flush=True)
     EngineCore.__init__ = _patched_engine_core_init
     EngineCore._drain_pd_channel_inbox = _drain_pd_channel_inbox
     EngineCore._maybe_publish_pre_out = _maybe_publish_pre_out
@@ -496,6 +527,7 @@ def install() -> None:
     EngineCoreProc._process_input_queue = _patched_process_input_queue
 
     setattr(EngineCore, _INSTALLED_FLAG, True)
+    print("### PDDBG installed EngineCore patches", flush=True)
     logger.info(
         "vllm-ascend EngineCore PD/edge-cloud patch installed."
     )
