@@ -268,6 +268,8 @@ def init_edge_cloud_tensor_meta(
         hidden_dtype,
         hidden_size,
         hc_mult,
+        merge_payload,
+        split_sizes,
     )
 
 
@@ -1307,6 +1309,34 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
         ###metadata_list = ec_meta.metadata_list
         ###tp_group.broadcast_object([num_tokens, metadata_list], src=0)
 
+        if ec_meta.merge_payload:
+            # Pop the private merged-buffer handle that
+            # edge_cloud_irecv_tensor_dict stashed for us; broadcast that
+            # single contiguous buffer across the TP group (1 op instead of
+            # one per key), then re-split into the public dict.
+            merged_buf = tensor_dict.pop("__merged_payload__")
+
+            def broadcast_postprocess(
+                merged_buf=merged_buf,
+                tensor_dict=tensor_dict,
+            ):
+                tp_dev_group = tp_group.device_group
+                handle = torch.distributed.broadcast(
+                    merged_buf,
+                    src=tp_group.ranks[0],
+                    group=tp_dev_group,
+                    async_op=True,
+                )
+                handle.wait()
+                # Re-split into the user-visible dict.  We update in place
+                # because callers may have captured the dict reference.
+                tensor_dict.update(
+                    _split_merged_buffer_into_dict(merged_buf, ec_meta)
+                )
+
+            comm_postprocess.append(broadcast_postprocess)
+            return tensor_dict, comm_handles, comm_postprocess
+
         def broadcast_postprocess():
             _, tensor_list = _split_tensor_dict(tensor_dict) if tensor_dict else (None, [])
             handles = []
@@ -1330,6 +1360,36 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
     ###broadcast_data = tp_group.broadcast_object(None, src=0)
     #recv_num_tokens = broadcast_data[0]
     #metadata_list = broadcast_data[1]
+
+    if ec_meta.merge_payload:
+        # Non-PP-rank-0 path on the merged fast path: allocate a single
+        # merged buffer with the same shape as PP rank 0's, broadcast-recv
+        # into it, then split.  Avoids one broadcast per key.
+        merged_buf = _allocate_merged_recv_buffer(ec_meta, num_tokens)
+        recv_tensor_dict: dict[str, torch.Tensor | Any] = {
+            key: value
+            for key, value in ec_meta.metadata_list
+            if not isinstance(value, TensorMetadata)
+        }
+
+        def broadcast_postprocess(
+            merged_buf=merged_buf,
+            recv_tensor_dict=recv_tensor_dict,
+        ):
+            tp_dev_group = tp_group.device_group
+            handle = torch.distributed.broadcast(
+                merged_buf,
+                src=tp_group.ranks[0],
+                group=tp_dev_group,
+                async_op=True,
+            )
+            handle.wait()
+            recv_tensor_dict.update(
+                _split_merged_buffer_into_dict(merged_buf, ec_meta)
+            )
+
+        return recv_tensor_dict, [], [broadcast_postprocess]
+
     metadata_list = ec_meta.metadata_list
     recv_num_tokens = num_tokens
     if metadata_list is None:
