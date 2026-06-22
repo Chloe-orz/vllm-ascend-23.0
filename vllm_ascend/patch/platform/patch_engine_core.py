@@ -428,7 +428,6 @@ def _patched_engine_core_shutdown(self):
 # =======================================================================#
 # EngineCoreProc.run_engine_core — keep child-process patch import.       #
 # =======================================================================#
-@functools.wraps(_ORIG_RUN_ENGINE_CORE)
 def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
                              **kwargs):
     """Delegate to upstream while keeping this patch module as the process
@@ -444,6 +443,10 @@ def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
     return _ORIG_RUN_ENGINE_CORE(
         *args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs
     )
+
+
+_patched_run_engine_core.__module__ = __name__
+_patched_run_engine_core.__qualname__ = "_patched_run_engine_core"
 
 
 # =======================================================================#
