@@ -89,6 +89,7 @@ _INSTALLED_FLAG = "_vllm_ascend_engine_core_patched"
 # -----------------------------------------------------------------------#
 _ORIG_ENGINE_CORE_INIT = EngineCore.__init__
 _ORIG_ENGINE_CORE_SHUTDOWN = EngineCore.shutdown
+_ORIG_RUN_ENGINE_CORE = EngineCoreProc.run_engine_core
 
 
 # =======================================================================#
@@ -404,6 +405,20 @@ def _patched_engine_core_shutdown(self):
 
 
 # =======================================================================#
+# EngineCoreProc.run_engine_core — keep child-process patch import.       #
+# =======================================================================#
+@functools.wraps(_ORIG_RUN_ENGINE_CORE)
+def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
+                             **kwargs):
+    """Delegate to upstream while keeping this patch module as the process
+    target so spawn-based child processes import and install the patches.
+    """
+    return _ORIG_RUN_ENGINE_CORE(
+        *args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs
+    )
+
+
+# =======================================================================#
 # EngineCoreProc._process_input_queue — full replacement to add the       #
 # edge-cloud idle-block branch.                                            #
 # =======================================================================#
@@ -477,6 +492,7 @@ def install() -> None:
     EngineCore.step_with_batch_queue = _patched_step_with_batch_queue
     EngineCore.shutdown = _patched_engine_core_shutdown
 
+    EngineCoreProc.run_engine_core = staticmethod(_patched_run_engine_core)
     EngineCoreProc._process_input_queue = _patched_process_input_queue
 
     setattr(EngineCore, _INSTALLED_FLAG, True)
