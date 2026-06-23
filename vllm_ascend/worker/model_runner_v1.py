@@ -2769,11 +2769,15 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         # ---- segment_e fast path: reuse segment_a's cached prepare results ----
+        # NOTE: if an intervening EMPTY batch cleared input_batch, we must
+        # fall through to the normal path so _update_states can re-add the
+        # requests before sampling.
         _fast_path = (
             self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "edge"
             and intermediate_tensors is not None
             and self._edge_prepare_cache is not None
+            and self.input_batch.num_reqs > 0
         )
         # ---- cloud fast path: reuse pre-computed prepare results ----
         _cloud_fast_path = (
@@ -2886,8 +2890,30 @@ class NPUModelRunner(GPUModelRunner):
                             ):
                                 req_state.prev_num_draft_len = 0
 
-                    # Update persistent batch states.
-                    deferred_state_corrections_fn = self._update_states(scheduler_output)
+                    # Edge-cloud tail segments (PL/DL) reuse the batch state
+                    # established by their head segment (PF/DF).  Skipping
+                    # _update_states prevents interleaving bugs when multiple
+                    # prefills are in flight (2P1D) and avoids double-counting.
+                    is_edge_tail_segment = (
+                        self._edge_cloud_enabled
+                        and is_edge_device()
+                        and scheduler_output.batch_type in (
+                            BatchType.PREFILL_LAST,
+                            BatchType.DECODE_LAST,
+                        )
+                    )
+                    scheduled_req_ids = tuple(scheduler_output.num_scheduled_tokens)
+                    skip_update_states = (
+                        is_edge_tail_segment
+                        and self.input_batch.num_reqs > 0
+                        and tuple(self.input_batch.req_ids) == scheduled_req_ids
+                    )
+                    if skip_update_states:
+                        deferred_state_corrections_fn = None
+                    else:
+                        deferred_state_corrections_fn = self._update_states(
+                            scheduler_output
+                        )
 
                     num_reqs = self.input_batch.num_reqs
                     if num_reqs == 0:
