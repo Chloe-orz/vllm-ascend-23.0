@@ -2778,6 +2778,8 @@ class NPUModelRunner(GPUModelRunner):
             and intermediate_tensors is not None
             and self._edge_prepare_cache is not None
             and self.input_batch.num_reqs > 0
+            and tuple(self.input_batch.req_ids)
+            == tuple(scheduler_output.num_scheduled_tokens)
         )
         # ---- cloud fast path: reuse pre-computed prepare results ----
         _cloud_fast_path = (
