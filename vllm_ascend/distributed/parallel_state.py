@@ -767,14 +767,22 @@ def _allocate_merged_recv_buffer(
 ) -> torch.Tensor:
     """Allocate the merged P2P recv buffer that matches the sender's cat layout.
 
-    The buffer's leading dim is num_tokens; the remaining dims come from
-    ec_meta.merged_shape_tail (which already encodes hc_mult for 3D models
-    and the total last-dim concatenation for either 2D or 3D).
+    The buffer's remaining dims come from ec_meta.merged_shape_tail (which
+    already encodes hc_mult for 3D models and the total last-dim concatenation
+    for either 2D or 3D).
+
+    The leading dim is padded up to the local TP size when SP is enabled, so
+    the per-key views handed to downstream SP ops satisfy the divisibility
+    requirement — mirroring the non-merge path's ``recv_num_tokens``.  The
+    sender still transmits only the actual ``num_tokens`` rows; the receiver
+    irecvs into the leading ``num_tokens`` rows of this larger buffer (see
+    edge_cloud_irecv_tensor_dict), leaving the padding tail unfilled.
     """
     assert ec_meta.merge_payload
     assert ec_meta.merged_dtype is not None
     assert ec_meta.merged_shape_tail is not None
-    full_shape = (num_tokens,) + ec_meta.merged_shape_tail
+    recv_num_tokens = _pad_num_tokens_to_tp_multiple(num_tokens)
+    full_shape = (recv_num_tokens,) + ec_meta.merged_shape_tail
     return torch.empty(full_shape, dtype=ec_meta.merged_dtype, device="npu")
 
 
@@ -870,8 +878,13 @@ def edge_cloud_irecv_tensor_dict(
         # comm_postprocess list so it runs *after* the irecv handle is
         # waited on by AsyncIntermediateTensors.wait_for_comm().
         merged = _allocate_merged_recv_buffer(ec_meta, num_tokens)
+        # When SP is on, `merged` is padded up to a TP multiple; the sender
+        # only transmits the actual num_tokens rows, so irecv into a view of
+        # the leading num_tokens rows (mirrors the non-merge SP path).  When
+        # SP is off this view is the whole buffer, a no-op.
+        recv_view = merged[:num_tokens]
         handle = torch.distributed.irecv(
-            merged, src=pp_group.ranks[src], group=group
+            recv_view, src=pp_group.ranks[src], group=group
         )
 
         # Pre-populate the dict with empty placeholders so callers can see
