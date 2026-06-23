@@ -359,9 +359,9 @@ class PassiveEngineCoreProc:
       `step()` until the executor reports failure.
 
     Unlike rank0, there is no local scheduling decision — every batch
-    comes pre-decided over ZMQ from the leader rank. The static
+    comes pre-decided over the cloud-side scheduler input. The static
     :py:meth:`run_passive_engine_core` is the process entry point that
-    constructs the executor + subscriber, builds an instance, and hands
+    constructs the executor + input channel, builds an instance, and hands
     off to `run_busy_loop`.
     """
 
@@ -369,7 +369,7 @@ class PassiveEngineCoreProc:
         self,
         vllm_config: "VllmConfig",
         executor,  # MultiprocExecutor — duck-typed to avoid heavy import
-        pp_subscriber: "PPSchedulerZmqSubscriber",
+        scheduler_input,
         dispatch_policy=None,
         pp_pd_channel: Optional["PPSchedulerZmqChannel"] = None,
     ) -> None:
@@ -380,8 +380,10 @@ class PassiveEngineCoreProc:
             )
         self.vllm_config = vllm_config
         self.executor = executor
+        # scheduler_input is any object exposing consume_new_outputs(); in
+        # PD-separation mode this is the cloud-side PPSchedulerZmqChannel.
         self.passive_scheduler = passive_scheduler_module.PassiveScheduler(
-            vllm_config, pp_subscriber, dispatch_policy=dispatch_policy
+            vllm_config, scheduler_input, dispatch_policy=dispatch_policy
         )
         # Optional POST_OUT (cloud → edge) channel. Only set on the cloud
         # side in PD-separation mode; left None for the legacy PP path.
@@ -517,9 +519,10 @@ class PassiveEngineCoreProc:
     ):
         """Entry point for the passive EngineCore process.
 
-        Creates a MultiprocExecutor to spawn workers, optionally wires up
-        a ZMQ subscriber to receive SchedulerOutputs from the leader PP
-        rank, then hands off to `PassiveEngineCoreProc.run_busy_loop`.
+        Creates a MultiprocExecutor to spawn workers, wires up the
+        cloud-side PD-separation channel as the scheduler input when PD
+        separation is enabled, then hands off to
+        `PassiveEngineCoreProc.run_busy_loop`.
         """
         # Imported lazily so the patched-by-vllm-ascend
         # ``MultiprocExecutor`` (= ``AscendMultiprocExecutor``) is the one
@@ -539,13 +542,6 @@ class PassiveEngineCoreProc:
             "vllm.engine_core", "engine_core", "PassiveEngineCore"
         )
         decorate_logs()
-
-        pp_subscriber: Optional[PPSchedulerZmqSubscriber] = None
-        scheduler_zmq_addr = os.getenv("VLLM_PP_SCHEDULER_ZMQ_ADDR")
-        if scheduler_zmq_addr is not None:
-            pp_subscriber = PPSchedulerZmqSubscriber(
-                scheduler_zmq_addr
-            )
 
         # Cloud-side PD-separation channel is constructed inside the try
         # block below (depends on `vllm_config`); declared here so the
@@ -571,85 +567,87 @@ class PassiveEngineCoreProc:
             ready_pipe.close()
             ready_pipe = None
 
-            if pp_subscriber is not None:
-                executor.start_worker_monitor(inline=False)
-
-                passive_scheduler_module = _import_passive_scheduler_module()
-                dispatch_policy_cls = passive_scheduler_module.DispatchPolicy
-                # Load PD-separation configuration from environment variables
-                from vllm_ascend.pd_separation_config import PDSeparationConfig
-                pd_config = PDSeparationConfig.from_env()
-                try:
-                    policy = dispatch_policy_cls(pd_config.dispatch_policy)
-                except ValueError:
-                    logger.warning(
-                        "Unknown VLLM_PP_PASSIVE_DISPATCH_POLICY=%r; "
-                        "falling back to expect_alternation.",
-                        pd_config.dispatch_policy,
-                    )
-                    policy = dispatch_policy_cls.EXPECT_ALTERNATION
-
-                # Set up edge-cloud PD-separation channel (cloud side).
-                # The cloud binds POST_OUT and connects PRE_OUT via
-                # master_addr (the edge's IP) so PRE_OUT connects back.
-                #
-                # PassiveEngineCore runs in a freshly-spawned subprocess where
-                # the ``_ASCEND_CONFIG`` singleton is empty; re-init from the
-                # ``vllm_config`` we were handed. ``init_ascend_config`` is
-                # idempotent on the singleton.
-                from vllm_ascend.ascend_config import init_ascend_config
-                _ascend_config = init_ascend_config(vllm_config)
-                _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
-                _pd_enabled = bool(
-                    _edge_cloud is not None
-                    and getattr(_edge_cloud, "enabled", False)
-                    and getattr(_edge_cloud, "pd_separation", None) is not None
-                    and _edge_cloud.pd_separation.enabled
+            passive_scheduler_module = _import_passive_scheduler_module()
+            dispatch_policy_cls = passive_scheduler_module.DispatchPolicy
+            # Load PD-separation configuration from environment variables.
+            from vllm_ascend.pd_separation_config import PDSeparationConfig
+            pd_config = PDSeparationConfig.from_env()
+            try:
+                policy = dispatch_policy_cls(pd_config.dispatch_policy)
+            except ValueError:
+                logger.warning(
+                    "Unknown VLLM_PP_PASSIVE_DISPATCH_POLICY=%r; "
+                    "falling back to expect_alternation.",
+                    pd_config.dispatch_policy,
                 )
-                if _pd_enabled:
-                    master_addr = vllm_config.parallel_config.master_addr
-                    master_port = vllm_config.parallel_config.master_port
+                policy = dispatch_policy_cls.EXPECT_ALTERNATION
 
-                    # Report this node's reachable IP to the edge so the
-                    # edge can construct POST_OUT's connect endpoint
-                    # without a CLI flag. Uses a one-shot TCPStore (edge
-                    # = master, cloud = client) on ``master_port + 1``
-                    # to avoid colliding with the NCCL rendezvous store
-                    # on ``master_port``.
-                    import torch.distributed as dist
-                    from datetime import timedelta
-                    from vllm.utils.network_utils import get_ip
-                    _addr_store = dist.TCPStore(
-                        host_name=master_addr,
-                        port=master_port + 1,
-                        world_size=2,
-                        is_master=False,
-                        timeout=timedelta(seconds=300),
-                    )
-                    _addr_store.set("cloud_ip", get_ip())
-                    del _addr_store
+            scheduler_input = None
 
-                    post_out_bind = pd_config.get_post_out_bind_addr()
-                    pre_out_connect = pd_config.get_pre_out_connect_addr(master_addr)
-                    pp_pd_channel = PPSchedulerZmqChannel(
-                        send_endpoint=post_out_bind,
-                        recv_endpoint=pre_out_connect,
-                        name="pd-cloud",
-                    )
-                    logger.info(
-                        "PD-separation cloud channel: POST_OUT=%s, "
-                        "PRE_OUT=%s",
-                        post_out_bind, pre_out_connect,
-                    )
+            # Set up edge-cloud PD-separation channel (cloud side). The
+            # cloud binds POST_OUT and connects PRE_OUT via master_addr
+            # (the edge's IP) so PRE_OUT connects back.
+            #
+            # PassiveEngineCore runs in a freshly-spawned subprocess where
+            # the ``_ASCEND_CONFIG`` singleton is empty; re-init from the
+            # ``vllm_config`` we were handed. ``init_ascend_config`` is
+            # idempotent on the singleton.
+            from vllm_ascend.ascend_config import init_ascend_config
+            _ascend_config = init_ascend_config(vllm_config)
+            _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
+            _pd_enabled = bool(
+                _edge_cloud is not None
+                and getattr(_edge_cloud, "enabled", False)
+                and getattr(_edge_cloud, "pd_separation", None) is not None
+                and _edge_cloud.pd_separation.enabled
+            )
+            if _pd_enabled:
+                master_addr = vllm_config.parallel_config.master_addr
+                master_port = vllm_config.parallel_config.master_port
 
+                # Report this node's reachable IP to the edge so the
+                # edge can construct POST_OUT's connect endpoint
+                # without a CLI flag. Uses a one-shot TCPStore (edge
+                # = master, cloud = client) on ``master_port + 1``
+                # to avoid colliding with the NCCL rendezvous store
+                # on ``master_port``.
+                import torch.distributed as dist
+                from datetime import timedelta
+                from vllm.utils.network_utils import get_ip
+                _addr_store = dist.TCPStore(
+                    host_name=master_addr,
+                    port=master_port + 1,
+                    world_size=2,
+                    is_master=False,
+                    timeout=timedelta(seconds=300),
+                )
+                _addr_store.set("cloud_ip", get_ip())
+                del _addr_store
+
+                post_out_bind = pd_config.get_post_out_bind_addr()
+                pre_out_connect = pd_config.get_pre_out_connect_addr(master_addr)
+                pp_pd_channel = PPSchedulerZmqChannel(
+                    send_endpoint=post_out_bind,
+                    recv_endpoint=pre_out_connect,
+                    name="pd-cloud",
+                )
+                scheduler_input = pp_pd_channel
+                logger.info(
+                    "PD-separation cloud channel: POST_OUT=%s, "
+                    "PRE_OUT=%s",
+                    post_out_bind, pre_out_connect,
+                )
+
+            if scheduler_input is not None:
+                executor.start_worker_monitor(inline=False)
                 proc = PassiveEngineCoreProc(
-                    vllm_config, executor, pp_subscriber,
+                    vllm_config, executor, scheduler_input,
                     dispatch_policy=policy,
                     pp_pd_channel=pp_pd_channel,
                 )
                 proc.run_busy_loop()
             else:
-                # No ZMQ subscriber, just monitor workers inline.
+                # No scheduler input, just monitor workers inline.
                 executor.start_worker_monitor(inline=True)
 
         except SystemExit:
@@ -664,8 +662,6 @@ class PassiveEngineCoreProc:
                 except Exception:
                     pass
                 ready_pipe.close()
-            if pp_subscriber is not None:
-                pp_subscriber.shutdown()
             if pp_pd_channel is not None:
                 pp_pd_channel.shutdown()
             if executor is not None:
