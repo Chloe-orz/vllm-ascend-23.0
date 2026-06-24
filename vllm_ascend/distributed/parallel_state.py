@@ -704,8 +704,8 @@ def edge_cloud_send_tensor_dict(
 
 
 def edge_cloud_broadcast_recv(
-    channel: HiddenChannelType = HiddenChannelType.PREFILL_1,
     num_tokens: int,
+    channel: HiddenChannelType = HiddenChannelType.PREFILL_1,
 ) -> tuple[
     dict[str, torch.Tensor | Any] | None,
     list[Handle],
