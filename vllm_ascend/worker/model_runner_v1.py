@@ -3258,21 +3258,6 @@ class NPUModelRunner(GPUModelRunner):
             num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
         )
         
-        # Layerwise chunked execution requires eager mode because
-        # each chunk is a separate execute_model call with a
-        # different layer range, which is incompatible with a
-        # captured full CUDAGraph.
-        if (
-            not get_pp_group().is_first_rank
-            and getattr(self, "_layer_slice_enabled", False)
-            and cudagraph_mode == CUDAGraphMode.FULL
-        ):
-            cudagraph_mode = CUDAGraphMode.NONE
-            batch_desc = BatchDescriptor(
-                num_tokens=batch_desc.num_tokens,
-                num_reqs=batch_desc.num_reqs,
-            )
-
         num_tokens_padded = batch_desc.num_tokens
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
