@@ -501,11 +501,42 @@ def destroy_ascend_model_parallel():
     _DYNAMIC_EPLB = None
 
 
+def _get_edge_cloud_hidden_channel_device_group(
+    pp_group: GroupCoordinator,
+    channel: HiddenChannelType | None = None,
+    use_alt_group: bool = False,
+):
+    if channel is not None:
+        if hasattr(pp_group, "_hidden_channel_groups"):
+            device_group, _ = pp_group._hidden_channel_groups(channel)
+            return device_group
+        if channel == HiddenChannelType.PREFILL_1:
+            return pp_group.device_group
+        if channel == HiddenChannelType.DECODE:
+            assert pp_group.alt_device_group is not None, (
+                "Alternate groups not created. "
+                "Call create_alternate_groups() first."
+            )
+            return pp_group.alt_device_group
+        raise RuntimeError(
+            "PREFILL_2 hidden channel requires create_hidden_channel_groups()"
+        )
+
+    if use_alt_group:
+        assert pp_group.alt_device_group is not None, (
+            "Alternate groups not created. "
+            "Call create_alternate_groups() first."
+        )
+        return pp_group.alt_device_group
+    return pp_group.device_group
+
+
 def edge_cloud_isend_tensor_dict(
     tensor_dict: dict[str, torch.Tensor | Any],
     dst: int | None = None,
     num_tokens: int | None = None,
     use_alt_group: bool = False,
+    channel: HiddenChannelType | None = None,
 ) -> list[Handle]:
     """Send tensor dict without metadata sync (edge-cloud optimized).
 
@@ -539,15 +570,9 @@ def edge_cloud_isend_tensor_dict(
     if dst is None:
         dst = (pp_group.rank_in_group + 1) % pp_group.world_size
 
-    group = pp_group.device_group
-    if use_alt_group:
-        assert pp_group.alt_device_group is not None, (
-            "Alternate groups not created. "
-            "Call create_alternate_groups() first."
-        )
-        group = pp_group.alt_device_group
-    else:
-        group = pp_group.device_group
+    group = _get_edge_cloud_hidden_channel_device_group(
+        pp_group, channel=channel, use_alt_group=use_alt_group
+    )
 
     # Guard against silent key/order drift between sender and receiver.
     # The receiver iterates ec_meta.metadata_list in a fixed order; if the
@@ -613,6 +638,8 @@ def edge_cloud_isend_tensor_dict(
         )
         if value.is_cuda:
             value.record_stream(torch.cuda.current_stream(value.device))
+        elif value.device.type == "npu":
+            value.record_stream(torch.npu.current_stream(value.device))
         handles.append(handle)
 
     return handles
@@ -622,6 +649,7 @@ def edge_cloud_irecv_tensor_dict(
     num_tokens: int,
     src: int | None = None,
     use_alt_group: bool = False,
+    channel: HiddenChannelType | None = None,
 ) -> tuple[dict[str, torch.Tensor | Any], list[Handle], list[Callable[[], None]]]:
     """Receive tensor dict without metadata sync (edge-cloud optimized).
 
@@ -643,16 +671,9 @@ def edge_cloud_irecv_tensor_dict(
         src = (pp_group.rank_in_group - 1) % pp_group.world_size
 
     ec_meta = get_edge_cloud_tensor_meta()
-    group = pp_group.device_group
-
-    if use_alt_group:
-        assert pp_group.alt_device_group is not None, (
-            "Alternate groups not created. "
-            "Call create_alternate_groups() first."
-        )
-        group = pp_group.alt_device_group
-    else:
-        group = pp_group.device_group
+    group = _get_edge_cloud_hidden_channel_device_group(
+        pp_group, channel=channel, use_alt_group=use_alt_group
+    )
 
     tensor_dict: dict[str, Any] = {}
     handles: list[Handle] = []
@@ -681,25 +702,47 @@ def edge_cloud_irecv_tensor_dict(
     return tensor_dict, handles, postprocess
 
 
+def edge_cloud_isend_tensor_dict_on_hidden_channel(
+    tensor_dict: dict[str, torch.Tensor | Any],
+    channel: HiddenChannelType,
+    dst: int | None = None,
+    num_tokens: int | None = None,
+) -> list[Handle]:
+    """Send edge-cloud tensors on a hidden channel without metadata sync."""
+    return edge_cloud_isend_tensor_dict(
+        tensor_dict,
+        dst=dst,
+        num_tokens=num_tokens,
+        channel=channel,
+    )
+
+
+def edge_cloud_irecv_tensor_dict_on_hidden_channel(
+    channel: HiddenChannelType,
+    src: int | None = None,
+    num_tokens: int | None = None,
+) -> tuple[dict[str, torch.Tensor | Any], list[Handle], list[Callable[[], None]]]:
+    """Receive edge-cloud tensors on a hidden channel without metadata sync."""
+    assert num_tokens is not None, (
+        "num_tokens must be provided for edge-cloud hidden-channel receive"
+    )
+    return edge_cloud_irecv_tensor_dict(
+        num_tokens=num_tokens,
+        src=src,
+        channel=channel,
+    )
+
+
 def edge_cloud_send_tensor_dict(
     tensor_dict: dict[str, torch.Tensor | Any],
     channel: HiddenChannelType,
     num_tokens: int,
 ) -> list[Handle]:
     """Send edge-cloud hidden tensors on the selected Phase6 channel."""
-    pp_group = get_pp_group()
-    if hasattr(pp_group, "isend_tensor_dict_on_hidden_channel"):
-        # need to modify
-        return pp_group.isend_tensor_dict_on_hidden_channel(
-            tensor_dict, channel=channel
-        )
-    # Compatibility fallback before Phase6 hidden-channel groups are created.
-    if channel == HiddenChannelType.PREFILL_1:
-        return edge_cloud_isend_tensor_dict(tensor_dict, num_tokens=num_tokens)
-    if channel == HiddenChannelType.DECODE:
-        return edge_cloud_isend_tensor_dict(tensor_dict, num_tokens=num_tokens, use_alt_group=True)
-    raise RuntimeError(
-        "PREFILL_2 hidden channel requires create_hidden_channel_groups()"
+    return edge_cloud_isend_tensor_dict_on_hidden_channel(
+        tensor_dict,
+        channel=channel,
+        num_tokens=num_tokens,
     )
 
 
@@ -725,23 +768,12 @@ def edge_cloud_broadcast_recv(
     ec_meta = get_edge_cloud_tensor_meta()
 
     if is_pp_npu0:
-        if hasattr(pp_group, "irecv_tensor_dict_on_hidden_channel"):
-            # need to modify
-            tensor_dict, comm_handles, comm_postprocess = (
-                pp_group.irecv_tensor_dict_on_hidden_channel(channel=channel)
-            )
-        elif channel == HiddenChannelType.PREFILL_1:
-            tensor_dict, comm_handles, comm_postprocess = edge_cloud_irecv_tensor_dict(
+        tensor_dict, comm_handles, comm_postprocess = (
+            edge_cloud_irecv_tensor_dict_on_hidden_channel(
+                channel=channel,
                 num_tokens=num_tokens,
             )
-        elif channel == HiddenChannelType.DECODE:
-            tensor_dict, comm_handles, comm_postprocess = edge_cloud_irecv_tensor_dict(
-                num_tokens=num_tokens, use_alt_group=True
-            )
-        else:
-            raise RuntimeError(
-                "PREFILL_2 hidden channel requires create_hidden_channel_groups()"
-            )
+        )
         assert tensor_dict is not None, (
             "edge_cloud_broadcast_recv: PP tensor_dict is None, "
             "sender may have failed."
