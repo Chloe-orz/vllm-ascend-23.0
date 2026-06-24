@@ -70,6 +70,7 @@ from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
     edge_cloud_send_tensor_dict,
     init_ascend_model_parallel,
+    init_edge_cloud_tensor_meta,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -118,11 +119,11 @@ def _detect_has_residual(model_config) -> bool:
     # Qwen3.5 / Qwen3.5-MoE use residual connections
     if "qwen3" in model_type:
         return True
-    # DeepSeek V4 uses hc_pre/hc_post internally, but in the edge-cloud
-    # no-residual variant the residual is recomputed locally per segment and
-    # is no longer transmitted across the network.
+    # DeepSeek V4 uses hc_pre/hc_post which is equivalent to a residual
+    # stream; its IntermediateTensors always contain both hidden_states
+    # and residual.
     if model_type == "deepseek_v4":
-        return False
+        return True
     # Default: most modern decoder models produce residual
     # Can be made more specific as more models are supported
     return True
@@ -532,7 +533,6 @@ class NPUWorker(WorkerBase):
                 hidden_dtype=hidden_dtype,
                 has_residual=has_residual,
                 hc_mult=hc_mult,
-                mode=self.model_runner.edge_cloud_cfg.mode,
             )
 
     @torch.inference_mode()
@@ -760,7 +760,8 @@ class NPUWorker(WorkerBase):
         if get_pp_group().world_size == 2:
             channel = self._hidden_channel_for(scheduler_output)
             self._record_pp_send_work(
-                edge_cloud_send_tensor_dict(output.tensors, channel=channel),
+                edge_cloud_send_tensor_dict(_gathered, channel=channel,
+                                            num_tokens=scheduler_output.total_num_scheduled_tokens),
                 channel=channel,
             )
             logger.info(f"Send intermediate tensors to cloud, hidden_channel: {channel.value}")
@@ -782,7 +783,8 @@ class NPUWorker(WorkerBase):
         logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         channel = self._hidden_channel_for(scheduler_output)
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-            channel=channel
+            channel=channel,
+            num_tokens=scheduler_output.total_num_scheduled_tokens,
         )
         logger.info(f"Receive intermediate tensors from cloud after, hidden_channel: {channel.value}")
         intermediate_tensors = AsyncIntermediateTensors(
@@ -827,11 +829,24 @@ class NPUWorker(WorkerBase):
         )
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and is_first_slice:
+            # Pre-compute input preparation while edge runs segment_a.
+            # This overlaps cloud's _update_states, _prepare_inputs,
+            # _determine_batch_execution_and_padding, and
+            # _build_attention_metadata with edge's segment_a forward.
             channel = self._hidden_channel_for(scheduler_output)
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-                channel=channel
+                channel=channel,
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
             )
             logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
+
+            self.model_runner.cloud_prepare_early(scheduler_output)
+            if enable_sp() and (self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+                or not self.model_runner.supports_mm_inputs):
+                tensor_dict = {
+                    k: sequence_parallel_chunk(v)
+                    for k, v in tensor_dict.items()
+                }
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,
                 comm_handles=comm_handles,
@@ -869,7 +884,8 @@ class NPUWorker(WorkerBase):
         if get_pp_group().world_size == 2:
             channel = self._hidden_channel_for(scheduler_output)
             self._record_pp_send_work(
-                edge_cloud_send_tensor_dict(output.tensors, channel=channel),
+                edge_cloud_send_tensor_dict(_gathered, channel=channel,
+                                            num_tokens=scheduler_output.total_num_scheduled_tokens),
                 channel=channel,
             )
             logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")
