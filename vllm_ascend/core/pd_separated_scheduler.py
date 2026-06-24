@@ -280,18 +280,6 @@ class PDSeparatedScheduler(Scheduler):
         self.chunk_prefill_first = []
         self.max_num_running_reqs -= len(saved_running)
 
-        # In PD-separated mode chunk_prefill_first may legitimately contain
-        # more requests than the remaining decode capacity.  Rather than
-        # truncating and deferring requests, temporarily widen the limit so
-        # that super().schedule() can process all accumulated prefill chunks
-        # in one go.  The standard scheduler assertion
-        #   len(self.running) <= self.max_num_running_reqs
-        # is overly strict here because the requests we moved into
-        # self.running are prefill-chunk requests, not decode requests.
-        self.max_num_running_reqs = max(
-            self.max_num_running_reqs, len(self.running)
-        )
-
         scheduler_output = None
         try:
             scheduler_output = super().schedule()
