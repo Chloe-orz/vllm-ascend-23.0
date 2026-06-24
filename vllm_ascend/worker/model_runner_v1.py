@@ -2661,59 +2661,6 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self._resume_and_validate_head_state(scheduler_output)
 
-            # [PD-FIX] Stale tail segment (PL/DL): cloud shipped a tail batch
-            # whose reqs already finished on the edge and were popped from
-            # self.requests during the head->tail window. Discard segment_e to
-            # avoid _update_states crashing on self.requests[req_id]. HeadState
-            # already popped above; hidden already received by
-            # _execute_model_edge_tail (data-plane contract preserved).
-            # update_from_output's `request is None or is_finished()` guard
-            # skips these reqs before req_id_to_index[req_id], so returning
-            # EMPTY is safe.
-            tail_req_ids = list(scheduler_output.num_scheduled_tokens.keys())
-            if tail_req_ids:
-                stale = [r for r in tail_req_ids if r not in self.requests]
-                if len(stale) == len(tail_req_ids):
-                    logger.error(
-                        "[EDGE-TAIL-STALE-DISCARD] batch_type=%s "
-                        "head_token=%s req_ids=%s all popped from "
-                        "self.requests; skip segment_e.",
-                        scheduler_output.batch_type,
-                        scheduler_output.head_token,
-                        tail_req_ids,
-                    )
-                    # Signal sample_tokens to also skip (return EMPTY, not None).
-                    self._tail_segment_discarded = True
-                    return EMPTY_MODEL_RUNNER_OUTPUT
-                if stale:
-                    # Partial-stale: alive reqs need the step, stale reqs would
-                    # crash. Cannot safely discard nor proceed. Full fix needs
-                    # per-req hidden slicing -- not yet implemented.
-                    logger.error(
-                        "[EDGE-TAIL-PARTIAL-STALE] batch_type=%s "
-                        "head_token=%s req_ids=%s stale=%s alive=%s; "
-                        "NOT handled, will crash.",
-                        scheduler_output.batch_type,
-                        scheduler_output.head_token,
-                        tail_req_ids,
-                        stale,
-                        [r for r in tail_req_ids if r in self.requests],
-                    )
-        # Save scheduler_output for edge-cloud mamba state sync in sample_tokens().
-        self._last_scheduler_output = scheduler_output
-
-        # In edge-cloud mode, execute_model is called twice for the
-        # same scheduler_output: head segment (intermediate_tensors is None) and
-        # tail segment (intermediate_tensors is not None). The tail segment should
-        # reuse the num_computed_tokens corrected by the head segment, instead of
-        # re-running update_num_computed_tokens_for_batch_change or copying the
-        # potentially optimistic CPU value back to GPU.
-        self._is_edge_cloud_tail_segment = (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "edge"
-            and intermediate_tensors is not None
-        )
-
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -5682,32 +5629,18 @@ class NPUModelRunner(GPUModelRunner):
     def _resume_and_validate_head_state(
         self,
         scheduler_output: SchedulerOutput,
-        intermediate_tensors: IntermediateTensors,
     ) -> None:
-        """Validate control-plane / data-plane alignment for a tail segment.
+        """Resume and validate the suspended HeadState for a tail segment.
 
-        The EngineCore sends the head_token over ZMQ (control plane); the
-        cloud worker echoes it back inside the intermediate tensors payload
-        (data plane).  Both must match before we execute the tail segment.
+        The control-plane head_token identifies the HeadState saved by the
+        matching edge head segment. Data-plane hidden tensors are aligned by
+        scheduler-selected hidden channels, so no data-plane token tensor is
+        required in IntermediateTensors.
         """
         token_ctrl = scheduler_output.head_token
         if not token_ctrl:
             raise RuntimeError(
                 "PL/DL scheduler_output must carry head_token from cloud"
-            )
-
-        token_tensor = intermediate_tensors.tensors.pop("_head_token", None)
-        if token_tensor is None:
-            raise RuntimeError(
-                "intermediate_tensors missing '_head_token'; "
-                "cloud worker must embed it"
-            )
-        token_pp = bytes(token_tensor.cpu().numpy().tolist()).decode("utf-8")
-
-        if token_ctrl != token_pp:
-            raise RuntimeError(
-                f"Control-plane vs data-plane head_token mismatch: "
-                f"ZMQ={token_ctrl}, PP={token_pp}"
             )
 
         head_state = self._pending_head_states.pop(token_ctrl, None)
