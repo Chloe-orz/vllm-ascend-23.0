@@ -759,15 +759,6 @@ class NPUWorker(WorkerBase):
             return output
 
         assert isinstance(output, IntermediateTensors)
-        # Echo the head_token back to the edge so the tail segment can
-        # correlate the data-plane tensor with the control-plane scheduler output.
-        token = scheduler_output.head_token
-        if token:
-            output.tensors["_head_token"] = torch.tensor(
-                list(bytearray(token, "utf-8")),
-                dtype=torch.uint8,
-                device="npu",
-            )
         # Edge-cloud with heterogeneous SP: aggregate SP shards to full
         # sequence before cross-PP send so edge can re-chunk by its SP.
         if enable_sp():
