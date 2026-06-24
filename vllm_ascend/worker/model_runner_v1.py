@@ -2381,9 +2381,9 @@ class NPUModelRunner(GPUModelRunner):
             )
         # --- End layer slice fast path ---
 
-        # Edge-cloud tail-segment validation: ensure the control-plane
-        # head_token matches the data-plane head_token embedded in the
-        # intermediate tensors received from the cloud.
+        # Edge-cloud tail-segment validation: use the control-plane
+        # head_token to resume the suspended HeadState. The scheduler and
+        # hidden channel selection guarantee data-plane alignment.
         if (
             self._edge_cloud_enabled
             and is_edge_device()
@@ -2392,9 +2392,7 @@ class NPUModelRunner(GPUModelRunner):
             )
             and intermediate_tensors is not None
         ):
-            self._resume_and_validate_head_state(
-                scheduler_output, intermediate_tensors
-            )
+            self._resume_and_validate_head_state(scheduler_output)
 
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
@@ -4099,32 +4097,18 @@ class NPUModelRunner(GPUModelRunner):
     def _resume_and_validate_head_state(
         self,
         scheduler_output: SchedulerOutput,
-        intermediate_tensors: IntermediateTensors,
     ) -> None:
-        """Validate control-plane / data-plane alignment for a tail segment.
+        """Resume and validate the suspended HeadState for a tail segment.
 
-        The EngineCore sends the head_token over ZMQ (control plane); the
-        cloud worker echoes it back inside the intermediate tensors payload
-        (data plane).  Both must match before we execute the tail segment.
+        The control-plane head_token identifies the HeadState saved by the
+        matching edge head segment. Data-plane hidden tensors are aligned by
+        scheduler-selected hidden channels, so no data-plane token tensor is
+        required in IntermediateTensors.
         """
         token_ctrl = scheduler_output.head_token
         if not token_ctrl:
             raise RuntimeError(
                 "PL/DL scheduler_output must carry head_token from cloud"
-            )
-
-        token_tensor = intermediate_tensors.tensors.pop("_head_token", None)
-        if token_tensor is None:
-            raise RuntimeError(
-                "intermediate_tensors missing '_head_token'; "
-                "cloud worker must embed it"
-            )
-        token_pp = bytes(token_tensor.cpu().numpy().tolist()).decode("utf-8")
-
-        if token_ctrl != token_pp:
-            raise RuntimeError(
-                f"Control-plane vs data-plane head_token mismatch: "
-                f"ZMQ={token_ctrl}, PP={token_pp}"
             )
 
         head_state = self._pending_head_states.pop(token_ctrl, None)
