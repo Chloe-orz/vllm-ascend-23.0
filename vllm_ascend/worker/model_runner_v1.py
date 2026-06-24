@@ -4975,7 +4975,7 @@ class NPUModelRunner(GPUModelRunner):
             force_eager=self.model_config.enforce_eager,
             num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
         )
-
+        
         num_tokens_padded = batch_desc.num_tokens
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
