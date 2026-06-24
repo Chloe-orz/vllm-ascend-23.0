@@ -783,8 +783,8 @@ class NPUWorker(WorkerBase):
         logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         channel = self._hidden_channel_for(scheduler_output)
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-            channel=channel,
             num_tokens=scheduler_output.total_num_scheduled_tokens,
+            channel=channel,
         )
         logger.info(f"Receive intermediate tensors from cloud after, hidden_channel: {channel.value}")
         intermediate_tensors = AsyncIntermediateTensors(
@@ -835,8 +835,8 @@ class NPUWorker(WorkerBase):
             # _build_attention_metadata with edge's segment_a forward.
             channel = self._hidden_channel_for(scheduler_output)
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-                channel=channel,
                 num_tokens=scheduler_output.total_num_scheduled_tokens,
+                channel=channel,
             )
             logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
 
