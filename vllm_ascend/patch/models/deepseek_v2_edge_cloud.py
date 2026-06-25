@@ -67,14 +67,9 @@ def _forward_edge_cloud_segment_deepseek_v2(
         hidden_states, residual = layer(positions, hidden_states, residual)
 
     if not is_last_segment:
-        if residual is None:
-            residual = torch.zeros_like(hidden_states)
-        tensors: dict[str, torch.Tensor | None] = {
-            "hidden_states": hidden_states,
-            "residual": residual,
-        }
-        if aux_hidden_states:
-            tensors["aux_hidden_states"] = torch.cat(aux_hidden_states, dim=-1)
+        tensors: dict[str, Any] = {"hidden_states": hidden_states}
+        if residual is not None:
+            tensors["residual"] = residual
         return IntermediateTensors(tensors)
 
     hidden_states, _ = self.norm(hidden_states, residual)

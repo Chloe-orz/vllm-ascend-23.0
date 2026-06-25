@@ -43,7 +43,17 @@ _P_TP: GroupCoordinator | None = None
 
 _DYNAMIC_EPLB: GroupCoordinator | None = None
 
-# Edge-cloud pre-computed tensor metadata cache
+# Edge-cloud pre-computed tensor metadata cache.
+#
+# The edge→cloud (e2c) and cloud→edge (c2e) directions can carry different
+# tensor key sets: in embedding_only mode the edge sends only embeddings
+# (no transformer layers run, so the residual would be a fabricated zero
+# tensor), hence e2c drops "residual" while c2e (cloud→edge) still carries
+# the real residual that the edge tail segment needs for its final norm.
+# In head_tail mode both directions are identical (both carry residual).
+_EDGE_CLOUD_TENSOR_META_E2C: "EdgeCloudTensorMeta | None" = None
+_EDGE_CLOUD_TENSOR_META_C2E: "EdgeCloudTensorMeta | None" = None
+# Dense (c2e) meta kept for backward-compatible access / tests.
 _EDGE_CLOUD_TENSOR_META: "EdgeCloudTensorMeta | None" = None
 
 
@@ -77,33 +87,17 @@ class EdgeCloudTensorMeta:
     split_sizes: list[int] | None = None
 
 
-def init_edge_cloud_tensor_meta(
+def _build_edge_cloud_tensor_meta(
     hidden_size: int,
-    hidden_dtype: torch.dtype = torch.bfloat16,
-    has_residual: bool = True,
-    hc_mult: int = 1,
-):
-    """Initialize the pre-computed tensor metadata for edge-cloud transfers.
+    hidden_dtype: torch.dtype,
+    has_residual: bool,
+    hc_mult: int,
+) -> EdgeCloudTensorMeta:
+    """Build a single direction's EdgeCloudTensorMeta.
 
-    Called once during worker initialization. The metadata is used by
-    edge_cloud_irecv_tensor_dict to allocate receive buffers without
-    requiring an inter-node metadata exchange.
-
-    Args:
-        hidden_size: model hidden dimension (from hf_text_config.hidden_size)
-        hidden_dtype: torch.dtype derived directly from model_config.dtype
-            (equivalent to MindIE's config.torch_dtype from config.json),
-            eliminating the need for a separate user-configured dtype string.
-        has_residual: dynamically detected  True if the model produces a
-            residual tensor in IntermediateTensors (most decoder models do).
-        hc_mult: HC multiplier for DeepSeek V4's Hash Compression mechanism.
-            When hc_mult > 1, intermediate tensors are 3D
-            ``(num_tokens, hc_mult, hidden_size)`` instead of the standard 2D
-            ``(num_tokens, hidden_size)``.  Defaults to 1 (standard models like
-            Qwen3.5, Llama, etc.).
+    See init_edge_cloud_tensor_meta for the meaning of the arguments and the
+    merge-payload derivation.
     """
-    global _EDGE_CLOUD_TENSOR_META
-
     dtype = hidden_dtype
     device = "npu"
 
@@ -171,7 +165,7 @@ def init_edge_cloud_tensor_meta(
             merged_shape_tail = leading_dims[1:] + (last_dim_sum,)
             split_sizes = sizes
 
-    _EDGE_CLOUD_TENSOR_META = EdgeCloudTensorMeta(
+    return EdgeCloudTensorMeta(
         metadata_list=metadata_list,
         tensor_keys=tensor_keys,
         hc_mult=hc_mult,
@@ -180,25 +174,119 @@ def init_edge_cloud_tensor_meta(
         merged_shape_tail=merged_shape_tail,
         split_sizes=split_sizes,
     )
+
+
+def init_edge_cloud_tensor_meta(
+    hidden_size: int,
+    hidden_dtype: torch.dtype = torch.bfloat16,
+    has_residual: bool = True,
+    hc_mult: int = 1,
+    mode: str = "head_tail",
+):
+    """Initialize the pre-computed tensor metadata for edge-cloud transfers.
+
+    Called once during worker initialization. The metadata is used by
+    edge_cloud_irecv_tensor_dict to allocate receive buffers without
+    requiring an inter-node metadata exchange.
+
+    Two direction-specific metas are built because the edge→cloud and
+    cloud→edge directions can carry different tensor key sets: in
+    ``embedding_only`` mode the edge sends only embeddings (no transformer
+    layers run, so a residual would be a fabricated zero tensor) and e2c
+    drops ``residual``, while c2e always carries the real residual that the
+    edge tail segment needs for its final norm. In ``head_tail`` mode both
+    directions are identical.
+
+    Args:
+        hidden_size: model hidden dimension (from hf_text_config.hidden_size)
+        hidden_dtype: torch.dtype derived directly from model_config.dtype
+            (equivalent to MindIE's config.torch_dtype from config.json),
+            eliminating the need for a separate user-configured dtype string.
+        has_residual: dynamically detected  True if the model produces a
+            residual tensor in IntermediateTensors (most decoder models do).
+        hc_mult: HC multiplier for DeepSeek V4's Hash Compression mechanism.
+            When hc_mult > 1, intermediate tensors are 3D
+            ``(num_tokens, hc_mult, hidden_size)`` instead of the standard 2D
+            ``(num_tokens, hidden_size)``.  Defaults to 1 (standard models like
+            Qwen3.5, Llama, etc.).
+        mode: edge-cloud mode ("head_tail" or "embedding_only"). In
+            embedding_only the edge→cloud direction omits the redundant zero
+            residual; in head_tail both directions carry residual.
+    """
+    global _EDGE_CLOUD_TENSOR_META_E2C, _EDGE_CLOUD_TENSOR_META_C2E
+    global _EDGE_CLOUD_TENSOR_META
+
+    # e2c (edge→cloud): in embedding_only the edge runs no transformer layers,
+    # so its residual would be a fabricated zero tensor carrying no information
+    # — drop it to halve the cross-node bandwidth. head_tail always runs >=1
+    # head layer, so the residual is real and must be transmitted.
+    has_residual_e2c = has_residual and (mode != "embedding_only")
+    # c2e (cloud→edge): the cloud produces a real residual that the edge tail
+    # segment's final norm consumes, so it is always transmitted.
+    has_residual_c2e = has_residual
+
+    _EDGE_CLOUD_TENSOR_META_E2C = _build_edge_cloud_tensor_meta(
+        hidden_size, hidden_dtype, has_residual_e2c, hc_mult,
+    )
+    _EDGE_CLOUD_TENSOR_META_C2E = _build_edge_cloud_tensor_meta(
+        hidden_size, hidden_dtype, has_residual_c2e, hc_mult,
+    )
+    # Backward-compatible alias: dense (residual-carrying) meta.
+    _EDGE_CLOUD_TENSOR_META = _EDGE_CLOUD_TENSOR_META_C2E
+
     logger.info(
-        "[EdgeCloud] Initialized tensor meta: keys=%s, dtype=%s, "
-        "hidden_size=%d, hc_mult=%d, merge_payload=%s, split_sizes=%s",
-        tensor_keys,
-        dtype,
+        "[EdgeCloud] Initialized tensor meta (mode=%s): "
+        "e2c keys=%s (merge=%s), c2e keys=%s (merge=%s), dtype=%s, "
+        "hidden_size=%d, hc_mult=%d",
+        mode,
+        _EDGE_CLOUD_TENSOR_META_E2C.tensor_keys,
+        _EDGE_CLOUD_TENSOR_META_E2C.merge_payload,
+        _EDGE_CLOUD_TENSOR_META_C2E.tensor_keys,
+        _EDGE_CLOUD_TENSOR_META_C2E.merge_payload,
+        hidden_dtype,
         hidden_size,
         hc_mult,
-        merge_payload,
-        split_sizes,
     )
 
 
-def get_edge_cloud_tensor_meta() -> EdgeCloudTensorMeta:
-    """Get the pre-computed edge-cloud tensor metadata."""
-    assert _EDGE_CLOUD_TENSOR_META is not None, (
+def get_edge_cloud_tensor_meta(
+    direction: str | None = None,
+) -> EdgeCloudTensorMeta:
+    """Get the pre-computed edge-cloud tensor metadata for a direction.
+
+    Args:
+        direction: "e2c" (edge→cloud) or "c2e" (cloud→edge). When None,
+            returns the dense (c2e) meta for backward compatibility.
+    """
+    if direction == "e2c":
+        meta = _EDGE_CLOUD_TENSOR_META_E2C
+    else:
+        meta = _EDGE_CLOUD_TENSOR_META_C2E
+    assert meta is not None, (
         "Edge-cloud tensor meta not initialized. "
         "Call init_edge_cloud_tensor_meta() first."
     )
-    return _EDGE_CLOUD_TENSOR_META
+    return meta
+
+
+def _select_edge_cloud_meta_for_send() -> EdgeCloudTensorMeta:
+    """Pick the send-direction meta based on this rank's PP role.
+
+    edge (PP first rank) sends e2c; cloud (PP last rank) sends c2e.
+    """
+    return get_edge_cloud_tensor_meta(
+        "e2c" if get_pp_group().is_first_rank else "c2e"
+    )
+
+
+def _select_edge_cloud_meta_for_recv() -> EdgeCloudTensorMeta:
+    """Pick the recv-direction meta based on this rank's PP role.
+
+    cloud (PP last rank) receives e2c; edge (PP first rank) receives c2e.
+    """
+    return get_edge_cloud_tensor_meta(
+        "e2c" if get_pp_group().is_last_rank else "c2e"
+    )
 
 
 def init_ascend_model_parallel(
@@ -633,7 +721,7 @@ def edge_cloud_isend_tensor_dict(
     # buffers and because there is no metadata exchange anymore, the
     # mismatch would corrupt data silently or only surface as an HCCL
     # crash. Fail fast here with a precise message instead.
-    ec_meta = get_edge_cloud_tensor_meta()
+    ec_meta = _select_edge_cloud_meta_for_send()
     sender_tensor_keys = [
         k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)
     ]
@@ -849,7 +937,7 @@ def edge_cloud_irecv_tensor_dict(
     if src is None:
         src = (pp_group.rank_in_group - 1) % pp_group.world_size
 
-    ec_meta = get_edge_cloud_tensor_meta()
+    ec_meta = _select_edge_cloud_meta_for_recv()
     group = pp_group.device_group
 
     if ec_meta.merge_payload:
@@ -935,7 +1023,7 @@ def edge_cloud_broadcast_recv(
     pp_group = get_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
-    ec_meta = get_edge_cloud_tensor_meta()
+    ec_meta = _select_edge_cloud_meta_for_recv()
 
     if is_pp_npu0:
         # PP rank 0: receive tensor data from the other side (edge/cloud)
