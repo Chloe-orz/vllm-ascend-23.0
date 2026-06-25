@@ -61,7 +61,7 @@ def _forward_edge_cloud_segment_glm4_moe(
             "check that all TP ranks receive tensors correctly."
         )
         hidden_states = intermediate_tensors["hidden_states"]
-        residual = intermediate_tensors.get("residual")
+        residual = intermediate_tensors.tensors.get("residual")
 
     # Glm4MoeDecoderLayer.forward uses positional args:
     #   forward(positions, hidden_states, residual)
