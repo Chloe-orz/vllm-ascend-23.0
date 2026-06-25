@@ -69,6 +69,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
     edge_cloud_isend_tensor_dict,
+    get_edge_cloud_tensor_meta,
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
 )
@@ -948,13 +949,23 @@ class NPUWorker(WorkerBase):
                 # This overlaps cloud's _update_states, _prepare_inputs,
                 # _determine_batch_execution_and_padding, and
                 # _build_attention_metadata with edge's segment_a forward.
+                # On the merge_payload fast path the per-key tensors are
+                # materialized lazily inside comm_postprocess (after the
+                # merged buffer is split), so SP chunking must run there too
+                # — an eager chunk here would iterate an empty dict, rebind
+                # the variable, and sever the link to the postprocess that
+                # fills the original dict by reference (broken tokens).
+                do_sp_chunk = enable_sp() and (
+                    self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+                    or not self.model_runner.supports_mm_inputs)
+                merge_payload = get_edge_cloud_tensor_meta().merge_payload
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    sp_chunk=do_sp_chunk and merge_payload,
                 )
                 self.model_runner.cloud_prepare_early(scheduler_output)
 
-                if enable_sp() and (self.model_runner.edge_cloud_cfg.mode != "embedding_only"
-                    or not self.model_runner.supports_mm_inputs):
+                if do_sp_chunk and not merge_payload:
                     tensor_dict = {
                         k: sequence_parallel_chunk(v)
                         for k, v in tensor_dict.items()
@@ -1010,10 +1021,13 @@ class NPUWorker(WorkerBase):
                     _gathered,
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                 )
+            edge_sp = enable_sp()
+            edge_merge = get_edge_cloud_tensor_meta().merge_payload
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=scheduler_output.total_num_scheduled_tokens,
+                sp_chunk=edge_sp and edge_merge,
             )
-            if enable_sp():
+            if edge_sp and not edge_merge:
                 tensor_dict = {
                     k: sequence_parallel_chunk(v)
                     for k, v in tensor_dict.items()

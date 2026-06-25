@@ -1045,8 +1045,27 @@ def edge_cloud_irecv_tensor_dict(
     return tensor_dict, handles, postprocess
 
 
+def _apply_sp_chunk_inplace(tensor_dict: dict[str, Any]) -> None:
+    """Sequence-parallel chunk each tensor in ``tensor_dict`` along dim 0.
+
+    Mirrors the eager ``sequence_parallel_chunk`` the worker applies on the
+    non-merge recv path.  The merge path needs this here because its per-key
+    tensors are materialized lazily *inside* the comm_postprocess callback
+    (after the merged buffer is split), so the worker's eager chunk runs before
+    the tensors exist: it would iterate an empty dict, rebind the variable to
+    a new dict, and sever the link to the postprocess callback that fills the
+    original dict by reference.  Running the chunk here, after the split,
+    keeps the chunked tensors in the same dict object the caller holds.
+    """
+    from vllm.model_executor.models.utils import sequence_parallel_chunk
+    for key, value in list(tensor_dict.items()):
+        if isinstance(value, torch.Tensor) and value.numel() > 0:
+            tensor_dict[key] = sequence_parallel_chunk(value)
+
+
 def edge_cloud_broadcast_recv(
     num_tokens: int,
+    sp_chunk: bool = False,
 ) -> tuple[
     dict[str, torch.Tensor | Any] | None,
     list[Handle],
@@ -1106,6 +1125,16 @@ def edge_cloud_broadcast_recv(
                 )
 
             comm_postprocess.append(broadcast_postprocess)
+            # On the merge path the per-key tensors are materialized lazily
+            # inside the callbacks above, so the worker cannot chunk them
+            # eagerly before AsyncIntermediateTensors exists (that would
+            # rebind the dict and sever the link to these callbacks).  Chunk
+            # here, as the final postprocess, after the splits have populated
+            # the dict.  Must run last — append after broadcast_postprocess.
+            if sp_chunk:
+                comm_postprocess.append(
+                    lambda: _apply_sp_chunk_inplace(tensor_dict)
+                )
             return tensor_dict, comm_handles, comm_postprocess
 
         def broadcast_postprocess():
@@ -1159,7 +1188,12 @@ def edge_cloud_broadcast_recv(
                 _split_merged_buffer_into_dict(merged_buf, ec_meta)
             )
 
-        return recv_tensor_dict, [], [broadcast_postprocess]
+        postprocess: list[Callable[[], None]] = [broadcast_postprocess]
+        if sp_chunk:
+            # Same rationale as the PP-NPU0 merge path: chunk after the
+            # split populates the dict, since the worker cannot chunk eagerly.
+            postprocess.append(lambda: _apply_sp_chunk_inplace(recv_tensor_dict))
+        return recv_tensor_dict, [], postprocess
 
     metadata_list = ec_meta.metadata_list
     recv_num_tokens = _pad_num_tokens_to_tp_multiple(num_tokens)
