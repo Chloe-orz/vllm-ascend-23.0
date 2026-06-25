@@ -583,6 +583,7 @@ class NPUWorker(WorkerBase):
                 hidden_dtype=hidden_dtype,
                 has_residual=has_residual,
                 hc_mult=hc_mult,
+                mode=self.model_runner.edge_cloud_cfg.mode,
             )
 
     @torch.inference_mode()
