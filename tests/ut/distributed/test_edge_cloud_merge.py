@@ -210,7 +210,8 @@ def test_split_3d_hc_mult_layout():
 # ---------------------------------------------------------------------------
 
 def test_init_meta_direction_aware_embedding_only():
-    """embedding_only: e2c omits residual, c2e keeps it."""
+    """embedding_only: e2c omits residual on the wire but receiver still
+    allocates a zero residual buffer; c2e keeps it on the wire."""
     ps.init_edge_cloud_tensor_meta(
         hidden_size=128,
         hidden_dtype=torch.bfloat16,
@@ -220,9 +221,13 @@ def test_init_meta_direction_aware_embedding_only():
     )
     e2c = ps.get_edge_cloud_tensor_meta("e2c")
     c2e = ps.get_edge_cloud_tensor_meta("c2e")
-    assert e2c.tensor_keys == ["hidden_states"]
-    assert e2c.merge_payload is False  # single tensor, cannot merge
+    # Receiver allocates both buffers so model layers stay unchanged.
+    assert e2c.tensor_keys == ["hidden_states", "residual"]
+    # Sender only puts hidden_states on the wire.
+    assert e2c.send_tensor_keys == ["hidden_states"]
+    assert e2c.merge_payload is False  # only one tensor is sent
     assert c2e.tensor_keys == ["hidden_states", "residual"]
+    assert c2e.send_tensor_keys == ["hidden_states", "residual"]
     # Backward-compatible (no-arg) accessor returns the dense c2e meta.
     assert ps.get_edge_cloud_tensor_meta().tensor_keys == c2e.tensor_keys
 
@@ -246,6 +251,8 @@ def test_init_meta_direction_aware_head_tail():
     e2c = ps.get_edge_cloud_tensor_meta("e2c")
     c2e = ps.get_edge_cloud_tensor_meta("c2e")
     assert e2c.tensor_keys == ["hidden_states", "residual"]
+    assert e2c.send_tensor_keys == ["hidden_states", "residual"]
     assert c2e.tensor_keys == ["hidden_states", "residual"]
+    assert c2e.send_tensor_keys == ["hidden_states", "residual"]
     assert e2c.merge_payload is True
     assert c2e.merge_payload is True
