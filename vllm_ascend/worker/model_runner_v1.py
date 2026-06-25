@@ -4310,7 +4310,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.intermediate_tensors[k][:copy_len].copy_(
                         v[:copy_len], non_blocking=True
                     )
-                keys = list(intermediate_tensors.keys())
+                keys = list(intermediate_tensors.tensors.keys())
                 return IntermediateTensors(
                     {
                         k: self.intermediate_tensors[k][:num_tokens]
@@ -4333,7 +4333,7 @@ class NPUModelRunner(GPUModelRunner):
         # the residual buffer in self.intermediate_tensors must not leak into
         # the dict passed to the next segment.
         if sync_self and intermediate_tensors is not None:
-            keys = list(intermediate_tensors.keys())
+            keys = list(intermediate_tensors.tensors.keys())
         else:
             keys = list(self.intermediate_tensors.keys())
         return IntermediateTensors(
