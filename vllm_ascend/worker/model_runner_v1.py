@@ -5251,7 +5251,7 @@ class NPUModelRunner(GPUModelRunner):
         # the residual buffer in self.intermediate_tensors must not leak into
         # the dict passed to the next segment.
         if sync_self and intermediate_tensors is not None:
-            keys = list(intermediate_tensors.keys())
+            keys = list(intermediate_tensors.tensors.keys())
         else:
             keys = list(self.intermediate_tensors.keys())
         return IntermediateTensors(
