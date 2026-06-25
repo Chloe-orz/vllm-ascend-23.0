@@ -58,7 +58,7 @@ def _forward_edge_cloud_segment_qwen3_5(
             "check that all TP ranks receive tensors correctly."
         )
         hidden_states = intermediate_tensors["hidden_states"]
-        residual = intermediate_tensors["residual"]
+        residual = intermediate_tensors.get("residual")
 
     for layer in islice(self.layers, start_layer, end_layer):
         hidden_states, residual = layer(
