@@ -270,22 +270,28 @@ def get_edge_cloud_tensor_meta(
 
 
 def _select_edge_cloud_meta_for_send() -> EdgeCloudTensorMeta:
-    """Pick the send-direction meta based on this rank's PP role.
+    """Pick the send-direction meta based on this rank's edge/cloud role.
 
-    edge (PP first rank) sends e2c; cloud (PP last rank) sends c2e.
+    In edge-cloud mode vLLM overrides ``get_pp_group().is_first_rank`` to
+    return ``is_edge_device()`` for the PP group, so we use the explicit
+    role helpers instead of raw PP rank.  Edge sends e2c; cloud sends c2e.
     """
     return get_edge_cloud_tensor_meta(
-        "e2c" if get_pp_group().is_first_rank else "c2e"
+        "e2c" if is_edge_device() else "c2e"
     )
 
 
 def _select_edge_cloud_meta_for_recv() -> EdgeCloudTensorMeta:
-    """Pick the recv-direction meta based on this rank's PP role.
+    """Pick the recv-direction meta based on this rank's edge/cloud role.
 
-    cloud (PP last rank) receives e2c; edge (PP first rank) receives c2e.
+    In edge-cloud mode vLLM overrides ``get_pp_group().is_last_rank`` to
+    return ``is_edge_device()`` for the PP group, so using it would swap
+    the receive direction and allocate buffers for the wrong tensor key set
+    (e.g. expecting a residual in embedding_only mode).  Edge receives c2e;
+    cloud receives e2c.
     """
     return get_edge_cloud_tensor_meta(
-        "e2c" if get_pp_group().is_last_rank else "c2e"
+        "e2c" if is_cloud_device() else "c2e"
     )
 
 

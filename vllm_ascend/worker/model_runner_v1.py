@@ -5835,16 +5835,14 @@ class NPUModelRunner(GPUModelRunner):
                     if not isinstance(v, torch.Tensor):
                         continue
                     copy_len = num_tokens
-                    dst = self.intermediate_tensors[k][:copy_len]
-                    recv_len = min(v.shape[0], copy_len)
-                    if recv_len:
-                        dst[:recv_len].copy_(v[:recv_len], non_blocking=True)
-                    if recv_len < copy_len:
-                        dst[recv_len:].zero_()
+                    self.intermediate_tensors[k][:copy_len].copy_(
+                        v[:copy_len], non_blocking=True
+                    )
+                keys = list(intermediate_tensors.keys())
                 return IntermediateTensors(
                     {
-                        k: v[:num_tokens]
-                        for k, v in self.intermediate_tensors.items()
+                        k: self.intermediate_tensors[k][:num_tokens]
+                        for k in keys
                     }
                 )
             else:
@@ -5869,12 +5867,22 @@ class NPUModelRunner(GPUModelRunner):
                     if recv_len < copy_len:
                         dst[recv_len:].zero_()
 
+        # Only return the keys that were actually received. In embedding_only
+        # edge-cloud mode the edge sends only hidden_states (no residual), so
+        # the residual buffer in self.intermediate_tensors must not leak into
+        # the dict passed to the next segment.
+        if sync_self and intermediate_tensors is not None:
+            keys = list(intermediate_tensors.keys())
+        else:
+            keys = list(self.intermediate_tensors.keys())
         return IntermediateTensors(
             {
-                k: v[: (num_tokens + tp - 1) // tp]
+                k: self.intermediate_tensors[k][
+                    : (num_tokens + tp - 1) // tp
+                ]
                 if enable_sp()
-                else v[:num_tokens]
-                for k, v in self.intermediate_tensors.items()
+                else self.intermediate_tensors[k][:num_tokens]
+                for k in keys
             }
         )
 
