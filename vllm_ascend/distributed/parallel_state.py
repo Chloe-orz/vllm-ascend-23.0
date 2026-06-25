@@ -84,18 +84,27 @@ class EdgeCloudTensorMeta:
     # Per-tensor size along the concatenation dim=-1.  Used to narrow the
     # merged buffer back into individual logical tensors.
     split_sizes: list[int] | None = None
+    # Ordered list of tensor keys that are actually transmitted over the wire.
+    # In embedding_only mode the edge->cloud direction omits the zero residual,
+    # so the receiver still allocates a residual buffer but zero-fills it locally
+    # instead of receiving it. Defaults to tensor_keys when send/recv are identical.
+    send_tensor_keys: list[str] | None = None
 
 
 def _build_edge_cloud_tensor_meta(
     hidden_size: int,
     hidden_dtype: torch.dtype,
-    has_residual: bool,
+    recv_has_residual: bool,
+    send_has_residual: bool,
     hc_mult: int,
 ) -> EdgeCloudTensorMeta:
     """Build a single direction's EdgeCloudTensorMeta.
 
-    See init_edge_cloud_tensor_meta for the meaning of the arguments and the
-    merge-payload derivation.
+    ``recv_has_residual`` controls which buffers the receiver allocates,
+    while ``send_has_residual`` controls which tensors the sender puts on the
+    wire. They differ in embedding_only mode: the receiver still wants a zero
+    residual buffer so the model layers stay unchanged, but the sender omits
+    the redundant zero residual to save cross-node bandwidth.
     """
     dtype = hidden_dtype
     device = "npu"
@@ -113,11 +122,15 @@ def _build_edge_cloud_tensor_meta(
     ]
     tensor_keys = ["hidden_states"]
 
-    if has_residual:
+    if recv_has_residual:
         metadata_list.append(
             ("residual", TensorMetadata(device, dtype, tensor_shape))
         )
         tensor_keys.append("residual")
+
+    send_tensor_keys = [k for k in tensor_keys if k != "residual"]
+    if send_has_residual:
+        send_tensor_keys = list(tensor_keys)
 
     # Decide whether to merge all tensors into one send/recv.  Conditions:
     #   1) at least 2 tensors to merge,
@@ -130,7 +143,7 @@ def _build_edge_cloud_tensor_meta(
     # 2D, num_tokens x hc_mult for 3D) are preserved.
     from vllm_ascend import envs as envs_ascend
     env_enabled = envs_ascend.VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD
-    merge_payload = env_enabled and len(tensor_keys) >= 2
+    merge_payload = env_enabled and len(tensor_keys) >= 2 and len(send_tensor_keys) >= 2
     merged_dtype: torch.dtype | None = None
     merged_shape_tail: tuple[int, ...] | None = None
     split_sizes: list[int] | None = None
@@ -172,6 +185,7 @@ def _build_edge_cloud_tensor_meta(
         merged_dtype=merged_dtype,
         merged_shape_tail=merged_shape_tail,
         split_sizes=split_sizes,
+        send_tensor_keys=send_tensor_keys,
     )
 
 
@@ -191,10 +205,11 @@ def init_edge_cloud_tensor_meta(
     Two direction-specific metas are built because the edge→cloud and
     cloud→edge directions can carry different tensor key sets: in
     ``embedding_only`` mode the edge sends only embeddings (no transformer
-    layers run, so a residual would be a fabricated zero tensor) and e2c
-    drops ``residual``, while c2e always carries the real residual that the
-    edge tail segment needs for its final norm. In ``head_tail`` mode both
-    directions are identical.
+    layers run, so the residual would be a fabricated zero tensor). To keep
+    the model layers unchanged, the receiver still allocates a zero residual
+    buffer locally; only the wire payload omits ``residual``. c2e always
+    carries the real residual that the edge tail segment needs for its final
+    norm. In ``head_tail`` mode both directions carry residual on the wire.
 
     Args:
         hidden_size: model hidden dimension (from hf_text_config.hidden_size)
@@ -216,31 +231,38 @@ def init_edge_cloud_tensor_meta(
     global _EDGE_CLOUD_TENSOR_META
 
     # e2c (edge→cloud): in embedding_only the edge runs no transformer layers,
-    # so its residual would be a fabricated zero tensor carrying no information
-    # — drop it to halve the cross-node bandwidth. head_tail always runs >=1
-    # head layer, so the residual is real and must be transmitted.
-    has_residual_e2c = has_residual and (mode != "embedding_only")
+    # so its residual would be a fabricated zero tensor carrying no information.
+    # Drop it from the wire payload to halve the cross-node bandwidth, but the
+    # receiver still allocates a zero residual buffer so model layers stay
+    # unchanged. head_tail always runs >=1 head layer, so the residual is real
+    # and must be transmitted.
+    e2c_recv_has_residual = has_residual
+    e2c_send_has_residual = has_residual and (mode != "embedding_only")
     # c2e (cloud→edge): the cloud produces a real residual that the edge tail
-    # segment's final norm consumes, so it is always transmitted.
-    has_residual_c2e = has_residual
+    # segment's final norm consumes, so it is always transmitted and received.
+    c2e_recv_has_residual = has_residual
+    c2e_send_has_residual = has_residual
 
     _EDGE_CLOUD_TENSOR_META_E2C = _build_edge_cloud_tensor_meta(
-        hidden_size, hidden_dtype, has_residual_e2c, hc_mult,
+        hidden_size, hidden_dtype, e2c_recv_has_residual, e2c_send_has_residual, hc_mult,
     )
     _EDGE_CLOUD_TENSOR_META_C2E = _build_edge_cloud_tensor_meta(
-        hidden_size, hidden_dtype, has_residual_c2e, hc_mult,
+        hidden_size, hidden_dtype, c2e_recv_has_residual, c2e_send_has_residual, hc_mult,
     )
     # Backward-compatible alias: dense (residual-carrying) meta.
     _EDGE_CLOUD_TENSOR_META = _EDGE_CLOUD_TENSOR_META_C2E
 
     logger.info(
         "[EdgeCloud] Initialized tensor meta (mode=%s): "
-        "e2c keys=%s (merge=%s), c2e keys=%s (merge=%s), dtype=%s, "
+        "e2c recv_keys=%s send_keys=%s (merge=%s), "
+        "c2e recv_keys=%s send_keys=%s (merge=%s), dtype=%s, "
         "hidden_size=%d, hc_mult=%d",
         mode,
         _EDGE_CLOUD_TENSOR_META_E2C.tensor_keys,
+        _EDGE_CLOUD_TENSOR_META_E2C.send_tensor_keys,
         _EDGE_CLOUD_TENSOR_META_E2C.merge_payload,
         _EDGE_CLOUD_TENSOR_META_C2E.tensor_keys,
+        _EDGE_CLOUD_TENSOR_META_C2E.send_tensor_keys,
         _EDGE_CLOUD_TENSOR_META_C2E.merge_payload,
         hidden_dtype,
         hidden_size,
@@ -744,13 +766,15 @@ def edge_cloud_isend_tensor_dict(
     # mismatch would corrupt data silently or only surface as an HCCL
     # crash. Fail fast here with a precise message instead.
     ec_meta = _select_edge_cloud_meta_for_send()
+    send_keys = ec_meta.send_tensor_keys or ec_meta.tensor_keys
     sender_tensor_keys = [
-        k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor)
+        k for k in send_keys
+        if k in tensor_dict and isinstance(tensor_dict[k], torch.Tensor)
     ]
-    assert sender_tensor_keys == ec_meta.tensor_keys, (
+    assert sender_tensor_keys == send_keys, (
         "edge_cloud_isend_tensor_dict: tensor key set/order does not match "
-        f"the pre-computed EdgeCloudTensorMeta. sender={sender_tensor_keys}, "
-        f"expected={ec_meta.tensor_keys}. If this is a new model, extend "
+        f"the pre-computed EdgeCloudTensorMeta send keys. sender={sender_tensor_keys}, "
+        f"expected={send_keys}. If this is a new model, extend "
         "init_edge_cloud_tensor_meta() so both sides agree."
     )
 
@@ -759,7 +783,8 @@ def edge_cloud_isend_tensor_dict(
     # that each tensor's non-dim-0 shape matches the pre-computed metadata.
     # Dim-0 is allowed to differ when the sender has cudagraph/SP/DP padding
     # (which is sliced off below).
-    for key, value in tensor_dict.items():
+    for key in send_keys:
+        value = tensor_dict[key]
         if not isinstance(value, torch.Tensor) or value.numel() == 0:
             continue
         for meta_key, meta_val in ec_meta.metadata_list:
@@ -784,7 +809,7 @@ def edge_cloud_isend_tensor_dict(
         # Both sides must compute the same merged shape, which they do via
         # the shared EdgeCloudTensorMeta initialized in worker setup.
         pieces: list[torch.Tensor] = []
-        for key in ec_meta.tensor_keys:
+        for key in send_keys:
             value = tensor_dict[key]
             if not isinstance(value, torch.Tensor) or value.numel() == 0:
                 # The receiver expects every tensor key to contribute its
@@ -828,7 +853,8 @@ def edge_cloud_isend_tensor_dict(
         handles.append(handle)
         return handles
 
-    for _, value in tensor_dict.items():
+    for key in send_keys:
+        value = tensor_dict[key]
         if not isinstance(value, torch.Tensor):
             continue
         if value.numel() == 0:
@@ -1008,6 +1034,7 @@ def edge_cloud_irecv_tensor_dict(
     postprocess: list[Callable[[], None]] = []
 
     recv_num_tokens = _pad_num_tokens_to_tp_multiple(num_tokens)
+    send_keys = set(ec_meta.send_tensor_keys or ec_meta.tensor_keys)
 
     for key, value in ec_meta.metadata_list:
         if isinstance(value, TensorMetadata):
@@ -1022,11 +1049,17 @@ def edge_cloud_irecv_tensor_dict(
                 tensor_dict[key] = full_tensor
                 continue
 
-            recv_view = full_tensor[:num_tokens]
-            handle = torch.distributed.irecv(
-                recv_view, src=pp_group.ranks[src], group=group
-            )
-            handles.append(handle)
+            if key in send_keys:
+                recv_view = full_tensor[:num_tokens]
+                handle = torch.distributed.irecv(
+                    recv_view, src=pp_group.ranks[src], group=group
+                )
+                handles.append(handle)
+            else:
+                # The sender skipped this tensor (e.g. the zero residual in
+                # embedding_only e2c). Keep the buffer zeroed so the model
+                # layers see a valid residual without paying cross-node cost.
+                full_tensor.zero_()
             tensor_dict[key] = full_tensor
         else:
             tensor_dict[key] = value
