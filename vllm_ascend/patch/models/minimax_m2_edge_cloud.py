@@ -50,7 +50,7 @@ def _forward_edge_cloud_segment_minimax_m2(
             "check that all TP ranks receive tensors correctly."
         )
         hidden_states = intermediate_tensors["hidden_states"]
-        residual = intermediate_tensors["residual"]
+        residual = intermediate_tensors.get("residual")
 
     # MiniMaxM2DecoderLayer.forward does not accept **kwargs; do not forward
     # extra_layer_kwargs here or unrelated model_kwargs will raise TypeError.
