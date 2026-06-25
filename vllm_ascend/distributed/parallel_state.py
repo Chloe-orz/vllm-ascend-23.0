@@ -866,6 +866,13 @@ def edge_cloud_irecv_tensor_dict(
                 recv_view, src=pp_group.ranks[src], group=group
             )
             handles.append(handle)
+            # Only the leading num_tokens rows are filled by irecv; the
+            # TP-padding tail [num_tokens:recv_num_tokens] keeps torch.empty's
+            # undefined values. Zero it so the padding rows handed to
+            # downstream SP ops are deterministic zeros instead of garbage that
+            # NaN-propagates through norm/logits.
+            if recv_num_tokens > num_tokens:
+                full_tensor[num_tokens:].zero_()
             tensor_dict[key] = full_tensor
         else:
             tensor_dict[key] = value
@@ -918,7 +925,15 @@ def edge_cloud_broadcast_recv(
             def broadcast_postprocess(
                 merged_buf=merged_buf,
                 tensor_dict=tensor_dict,
+                num_tokens=num_tokens,
             ):
+                # irecv only filled the leading num_tokens rows; the
+                # TP-padding tail [num_tokens:] keeps torch.empty's undefined
+                # values. Zero it BEFORE the TP broadcast, otherwise every TP
+                # rank receives the garbage tail and it NaN-propagates
+                # through downstream norm/logits.
+                if merged_buf.shape[0] > num_tokens:
+                    merged_buf[num_tokens:].zero_()
                 tp_dev_group = tp_group.device_group
                 handle = torch.distributed.broadcast(
                     merged_buf,
