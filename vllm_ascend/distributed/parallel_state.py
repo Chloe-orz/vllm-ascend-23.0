@@ -268,8 +268,6 @@ def init_edge_cloud_tensor_meta(
         hidden_dtype,
         hidden_size,
         hc_mult,
-        merge_payload,
-        split_sizes,
     )
 
 
@@ -1291,7 +1289,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
     pp_group = get_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
-    ec_meta = get_edge_cloud_tensor_meta()
+    ec_meta = _select_edge_cloud_meta_for_recv()
 
     if is_pp_npu0:
         # PP rank 0: receive tensor data from the other side (edge/cloud)
