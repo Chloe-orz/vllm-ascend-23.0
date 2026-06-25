@@ -160,8 +160,10 @@ class PDSeparatedScheduler(Scheduler):
         return scheduler_output
 
     def _pick_by_state(self, state: PrefillState) -> SchedulerOutput:
+        # D尾必须无条件优先于 D首，防止 decode_inflight_count 在 D首
+        # 完成后立即释放导致 D尾 starvation。
         if state == PrefillState.IDLE:
-            # IDLE: P首/chunk0首 > D首 > D尾 > Empty.
+            # IDLE: P首/chunk0首 > D尾 > D首 > Empty.
             if self._can_schedule_prefill_first():
                 so = self._pick_prefill_first_batch()
                 if so.total_num_scheduled_tokens > 0:
@@ -175,14 +177,14 @@ class PDSeparatedScheduler(Scheduler):
                     "requests. Prefill work will be deferred until resources are freed."
                 )
                 self.finished_req_ids.update(so.finished_req_ids)
-            if self._can_schedule_decode_first():
-                return self._pick_decode_first_batch()
             if self.decodes_last_ready:
                 return self._pick_decode_last_batch()
+            if self._can_schedule_decode_first():
+                return self._pick_decode_first_batch()
             return self._make_empty_batch()
 
         if state == PrefillState.LOW:
-            # LOW: chunk/P首(when slot available) > P尾 > D首 > D尾 > Empty.
+            # LOW: chunk/P首(when slot available) > P尾 > D尾 > D首 > Empty.
             if self._can_schedule_prefill_first():
                 so = self._pick_prefill_first_batch()
                 if so.total_num_scheduled_tokens > 0:
@@ -195,19 +197,19 @@ class PDSeparatedScheduler(Scheduler):
                 self.finished_req_ids.update(so.finished_req_ids)
             if self.prefills_last_ready:
                 return self._pick_prefill_last_batch()
-            if self._can_schedule_decode_first():
-                return self._pick_decode_first_batch()
             if self.decodes_last_ready:
                 return self._pick_decode_last_batch()
+            if self._can_schedule_decode_first():
+                return self._pick_decode_first_batch()
             return self._make_empty_batch()
 
-        # HIGH: P尾 > D首 > D尾 > Empty. New P首 is forbidden.
+        # HIGH: P尾 > D尾 > D首 > Empty. New P首 is forbidden.
         if self.prefills_last_ready:
             return self._pick_prefill_last_batch()
-        if self._can_schedule_decode_first():
-            return self._pick_decode_first_batch()
         if self.decodes_last_ready:
             return self._pick_decode_last_batch()
+        if self._can_schedule_decode_first():
+            return self._pick_decode_first_batch()
         return self._make_empty_batch()
 
     def is_waiting_for_remote_tail(self) -> bool:
@@ -578,9 +580,18 @@ class PDSeparatedScheduler(Scheduler):
                 f"running[]: {len(self.running)}, "
                 f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
             )
-        if scheduler_output.batch_type == BatchType.DECODE_LAST:
+        if scheduler_output.batch_type == BatchType.DECODE_FIRST:
+            # D首完成后立即释放 inflight 计数，使下一个 D首可以
+            # 在 D尾仍在 batch_queue 中时就被调度，消除 Cloud idle gap。
             if self.decode_inflight_count > 0:
                 self.decode_inflight_count -= 1
+            logger.info(
+                f"[PD] update_from_output DECODE_FIRST done, "
+                f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
+            )
+        if scheduler_output.batch_type == BatchType.DECODE_LAST:
+            # decode_inflight_count 已在 DECODE_FIRST 的 update_from_output
+            # 中释放，此处不再重复减 1。
             logger.info(
                 f"[PD] update_from_output DECODE_LAST done, "
                 f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
