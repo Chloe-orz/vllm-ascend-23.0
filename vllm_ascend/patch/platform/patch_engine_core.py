@@ -72,7 +72,7 @@ from vllm.config import ParallelConfig
 from vllm.logger import init_logger, logger as vllm_logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 
 from vllm_ascend.v1.engine.passive_core import PPSchedulerZmqChannel
 
@@ -225,6 +225,76 @@ def _needs_sample_tokens(self, scheduler_output: SchedulerOutput) -> bool:
     return bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST)
 
 
+def _stash_empty_worker_cleanup(self, scheduler_output: SchedulerOutput) -> None:
+    """Keep worker-side cleanup from EMPTY batches for the next real batch."""
+    finished_req_ids = getattr(scheduler_output, "finished_req_ids", None)
+    free_encoder_mm_hashes = getattr(scheduler_output, "free_encoder_mm_hashes", None)
+    if not finished_req_ids and not free_encoder_mm_hashes:
+        return
+
+    pending_finished = getattr(self, "_pd_pending_finished_req_ids", None)
+    if pending_finished is None:
+        pending_finished = set()
+        self._pd_pending_finished_req_ids = pending_finished
+    pending_finished.update(finished_req_ids or ())
+
+    pending_mm_hashes = getattr(self, "_pd_pending_free_encoder_mm_hashes", None)
+    if pending_mm_hashes is None:
+        pending_mm_hashes = set()
+        self._pd_pending_free_encoder_mm_hashes = pending_mm_hashes
+    pending_mm_hashes.update(free_encoder_mm_hashes or ())
+
+
+def _merge_pending_worker_cleanup(self, scheduler_output: SchedulerOutput) -> None:
+    """Attach cleanup skipped with EMPTY batches to the next worker batch."""
+    pending_finished = getattr(self, "_pd_pending_finished_req_ids", None)
+    if pending_finished:
+        scheduler_output.finished_req_ids = set(
+            scheduler_output.finished_req_ids
+        ).union(pending_finished)
+        pending_finished.clear()
+
+    pending_mm_hashes = getattr(self, "_pd_pending_free_encoder_mm_hashes", None)
+    if pending_mm_hashes:
+        scheduler_output.free_encoder_mm_hashes = list(
+            dict.fromkeys([
+                *scheduler_output.free_encoder_mm_hashes,
+                *pending_mm_hashes,
+            ])
+        )
+        pending_mm_hashes.clear()
+
+
+def _finish_empty_batch(self, scheduler_output: SchedulerOutput):
+    """Complete an EMPTY SchedulerOutput without broadcasting to workers."""
+    self._stash_empty_worker_cleanup(scheduler_output)
+    self._process_aborts_queue()
+    with (
+        self.log_error_detail(scheduler_output),
+        self.log_iteration_details(scheduler_output),
+    ):
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT
+        )
+    return engine_core_outputs, False
+
+
+def _defer_empty_batch(self, scheduler_output: SchedulerOutput) -> None:
+    """Defer an EMPTY batch when queued model work must complete first."""
+    deferred = getattr(self, "_pd_deferred_empty_batches", None)
+    if deferred is None:
+        deferred = []
+        self._pd_deferred_empty_batches = deferred
+    deferred.append(scheduler_output)
+
+
+def _pop_deferred_empty_batch(self) -> SchedulerOutput | None:
+    deferred = getattr(self, "_pd_deferred_empty_batches", None)
+    if not deferred:
+        return None
+    return deferred.pop(0)
+
+
 # =======================================================================#
 # EngineCore.step — full replacement, mirrors upstream + dest inserts.    #
 # =======================================================================#
@@ -248,6 +318,11 @@ def _patched_step(self):
     # [ascend insert] Forward head-segment batches on the PRE_OUT
     # (edge → cloud) channel.
     self._maybe_publish_pre_out(scheduler_output)
+
+    if scheduler_output.batch_type == BatchType.EMPTY:
+        return self._finish_empty_batch(scheduler_output)
+
+    self._merge_pending_worker_cleanup(scheduler_output)
 
     future = self.model_executor.execute_model(
         scheduler_output, non_block=True
@@ -309,54 +384,64 @@ def _patched_step_with_batch_queue(self):
         # [ascend insert] Forward head-segment batches on PRE_OUT.
         self._maybe_publish_pre_out(scheduler_output)
 
-        with self.log_error_detail(scheduler_output):
-            exec_future = self.model_executor.execute_model(
-                scheduler_output, non_block=True
-            )
-        if self.is_ec_consumer:
-            model_executed = (
-                scheduler_output.total_num_scheduled_tokens > 0
-            )
-
-        if self.is_pooling_model or not model_executed:
-            # No sampling required (no requests scheduled).
-            future = cast(Future[ModelRunnerOutput], exec_future)
-        elif not self._needs_sample_tokens(scheduler_output):
-            # [ascend insert] Edge-cloud head segment (PF/DF): sampling is
-            # done in the tail segment (PL/DL) after the cloud returns
-            # intermediate tensors. Skip sample_tokens for the head
-            # segment.
-            future = cast(Future[ModelRunnerOutput], exec_future)
-        else:
-            if not scheduler_output.pending_structured_output_tokens:
-                grammar_output = self.scheduler.get_grammar_bitmask(
-                    scheduler_output
-                )
-                future = self.model_executor.sample_tokens(
-                    grammar_output, non_block=True
-                )
+        if scheduler_output.batch_type == BatchType.EMPTY:
+            if batch_queue:
+                self._defer_empty_batch(scheduler_output)
+                scheduler_output = None
             else:
-                deferred_scheduler_output = scheduler_output
+                return self._finish_empty_batch(scheduler_output)
 
-        if not deferred_scheduler_output:
-            batch_queue.appendleft((future, scheduler_output, exec_future))
-            # [ascend insert] Log batch_queue contents for debugging.
-            queue_types = [
-                so.batch_type.value
-                for _, so, _ in batch_queue
-            ]
-            vllm_logger.info(
-                "[BATCH_QUEUE] Enqueued %s, queue_len=%d, types=%s",
-                scheduler_output.batch_type.value,
-                len(batch_queue),
-                queue_types,
-            )
-            if (
-                model_executed
-                and len(batch_queue) < self.batch_queue_size
-                and not batch_queue[-1][0].done()
-            ):
-                return None, True
+        if scheduler_output is not None:
+            self._merge_pending_worker_cleanup(scheduler_output)
+
+            with self.log_error_detail(scheduler_output):
+                exec_future = self.model_executor.execute_model(
+                    scheduler_output, non_block=True
+                )
+            if self.is_ec_consumer:
+                model_executed = (
+                    scheduler_output.total_num_scheduled_tokens > 0
+                )
+
+            if self.is_pooling_model or not model_executed:
+                # No sampling required (no requests scheduled).
+                future = cast(Future[ModelRunnerOutput], exec_future)
+            elif not self._needs_sample_tokens(scheduler_output):
+                # [ascend insert] Edge-cloud head segment (PF/DF): sampling is
+                # done in the tail segment (PL/DL) after the cloud returns
+                # intermediate tensors. Skip sample_tokens for the head
+                # segment.
+                future = cast(Future[ModelRunnerOutput], exec_future)
+            else:
+                if not scheduler_output.pending_structured_output_tokens:
+                    grammar_output = self.scheduler.get_grammar_bitmask(
+                        scheduler_output
+                    )
+                    future = self.model_executor.sample_tokens(
+                        grammar_output, non_block=True
+                    )
+                else:
+                    deferred_scheduler_output = scheduler_output
+
+            if not deferred_scheduler_output:
+                batch_queue.appendleft((future, scheduler_output, exec_future))
+                # [ascend insert] Log batch_queue contents for debugging.
+                queue_types = [
+                    so.batch_type.value
+                    for _, so, _ in batch_queue
+                ]
+                vllm_logger.info(
+                    "[BATCH_QUEUE] Enqueued %s, queue_len=%d, types=%s",
+                    scheduler_output.batch_type.value,
+                    len(batch_queue),
+                    queue_types,
+                )
+                if (
+                    model_executed
+                    and len(batch_queue) < self.batch_queue_size
+                    and not batch_queue[-1][0].done()
+                ):
+                    return None, True
 
     elif not batch_queue:
         return None, False
@@ -376,6 +461,22 @@ def _patched_step_with_batch_queue(self):
     engine_core_outputs = self.scheduler.update_from_output(
         scheduler_output, model_output
     )
+
+    if deferred_empty_batch := self._pop_deferred_empty_batch():
+        empty_outputs, _ = self._finish_empty_batch(deferred_empty_batch)
+        if empty_outputs:
+            if engine_core_outputs:
+                for client_index, output in empty_outputs.items():
+                    existing = engine_core_outputs.get(client_index)
+                    if existing is None:
+                        engine_core_outputs[client_index] = output
+                    elif output.finished_requests:
+                        existing_finished = existing.finished_requests or set()
+                        existing.finished_requests = existing_finished.union(
+                            output.finished_requests
+                        )
+            else:
+                engine_core_outputs = empty_outputs
 
     if deferred_scheduler_output:
         if self.use_spec_decode:
@@ -502,6 +603,11 @@ def install() -> None:
     EngineCore._drain_pd_channel_inbox = _drain_pd_channel_inbox
     EngineCore._maybe_publish_pre_out = _maybe_publish_pre_out
     EngineCore._needs_sample_tokens = _needs_sample_tokens
+    EngineCore._stash_empty_worker_cleanup = _stash_empty_worker_cleanup
+    EngineCore._merge_pending_worker_cleanup = _merge_pending_worker_cleanup
+    EngineCore._finish_empty_batch = _finish_empty_batch
+    EngineCore._defer_empty_batch = _defer_empty_batch
+    EngineCore._pop_deferred_empty_batch = _pop_deferred_empty_batch
     EngineCore.step = _patched_step
     EngineCore.step_with_batch_queue = _patched_step_with_batch_queue
     EngineCore.shutdown = _patched_engine_core_shutdown
