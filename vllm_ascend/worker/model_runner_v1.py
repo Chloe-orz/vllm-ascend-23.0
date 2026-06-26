@@ -3390,12 +3390,6 @@ class NPUModelRunner(GPUModelRunner):
                     self.intermediate_tensors[k][:copy_len].copy_(
                         v[:copy_len], non_blocking=True
                     )
-                return IntermediateTensors(
-                    {
-                        k: v[:num_tokens]
-                        for k, v in self.intermediate_tensors.items()
-                    }
-                )
             else:
                 for k, v in intermediate_tensors.items():
                     copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
