@@ -5826,11 +5826,6 @@ class NPUModelRunner(GPUModelRunner):
                 # hidden_states/residual and handles TP/SP internally (e.g. VL
                 # first-layer special branch). Return all keys from the local
                 # buffer so residual is always present.
-                #
-                # The edge side strips cudagraph/SP padding before transmission,
-                # so the received tensors may be shorter than num_tokens. Copy
-                # the received prefix and zero-fill the padding locally to avoid
-                # a shape-mismatch copy_ error on NPUs (e.g. 60 vs 64).
                 for k, v in intermediate_tensors.items():
                     if not isinstance(v, torch.Tensor):
                         continue
@@ -5838,6 +5833,12 @@ class NPUModelRunner(GPUModelRunner):
                     self.intermediate_tensors[k][:copy_len].copy_(
                         v[:copy_len], non_blocking=True
                     )
+                return IntermediateTensors(
+                    {
+                        k: v[:num_tokens]
+                        for k, v in self.intermediate_tensors.items()
+                    }
+                )
             else:
                 for k, v in intermediate_tensors.items():
                     copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
