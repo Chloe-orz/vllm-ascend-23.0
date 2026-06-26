@@ -4305,11 +4305,23 @@ class NPUModelRunner(GPUModelRunner):
                     and self.edge_cloud_cfg.role == "cloud"
                     and self.edge_cloud_cfg.mode == "embedding_only"
                     and self.supports_mm_inputs):
+                # In edge-cloud embedding-only multimodal mode the edge sends
+                # the full sequence (it does not SP-chunk, see worker.py).
+                # The Cloud's first transformer layer expects full
+                # hidden_states/residual and handles TP/SP internally (e.g. VL
+                # first-layer special branch). Return all keys from the local
+                # buffer so residual is always present.
                 for k, v in intermediate_tensors.items():
                     copy_len = num_tokens
                     self.intermediate_tensors[k][:copy_len].copy_(
                         v[:copy_len], non_blocking=True
                     )
+                return IntermediateTensors(
+                    {
+                        k: v[:num_tokens]
+                        for k, v in self.intermediate_tensors.items()
+                    }
+                )
             else:
                 for k, v in intermediate_tensors.items():
                     copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
