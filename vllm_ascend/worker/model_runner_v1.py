@@ -835,6 +835,7 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_a: Any = None
             self.segment_e: Any = None
             self.segment_c: Any = None
+            self.segment_c_raw: Any = None
             self.segment_a_wrapper: Any = None
             self.segment_e_wrapper: Any = None
             self.segment_c_wrapper: Any = None
@@ -929,6 +930,46 @@ class NPUModelRunner(GPUModelRunner):
             return False
         return bool(getattr(forward_context, "in_profile_run", False))
 
+    def _create_raw_segment_callable(
+        self,
+        model: torch.nn.Module,
+        start_layer: int,
+        end_layer: int,
+        is_first_segment: bool | None = None,
+        is_last_segment: bool | None = None,
+    ) -> EdgeCloudSegment:
+        return EdgeCloudSegment(
+            model, start_layer, end_layer, is_first_segment, is_last_segment
+        )
+
+    def _maybe_compile_segment_callable(
+        self,
+        segment: Any,
+        start_layer: int,
+        end_layer: int,
+    ) -> Any:
+        # 若全局 enable_npugraph_ex 开启且当前处于全图模式，
+        # 对 segment 应用 npugraph_ex 编译时优化（第1层）。
+        # 第2层（ACLGraphWrapper 运行时捕获）由 _wrap_segment_if_needed 负责。
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        if (
+            ascend_compilation_config.enable_npugraph_ex
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            logger.info(
+                "EdgeCloudCompiledSegment wrapping segment [%d, %d) "
+                "with npugraph_ex compile-time optimization.",
+                start_layer,
+                end_layer,
+            )
+            return EdgeCloudCompiledSegment(
+                segment,
+                self.vllm_config,
+                ascend_compilation_config,
+            )
+
+        return segment
+
     def _create_segment_callable(
         self,
         model: torch.nn.Module,
@@ -951,31 +992,10 @@ class NPUModelRunner(GPUModelRunner):
         边云场景下所有模型均已在加载阶段通过对应 patch 文件注入
         forward_edge_cloud_segment，因此直接委托即可，无需额外 fallback。
         """
-        segment = EdgeCloudSegment(
+        segment = self._create_raw_segment_callable(
             model, start_layer, end_layer, is_first_segment, is_last_segment
         )
-
-        # 若全局 enable_npugraph_ex 开启且当前处于全图模式，
-        # 对 segment 应用 npugraph_ex 编译时优化（第1层）。
-        # 第2层（ACLGraphWrapper 运行时捕获）由 _wrap_segment_if_needed 负责。
-        ascend_compilation_config = get_ascend_config().ascend_compilation_config
-        if (
-            ascend_compilation_config.enable_npugraph_ex
-            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            logger.info(
-                "EdgeCloudCompiledSegment wrapping segment [%d, %d) "
-                "with npugraph_ex compile-time optimization.",
-                start_layer,
-                end_layer,
-            )
-            segment = EdgeCloudCompiledSegment(
-                segment,
-                self.vllm_config,
-                ascend_compilation_config,
-            )
-
-        return segment
+        return self._maybe_compile_segment_callable(segment, start_layer, end_layer)
 
     def _wrap_segment_if_needed(
         self,
@@ -1099,12 +1119,17 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_a_wrapper = self._wrap_segment_if_needed(self.segment_a)
             self.segment_e_wrapper = self._wrap_segment_if_needed(self.segment_e)
         else:
-            self.segment_c = self._create_segment_callable(
+            self.segment_c_raw = self._create_raw_segment_callable(
                 self.model,
                 self.head_k,
                 self.num_layers - self.tail_k,
                 is_first_segment=False,
                 is_last_segment=False,
+            )
+            self.segment_c = self._maybe_compile_segment_callable(
+                self.segment_c_raw,
+                self.head_k,
+                self.num_layers - self.tail_k,
             )
             self.segment_c_wrapper = self._wrap_segment_if_needed(self.segment_c)
 
@@ -4167,7 +4192,26 @@ class NPUModelRunner(GPUModelRunner):
             "Cloud segment_c requires intermediate_tensors from Edge side"
         )
 
-        seg_c = self.segment_c_wrapper if use_graph else self.segment_c
+        if layer_slice_info is not None:
+            # Cloud prefill layer slicing changes layer_slice_start/end per
+            # slice. EdgeCloudCompiledSegment/npugraph_ex may specialize those
+            # Python int ranges from the first slice and reuse them for later
+            # slices, causing wrong-layer execution. Use the raw segment for
+            # sliced prefill while keeping graph/compile for decode and
+            # non-sliced prefill.
+            seg_c = self.segment_c_raw
+            logger.debug(
+                "[EdgeCloud] Cloud sliced prefill uses raw segment: "
+                "slice=%d/%d local=[%d,%d) global=[%d,%d)",
+                layer_slice_info.slice_index + 1,
+                layer_slice_info.total_slices,
+                layer_slice_info.start_layer,
+                layer_slice_info.end_layer,
+                layer_slice_info.start_layer + self.head_k,
+                layer_slice_info.end_layer + self.head_k,
+            )
+        else:
+            seg_c = self.segment_c_wrapper if use_graph else self.segment_c
         seg_c_graph = isinstance(seg_c, ACLGraphWrapper)
 
         cloud_layer_indices = list(range(
