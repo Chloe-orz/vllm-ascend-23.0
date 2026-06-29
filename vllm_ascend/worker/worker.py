@@ -74,6 +74,8 @@ from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_sp,
     get_ascend_device_type,
+    pp_batch_enabled,
+    pp_log_batch,
     pp_timing_enabled,
     pp_timing_sync,
     register_ascend_customop,
@@ -183,6 +185,9 @@ class NPUWorker(WorkerBase):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.20.2; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
+        # PP_BATCH 打印用的步序号与 prefill 步累计计数（仅 rank 0 递增）。
+        self._pp_batch_step: int = 0
+        self._pp_prefill_count: int = 0
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -527,14 +532,27 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
-        role = "standard"  # default, may be overridden below
+        # role 在打点与 batch 打印间共用，因此无条件计算（开销可忽略，
+        # is_edge_device / is_cloud_device 在本函数下方本就每步调用）。
+        role = "standard"
+        if is_edge_device():
+            role = "edge"
+        elif is_cloud_device():
+            role = "cloud"
+
         if pp_timing_enabled():
-            if is_edge_device():
-                role = "edge"
-            elif is_cloud_device():
-                role = "cloud"
             pp_timing_sync()
             print(f"[PP_TIMING][{role}][worker_entry] {time.perf_counter()}")
+
+        if pp_batch_enabled() and scheduler_output.total_num_scheduled_tokens > 0:
+            self._pp_batch_step += 1
+            n_prefill = pp_log_batch(role, scheduler_output, self._pp_batch_step)
+            if n_prefill > 0:
+                self._pp_prefill_count += 1
+                print(
+                    f"[PP_BATCH][step={self._pp_batch_step}] "
+                    f"cumulative_prefill_batches={self._pp_prefill_count}"
+                )
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
@@ -597,13 +615,13 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
-        if pp_timing_enabled():
-            pp_timing_sync()
-            print(f"[PP_TIMING][{role}][runner_entry] {time.perf_counter()}")
+        # if pp_timing_enabled():
+        #     pp_timing_sync()
+        #     print(f"[PP_TIMING][{role}][runner_entry] {time.perf_counter()}")
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if pp_timing_enabled():
-            pp_timing_sync()
-            print(f"[PP_TIMING][{role}][runner_done] {time.perf_counter()}")
+        # if pp_timing_enabled():
+        #     pp_timing_sync()
+        #     print(f"[PP_TIMING][{role}][runner_done] {time.perf_counter()}")
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -652,13 +670,13 @@ class NPUWorker(WorkerBase):
                 pp_timing_sync()
                 print(f"[PP_TIMING][edge][recv_from_cloud] {time.perf_counter()}")
 
-            if pp_timing_enabled():
-                pp_timing_sync()
-                print(f"[PP_TIMING][edge][runner_entry_e] {time.perf_counter()}")
+            # if pp_timing_enabled():
+            #     pp_timing_sync()
+            #     print(f"[PP_TIMING][edge][runner_entry_e] {time.perf_counter()}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-            if pp_timing_enabled():
-                pp_timing_sync()
-                print(f"[PP_TIMING][edge][runner_done_e] {time.perf_counter()}")
+            # if pp_timing_enabled():
+            #     pp_timing_sync()
+            #     print(f"[PP_TIMING][edge][runner_done_e] {time.perf_counter()}")
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
