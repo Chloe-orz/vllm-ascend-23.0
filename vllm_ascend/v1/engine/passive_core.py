@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Optional
 
 import zmq
 from vllm import envs
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value,
 )
@@ -53,8 +53,6 @@ from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-logger = init_logger(__name__)
 
 
 def _import_passive_scheduler_module():
@@ -451,6 +449,9 @@ class PassiveEngineCoreProc:
             )
             self.executor.rpc_broadcast_mq.enqueue(
                 (b"pp_scheduler_output", payload, {}, None)
+            )
+            logger.info(
+                f"[BATCH_QUEUE] Enqueued {batch.scheduler_output.batch_type.value}"
             )
             # PD-separation: on the cloud side, publish the rewritten
             # tail-segment SchedulerOutput on POST_OUT only when the dispatched
