@@ -456,10 +456,9 @@ class PDSeparatedScheduler(Scheduler):
             if scheduler_output is not None:
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     scheduler_output.batch_type = BatchType.EMPTY
-                    logger.error(
-                        "DECODE_FIRST returned empty batch (total_num_scheduled_tokens=0) "
-                        "despite %d running requests. This indicates a severe KV cache "
-                        "shortage or scheduler budget exhaustion.",
+                    logger.debug(
+                        "DECODE_FIRST race: empty batch due to async "
+                        "update_from_output delay, running=%d",
                         len(self.running),
                     )
                 else:
