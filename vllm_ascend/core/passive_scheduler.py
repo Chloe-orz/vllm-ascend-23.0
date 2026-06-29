@@ -544,6 +544,16 @@ class PassiveScheduler:
 
     def _schedule_expect_alternation(self) -> ScheduledBatch:
         state = self.cloud_scheduling_state
+        logger.error(
+            "[PD-PASSIVE] Before expect_alternation schedule: "
+            "state=%s, schedulable=(prefills=%d, active_prefill_slices=%d, "
+            "pdmixes=%d, decodes=%d)",
+            state.value,
+            len(self.ready_prefills),
+            len(self._active_prefill_slices),
+            len(self.ready_pdmixes),
+            len(self.ready_decodes),
+        )
         if state == CloudSchedulingState.EXPECT_EXECUTE_PREFILL:
             if self._active_prefill_slices:
                 self.cloud_scheduling_state = (
