@@ -281,9 +281,15 @@ def update_full_graph_params(
     # Lazy import to avoid circular dependency:
     # acl_graph_edge_cloud.py imports ACLGraphWrapper / GraphParams from this module,
     # so we import graph_params_scope inside the function body.
-    from vllm_ascend.compilation.acl_graph_edge_cloud import graph_params_scope
+    from vllm_ascend.compilation.acl_graph_edge_cloud import (
+        graph_params_scope_no_sync,
+    )
 
-    with graph_params_scope(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
+    # 使用 no_sync 变体：update 的 op 全部 launch 到独立 update_stream，
+    # 与下一次 replay 的 CPU 准备阶段重叠。replay 内部已通过 ExternalEvent
+    # （capture 时 event.wait 烧入图）保证 replay 在 update 完成后才执行，
+    # 因此无需在此 host-block 同步主 stream，否则会破坏 CPU-NPU 掩盖。
+    with graph_params_scope_no_sync(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
         impl_cls = attn_backend.get_impl_cls()
 
         # Use the caller-supplied unfiltered metadata if available;
