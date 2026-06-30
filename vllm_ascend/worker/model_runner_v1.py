@@ -3908,18 +3908,18 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
@@ -3945,17 +3945,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -4233,15 +4233,6 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 _EXTRA_CTX.layer_idx = self.head_k
 
-        # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
-        # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
-        # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
-        if seg_c_graph and not forward_context.capturing:
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions,
-                layer_indices=cloud_layer_indices,
-                graph_wrapper=seg_c,
-            )
         if layer_slice_info is not None:
             model_kwargs = dict(model_kwargs)
             model_kwargs["layer_slice_start"] = (
@@ -4252,12 +4243,18 @@ class NPUModelRunner(GPUModelRunner):
             )
             if not layer_slice_info.is_last_slice:
                 model_kwargs["layer_slice_return_intermediate"] = True
-
         hidden_states = seg_c(
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             **model_kwargs,
         )
+        if seg_c_graph and not forward_context.capturing:
+            self._update_full_graph_params_if_needed(
+                forward_context, num_tokens_padded, positions,
+                layer_indices=cloud_layer_indices,
+                graph_wrapper=seg_c,
+            )
+        
         if old_layer_idx is not None:
             _EXTRA_CTX.layer_idx = old_layer_idx
 
