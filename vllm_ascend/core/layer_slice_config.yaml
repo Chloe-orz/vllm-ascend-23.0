@@ -19,6 +19,11 @@
 # This file supports hot-reload: modify and save while the service is
 # running; the next prefill batch will pick up the new config automatically.
 
+# Cloud-side prefill-middle throttle: how long (in milliseconds) to wait for
+# a decode-middle batch before falling back to another prefill-middle slice.
+# Default: 10 (ms).
+prefill_middle_throttle_ms: 10
+
 16: 24
 8: 10
 4: 4
