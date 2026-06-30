@@ -389,9 +389,26 @@ class PassiveScheduler:
                     "Layer-slice config %s is not a dict; ignoring.", yaml_path
                 )
                 return None
+            # Extract optional prefill_middle_throttle_ms (milliseconds) before filtering.
+            _throttle_key = "prefill_middle_throttle_ms"
+            if _throttle_key in raw:
+                try:
+                    self._prefill_middle_throttle_seconds = float(raw[_throttle_key]) / 1000.0
+                    logger.info(
+                        "[PassiveScheduler] %s set to %.1f ms (%.3f s) from %s",
+                        _throttle_key, float(raw[_throttle_key]),
+                        self._prefill_middle_throttle_seconds, yaml_path,
+                    )
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Invalid %s value %r in %s; keeping %.3f s",
+                        _throttle_key, raw[_throttle_key], yaml_path,
+                        self._prefill_middle_throttle_seconds,
+                    )
+
             # Normalize to int keys / values and sort descending by token threshold.
             config = {
-                int(k): int(v) for k, v in raw.items()
+                int(k): int(v) for k, v in raw.items() if isinstance(k, (int, str)) and str(k).lstrip('-').isdigit()
             }
             self._layer_slice_config_path = yaml_path
             self._layer_slice_config_mtime = os.path.getmtime(yaml_path)
