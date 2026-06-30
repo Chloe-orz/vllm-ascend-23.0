@@ -5165,18 +5165,18 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
@@ -5202,17 +5202,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -5565,41 +5565,22 @@ class NPUModelRunner(GPUModelRunner):
         from vllm_ascend.ascend_forward_context import _EXTRA_CTX
         old_layer_idx = _EXTRA_CTX.layer_idx
         if _EXTRA_CTX.layer_idx is not None:
-            if layer_slice_info is not None:
-                # Layer-sliced execution: each slice starts at a different
-                # local layer.  Add head_k offset to get the global layer
-                # index so that weight_prefetch / EPLB route to the correct
-                # layer weights for this slice.
-                _EXTRA_CTX.layer_idx = (
-                    layer_slice_info.start_layer + self.head_k
+            _EXTRA_CTX.layer_idx = self.head_k
+        try:
+            hidden_states = seg_c(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
+            if seg_c_graph and not forward_context.capturing:
+                self._update_full_graph_params_if_needed(
+                    forward_context, num_tokens_padded, positions,
+                    layer_indices=cloud_layer_indices,
+                    graph_wrapper=seg_c,
                 )
-            else:
-                _EXTRA_CTX.layer_idx = self.head_k
-
-        if layer_slice_info is not None:
-            model_kwargs = dict(model_kwargs)
-            model_kwargs["layer_slice_start"] = (
-                layer_slice_info.start_layer + self.head_k
-            )
-            model_kwargs["layer_slice_end"] = (
-                layer_slice_info.end_layer + self.head_k
-            )
-            if not layer_slice_info.is_last_slice:
-                model_kwargs["layer_slice_return_intermediate"] = True
-        hidden_states = seg_c(
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            **model_kwargs,
-        )
-        if seg_c_graph and not forward_context.capturing:
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions,
-                layer_indices=cloud_layer_indices,
-                graph_wrapper=seg_c,
-            )
-        
-        if old_layer_idx is not None:
-            _EXTRA_CTX.layer_idx = old_layer_idx
+        finally:
+            if old_layer_idx is not None:
+                _EXTRA_CTX.layer_idx = old_layer_idx
 
         # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
         assert isinstance(hidden_states, IntermediateTensors)
