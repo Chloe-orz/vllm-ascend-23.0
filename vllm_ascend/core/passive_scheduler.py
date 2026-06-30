@@ -153,6 +153,9 @@ class PassiveScheduler:
         self._subscriber_thread: threading.Thread | None = None
         self._shutdown_event = threading.Event()
 
+        # [DIAG] Track DECODE_FIRST arrival intervals on the cloud side.
+        self._last_decode_first_arrival_ts: float | None = None
+
         # Precompute local layer count.  The actual slice count is resolved
         # per-batch from a YAML config (token threshold -> slice count).
         self._num_local_layers = 0
@@ -290,6 +293,14 @@ class PassiveScheduler:
                 self.ready_prefills.append(scheduler_output)
             elif bt in (BatchType.PURE_DECODE, BatchType.DECODE_FIRST):
                 # Same reasoning as above for decode head segments.
+                now = time.monotonic()
+                if self._last_decode_first_arrival_ts is not None:
+                    interval_ms = (now - self._last_decode_first_arrival_ts) * 1000
+                    logger.info(
+                        "DECODE_FIRST arrival interval: %.2f ms",
+                        interval_ms,
+                    )
+                self._last_decode_first_arrival_ts = now
                 self.ready_decodes.append(scheduler_output)
             elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
                 # Tail-segment batches are edge-only and must never be
@@ -378,9 +389,26 @@ class PassiveScheduler:
                     "Layer-slice config %s is not a dict; ignoring.", yaml_path
                 )
                 return None
+            # Extract optional prefill_middle_throttle_ms (milliseconds) before filtering.
+            _throttle_key = "prefill_middle_throttle_ms"
+            if _throttle_key in raw:
+                try:
+                    self._prefill_middle_throttle_seconds = float(raw[_throttle_key]) / 1000.0
+                    logger.info(
+                        "[PassiveScheduler] %s set to %.1f ms (%.3f s) from %s",
+                        _throttle_key, float(raw[_throttle_key]),
+                        self._prefill_middle_throttle_seconds, yaml_path,
+                    )
+                except (ValueError, TypeError):
+                    logger.warning(
+                        "Invalid %s value %r in %s; keeping %.3f s",
+                        _throttle_key, raw[_throttle_key], yaml_path,
+                        self._prefill_middle_throttle_seconds,
+                    )
+
             # Normalize to int keys / values and sort descending by token threshold.
             config = {
-                int(k): int(v) for k, v in raw.items()
+                int(k): int(v) for k, v in raw.items() if isinstance(k, (int, str)) and str(k).lstrip('-').isdigit()
             }
             self._layer_slice_config_path = yaml_path
             self._layer_slice_config_mtime = os.path.getmtime(yaml_path)
