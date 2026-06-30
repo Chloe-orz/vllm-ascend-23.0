@@ -592,6 +592,7 @@ class NPUWorker(WorkerBase):
                     intermediate_tensors.wait_for_comm()
                     pp_timing_sync()
                     print(f"[PP_TIMING][cloud][pp_recv_done] {time.perf_counter()}")
+                    print(f"[PP_TIMING][cloud][recv tensor] {intermediate_tensors}")
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
                 # it will conflict with the all-gather operation in flashcomm1.
@@ -669,6 +670,7 @@ class NPUWorker(WorkerBase):
                 intermediate_tensors.wait_for_comm()
                 pp_timing_sync()
                 print(f"[PP_TIMING][edge][recv_from_cloud] {time.perf_counter()}")
+                print(f"[PP_TIMING][edge][recv tensor] {intermediate_tensors}")
 
             if pp_timing_enabled():
                 pp_timing_sync()

@@ -2891,6 +2891,7 @@ class NPUModelRunner(GPUModelRunner):
                 if len(filtered_metadata) != len(original_attn_metadata):
                     forward_context.attn_metadata = filtered_metadata
             try:
+                self._pp_timing("start update_graph_params", sync_npu=True)
                 update_full_graph_params(
                     self.attn_backend,
                     self.update_stream,
@@ -2906,6 +2907,7 @@ class NPUModelRunner(GPUModelRunner):
                     ),
                     unfiltered_attn_metadata=original_attn_metadata,
                 )
+                self._pp_timing("end update_graph_params", sync_npu=True)
             finally:
                 forward_context.attn_metadata = original_attn_metadata
 
