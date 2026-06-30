@@ -219,6 +219,10 @@ class ACLGraphWrapper:
 def weak_ref_workspaces(params):
     if params is None:
         return
+    # 边云 segment 的 workspace 生命周期与标准路径一致：capture 后转弱引用，
+    # 由 npugraph 的 graph pool 保活显存，capture 多 batch_size 时可被复用，
+    # 避免强引用累积导致 capture 阶段 OOM。
+    # （边云首次 replay 正确性由"首次 replay 前 pre-update"保证，与 workspace 无关。）
     for num_tokens in params.workspaces:
         if params.workspaces[num_tokens] is None:
             continue
@@ -253,9 +257,15 @@ def update_full_graph_params(
     # Lazy import to avoid circular dependency:
     # acl_graph_edge_cloud.py imports ACLGraphWrapper / GraphParams from this module,
     # so we import graph_params_scope inside the function body.
-    from vllm_ascend.compilation.acl_graph_edge_cloud import graph_params_scope
+    from vllm_ascend.compilation.acl_graph_edge_cloud import (
+        graph_params_scope_no_sync,
+    )
 
-    with graph_params_scope(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
+    # 使用 no_sync 变体：update 的 op 全部 launch 到独立 update_stream，
+    # 与下一次 replay 的 CPU 准备阶段重叠。replay 内部已通过 ExternalEvent
+    # （capture 时 event.wait 烧入图）保证 replay 在 update 完成后才执行，
+    # 因此无需在此 host-block 同步主 stream，否则会破坏 CPU-NPU 掩盖。
+    with graph_params_scope_no_sync(graph_params, draft_graph_params), set_current_vllm_config(vllm_config):
         impl_cls = attn_backend.get_impl_cls()
 
         # Use the caller-supplied unfiltered metadata if available;

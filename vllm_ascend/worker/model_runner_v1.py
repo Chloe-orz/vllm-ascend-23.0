@@ -3262,12 +3262,7 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
+                
                 self._pp_timing("segment_a_entry", sync_npu=True)
                 hidden_states = seg_a(
                     input_ids=input_ids,
@@ -3276,6 +3271,12 @@ class NPUModelRunner(GPUModelRunner):
                     **model_kwargs,
                 )
                 self._pp_timing("segment_a_done", sync_npu=True)
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
@@ -3301,12 +3302,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
-            if seg_e_graph and not forward_context.capturing:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions,
-                    layer_indices=tail_layer_indices,
-                    graph_wrapper=seg_e,
-                )
             self._pp_timing("segment_e_entry", sync_npu=True)
             hidden_states = seg_e(
                 positions=positions,
@@ -3314,6 +3309,12 @@ class NPUModelRunner(GPUModelRunner):
                 **model_kwargs,
             )
             self._pp_timing("segment_e_done", sync_npu=True)
+            if seg_e_graph and not forward_context.capturing:
+                self._update_full_graph_params_if_needed(
+                    forward_context, num_tokens_padded, positions,
+                    layer_indices=tail_layer_indices,
+                    graph_wrapper=seg_e,
+                )
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -3358,15 +3359,6 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
         try:
-            # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
-            # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
-            # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
-            if seg_c_graph and not forward_context.capturing:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions,
-                    layer_indices=cloud_layer_indices,
-                    graph_wrapper=seg_c,
-                )
             self._pp_timing("segment_c_entry", sync_npu=True)
             hidden_states = seg_c(
                 positions=positions,
@@ -3374,6 +3366,12 @@ class NPUModelRunner(GPUModelRunner):
                 **model_kwargs,
             )
             self._pp_timing("segment_c_done", sync_npu=True)
+            if seg_c_graph and not forward_context.capturing:
+                self._update_full_graph_params_if_needed(
+                    forward_context, num_tokens_padded, positions,
+                    layer_indices=cloud_layer_indices,
+                    graph_wrapper=seg_c,
+                )
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
@@ -5450,8 +5448,13 @@ class NPUModelRunner(GPUModelRunner):
                 wrappers = []
                 if self.edge_cloud_cfg.role == "edge":
                     wrappers = [self.segment_a_wrapper, self.segment_e_wrapper]
+                    # capture 前重置：首次回放走 pre-update（保证正确），
+                    # 之后切换到 post-update（与下一轮 CPU 准备重叠）
+                    self._seg_a_post_update_mode = False
+                    self._seg_e_post_update_mode = False
                 elif self.edge_cloud_cfg.role == "cloud":
                     wrappers = [self.segment_c_wrapper]
+                    self._seg_c_post_update_mode = False
                 for wrapper in wrappers:
                     if isinstance(wrapper, ACLGraphWrapper):
                         wrapper.graph_params = make_graph_params(self.cudagraph_batch_sizes)
