@@ -17,6 +17,12 @@ from vllm_ascend.compilation.acl_graph import (
     GraphParams,
 )
 
+from vllm_ascend.utils import (
+    pp_timing_enabled,
+    pp_timing_sync,
+)
+import time
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any
@@ -61,6 +67,10 @@ def graph_params_scope(
 
     退出时同步 NPU 流并恢复原值，防止后续 segment 读到错误参数。
     """
+    if pp_timing_enabled():
+        pp_timing_sync()
+        print(f"[PP_TIMING][edge][graph_params_scope start] {time.perf_counter()}")
+
     old_graph_params = _acl_graph._graph_params
     old_draft_graph_params = _acl_graph._draft_graph_params
     if graph_params is not None:
@@ -70,10 +80,14 @@ def graph_params_scope(
     try:
         yield
     finally:
-        if graph_params is not None:
-            torch.npu.current_stream().synchronize()
+        # if graph_params is not None:
+        #     torch.npu.current_stream().synchronize()
         _acl_graph._graph_params = old_graph_params
         _acl_graph._draft_graph_params = old_draft_graph_params
+    
+    if pp_timing_enabled():
+        pp_timing_sync()
+        print(f"[PP_TIMING][edge][graph_params_scope end] {time.perf_counter()}")
 
 
 # ============================================================
