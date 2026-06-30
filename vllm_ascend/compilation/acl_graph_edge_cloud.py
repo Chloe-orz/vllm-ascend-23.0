@@ -76,6 +76,30 @@ def graph_params_scope(
         _acl_graph._draft_graph_params = old_draft_graph_params
 
 
+@contextmanager
+def graph_params_scope_no_sync(
+    graph_params: GraphParams | None,
+    draft_graph_params: GraphParams | None = None,
+):
+    """与 graph_params_scope 相同，但退出时不同步 NPU 主 stream。
+
+    仅用于 update_full_graph_params 等已知 work 全在独立 update_stream 上、
+    且不需要阻塞主 stream 的场景。图回放前仍需由调用方保证 update_stream
+    上的参数更新已全部完成。
+    """
+    old_graph_params = _acl_graph._graph_params
+    old_draft_graph_params = _acl_graph._draft_graph_params
+    if graph_params is not None:
+        _acl_graph._graph_params = graph_params
+    if draft_graph_params is not None:
+        _acl_graph._draft_graph_params = draft_graph_params
+    try:
+        yield
+    finally:
+        _acl_graph._graph_params = old_graph_params
+        _acl_graph._draft_graph_params = old_draft_graph_params
+
+
 # ============================================================
 #  边云分段 ACLGraphWrapper
 #  —— 继承标准 ACLGraphWrapper，在 __call__ 中注入
@@ -112,5 +136,8 @@ class EdgeCloudACLGraphWrapper(ACLGraphWrapper):
         self.draft_graph_params: GraphParams | None = None
 
     def __call__(self, *args, **kwargs):
-        with graph_params_scope(self.graph_params, self.draft_graph_params):
+        # 使用 no_sync 变体：capture 时仅切换 _graph_params 指针供 attention 后端
+        # 填充本 segment 参数，replay 时指针切换无副作用（replay 不再读取全局指针）。
+        # 不在退出时同步主 stream，避免 replay 后 host-block 破坏 CPU-NPU 掩盖。
+        with graph_params_scope_no_sync(self.graph_params, self.draft_graph_params):
             return super().__call__(*args, **kwargs)
