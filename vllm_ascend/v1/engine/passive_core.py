@@ -407,6 +407,9 @@ class PassiveEngineCoreProc:
             )
         self._idle_sleep_seconds = 0.001
 
+        # [DIAG] Track step interval on the cloud side.
+        self._last_step_ts: float | None = None
+
     def step(self) -> bool:
         """Single tick: poll ZMQ → pick batches → enqueue worker payloads.
 
@@ -417,6 +420,15 @@ class PassiveEngineCoreProc:
             True if at least one payload was enqueued, False if the
             scheduler had nothing to dispatch.
         """
+        now = time.monotonic()
+        if self._last_step_ts is not None:
+            interval_ms = (now - self._last_step_ts) * 1000
+            logger.info(
+                "Cloud step interval: %.2f ms",
+                interval_ms,
+            )
+        self._last_step_ts = now
+
         self.passive_scheduler.poll_and_classify()
         batch = self.passive_scheduler.schedule()
         if batch.is_empty():

@@ -153,6 +153,9 @@ class PassiveScheduler:
         self._subscriber_thread: threading.Thread | None = None
         self._shutdown_event = threading.Event()
 
+        # [DIAG] Track DECODE_FIRST arrival intervals on the cloud side.
+        self._last_decode_first_arrival_ts: float | None = None
+
         # Precompute local layer count.  The actual slice count is resolved
         # per-batch from a YAML config (token threshold -> slice count).
         self._num_local_layers = 0
@@ -290,6 +293,14 @@ class PassiveScheduler:
                 self.ready_prefills.append(scheduler_output)
             elif bt in (BatchType.PURE_DECODE, BatchType.DECODE_FIRST):
                 # Same reasoning as above for decode head segments.
+                now = time.monotonic()
+                if self._last_decode_first_arrival_ts is not None:
+                    interval_ms = (now - self._last_decode_first_arrival_ts) * 1000
+                    logger.info(
+                        "DECODE_FIRST arrival interval: %.2f ms",
+                        interval_ms,
+                    )
+                self._last_decode_first_arrival_ts = now
                 self.ready_decodes.append(scheduler_output)
             elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
                 # Tail-segment batches are edge-only and must never be
