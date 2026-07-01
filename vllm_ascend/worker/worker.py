@@ -674,9 +674,9 @@ class NPUWorker(WorkerBase):
             #     pp_timing_sync()
             #     print(f"[PP_TIMING][edge][runner_entry_e] {time.perf_counter()}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-            # if pp_timing_enabled():
-            #     pp_timing_sync()
-            #     print(f"[PP_TIMING][edge][runner_done_e] {time.perf_counter()}")
+            if pp_timing_enabled():
+                pp_timing_sync()
+                print(f"[PP_TIMING][edge][runner_done_e] {time.perf_counter()}")
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output
