@@ -201,6 +201,52 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             return 0
         return super()._get_output_rank()
 
+    def execute_model(  # type: ignore[override]
+        self, scheduler_output, non_block: bool = False
+    ):
+        # [ascend] Edge-cloud: deliver execute_model to local edge workers
+        # only (local_only), so the SchedulerOutput is never serialized
+        # cross-node to the cloud. The cloud receives work solely via ZMQ
+        # (PassiveEngineCore -> cloud local rpc_broadcast_mq, method
+        # b"pp_scheduler_output"); edge-only tail segments (PREFILL_LAST /
+        # DECODE_LAST) must never reach the cloud at all. Edge workers are
+        # local readers of rpc_broadcast_mq and are unaffected by
+        # local_only; only the remote (TCP) send to the cloud is skipped.
+        pc = self.parallel_config
+        if not (
+            getattr(pc, "enable_edge_cloud", False)
+            and getattr(pc, "is_edge_node", False)
+        ):
+            return super().execute_model(scheduler_output, non_block=non_block)
+
+        assert self.rpc_broadcast_mq is not None, (
+            "execute_model should not be called on a follower node"
+        )
+        if self.is_failed:
+            raise RuntimeError("Executor failed.")
+
+        output_rank = self.output_rank  # 0 in edge-cloud (see _get_output_rank)
+        self.rpc_broadcast_mq.enqueue(
+            ("execute_model", (scheduler_output,), {}, output_rank),
+            local_only=True,
+        )
+
+        response_mq = self.response_mqs[output_rank]
+
+        def get_response():
+            status, result = response_mq.dequeue()
+            if status != WorkerProc.ResponseStatus.SUCCESS:
+                raise RuntimeError(
+                    f"Worker failed with error '{result}', please check the"
+                    " stack trace above for the root cause"
+                )
+            return result
+
+        future = FutureWrapper(
+            self.futures_queue, get_response=get_response, aggregate=lambda x: x
+        )
+        return future if non_block else future.result()
+
 
 class AscendWorkerProc(WorkerProc):
     def _init_message_queues(
