@@ -480,8 +480,6 @@ class PassiveEngineCoreProc:
             )
         self._idle_sleep_seconds = 0.001
 
-        # [DIAG] Track step interval on the cloud side.
-        self._last_step_ts: float | None = None
         self._prev_dispatch_req_ids: set[str] = set()
         self._pending_post_out_by_head_token: dict[str, SchedulerOutput] = {}
         self._published_post_out_tokens: set[str] = set()
@@ -532,15 +530,6 @@ class PassiveEngineCoreProc:
             True if at least one payload was enqueued, False if the
             scheduler had nothing to dispatch.
         """
-        now = time.monotonic()
-        if self._last_step_ts is not None:
-            interval_ms = (now - self._last_step_ts) * 1000
-            logger.info(
-                "Cloud step interval: %.2f ms",
-                interval_ms,
-            )
-        self._last_step_ts = now
-
         self._drain_worker_completion_acks()
         self.passive_scheduler.poll_and_classify()
         batch = self.passive_scheduler.schedule()
