@@ -33,6 +33,7 @@ the upstream ``vllm/v1/engine/core.py`` stays untouched.
 """
 from __future__ import annotations
 
+import copy
 import os
 import pickle
 import queue
@@ -345,6 +346,78 @@ class PPSchedulerZmqChannel:
         self._subscriber.shutdown()
 
 
+
+
+def _trim_scheduler_output_for_worker_enqueue(
+    scheduler_output: SchedulerOutput,
+    prev_dispatch_req_ids: set[str] | None,
+) -> SchedulerOutput:
+    """Trim large cached token lists before cloud EngineCore -> worker MQ.
+
+    Cloud worker ``_update_states`` only needs ``all_token_ids`` for cached
+    requests that are not already in its persistent batch and have output
+    tokens.  The best local approximation is the previous cloud dispatch batch:
+    continuously dispatched requests can drop ``all_token_ids`` while newly
+    appearing / resumed requests keep it.
+    """
+    cached = scheduler_output.scheduled_cached_reqs
+    if cached is None:
+        return scheduler_output
+
+    all_token_ids = getattr(cached, "all_token_ids", None)
+    if not all_token_ids:
+        return scheduler_output
+
+    prev_dispatch_req_ids = prev_dispatch_req_ids or set()
+    resumed_req_ids = getattr(cached, "resumed_req_ids", set()) or set()
+    num_output_tokens_by_req = {
+        req_id: num_output_tokens
+        for req_id, num_output_tokens in zip(
+            getattr(cached, "req_ids", ()),
+            getattr(cached, "num_output_tokens", ()),
+        )
+    }
+    keep_req_ids = {
+        req_id
+        for req_id in all_token_ids
+        if req_id in resumed_req_ids
+        or (
+            req_id not in prev_dispatch_req_ids
+            and num_output_tokens_by_req.get(req_id, 0) > 0
+        )
+    }
+    trimmed_all_token_ids = {
+        req_id: token_ids
+        for req_id, token_ids in all_token_ids.items()
+        if req_id in keep_req_ids
+    }
+    if len(trimmed_all_token_ids) == len(all_token_ids):
+        return scheduler_output
+
+    before_tokens = sum(len(token_ids) for token_ids in all_token_ids.values())
+    after_tokens = sum(
+        len(token_ids) for token_ids in trimmed_all_token_ids.values()
+    )
+    logger.info(
+        "[CLOUD-MQ-TRIM] batch_type=%s reqs=%d prev_dispatch_reqs=%d "
+        "resumed=%d all_token_ids entries %d->%d tokens %d->%d",
+        scheduler_output.batch_type.value,
+        len(getattr(cached, "req_ids", ())),
+        len(prev_dispatch_req_ids),
+        len(resumed_req_ids),
+        len(all_token_ids),
+        len(trimmed_all_token_ids),
+        before_tokens,
+        after_tokens,
+    )
+
+    so_copy = copy.copy(scheduler_output)
+    cached_copy = copy.copy(cached)
+    cached_copy.all_token_ids = trimmed_all_token_ids
+    so_copy.scheduled_cached_reqs = cached_copy
+    return so_copy
+
+
 class PassiveEngineCoreProc:
     """Passive EngineCore process for non-leader PP ranks.
 
@@ -409,6 +482,7 @@ class PassiveEngineCoreProc:
 
         # [DIAG] Track step interval on the cloud side.
         self._last_step_ts: float | None = None
+        self._prev_dispatch_req_ids: set[str] = set()
 
     def step(self) -> bool:
         """Single tick: poll ZMQ → pick batches → enqueue worker payloads.
@@ -454,16 +528,29 @@ class PassiveEngineCoreProc:
         )
 
         for slice_info in batch.slices:
-            payload = (
-                (batch.scheduler_output, slice_info)
-                if slice_info is not None
-                else (batch.scheduler_output,)
+            worker_scheduler_output = _trim_scheduler_output_for_worker_enqueue(
+                batch.scheduler_output,
+                self._prev_dispatch_req_ids,
             )
+            payload = (
+                (worker_scheduler_output, slice_info)
+                if slice_info is not None
+                else (worker_scheduler_output,)
+            )
+            bt = batch.scheduler_output.batch_type.value
+            logger.info("[CLOUD-MQ] About to enqueue batch_type=%s", bt)
+            _t0 = time.monotonic()
             self.executor.rpc_broadcast_mq.enqueue(
                 (b"pp_scheduler_output", payload, {}, None)
             )
+            self._prev_dispatch_req_ids = set(
+                batch.scheduler_output.num_scheduled_tokens.keys()
+            )
+            _dt_ms = (time.monotonic() - _t0) * 1000
             logger.info(
-                f"[BATCH_QUEUE] Enqueued {batch.scheduler_output.batch_type.value}"
+                "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
+                bt,
+                _dt_ms,
             )
             # PD-separation: on the cloud side, publish the rewritten
             # tail-segment SchedulerOutput on POST_OUT only when the dispatched
