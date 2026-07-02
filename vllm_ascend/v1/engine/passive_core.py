@@ -42,7 +42,6 @@ import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
-import numpy as np
 import zmq
 from vllm import envs
 from vllm.logger import logger
@@ -387,23 +386,12 @@ def _trim_scheduler_output_for_worker_enqueue(
             and num_output_tokens_by_req.get(req_id, 0) > 0
         )
     }
-    trimmed_all_token_ids = {}
-    for req_id, token_ids in all_token_ids.items():
-        if req_id not in keep_req_ids:
-            continue
-        num_output_tokens = num_output_tokens_by_req.get(req_id, 0)
-        if num_output_tokens <= 0:
-            continue
-        keep_len = min(num_output_tokens, len(token_ids))
-        if keep_len <= 0:
-            continue
-        trimmed_all_token_ids[req_id] = np.ascontiguousarray(
-            token_ids[-keep_len:]
-        )
-    if len(trimmed_all_token_ids) == len(all_token_ids) and all(
-        len(trimmed_all_token_ids[req_id]) == len(token_ids)
+    trimmed_all_token_ids = {
+        req_id: token_ids
         for req_id, token_ids in all_token_ids.items()
-    ):
+        if req_id in keep_req_ids
+    }
+    if len(trimmed_all_token_ids) == len(all_token_ids):
         return scheduler_output
 
     before_tokens = sum(len(token_ids) for token_ids in all_token_ids.values())
