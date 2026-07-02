@@ -28,12 +28,12 @@ decode_last_delay_schedule_ms: 30
 # Cloud-side prefill-middle throttle: how long (in milliseconds) to wait for
 # a decode-middle batch before falling back to another prefill-middle slice.
 # Default: 10 (ms).
-prefill_middle_throttle_ms: 500
+prefill_middle_throttle_ms: 10
 
 16: 24
 8: 10
-4: 10
-3: 10
-2: 10
-1: 10
-0: 10
+4: 4
+3: 6
+2: 5
+1: 5
+0: 5
