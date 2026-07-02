@@ -190,45 +190,5 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         self.assertTrue(runner._debugger_started)
 
 
-class TestNPUModelRunnerDummySamplerRun(unittest.TestCase):
-    def _build_runner(self, role: str = "edge"):
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner._edge_cloud_enabled = True
-        runner.edge_cloud_cfg = MagicMock()
-        runner.edge_cloud_cfg.role = role
-        runner.max_num_tokens = 4
-        runner.max_num_reqs = 2
-        runner.model = MagicMock()
-        return runner
-
-    def test_dummy_sampler_run_skipped_on_cloud(self):
-        """Cloud side in edge-cloud mode must not run sampler profiling."""
-        runner = self._build_runner(role="cloud")
-        hidden_states = torch.randn(4, 8)
-
-        result = runner._dummy_sampler_run(hidden_states)
-
-        self.assertIsNone(result)
-        runner.model.compute_logits.assert_not_called()
-
-    def test_dummy_sampler_run_executed_on_edge(self):
-        """Edge side in edge-cloud mode should still profile logits."""
-        runner = self._build_runner(role="edge")
-        hidden_states = torch.randn(4, 8)
-        expected_logits = torch.randn(2, 8)
-        runner.model.compute_logits.return_value = expected_logits
-
-        result = runner._dummy_sampler_run(hidden_states)
-
-        self.assertIs(result, expected_logits)
-        runner.model.compute_logits.assert_called_once()
-        # logit_indices are the cumulative last token of each request
-        call_args = runner.model.compute_logits.call_args[0][0]
-        np.testing.assert_array_equal(
-            call_args.numpy(),
-            hidden_states[[1, 3]].numpy(),
-        )
-
-
 if __name__ == "__main__":
     unittest.main()

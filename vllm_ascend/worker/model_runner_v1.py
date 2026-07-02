@@ -5265,13 +5265,7 @@ class NPUModelRunner(GPUModelRunner):
     def _dummy_sampler_run(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        # In edge-cloud mode logits are produced on the edge side; the cloud
-        # side does not hold the tail segment / lm_head and must not participate
-        # in sampler profiling.
-        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
-            return None
-
+    ) -> torch.Tensor:
         output = None
 
         # For profile, have maximum num_reqs and that collectively have
