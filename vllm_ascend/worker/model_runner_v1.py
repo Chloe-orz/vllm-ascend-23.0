@@ -2722,6 +2722,27 @@ class NPUModelRunner(GPUModelRunner):
                     self._cloud_spec_decode_common_attn_metadata = spec_decode_common_attn_metadata
                     self._cloud_spec_decode_num_reqs = num_reqs
 
+            # Edge-cloud cloud side: reuse the M-RoPE positions edge computed
+            # and pushed via intermediate_tensors (cloud skipped
+            # _init/_calc_mrope_positions). The wire tensor is [N, 3]
+            # (dim-0 = sequence). Materialize it into
+            # self.mrope_positions.gpu[:, :num_tokens_padded] ([3, N]) BEFORE
+            # _preprocess, which reads `positions` as a view over this buffer
+            # and runs update_cos_sin on it. Capture the received reference now:
+            # _preprocess -> sync_and_slice_intermediate_tensors reassigns
+            # `intermediate_tensors` to a local-buffer copy that omits
+            # mrope_positions (the sync loop skips it).
+            recv_intermediate_tensors = intermediate_tensors
+            if (self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "cloud"
+                    and self.uses_mrope
+                    and recv_intermediate_tensors is not None):
+                recv_intermediate_tensors.wait_for_comm()
+                recv_mrope = recv_intermediate_tensors.tensors["mrope_positions"]
+                self.mrope_positions.gpu[:, :num_tokens_padded].copy_(
+                    recv_mrope[:num_tokens_padded].t().contiguous()
+                )
+
             (
                 input_ids,
                 inputs_embeds,
@@ -2736,23 +2757,6 @@ class NPUModelRunner(GPUModelRunner):
                 else total_num_scheduled_tokens,
                 intermediate_tensors,
             )
-
-            # Edge-cloud cloud side: reuse the M-RoPE positions edge computed
-            # and pushed via intermediate_tensors (edge skipped nothing, cloud
-            # skipped _init/_calc_mrope_positions). Materialize the wire tensor
-            # [N, 3] back into self.mrope_positions.gpu[:, :num_tokens_padded]
-            # ([3, N]) before _preprocess / update_cos_sin consume `positions`
-            # (a view over this buffer). wait_for_comm is a no-op once the
-            # hidden_states access below has already triggered it.
-            if (self._edge_cloud_enabled
-                    and self.edge_cloud_cfg.role == "cloud"
-                    and self.uses_mrope
-                    and intermediate_tensors is not None):
-                intermediate_tensors.wait_for_comm()
-                recv_mrope = intermediate_tensors.tensors["mrope_positions"]
-                self.mrope_positions.gpu[:, :num_tokens_padded].copy_(
-                    recv_mrope[:num_tokens_padded].t().contiguous()
-                )
 
             if not self.edge_cloud_cfg.role == "edge":
                 # update global cos, sin
@@ -4348,7 +4352,7 @@ class NPUModelRunner(GPUModelRunner):
                 # the received prefix and zero-fill the padding locally to avoid
                 # a shape-mismatch copy_ error on NPUs (e.g. 60 vs 64).
                 for k, v in intermediate_tensors.items():
-                    if not isinstance(v, torch.Tensor):
+                    if not isinstance(v, torch.Tensor) or k == "mrope_positions":
                         continue
                     copy_len = num_tokens
                     dst = self.intermediate_tensors[k][:copy_len]
@@ -4365,6 +4369,15 @@ class NPUModelRunner(GPUModelRunner):
                 )
             else:
                 for k, v in intermediate_tensors.items():
+                    # mrope_positions is an edge-cloud side-channel tensor that
+                    # lives outside the model's layer-to-layer intermediate
+                    # buffer (self.intermediate_tensors, declared by
+                    # make_empty_intermediate_tensors as hidden/residual only).
+                    # It is materialized into self.mrope_positions.gpu directly
+                    # in execute_model before _preprocess; skip it here so the
+                    # copy-into-local-buffer loop does not KeyError on it.
+                    if k == "mrope_positions":
+                        continue
                     copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                     # Clamp copy_len to the source tensor's actual dim-0 size.
                     # In edge-cloud mode the received intermediate_tensors may have
