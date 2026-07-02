@@ -263,19 +263,10 @@ class PassiveScheduler:
             self._drain_subscriber_inline()
 
         while True:
-            has_ready_work = bool(
-                self.ready_prefills
-                or self._active_prefill_slices
-                or self.ready_pdmixes
-                or self.ready_decodes
-            )
             try:
                 seq, scheduler_output = self._inbox.get_nowait()
             except queue.Empty:
-                if has_ready_work:
-                    break
-                logger.info("poll_and_classify: inbox is empty")
-                seq, scheduler_output = self._inbox.get(block=True)
+                break
             self._remember_arrival_seq(scheduler_output, seq)
             bt = scheduler_output.batch_type
             logger.info(
@@ -628,22 +619,6 @@ class PassiveScheduler:
 
     def _schedule_expect_alternation(self) -> ScheduledBatch:
         state = self.cloud_scheduling_state
-        logger.info(
-            "[PD-PASSIVE] Before expect_alternation schedule: "
-            "state=%s, schedulable=(prefills=%d, active_prefill_slices=%d, "
-            "pdmixes=%d, decodes=%d, seq=(prefill=%s, decode=%s))",
-            state.value,
-            len(self.ready_prefills),
-            len(self._active_prefill_slices),
-            len(self.ready_pdmixes),
-            len(self.ready_decodes),
-            self._arrival_seq(self.ready_prefills[0])
-            if self.ready_prefills
-            else None,
-            self._arrival_seq(self.ready_decodes[0])
-            if self.ready_decodes
-            else None,
-        )
         if state == CloudSchedulingState.EXPECT_EXECUTE_PREFILL:
             if self._active_prefill_slices:
                 self.cloud_scheduling_state = (

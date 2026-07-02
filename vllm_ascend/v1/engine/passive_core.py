@@ -480,9 +480,45 @@ class PassiveEngineCoreProc:
             )
         self._idle_sleep_seconds = 0.001
 
-        # [DIAG] Track step interval on the cloud side.
-        self._last_step_ts: float | None = None
         self._prev_dispatch_req_ids: set[str] = set()
+        self._pending_post_out_by_head_token: dict[str, SchedulerOutput] = {}
+        self._published_post_out_tokens: set[str] = set()
+
+    def _drain_worker_completion_acks(self) -> None:
+        """Publish POST_OUT only after cloud workers complete the middle segment."""
+        for mq in getattr(self.executor, "response_mqs", []):
+            while True:
+                try:
+                    _status, result = mq.dequeue(timeout=0)
+                except TimeoutError:
+                    break
+                except Exception:
+                    logger.exception("Failed to drain cloud worker completion ack")
+                    break
+
+                if not (
+                    isinstance(result, dict)
+                    and result.get("__pp_scheduler_ack__")
+                ):
+                    continue
+
+                if result.get("batch_type") != BatchType.PREFILL_FIRST:
+                    continue
+                head_token = result.get("head_token")
+                if not head_token or head_token in self._published_post_out_tokens:
+                    continue
+                scheduler_output = self._pending_post_out_by_head_token.pop(
+                    head_token, None
+                )
+                if scheduler_output is None:
+                    continue
+                self._published_post_out_tokens.add(head_token)
+                logger.info(
+                    "[CLOUD-POST-OUT] Publishing PREFILL_LAST after worker done, "
+                    "head_token=%s",
+                    head_token,
+                )
+                self._maybe_publish_post_out(scheduler_output)
 
     def step(self) -> bool:
         """Single tick: poll ZMQ → pick batches → enqueue worker payloads.
@@ -494,15 +530,7 @@ class PassiveEngineCoreProc:
             True if at least one payload was enqueued, False if the
             scheduler had nothing to dispatch.
         """
-        now = time.monotonic()
-        if self._last_step_ts is not None:
-            interval_ms = (now - self._last_step_ts) * 1000
-            logger.info(
-                "Cloud step interval: %.2f ms",
-                interval_ms,
-            )
-        self._last_step_ts = now
-
+        self._drain_worker_completion_acks()
         self.passive_scheduler.poll_and_classify()
         batch = self.passive_scheduler.schedule()
         if batch.is_empty():
@@ -552,14 +580,21 @@ class PassiveEngineCoreProc:
                 bt,
                 _dt_ms,
             )
-            # PD-separation: on the cloud side, publish the rewritten
-            # tail-segment SchedulerOutput on POST_OUT only when the dispatched
-            # work can produce the final middle-segment hidden state. With
-            # slice-aware scheduling, early prefill slices must not wake the
-            # edge tail segment because doing so can block the edge on a recv
-            # and prevent it from issuing decode head work between P slices.
-            if slice_info is None or slice_info.is_last_slice:
+            # For PREFILL_FIRST, POST_OUT must mean the cloud middle segment
+            # has completed and started sending hidden states back.  Store the
+            # original SchedulerOutput here and publish it from
+            # _drain_worker_completion_acks() after the worker reports done.
+            if batch.scheduler_output.batch_type == BatchType.DECODE_FIRST:
                 self._maybe_publish_post_out(batch.scheduler_output)
+            elif (
+                batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
+                and (slice_info is None or slice_info.is_last_slice)
+            ):
+                head_token = getattr(batch.scheduler_output, "head_token", None)
+                if head_token:
+                    self._pending_post_out_by_head_token[head_token] = (
+                        batch.scheduler_output
+                    )
         return True
 
     def _maybe_publish_post_out(
@@ -586,17 +621,9 @@ class PassiveEngineCoreProc:
                 scheduler_output, batch_type=BatchType.PREFILL_LAST
             )
         elif bt == BatchType.DECODE_FIRST:
-            # === Decode-first self-posting optimization ===
-            # Edge always pre-generates DECODE_LAST locally and stores it
-            # in decodes_last_ready.  Cloud never needs to send DECODE_LAST
-            # back via POST_OUT, eliminating control-plane round-trip.
-            logger.debug(
-                "[Cloud] Skipping POST_OUT for DECODE_FIRST "
-                "head_token=%s (edge pre-generates DECODE_LAST)",
-                scheduler_output.head_token,
+            tail = replace(
+                scheduler_output, batch_type=BatchType.DECODE_LAST
             )
-            return
-            # ===============================================
         else:
             return
         # Echo the head_token back so the edge can correlate the tail
