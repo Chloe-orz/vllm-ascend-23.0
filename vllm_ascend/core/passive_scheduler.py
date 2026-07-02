@@ -263,19 +263,10 @@ class PassiveScheduler:
             self._drain_subscriber_inline()
 
         while True:
-            has_ready_work = bool(
-                self.ready_prefills
-                or self._active_prefill_slices
-                or self.ready_pdmixes
-                or self.ready_decodes
-            )
             try:
                 seq, scheduler_output = self._inbox.get_nowait()
             except queue.Empty:
-                if has_ready_work:
-                    break
-                logger.info("poll_and_classify: inbox is empty")
-                seq, scheduler_output = self._inbox.get(block=True)
+                break
             self._remember_arrival_seq(scheduler_output, seq)
             bt = scheduler_output.batch_type
             logger.info(
