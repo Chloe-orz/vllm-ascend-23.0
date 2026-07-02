@@ -586,21 +586,9 @@ class PDSeparatedScheduler(Scheduler):
                     # through POST_OUT.  The cloud unconditionally skips
                     # POST_OUT for all DECODE_FIRST batches.
                     from dataclasses import replace
-                    # DL is a shallow copy of DF: its num_scheduled_tokens
-                    # keys == DF's == the worker's input_batch.req_ids (DL
-                    # runs immediately after DF with no _update_states in
-                    # between). So the edge tail-segment fast path
-                    # (model_runner_v1 skip_update_states) holds and the
-                    # worker NEVER reads all_token_ids at DL. Strip it so DL
-                    # doesn't re-serialize/re-dequeue the ~1 MB back-fill that
-                    # DF already carried — it was ~99% of the DL payload.
                     decode_last = replace(
                         scheduler_output,
                         batch_type=BatchType.DECODE_LAST,
-                        scheduled_cached_reqs=replace(
-                            scheduler_output.scheduled_cached_reqs,
-                            all_token_ids={},
-                        ),
                     )
                     self.decodes_last_ready.append(decode_last)
                     # ===============================================
