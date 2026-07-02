@@ -2737,6 +2737,23 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors,
             )
 
+            # Edge-cloud cloud side: reuse the M-RoPE positions edge computed
+            # and pushed via intermediate_tensors (edge skipped nothing, cloud
+            # skipped _init/_calc_mrope_positions). Materialize the wire tensor
+            # [N, 3] back into self.mrope_positions.gpu[:, :num_tokens_padded]
+            # ([3, N]) before _preprocess / update_cos_sin consume `positions`
+            # (a view over this buffer). wait_for_comm is a no-op once the
+            # hidden_states access below has already triggered it.
+            if (self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "cloud"
+                    and self.uses_mrope
+                    and intermediate_tensors is not None):
+                intermediate_tensors.wait_for_comm()
+                recv_mrope = intermediate_tensors.tensors["mrope_positions"]
+                self.mrope_positions.gpu[:, :num_tokens_padded].copy_(
+                    recv_mrope[:num_tokens_padded].t().contiguous()
+                )
+
             if not self.edge_cloud_cfg.role == "edge":
                 # update global cos, sin
                 update_cos_sin(positions)
@@ -3973,6 +3990,24 @@ class NPUModelRunner(GPUModelRunner):
             "cudagraph_stats": cudagraph_stats,
             "num_scheduled_tokens_compressed_list": num_scheduled_tokens_compressed_list,
         }
+
+    def _init_mrope_positions(self, req_state) -> None:
+        # In edge-cloud mode the cloud side reuses M-RoPE positions computed
+        # on the edge (transferred via intermediate_tensors), because the
+        # image_grid_thw / video_grid_thw metadata needed by the local
+        # computation did not cross the edge->cloud mm_features boundary.
+        # profile_run / _dummy_run do not call this, so the role guard is
+        # sufficient and does not affect profiling.
+        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+            return
+        super()._init_mrope_positions(req_state)
+
+    def _calc_mrope_positions(self, scheduler_output) -> None:
+        # See _init_mrope_positions: cloud reuses edge-computed mrope written
+        # into self.mrope_positions by execute_model, so skip local calc.
+        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+            return
+        super()._calc_mrope_positions(scheduler_output)
 
     def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
         """Pre-compute input preparation on cloud while edge runs segment_a.
@@ -5230,7 +5265,13 @@ class NPUModelRunner(GPUModelRunner):
     def _dummy_sampler_run(
         self,
         hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
+        # In edge-cloud mode logits are produced on the edge side; the cloud
+        # side does not hold the tail segment / lm_head and must not participate
+        # in sampler profiling.
+        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+            return None
+
         output = None
 
         # For profile, have maximum num_reqs and that collectively have

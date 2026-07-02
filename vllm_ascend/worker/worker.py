@@ -383,6 +383,7 @@ class NPUWorker(WorkerBase):
                 has_residual=has_residual,
                 hc_mult=hc_mult,
                 mode=self.model_runner.edge_cloud_cfg.mode,
+                uses_mrope=self.model_config.uses_mrope,
             )
 
     @torch.inference_mode()
@@ -603,6 +604,18 @@ class NPUWorker(WorkerBase):
                 _gathered = self._all_gather_tensor_dict(output.tensors)
             else:
                 _gathered = output.tensors
+            # For M-RoPE VL models, edge has already computed the per-token
+            # mrope positions (which needs image_grid_thw that did not cross
+            # the edge->cloud mm_features boundary). Push them alongside
+            # hidden_states so cloud can reuse them instead of recomputing
+            # (and hitting the missing grid_thw). Transpose [3, N] -> [N, 3]
+            # so the sequence axis is dim-0, matching hidden_states and the
+            # e2c transfer's dim-0 slicing / SP-gather path.
+            if self.model_runner.uses_mrope and "hidden_states" in _gathered:
+                n = _gathered["hidden_states"].shape[0]
+                _gathered["mrope_positions"] = (
+                    self.model_runner.mrope_positions.gpu[:, :n].t().contiguous()
+                )
             if get_pp_group().world_size == 2:
                 # Pass scheduler total so the sender slices off any
                 # cudagraph / SP / DP padding, letting the cloud receiver
