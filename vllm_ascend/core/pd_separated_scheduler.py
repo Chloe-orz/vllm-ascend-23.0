@@ -201,7 +201,7 @@ class PDSeparatedScheduler(Scheduler):
             return self._make_empty_batch()
 
         if state == PrefillState.LOW:
-            # LOW: chunk/P首(when slot available) > P尾 > D尾 > D首 > Empty.
+            # LOW: chunk/P首(when slot available) > D尾 > D首 > P尾 > Empty.
             if self._can_schedule_prefill_first():
                 so = self._pick_prefill_first_batch()
                 if so.total_num_scheduled_tokens > 0:
@@ -212,21 +212,21 @@ class PDSeparatedScheduler(Scheduler):
                     "requests. Prefill work will be deferred until resources are freed."
                 )
                 self.finished_req_ids.update(so.finished_req_ids)
-            if self.prefills_last_ready:
-                return self._pick_prefill_last_batch()
             if self.decodes_last_ready and self._can_schedule_decode_last():
                 return self._pick_decode_last_batch()
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
+            if self.prefills_last_ready:
+                return self._pick_prefill_last_batch()
             return self._make_empty_batch()
 
-        # HIGH: P尾 > D尾 > D首 > Empty. New P首 is forbidden.
-        if self.prefills_last_ready:
-            return self._pick_prefill_last_batch()
+        # HIGH: D尾 > D首 > P尾 > Empty. New P首 is forbidden.
         if self.decodes_last_ready and self._can_schedule_decode_last():
             return self._pick_decode_last_batch()
         if self._can_schedule_decode_first():
             return self._pick_decode_first_batch()
+        if self.prefills_last_ready:
+            return self._pick_prefill_last_batch()
         return self._make_empty_batch()
 
     def is_waiting_for_remote_tail(self) -> bool:
