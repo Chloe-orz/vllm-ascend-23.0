@@ -96,6 +96,7 @@ def _build_edge_cloud_tensor_meta(
     recv_has_residual: bool,
     send_has_residual: bool,
     hc_mult: int,
+    uses_mrope: bool = False,
 ) -> EdgeCloudTensorMeta:
     """Build a single direction's EdgeCloudTensorMeta.
 
@@ -130,6 +131,20 @@ def _build_edge_cloud_tensor_meta(
     send_tensor_keys = [k for k in tensor_keys if k != "residual"]
     if send_has_residual:
         send_tensor_keys = list(tensor_keys)
+
+    if uses_mrope:
+        # M-RoPE per-token positions, shape (num_tokens, 3) on the wire.
+        # dim-0 is the sequence axis (matches hidden_states) so it rides the
+        # same SP gather / num_tokens slice / irecv path. dtype is int64,
+        # which differs from the bf16 hidden/residual, so the merge_payload
+        # sanity check below degrades merge_payload to False for VL models
+        # (one extra small P2P; acceptable, VL-only).
+        mrope_shape = (0, 3)
+        metadata_list.append(
+            ("mrope_positions", TensorMetadata(device, torch.int64, mrope_shape))
+        )
+        tensor_keys.append("mrope_positions")
+        send_tensor_keys.append("mrope_positions")
 
     # Decide whether to merge all tensors into one send/recv.  Conditions:
     #   1) at least 2 tensors to merge,
@@ -194,6 +209,7 @@ def init_edge_cloud_tensor_meta(
     has_residual: bool = True,
     hc_mult: int = 1,
     mode: str = "head_tail",
+    uses_mrope: bool = False,
 ):
     """Initialize the pre-computed tensor metadata for edge-cloud transfers.
 
@@ -244,9 +260,13 @@ def init_edge_cloud_tensor_meta(
 
     _EDGE_CLOUD_TENSOR_META_E2C = _build_edge_cloud_tensor_meta(
         hidden_size, hidden_dtype, e2c_recv_has_residual, e2c_send_has_residual, hc_mult,
+        uses_mrope=uses_mrope,
     )
     _EDGE_CLOUD_TENSOR_META_C2E = _build_edge_cloud_tensor_meta(
         hidden_size, hidden_dtype, c2e_recv_has_residual, c2e_send_has_residual, hc_mult,
+        # c2e (cloud->edge) does not need mrope: only edge computes M-RoPE
+        # and pushes it to cloud.
+        uses_mrope=False,
     )
     # Backward-compatible alias: dense (residual-carrying) meta.
     _EDGE_CLOUD_TENSOR_META = _EDGE_CLOUD_TENSOR_META_C2E

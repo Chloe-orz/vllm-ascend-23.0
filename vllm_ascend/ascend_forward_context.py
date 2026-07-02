@@ -259,6 +259,14 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
     """
     if not is_moe_model(vllm_config):
         return None
+
+    # Edge-cloud mode splits the cluster into two sides; MC2/ALLTOALL paths
+    # use the MC2 group and may trigger collective operations that cross the
+    # edge-cloud boundary when the group or runtime setup is asymmetric.
+    # Fall back to ALLGATHER, which only exercises the local EP/TP groups.
+    if vllm_config.parallel_config.enable_edge_cloud:
+        return MoECommType.ALLGATHER
+
     mc2_tokens_capacity = get_mc2_tokens_capacity()
     soc_version = get_ascend_device_type()
     quant_type = getattr(
