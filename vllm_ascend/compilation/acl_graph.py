@@ -24,11 +24,6 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 
 from ..utils import weak_ref_tensors
-from vllm_ascend.utils import (
-    pp_timing_enabled,
-    pp_timing_sync,
-)
-import time
 
 
 @dataclasses.dataclass
@@ -278,10 +273,6 @@ def update_full_graph_params(
         unfiltered_metadata = unfiltered_attn_metadata or forward_context.attn_metadata
         filtered_metadata = None
 
-        if pp_timing_enabled():
-            pp_timing_sync()
-            print(f"[PP_TIMING][edge][_filter_attn_metadata start] {time.perf_counter()}")
-        
         if layer_indices is not None:
             # 强制要求 layer_indices 为升序自然层号，与图捕获时 islice(self.layers)
             # 的遍历顺序严格一致，防止 zip(attn_keys, attn_params) 错位
@@ -294,16 +285,7 @@ def update_full_graph_params(
             )
             forward_context.attn_metadata = filtered_metadata
 
-        if pp_timing_enabled():
-            pp_timing_sync()
-            print(f"[PP_TIMING][edge][_filter_attn_metadata end] {time.perf_counter()}")
-
         try:
-            
-            if pp_timing_enabled():
-                pp_timing_sync()
-                print(f"[PP_TIMING][edge][update_graph_param start] {time.perf_counter()}")
-
             impl_cls.update_graph_params(
                 update_stream,
                 forward_context,
@@ -314,18 +296,12 @@ def update_full_graph_params(
                 draft_attn_metadatas,
             )
 
-            if pp_timing_enabled():
-                pp_timing_sync()
-                print(f"[PP_TIMING][edge][update_graph_param end] {time.perf_counter()}")
             # For GDN Attention: AscendC operate(conv1d update) update graph params
             # _filter_attn_metadata_for_layers drops GDN keys (they do not contain
             # ".layers.{idx}.self_attn" and are absent from attn_params), but
             # update_conv1d_graph_params still needs the full metadata dict to look
             # up layer_prefix.  Temporarily restore the unfiltered metadata.
 
-            if pp_timing_enabled():
-                pp_timing_sync()
-                print(f"[PP_TIMING][edge][update_conv1d_graph_params start] {time.perf_counter()}")
             
             from vllm_ascend.ops.gdn import update_conv1d_graph_params
             if unfiltered_metadata is not None and unfiltered_metadata is not forward_context.attn_metadata:
@@ -350,12 +326,7 @@ def update_full_graph_params(
                     vllm_config,
                     _EXTRA_CTX.is_draft_model,
                     draft_attn_metadatas,
-                )
-            
-            if pp_timing_enabled():
-                pp_timing_sync()
-                print(f"[PP_TIMING][edge][update_conv1d_graph_params end] {time.perf_counter()}")
-
+                )         
         finally:
             if filtered_metadata is not None:
                 forward_context.attn_metadata = unfiltered_metadata
