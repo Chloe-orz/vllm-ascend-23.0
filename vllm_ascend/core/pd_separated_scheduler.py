@@ -3,6 +3,8 @@
 import enum
 import time
 from collections import deque
+
+import numpy as np
 from collections.abc import Iterable
 from typing import Any
 from uuid import uuid4
@@ -433,9 +435,12 @@ class PDSeparatedScheduler(Scheduler):
             cached_reqs.num_output_tokens,
         ):
             if num_output_tokens > 0 and req_id not in cached_reqs.all_token_ids:
-                cached_reqs.all_token_ids[req_id] = (
-                    self.requests[req_id].all_token_ids.copy()
-                )
+                # np.ndarray(int32): zerocopy via PickleBuffer on the wire
+                # (see scheduler._make_cached_request_data). This back-fill is
+                # the dominant payload on DECODE_FIRST; int32 avoids the
+                # per-int PyLong alloc that made dequeue grow under load.
+                cached_reqs.all_token_ids[req_id] = np.asarray(
+                    self.requests[req_id].all_token_ids, dtype=np.int32)
 
     def _pick_decode_first_batch(self) -> SchedulerOutput:
         if not self.running:
