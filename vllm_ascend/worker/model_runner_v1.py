@@ -2277,7 +2277,7 @@ class NPUModelRunner(GPUModelRunner):
                 # update global cos, sin
                 update_cos_sin(positions)
 
-        self._pp_timing("prepare_done", sync_npu=True)
+        # self._pp_timing("prepare_done", sync_npu=True)
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB weight D2D"):
@@ -2412,7 +2412,7 @@ class NPUModelRunner(GPUModelRunner):
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
-                self._pp_timing("logits_done", sync_npu=True)
+                # self._pp_timing("logits_done", sync_npu=True)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
