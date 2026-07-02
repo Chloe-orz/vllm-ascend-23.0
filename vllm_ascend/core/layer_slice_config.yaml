@@ -31,9 +31,9 @@ decode_last_delay_schedule_ms: 30
 prefill_middle_throttle_ms: 10
 
 16: 24
-8: 10
-4: 4
-3: 6
+8: 5
+4: 5
+3: 5
 2: 5
 1: 5
 0: 5
