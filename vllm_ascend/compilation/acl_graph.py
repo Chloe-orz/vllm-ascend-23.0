@@ -477,8 +477,8 @@ def graph_params_scope(
     finally:
         # 在切回旧的 graph_params 之前，确保当前流上所有 attention 参数更新任务
         # 已全部完成，避免异步流仍在引用本段 graph_params 导致 task handle 错配
-        if graph_params is not None:
-            torch.npu.current_stream().synchronize()
+        # if graph_params is not None:
+        #     torch.npu.current_stream().synchronize()
         _active_graph_params = old_graph_params
         _active_draft_graph_params = old_draft_graph_params
 
