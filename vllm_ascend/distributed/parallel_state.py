@@ -705,6 +705,7 @@ def edge_cloud_isend_tensor_dict(
     tensor_dict: dict[str, torch.Tensor | Any],
     dst: int | None = None,
     num_tokens: int | None = None,
+    include_mrope: bool = True,
 ) -> list[Handle]:
     """Send tensor dict without metadata sync (edge-cloud optimized).
 
@@ -730,6 +731,11 @@ def edge_cloud_isend_tensor_dict(
             etc.). When ``None``, tensors are sent as-is preserving the
             previous behavior for callers that already guarantee unpadded
             output.
+        include_mrope: when False, omit ``mrope_positions`` from the wire
+            payload (text-only batches compute M-RoPE locally on the cloud,
+            so transferring it would waste a P2P RTT). The caller on both
+            sides must pass the same value (derived from
+            step_has_multimodal_req) so sender/receiver agree on the key set.
     """
     pp_group = get_pp_group()
     if pp_group.world_size <= 1:
@@ -749,7 +755,15 @@ def edge_cloud_isend_tensor_dict(
     # mismatch would corrupt data silently or only surface as an HCCL
     # crash. Fail fast here with a precise message instead.
     ec_meta = _select_edge_cloud_meta_for_send()
-    send_keys = ec_meta.send_tensor_keys or ec_meta.tensor_keys
+    # Dynamic send key set: drop mrope_positions when the caller signals a
+    # text-only batch (include_mrope=False). Both sides derive include_mrope
+    # from the same step_has_multimodal_req(scheduler_output), so sender and
+    # receiver agree on whether mrope is on the wire.
+    meta_send_keys = ec_meta.send_tensor_keys or ec_meta.tensor_keys
+    send_keys = [
+        k for k in meta_send_keys
+        if not (k == "mrope_positions" and not include_mrope)
+    ]
     sender_tensor_keys = [
         k for k in send_keys
         if k in tensor_dict and isinstance(tensor_dict[k], torch.Tensor)
@@ -963,6 +977,7 @@ def _pad_num_tokens_to_tp_multiple(num_tokens: int) -> int:
 def edge_cloud_irecv_tensor_dict(
     num_tokens: int,
     src: int | None = None,
+    include_mrope: bool = True,
 ) -> tuple[dict[str, torch.Tensor | Any], list[Handle], list[Callable[[], None]]]:
     """Receive tensor dict without metadata sync (edge-cloud optimized).
 
@@ -1045,6 +1060,10 @@ def edge_cloud_irecv_tensor_dict(
             continue
         if key in merge_key_set:
             continue  # already covered by the merged buffer
+        if key == "mrope_positions" and not include_mrope:
+            # Sender omitted mrope for this text-only batch; do not allocate
+            # or irecv it (cloud computes M-RoPE locally).
+            continue
         # Replace the placeholder dim-0 with the TP-padded size; the
         # actual wire transfer still only covers num_tokens rows.
         full_size = (recv_num_tokens,) + value.size[1:]
@@ -1140,6 +1159,7 @@ def _broadcast_nonmerge_tensors_inplace(
 def edge_cloud_broadcast_recv(
     num_tokens: int,
     sp_chunk: bool = False,
+    include_mrope: bool = True,
 ) -> tuple[
     dict[str, torch.Tensor | Any] | None,
     list[Handle],
@@ -1151,6 +1171,10 @@ def edge_cloud_broadcast_recv(
     This eliminates the inter-node pickle+Gloo metadata exchange, while
     still broadcasting metadata within the local TP group (intra-node)
     so that non-NPU0 TP ranks can allocate tensors.
+
+    include_mrope: must match the sender's edge_cloud_isend_tensor_dict
+    argument (both derived from step_has_multimodal_req). When False,
+    mrope_positions is neither received nor broadcast (text-only batch).
     """
     pp_group = get_pp_group()
     tp_group = get_tp_group()
@@ -1162,6 +1186,7 @@ def edge_cloud_broadcast_recv(
         # without metadata sync shapes are computed locally
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_irecv_tensor_dict(
             num_tokens=num_tokens,
+            include_mrope=include_mrope,
         )
         assert tensor_dict is not None, (
             "edge_cloud_broadcast_recv: PP tensor_dict is None, "
@@ -1260,6 +1285,10 @@ def edge_cloud_broadcast_recv(
                 continue
             if key in merge_key_set:
                 continue  # covered by merged_buf
+            if key == "mrope_positions" and not include_mrope:
+                # Sender omitted mrope for this text-only batch; mirror that
+                # on the recv side (do not allocate / broadcast-recv).
+                continue
             full_size = (recv_num_tokens,) + value.size[1:]
             recv_tensor_dict[key] = torch.empty(
                 full_size, dtype=value.dtype, device=value.device
@@ -1299,6 +1328,9 @@ def edge_cloud_broadcast_recv(
 
     for key, value in metadata_list:
         if isinstance(value, TensorMetadata):
+            if key == "mrope_positions" and not include_mrope:
+                # Sender omitted mrope for this text-only batch; skip.
+                continue
             # Replace placeholder dim-0 with the TP-padded size so the
             # intra-node broadcast matches the tensor allocated by PP NPU0.
             full_size = (recv_num_tokens,) + value.size[1:]
