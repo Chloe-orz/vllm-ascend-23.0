@@ -939,18 +939,14 @@ class NPUWorker(WorkerBase):
             # [CHER] Atomically reuse the guard thread's early-recv entry, or
             # post the irecv ourselves.  get_or_post_early_recv guarantees at
             # most one irecv per head_token even when the guard thread's hint
-            # dequeue races this dequeue -- the old pop-then-fallback path
-            # posted a second irecv when the guard had not posted yet, and both
-            # irecvs raced the sender's single isend, deadlocking.  Returns
-            # None only when CHER is off or posting failed (then sync recv).
-            #
-            # PREFILL_FIRST only: CHER must NOT touch DECODE_FIRST.  The guard
-            # thread would wait() a decode irecv on the DECODE channel while
-            # busy_loop issues isend on that same single decode channel ->
-            # HCCL cross-thread send/recv deadlock that stalls the whole decode
-            # pipeline (and with it the prefill POST_OUT ack path, so the edge
-            # never gets P-tail).  Decode hidden is tiny (batch x 1) anyway, so
-            # early-recv brings no benefit there.
+            # dequeue races this dequeue.  Applies to PREFILL_FIRST only:
+            # DECODE_FIRST must NOT use early-recv because DECODE is a single
+            # channel/stream -- a guard-thread irecv post on the DECODE stream
+            # races busy_loop's isend on that same stream (cross-thread FIFO
+            # ordering is non-deterministic -> deadlock).  PREFILL has two
+            # channels (PREFILL_1/2) so irecv and isend land on different
+            # streams.  The guard thread ONLY posts (never wait()s); wait is
+            # done by execute_model's wait_for_comm() on the busy_loop thread.
             _ht = getattr(scheduler_output, "head_token", None)
             entry = None
             if (self._cloud_hidden_early_recv_enabled and _ht
@@ -991,12 +987,34 @@ class NPUWorker(WorkerBase):
                     or not self.model_runner.supports_mm_inputs)
                 merge_payload = get_edge_cloud_tensor_meta().merge_payload
                 channel = self._hidden_channel_for(scheduler_output)
+                # In the shared-model edge-cloud topology the edge
+                # has a single distributed rank at in-group rank 0;
+                # the cloud first-worker of each dp_rank must
+                # receive the head-layer intermediate tensors from
+                # that single edge rank. Pass the explicit
+                # src=0 so the receive is routed to the edge
+                # rather than the implicit "previous PP rank"
+                # (which would not point at the edge for cloud
+                # first-workers past the first one).
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     channel=channel,
                     sp_chunk=do_sp_chunk and merge_payload,
+                    src=0,
                 )
                 logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
+
+                self.model_runner.cloud_prepare_early(scheduler_output)
+                if do_sp_chunk and not merge_payload:
+                    tensor_dict = {
+                        k: sequence_parallel_chunk(v)
+                        for k, v in tensor_dict.items()
+                    }
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
 
                 self.model_runner.cloud_prepare_early(scheduler_output)
                 if do_sp_chunk and not merge_payload:
@@ -1034,11 +1052,22 @@ class NPUWorker(WorkerBase):
             _gathered = self._all_gather_tensor_dict(output.tensors)
         else:
             _gathered = output.tensors
-        if get_pp_group().world_size == 2:
+
+        # In the shared-model edge-cloud topology the cloud
+        # first-worker of each dp_rank is in the shared PP group
+        # with the edge and must send its middle-layer output
+        # back to the edge (in-group rank 0). Other cloud
+        # workers (TP non-first) are in singleton PP groups
+        # and don't communicate with the edge. We use an
+        # explicit ``dst=0`` rather than the default "next PP
+        # rank" routing because the edge sits at in-group rank
+        # 0, not the slot after the cloud.
+        if get_pp_group().world_size > 1:
             channel = self._hidden_channel_for(scheduler_output)
             self._record_pp_send_work(
                 edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                                            num_tokens=scheduler_output.total_num_scheduled_tokens),
+                                            num_tokens=scheduler_output.total_num_scheduled_tokens,
+                                            dst=0),
                 channel=channel,
             )
             logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")
@@ -1392,8 +1421,29 @@ class NPUWorker(WorkerBase):
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()
+        # NOTE: `self.local_rank` is also consumed by `bind_cpus` for CPU
+        # binding, so it must stay as the original TP local rank. Compute the
+        # adjusted local rank locally and pass it to `init_distributed_environment`.
+        local_rank = self.local_rank
+        parallel_config = self.parallel_config
+        if (
+            parallel_config.distributed_executor_backend
+            not in ("ray", "external_launcher")
+            and parallel_config.data_parallel_backend != "ray"
+            and parallel_config.data_parallel_size > 1
+        ):
+            # Use local DP rank if available, otherwise use global DP rank.
+            dp_local_rank = parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = parallel_config.data_parallel_index
+
+            # In edge-cloud mode, local_world_size = edge_npu_count or cloud_npu_count
+            # Use local_world_size as the stride per DP instance
+            local_world_size = parallel_config.local_world_size
+            # DP_LOCAL_RANK * LOCAL_WORLD_SIZE + TP_LOCAL_RANK
+            local_rank += dp_local_rank * local_world_size
         init_distributed_environment(
-            self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
+            self.parallel_config.world_size, self.rank, self.distributed_init_method, local_rank, "hccl"
         )
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
