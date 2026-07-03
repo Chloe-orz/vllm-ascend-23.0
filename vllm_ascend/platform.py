@@ -289,6 +289,14 @@ class NPUPlatform(Platform):
         # user config so the scheduler's reader stays unchanged.
         scheduler_config.pd_prefill_inflight_limit = pd.prefill_inflight_limit
 
+        # Chunk-prefill-prior config.
+        scheduler_config.pd_chunk_prefill_prior_enable = (
+            pd.chunk_prefill_prior_enable
+        )
+        scheduler_config.pd_max_chunk_prefill_ahead = (
+            pd.max_chunk_prefill_ahead
+        )
+
         if getattr(scheduler_config, "async_scheduling", False):
             scheduler_config.scheduler_cls = (
                 "vllm_ascend.core.pd_separated_scheduler.AsyncPDSeparatedScheduler"

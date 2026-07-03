@@ -4,6 +4,7 @@ import enum
 import os
 import time
 from collections import deque
+from dataclasses import dataclass
 
 import numpy as np
 from collections.abc import Iterable
@@ -30,6 +31,40 @@ class PrefillState(enum.Enum):
     IDLE = "idle"       # prefill_inflight_count == 0
     LOW = "low"         # prefill_inflight_count == 1
     HIGH = "high"       # prefill_inflight_count >= prefill_inflight_limit
+
+
+@dataclass
+class PrefillChunkFlight:
+    """Per-chunk in-flight tracking for chunk-prefill-prior scheduling.
+
+    When ``chunk_prefill_prior_enable`` is True, each PREFILL_FIRST batch
+    creates one ``PrefillChunkFlight`` keyed by its ``head_token``.  This
+    allows the same request to have multiple chunks in-flight
+    simultaneously — the next chunk's PF can be dispatched before the
+    previous chunk's PL returns.
+
+    Fields
+    ------
+    request_id : str
+        The owning request.
+    head_token : str
+        Unique token assigned to this chunk's PREFILL_FIRST batch.
+        PREFILL_LAST echoes it back so the flight can be located.
+    hidden_channel : HiddenChannelType
+        Prefill data-plane channel allocated for this chunk.
+    chunk_index : int
+        0-based index of this chunk within the request.
+    is_last_chunk : bool
+        True when this chunk consumes the last remaining prompt tokens.
+    num_scheduled_tokens : int
+        Number of tokens scheduled in this chunk.
+    """
+    request_id: str
+    head_token: str
+    hidden_channel: HiddenChannelType
+    chunk_index: int
+    is_last_chunk: bool
+    num_scheduled_tokens: int
 
 
 class HiddenChannelManager:
@@ -108,6 +143,15 @@ class PDSeparatedScheduler(Scheduler):
     ready queues for *last* segments (``prefills_last_ready`` /
     ``decodes_last_ready``), which are filled by the EngineCore from the
     POST_OUT channel before each ``schedule()`` call.
+
+    Chunk-prefill-prior (Phase 1)
+    -----------------------------
+    When ``chunk_prefill_prior_enable`` is True, per-chunk flight tracking
+    replaces the request-granularity ``prefill_last_pending`` list.  This
+    allows the next chunk's PREFILL_FIRST to be dispatched before the
+    previous chunk's PREFILL_LAST returns, achieving the same pipeline
+    interleaving that MindIE's ``generate_send_metadata_to_queue()``
+    provides.
     """
 
     def __init__(self, *args, **kwargs) -> None:
@@ -139,7 +183,34 @@ class PDSeparatedScheduler(Scheduler):
         # Buffer queue: requests whose P-first segment is done but P-last
         # segment has not yet returned from the cloud.  Not eligible for
         # decode scheduling until PL completes and they are moved to running.
+        # When chunk_prefill_prior_enable is True, this is supplemented by
+        # per-chunk flight tracking.
         self.prefill_last_pending: list[Request] = []
+
+        # ------------------------------------------------------------------ #
+        # Chunk-prefill-prior fields                                          #
+        # ------------------------------------------------------------------ #
+        # Enabled via pd_separation.chunk_prefill_prior_enable.
+        self.chunk_prefill_prior_enable: bool = getattr(
+            self.scheduler_config, "pd_chunk_prefill_prior_enable", False
+        )
+        self.max_chunk_prefill_ahead: int = getattr(
+            self.scheduler_config, "pd_max_chunk_prefill_ahead", 1
+        )
+
+        # Per-chunk flight tracking: head_token → PrefillChunkFlight.
+        # Populated on PF, consumed on PL.
+        self._prefill_flight_by_token: dict[str, PrefillChunkFlight] = {}
+
+        # Per-request count of chunks still waiting for PL.
+        # request_id → count.  When count reaches 0, the request is
+        # eligible to enter decode.
+        self._pending_tail_count: dict[str, int] = {}
+
+        # Per-request count of chunks whose PF was dispatched ahead
+        # (before the previous chunk's PL returned).  Decremented on
+        # PL return so the request is not re-added to chunk_prefill_first.
+        self._ahead_chunk_count: dict[str, int] = {}
 
         # [新增] DECODE_LAST 延迟调度计时器。
         # D首 pick 后启动，D尾 在延迟到期前不可被调度。
@@ -154,6 +225,39 @@ class PDSeparatedScheduler(Scheduler):
         self._layer_slice_config_path: str | None = None
         self._layer_slice_config_mtime: float = 0.0
         self._load_layer_slice_config()
+
+    # ------------------------------------------------------------------ #
+    # Chunk-prefill-prior helpers                                         #
+    # ------------------------------------------------------------------ #
+    def _remaining_prompt_tokens(self, req: Request, scheduled: int) -> int:
+        """Tokens remaining after scheduling ``scheduled`` tokens."""
+        return max(0, req.num_prompt_tokens - req.num_computed_tokens - scheduled)
+
+    def _has_more_chunks(self, req: Request, num_scheduled: int) -> bool:
+        """True if the request still has prompt tokens after this chunk."""
+        return self._remaining_prompt_tokens(req, num_scheduled) > 0
+
+    def _can_ahead_schedule(self, req_id: str) -> bool:
+        """True when the request can have one more chunk PF dispatched ahead."""
+        return (
+            self._ahead_chunk_count.get(req_id, 0) < self.max_chunk_prefill_ahead
+        )
+
+    def _total_pending_tails(self) -> int:
+        """Total number of chunks waiting for PL across all requests."""
+        return sum(self._pending_tail_count.values())
+
+    def _cleanup_request_flight_state(self, req_id: str) -> None:
+        """Remove all tracking state for a finished request."""
+        self._pending_tail_count.pop(req_id, None)
+        self._ahead_chunk_count.pop(req_id, None)
+        # Remove flights for this request.
+        to_remove = [
+            token for token, flight in self._prefill_flight_by_token.items()
+            if flight.request_id == req_id
+        ]
+        for token in to_remove:
+            self._prefill_flight_by_token.pop(token, None)
 
     def schedule(self) -> SchedulerOutput:
         return self._schedule_pd_separated()
@@ -279,17 +383,33 @@ class PDSeparatedScheduler(Scheduler):
 
     def _log_scheduler_state(self, state: PrefillState, batch_type: BatchType) -> None:
         self._step_counter += 1
-        logger.info(
-            f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
-            f"waiting[]: {len(self.waiting)}, "
-            f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
-            f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
-            f"running[]: {len(self.running)}, "
-            f"prefills_last_ready[]: {len(self.prefills_last_ready)}, "
-            f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
-            f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
-            f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
-        )
+        if self.chunk_prefill_prior_enable:
+            logger.info(
+                f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
+                f"waiting[]: {len(self.waiting)}, "
+                f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
+                f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
+                f"running[]: {len(self.running)}, "
+                f"prefills_last_ready[]: {len(self.prefills_last_ready)}, "
+                f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
+                f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
+                f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}, "
+                f"chunk_flights: {len(self._prefill_flight_by_token)}, "
+                f"pending_tails: {self._total_pending_tails()}, "
+                f"ahead_chunks: {sum(self._ahead_chunk_count.values())}",
+            )
+        else:
+            logger.info(
+                f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
+                f"waiting[]: {len(self.waiting)}, "
+                f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
+                f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
+                f"running[]: {len(self.running)}, "
+                f"prefills_last_ready[]: {len(self.prefills_last_ready)}, "
+                f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
+                f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
+                f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
+            )
 
     # ------------------------------------------------------------------ #
     # Layer-slice config loading (Edge side)                             #
@@ -415,25 +535,115 @@ class PDSeparatedScheduler(Scheduler):
                     )
                     self.prefill_inflight_count += 1
 
-                    # === 核心修改 ===
-                    # All requests scheduled in this PF batch enter
-                    # prefill_last_pending immediately. They may NOT be
-                    # re-scheduled for the next chunk until the cloud
-                    # returns the matching PL (PREFILL_LAST).
                     scheduled_req_ids = set(
                         scheduler_output.num_scheduled_tokens.keys()
                     )
-                    for req in self.running:
-                        if req.request_id in scheduled_req_ids:
-                            self.prefill_last_pending.append(req)
-                        elif req.is_prefill_chunk:
-                            # Not scheduled this round (e.g. token budget
-                            # exhausted), keep in chunk_prefill_first.
-                            self.chunk_prefill_first.append(req)
-                        else:
-                            # Completed but not scheduled – defensive.
-                            self.prefill_last_pending.append(req)
-                    # ================
+
+                    if self.chunk_prefill_prior_enable:
+                        # === Chunk-prefill-prior routing ===
+                        # Each scheduled request gets a PerfillChunkFlight.
+                        # If the request still has more chunks after this
+                        # PF, it may be re-added to chunk_prefill_first
+                        # immediately (ahead), allowing the next chunk's PF
+                        # before the current chunk's PL returns.
+                        for req in self.running:
+                            if req.request_id in scheduled_req_ids:
+                                num_scheduled = (
+                                    scheduler_output.num_scheduled_tokens[
+                                        req.request_id
+                                    ]
+                                )
+                                is_last = not self._has_more_chunks(
+                                    req, num_scheduled
+                                )
+                                flight = PrefillChunkFlight(
+                                    request_id=req.request_id,
+                                    head_token=scheduler_output.head_token,
+                                    hidden_channel=(
+                                        scheduler_output.hidden_channel
+                                    ),
+                                    chunk_index=req.chunk_num,
+                                    is_last_chunk=is_last,
+                                    num_scheduled_tokens=num_scheduled,
+                                )
+                                self._prefill_flight_by_token[
+                                    scheduler_output.head_token
+                                ] = flight
+                                self._pending_tail_count[req.request_id] = (
+                                    self._pending_tail_count.get(
+                                        req.request_id, 0
+                                    )
+                                    + 1
+                                )
+
+                                if (
+                                    not is_last
+                                    and self._can_ahead_schedule(
+                                        req.request_id
+                                    )
+                                ):
+                                    # Ahead: re-add to chunk_prefill_first
+                                    # so the next chunk PF can be dispatched
+                                    # before this chunk's PL returns.
+                                    self.chunk_prefill_first.append(req)
+                                    self._ahead_chunk_count[
+                                        req.request_id
+                                    ] = (
+                                        self._ahead_chunk_count.get(
+                                            req.request_id, 0
+                                        )
+                                        + 1
+                                    )
+                                    logger.info(
+                                        "[PD-CHUNK-PRIOR] Ahead-scheduled "
+                                        "chunk %d of request %s "
+                                        "(head_token=%s, %d tokens, "
+                                        "ahead_count=%d)",
+                                        flight.chunk_index,
+                                        req.request_id,
+                                        scheduler_output.head_token,
+                                        num_scheduled,
+                                        self._ahead_chunk_count[
+                                            req.request_id
+                                        ],
+                                    )
+                                else:
+                                    # Wait for PL before next chunk.
+                                    self.prefill_last_pending.append(req)
+                                    logger.info(
+                                        "[PD-CHUNK-PRIOR] Chunk %d of "
+                                        "request %s waiting for PL "
+                                        "(head_token=%s, %d tokens, "
+                                        "is_last=%s, "
+                                        "pending_tails=%d)",
+                                        flight.chunk_index,
+                                        req.request_id,
+                                        scheduler_output.head_token,
+                                        num_scheduled,
+                                        is_last,
+                                        self._pending_tail_count.get(
+                                            req.request_id, 0
+                                        ),
+                                    )
+                            elif req.is_prefill_chunk:
+                                # Not scheduled this round (token budget
+                                # exhausted), keep for next round.
+                                self.chunk_prefill_first.append(req)
+                            else:
+                                # Completed but not scheduled – defensive.
+                                self.prefill_last_pending.append(req)
+                    else:
+                        # === Legacy routing (no chunk-prefill-prior) ===
+                        for req in self.running:
+                            if req.request_id in scheduled_req_ids:
+                                self.prefill_last_pending.append(req)
+                            elif req.is_prefill_chunk:
+                                # Not scheduled this round (e.g. token budget
+                                # exhausted), keep in chunk_prefill_first.
+                                self.chunk_prefill_first.append(req)
+                            else:
+                                # Completed but not scheduled – defensive.
+                                self.prefill_last_pending.append(req)
 
                 self.running = saved_running
 
@@ -590,8 +800,17 @@ class PDSeparatedScheduler(Scheduler):
         return scheduler_output  # type: ignore[return-value]
 
     def _migrate_prefill_to_running(self) -> None:
+        """Move fully-prefilled requests from chunk_prefill_first to running.
+
+        When chunk_prefill_prior is enabled, a request stays in
+        chunk_prefill_first even after ``is_prefill_chunk`` becomes False
+        if it still has pending PL returns.  Only requests with zero
+        pending tails are eligible to enter decode.
+        """
         completed = [
-            req for req in self.chunk_prefill_first if not req.is_prefill_chunk
+            req for req in self.chunk_prefill_first
+            if not req.is_prefill_chunk
+            and self._pending_tail_count.get(req.request_id, 0) == 0
         ]
         for req in completed:
             self.chunk_prefill_first.remove(req)
@@ -630,6 +849,131 @@ class PDSeparatedScheduler(Scheduler):
         self._migrate_prefill_to_running()
         self.finished_req_ids = set()
 
+    # ------------------------------------------------------------------ #
+    # update_from_output — chunk-prefill-prior routing                    #
+    # ------------------------------------------------------------------ #
+    def _update_from_output_prefill_last_legacy(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        """Legacy PL routing: request-granularity pending list."""
+        completed_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
+        newly_running: list[Request] = []
+        newly_chunked: list[Request] = []
+        remaining_pending: list[Request] = []
+        for req in self.prefill_last_pending:
+            if req.request_id in completed_req_ids:
+                if req.is_prefill_chunk:
+                    self.chunk_prefill_first.append(req)
+                    newly_chunked.append(req)
+                else:
+                    self.running.append(req)
+                    newly_running.append(req)
+            else:
+                remaining_pending.append(req)
+        self.prefill_last_pending = remaining_pending
+
+        logger.info(
+            f"[PD] update_from_output PREFILL_LAST done, "
+            f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
+            f"moved {len(newly_running)} reqs to running[], "
+            f"moved {len(newly_chunked)} reqs to chunk_prefill_first[], "
+            f"running[]: {len(self.running)}, "
+            f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
+        )
+
+    def _update_from_output_prefill_last_chunk_prior(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        """Chunk-prefill-prior PL routing: head_token → flight lookup."""
+        head_token = scheduler_output.head_token
+        if not head_token:
+            logger.warning(
+                "[PD-CHUNK-PRIOR] PREFILL_LAST missing head_token; "
+                "falling back to legacy routing."
+            )
+            self._update_from_output_prefill_last_legacy(scheduler_output)
+            return
+
+        flight = self._prefill_flight_by_token.pop(head_token, None)
+        if flight is None:
+            logger.warning(
+                "[PD-CHUNK-PRIOR] PREFILL_LAST head_token=%s not found "
+                "in flight map; falling back to legacy routing.",
+                head_token,
+            )
+            self._update_from_output_prefill_last_legacy(scheduler_output)
+            return
+
+        req_id = flight.request_id
+        req = self.requests.get(req_id)
+
+        # Decrement pending tail count.
+        prev_count = self._pending_tail_count.get(req_id, 0)
+        if prev_count > 0:
+            self._pending_tail_count[req_id] = prev_count - 1
+        remaining = self._pending_tail_count.get(req_id, 0)
+
+        # Decrement ahead count if this chunk was pre-scheduled.
+        ahead_before = self._ahead_chunk_count.get(req_id, 0)
+        if ahead_before > 0:
+            self._ahead_chunk_count[req_id] = ahead_before - 1
+
+        logger.info(
+            "[PD-CHUNK-PRIOR] PL returned: request=%s chunk=%d/%s "
+            "head_token=%s tokens=%d "
+            "pending_tails: %d→%d ahead: %d→%d",
+            req_id,
+            flight.chunk_index,
+            "last" if flight.is_last_chunk else "mid",
+            head_token,
+            flight.num_scheduled_tokens,
+            prev_count,
+            remaining,
+            ahead_before,
+            self._ahead_chunk_count.get(req_id, 0),
+        )
+
+        if flight.is_last_chunk and remaining == 0:
+            # All chunks complete → request enters decode.
+            if req is not None:
+                self.running.append(req)
+            self._cleanup_request_flight_state(req_id)
+            logger.info(
+                "[PD-CHUNK-PRIOR] Request %s all chunks done, "
+                "moved to running[] (%d total).",
+                req_id,
+                len(self.running),
+            )
+        elif remaining == 0 and req is not None:
+            # is_last_chunk was False but no more pending tails.
+            # This can happen if earlier chunks were already cleaned up
+            # (e.g. abort). Move to running as a safety measure.
+            self.running.append(req)
+            self._cleanup_request_flight_state(req_id)
+            logger.info(
+                "[PD-CHUNK-PRIOR] Request %s all tails resolved "
+                "(non-last chunk), moved to running[].",
+                req_id,
+            )
+        elif ahead_before > 0:
+            # The request was already ahead-scheduled; do not re-add to
+            # chunk_prefill_first.
+            logger.info(
+                "[PD-CHUNK-PRIOR] Request %s chunk %d PL: "
+                "already ahead-scheduled, skip re-add.",
+                req_id,
+                flight.chunk_index,
+            )
+        elif req is not None:
+            # Not ahead-scheduled and still has more chunks → add back.
+            self.chunk_prefill_first.append(req)
+            logger.info(
+                "[PD-CHUNK-PRIOR] Request %s chunk %d PL: "
+                "re-added to chunk_prefill_first[] for next chunk.",
+                req_id,
+                flight.chunk_index,
+            )
+
     def update_from_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -642,36 +986,16 @@ class PDSeparatedScheduler(Scheduler):
                 self.hidden_channel_manager.release_prefill(
                     scheduler_output.head_token
                 )
-            # === 核心修改 ===
-            # Requests whose PL just returned are removed from
-            # prefill_last_pending and routed directly:
-            #   - still has more chunks -> chunk_prefill_first
-            #   - prefill fully done    -> running
-            completed_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
-            newly_running: list[Request] = []
-            newly_chunked: list[Request] = []
-            remaining_pending: list[Request] = []
-            for req in self.prefill_last_pending:
-                if req.request_id in completed_req_ids:
-                    if req.is_prefill_chunk:
-                        self.chunk_prefill_first.append(req)
-                        newly_chunked.append(req)
-                    else:
-                        self.running.append(req)
-                        newly_running.append(req)
-                else:
-                    remaining_pending.append(req)
-            self.prefill_last_pending = remaining_pending
-            # ================
 
-            logger.info(
-                f"[PD] update_from_output PREFILL_LAST done, "
-                f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
-                f"moved {len(newly_running)} reqs to running[], "
-                f"moved {len(newly_chunked)} reqs to chunk_prefill_first[], "
-                f"running[]: {len(self.running)}, "
-                f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
-            )
+            if self.chunk_prefill_prior_enable:
+                self._update_from_output_prefill_last_chunk_prior(
+                    scheduler_output
+                )
+            else:
+                self._update_from_output_prefill_last_legacy(
+                    scheduler_output
+                )
+
         if scheduler_output.batch_type == BatchType.DECODE_FIRST:
             # D首完成后立即释放 inflight 计数，使下一个 D首可以
             # 在 D尾仍在 batch_queue 中时就被调度，消除 Cloud idle gap。
@@ -702,7 +1026,8 @@ class PDSeparatedScheduler(Scheduler):
         return (
             num_running
             + len(self.chunk_prefill_first)
-            + len(self.prefill_last_pending),
+            + len(self.prefill_last_pending)
+            + self._total_pending_tails(),
             num_waiting,
         )
 
@@ -713,6 +1038,7 @@ class PDSeparatedScheduler(Scheduler):
             super().get_num_unfinished_requests()
             + len(self.chunk_prefill_first)
             + len(self.prefill_last_pending)
+            + self._total_pending_tails()
         )
 
     def finish_requests(
@@ -731,6 +1057,8 @@ class PDSeparatedScheduler(Scheduler):
             req = self.requests.get(req_id)
             if req and req.is_finished():
                 to_remove.add(req)
+                # Clean up chunk-prefill-prior flight state.
+                self._cleanup_request_flight_state(req_id)
 
         if to_remove:
             self.chunk_prefill_first = remove_all(
@@ -758,6 +1086,10 @@ class PDSeparatedScheduler(Scheduler):
                 request.num_output_placeholders = 0
                 request.discard_latest_async_tokens = True
                 self.waiting.prepend_request(request)
+
+            # Also clean up chunk-prefill-prior flight state.
+            for req_id in list(self._pending_tail_count.keys()):
+                self._cleanup_request_flight_state(req_id)
 
         return super().reset_prefix_cache(reset_running_requests, reset_connector)
 
