@@ -880,21 +880,6 @@ def edge_cloud_isend_tensor_dict(
             value.record_stream(torch.cuda.current_stream(value.device))
         handles.append(handle)
 
-    # TEMP DIAGNOSTIC (remove after RTT verification) ---------------
-    if not hasattr(edge_cloud_isend_tensor_dict, "_diag_count"):
-        edge_cloud_isend_tensor_dict._diag_count = 0
-    if edge_cloud_isend_tensor_dict._diag_count < 5:
-        edge_cloud_isend_tensor_dict._diag_count += 1
-        _merged = list(ec_meta.merge_keys) if ec_meta.merge_payload else []
-        _merged_set = set(_merged)
-        _nonmerged = [k for k in send_keys if k not in _merged_set]
-        logger.warning(
-            "[EC-DIAG isend] total_isend=%d merge_payload=%s "
-            "merge_keys=%s nonmerge_keys=%s num_tokens=%s",
-            len(handles), ec_meta.merge_payload, _merged, _nonmerged, num_tokens,
-        )
-    # END TEMP DIAGNOSTIC -------------------------------------------
-
     return handles
 
 
@@ -1087,22 +1072,6 @@ def edge_cloud_irecv_tensor_dict(
             # layers see a valid residual without paying cross-node cost.
             full_tensor.zero_()
         tensor_dict[key] = full_tensor
-
-    # TEMP DIAGNOSTIC (remove after RTT verification) ---------------
-    if not hasattr(edge_cloud_irecv_tensor_dict, "_diag_count"):
-        edge_cloud_irecv_tensor_dict._diag_count = 0
-    if edge_cloud_irecv_tensor_dict._diag_count < 5:
-        edge_cloud_irecv_tensor_dict._diag_count += 1
-        _merged = list(ec_meta.merge_keys) if ec_meta.merge_payload else []
-        _merged_set = set(_merged)
-        _send_keys = ec_meta.send_tensor_keys or ec_meta.tensor_keys
-        _nonmerged = [k for k in _send_keys if k not in _merged_set]
-        logger.warning(
-            "[EC-DIAG irecv] total_irecv=%d merge_payload=%s "
-            "merge_keys=%s nonmerge_keys=%s num_tokens=%d",
-            len(handles), ec_meta.merge_payload, _merged, _nonmerged, num_tokens,
-        )
-    # END TEMP DIAGNOSTIC -------------------------------------------
 
     return tensor_dict, handles, postprocess
 
