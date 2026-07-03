@@ -322,21 +322,38 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
+    # Declare globals upfront to avoid "used prior to global declaration" errors
     global _MC2
     if parallel_config.enable_edge_cloud:
-        # Edge-cloud mode has a non-uniform rank layout (edge + cloud),
-        # so the standard DP*PP*PCP*TP grid does not apply.
-        # Instead, initialize Ascend-specific groups aligned with the
-        # edge/cloud TP split established in ensure_model_parallel_initialized.
-        world_size = torch.distributed.get_world_size()
+        # In edge-cloud mode, _MC2 is initialized with the same group_ranks as
+        # upstream _EP: all edge workers form one EP group and all cloud
+        # workers form another. Ranks are arranged by dp instance:
+        # instance0_edge, instance0_cloud, instance1_edge, instance1_cloud.
+        # P_TP / DYNAMIC_EPLB / fine-grained TP groups are skipped because
+        # edge-cloud mode does not use the standard uniform rank layout
+        # (DP * PP * PCP * TP).
         backend = torch.distributed.get_backend(get_world_group().device_group)
         edge_npu_count = parallel_config.edge_npu_count
-
-        edge_ranks = list(range(edge_npu_count))
-        cloud_ranks = list(range(edge_npu_count, world_size))
-
+        cloud_npu_count = parallel_config.cloud_npu_count
+        if parallel_config.is_shared_model_edge:
+            # Shared-model edge-cloud topology: the edge has a
+            # single distributed rank (rank 0) and the cloud
+            # occupies ranks 1..1 + N*C.
+            ep_edge_ranks = [0]
+            ep_cloud_ranks = list(
+                range(1,
+                      1 + parallel_config.data_parallel_size * cloud_npu_count))
+        else:
+            world_size_per_instance = edge_npu_count + cloud_npu_count
+            ep_edge_ranks = []
+            ep_cloud_ranks = []
+            for dp_idx in range(parallel_config.data_parallel_size):
+                base = dp_idx * world_size_per_instance
+                ep_edge_ranks.extend(range(base, base + edge_npu_count))
+                ep_cloud_ranks.extend(
+                    range(base + edge_npu_count, base + world_size_per_instance))
         _MC2 = init_model_parallel_group(
-            [edge_ranks, cloud_ranks],
+            [ep_edge_ranks, ep_cloud_ranks],
             get_world_group().local_rank,
             backend,
             group_name="mc2",
@@ -1155,12 +1172,14 @@ def edge_cloud_send_tensor_dict(
     tensor_dict: dict[str, torch.Tensor | Any],
     channel: HiddenChannelType,
     num_tokens: int,
+    dst: int | None = None,
 ) -> list[Handle]:
     """Send edge-cloud hidden tensors on the selected Phase6 channel."""
     return edge_cloud_isend_tensor_dict_on_hidden_channel(
         tensor_dict,
         channel=channel,
         num_tokens=num_tokens,
+        dst=dst,
     )
 def _apply_sp_chunk_inplace(tensor_dict: dict[str, Any]) -> None:
     """Sequence-parallel chunk each tensor in ``tensor_dict`` along dim 0.
@@ -1184,6 +1203,7 @@ def edge_cloud_broadcast_recv(
     num_tokens: int,
     channel: HiddenChannelType = HiddenChannelType.PREFILL_1,
     sp_chunk: bool = False,
+    src: int | None = None,
 ) -> tuple[
     dict[str, torch.Tensor | Any] | None,
     list[Handle],
@@ -1196,10 +1216,25 @@ def edge_cloud_broadcast_recv(
     This eliminates the inter-node pickle+Gloo metadata exchange, while
     still broadcasting metadata within the local TP group (intra-node)
     so that non-NPU0 TP ranks can allocate tensors.
+    Args:
+        src: optional explicit source rank (in-group index) for the
+            PP receive. When ``None`` (the default), the upstream
+            vLLM
+            :meth:`GroupCoordinator.irecv_tensor_dict` falls back to
+            the implicit "previous PP rank" routing — the original
+            behaviour of this function. Pass an explicit rank when
+            the caller needs to receive from a specific peer (e.g.
+            the shared-model edge worker, where multiple virtual
+            workers share a single distributed rank and each one
+            communicates with a different cloud peer based on
+            ``local_rank``). The parameter is only consulted when
+            the local PP group is the PP pair (i.e. it participates
+            in the PP receive); the singleton-PP TP-broadcast-only
+            branch is unchanged.
     """
     pp_group = get_pp_group()
     tp_group = get_tp_group()
-    is_pp_npu0 = pp_group.world_size == 2
+    is_pp_npu0 = pp_group.world_size > 1
     ec_meta = _select_edge_cloud_meta_for_recv()
 
     if is_pp_npu0:
@@ -1207,6 +1242,7 @@ def edge_cloud_broadcast_recv(
             edge_cloud_irecv_tensor_dict_on_hidden_channel(
                 channel=channel,
                 num_tokens=num_tokens,
+                src=src,
             )
         )
         assert tensor_dict is not None, (
