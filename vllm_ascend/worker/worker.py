@@ -550,10 +550,18 @@ class NPUWorker(WorkerBase):
                 # rather than the implicit "previous PP rank"
                 # (which would not point at the edge for cloud
                 # first-workers past the first one).
+                # Match the sender: only receive mrope when this batch has a
+                # multimodal request (text-only batches compute M-RoPE on
+                # cloud locally). Computed from the same scheduler_output the
+                # edge used, so both sides agree.
+                cloud_include_mrope = self.model_runner.step_has_multimodal_req(
+                    scheduler_output
+                )
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     sp_chunk=do_sp_chunk and merge_payload,
                     src=0,
+                    include_mrope=cloud_include_mrope,
                 )
                 self.model_runner.cloud_prepare_early(scheduler_output)
 
@@ -611,7 +619,14 @@ class NPUWorker(WorkerBase):
             # (and hitting the missing grid_thw). Transpose [3, N] -> [N, 3]
             # so the sequence axis is dim-0, matching hidden_states and the
             # e2c transfer's dim-0 slicing / SP-gather path.
-            if self.model_runner.uses_mrope and "hidden_states" in _gathered:
+            # Skip for text-only batches: cloud computes M-RoPE locally then
+            # (empty mm_features degrades to 1D, no grid_thw needed), saving
+            # one P2P RTT.
+            include_mrope = self.model_runner.step_has_multimodal_req(
+                scheduler_output
+            )
+            if (include_mrope and self.model_runner.uses_mrope
+                    and "hidden_states" in _gathered):
                 n = _gathered["hidden_states"].shape[0]
                 _gathered["mrope_positions"] = (
                     self.model_runner.mrope_positions.gpu[:, :n].t().contiguous()
@@ -624,6 +639,7 @@ class NPUWorker(WorkerBase):
                 self._pp_send_work = edge_cloud_isend_tensor_dict(
                     _gathered,
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    include_mrope=include_mrope,
                 )
             edge_sp = enable_sp()
             edge_merge = get_edge_cloud_tensor_meta().merge_payload

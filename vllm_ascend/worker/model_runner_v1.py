@@ -2736,6 +2736,7 @@ class NPUModelRunner(GPUModelRunner):
             if (self._edge_cloud_enabled
                     and self.edge_cloud_cfg.role == "cloud"
                     and self.uses_mrope
+                    and self.step_has_multimodal_req(scheduler_output)
                     and recv_intermediate_tensors is not None):
                 recv_intermediate_tensors.wait_for_comm()
                 recv_mrope = recv_intermediate_tensors.tensors["mrope_positions"]
@@ -3995,21 +3996,50 @@ class NPUModelRunner(GPUModelRunner):
             "num_scheduled_tokens_compressed_list": num_scheduled_tokens_compressed_list,
         }
 
+    def step_has_multimodal_req(self, scheduler_output) -> bool:
+        """Whether the current step's batch contains any multimodal request.
+
+        Used to decide whether mrope_positions must be transferred edge->cloud
+        (only multimodal requests need it; text-only batches can be computed
+        locally on the cloud because empty mm_features degrades M-RoPE to 1D
+        without hitting the missing image_grid_thw). Must return the SAME value
+        on edge and cloud (they share the scheduler_output and build req_state
+        from the same NewRequestData.mm_features).
+        """
+        # cached/running reqs: covers decode of multimodal requests (whose
+        # mm_features stay non-empty after prefill).
+        if any(rs.mm_features for rs in self.requests.values()):
+            return True
+        # new reqs this step: cloud recv runs BEFORE cloud_prepare_early builds
+        # req_state, so on the cloud side self.requests does not yet contain
+        # this step's new reqs; check scheduler_output directly.
+        for nr in scheduler_output.scheduled_new_reqs:
+            if getattr(nr, "mm_features", None):
+                return True
+        return False
+
     def _init_mrope_positions(self, req_state) -> None:
-        # In edge-cloud mode the cloud side reuses M-RoPE positions computed
-        # on the edge (transferred via intermediate_tensors), because the
-        # image_grid_thw / video_grid_thw metadata needed by the local
-        # computation did not cross the edge->cloud mm_features boundary.
-        # profile_run / _dummy_run do not call this, so the role guard is
-        # sufficient and does not affect profiling.
-        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+        # In edge-cloud cloud mode: skip M-RoPE init only for multimodal
+        # requests (their image_grid_thw / video_grid_thw did not cross the
+        # edge->cloud mm_features boundary, so local init would KeyError).
+        # Text-only requests (empty mm_features) init locally: _iter_mm_grid_hw
+        # does not enter its loop, M-RoPE degrades to 1D, no crash. This lets
+        # text-only batches skip the mrope transfer entirely.
+        # profile_run / _dummy_run do not call this, so the role guard does not
+        # affect profiling.
+        if (self._edge_cloud_enabled
+                and self.edge_cloud_cfg.role == "cloud"
+                and req_state.mm_features):
             return
         super()._init_mrope_positions(req_state)
 
     def _calc_mrope_positions(self, scheduler_output) -> None:
-        # See _init_mrope_positions: cloud reuses edge-computed mrope written
-        # into self.mrope_positions by execute_model, so skip local calc.
-        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+        # In edge-cloud cloud mode: skip local calc only when the batch contains
+        # a multimodal request (edge transfers the whole-batch mrope buffer and
+        # execute_model injects it). Text-only batches compute locally.
+        if (self._edge_cloud_enabled
+                and self.edge_cloud_cfg.role == "cloud"
+                and self.step_has_multimodal_req(scheduler_output)):
             return
         super()._calc_mrope_positions(scheduler_output)
 
