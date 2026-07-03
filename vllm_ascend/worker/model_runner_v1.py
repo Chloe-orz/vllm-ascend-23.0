@@ -350,95 +350,27 @@ class EdgeCloudSegment(torch.nn.Module):
             **extra_layer_kwargs,
         )
 
+
 @dataclass
-class HeadState:
-    """Minimal suspended state for an edge-cloud head-segment batch.
+class _StubCommonAttnMetadata:
+    """Minimal stub carrying the fields the GDN sub-patchers
+    (``_patched_build_spec`` / ``_patched_build_prefill`` /
+    ``_patched_build_decode``) read off
+    ``common_attn_metadata``.
 
-    The heavy intermediate tensors (hidden states) are sent to the cloud
-    immediately; we only keep enough metadata to correlate the tail-segment
-    batch with its head segment via ``head_token``.
+    Used by ``_merge_gdn_layer_attn`` to feed the patched
+    builders when running the batched GDN path. Only
+    ``query_start_loc`` (for ``.device``) and
+    ``query_start_loc_cpu`` (the merged full cu_seqlen) plus
+    ``num_decode_draft_tokens_cpu`` (the merged per-req spec
+    flag) are needed; the rest of
+    :class:`vllm.v1.attention.backend.CommonAttentionMetadata` is
+    not read.
     """
-    head_token: str
-    scheduler_output: "SchedulerOutput"
-    req_ids: tuple[str, ...]
 
-
-def _clone_gdn_attn_metadata(meta):
-    """Deep-clone device tensors inside GDNAttentionMetadata.
-
-    GDN metadata holds device tensors that are views into shared
-    ``common_attn_metadata`` buffers (e.g. ``query_start_loc``,
-    ``state_indices``).  These buffers are rebuilt on every batch, so a
-    decode batch interleaved between two prefill slices would silently
-    overwrite the data still referenced by the saved
-    ``_layerwise_attn_metadata``.  Cloning at **save time** preserves
-    the correct prefill-length values.
-    """
-    import copy
-    from dataclasses import fields
-
-    # Use dataclass replacement to create a shallow copy first,
-    # then deep-clone the device tensor fields.
-    cloned = copy.copy(meta)
-
-    # Device tensor fields that must be cloned to decouple from
-    # shared common_attn_metadata buffers.
-    _DEVICE_TENSOR_FIELDS = (
-        "has_initial_state",
-        "spec_query_start_loc",
-        "non_spec_query_start_loc",
-        "spec_state_indices_tensor",
-        "non_spec_state_indices_tensor",
-        "spec_sequence_masks",
-        "spec_token_indx",
-        "non_spec_token_indx",
-        "num_accepted_tokens",
-        "chunk_indices",
-        "chunk_offsets",
-    )
-    for field_name in _DEVICE_TENSOR_FIELDS:
-        tensor = getattr(cloned, field_name, None)
-        if tensor is not None and isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
-            setattr(cloned, field_name, tensor.clone())
-
-    # The non_spec_prefill_fallback_meta contains pooled device tensors
-    # for causal_conv1d host args and chunked prefill metadata.
-    fallback_meta = getattr(cloned, "non_spec_prefill_fallback_meta", None)
-    if fallback_meta is not None:
-        cloned_fallback = copy.copy(fallback_meta)
-
-        # Clone causal_conv1d host metadata (CPU pinned tensors)
-        causal_conv1d = getattr(cloned_fallback, "causal_conv1d", None)
-        if causal_conv1d is not None:
-            cloned_causal = copy.copy(causal_conv1d)
-            for attr in ("query_start_loc_cpu", "cache_indices_cpu", "has_initial_state_cpu"):
-                t = getattr(cloned_causal, attr, None)
-                if t is not None and isinstance(t, torch.Tensor):
-                    setattr(cloned_causal, attr, t.clone())
-            cloned_fallback.causal_conv1d = cloned_causal
-
-        # Clone chunked prefill metadata (device tensors from 2-slot pool)
-        chunk_meta = getattr(cloned_fallback, "chunk", None)
-        if chunk_meta is not None:
-            cloned_chunk = copy.copy(chunk_meta)
-            for attr in (
-                "chunk_indices_chunk64",
-                "chunk_offsets_chunk64",
-                "update_chunk_offsets_chunk64",
-                "final_chunk_indices_chunk64",
-                "chunk_indices_large_block",
-                "block_indices_cumsum",
-            ):
-                t = getattr(cloned_chunk, attr, None)
-                if t is not None and isinstance(t, torch.Tensor) and t.device.type != "cpu":
-                    setattr(cloned_chunk, attr, t.clone())
-            # Decouple from pool so the pool slot can be reused safely
-            cloned_chunk._buffer_slot = None
-            cloned_fallback.chunk = cloned_chunk
-
-        cloned.non_spec_prefill_fallback_meta = cloned_fallback
-
-    return cloned
+    query_start_loc: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
+    num_decode_draft_tokens_cpu: torch.Tensor | None = None
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -8823,45 +8755,47 @@ class NPUModelRunner(GPUModelRunner):
             if non_spec_qsl_parts else None
         )
 
-        # F. ``chunk_indices`` / ``chunk_offsets`` /
+        # F-class fields (``chunk_indices`` / ``chunk_offsets`` /
         # ``nums_dict`` / ``batch_ptr`` /
-        # ``token_chunk_offset_ptr`` — same derivation as
-        # ``_ORIGINAL_BUILD`` (gdn_attn.py line 329-346) but on the
-        # merged ``non_spec_query_start_loc``. These tensors live on
-        # the metadata itself (NOT used by the patched Ascend
-        # forward path — see ``GDNPrefillFallbackMeta`` below) but
-        # are populated to match ``_ORIGINAL_BUILD``'s signature.
+        # ``token_chunk_offset_ptr``) are populated by
+        # ``_ORIGINAL_BUILD`` on the per-dp_rank path but the
+        # patched Ascend forward path reads the ``*_fallback_meta``
+        # (set as instance attributes by the three sub-patchers
+        # below), not the dataclass fields — so they can stay
+        # ``None`` for the merged batch.
         merged_chunk_indices = None
         merged_chunk_offsets = None
         merged_nums_dict = None
         merged_batch_ptr = None
         merged_token_chunk_offset_ptr = None
-        # ``GDNPrefillFallbackMeta`` is what ``_patched_build``
-        # additionally sets on the metadata after ``_ORIGINAL_BUILD``
-        # (see patch_gdn_attn.py line 592). Construct it from the
-        # patched helpers, using the merged cu_seqlen.
-        merged_non_spec_prefill_fallback_meta = None
-        if (merged_non_spec_query_start_loc is not None
-                and merged_num_prefills > 0):
-            from vllm.model_executor.layers.fla.ops.index import (
-                prepare_chunk_indices,
-                prepare_chunk_offsets,
-            )
-            from vllm.model_executor.layers.fla.ops.utils import (
-                FLA_CHUNK_SIZE,
-            )
-            from vllm.v1.attention.backends.utils import (
-                compute_causal_conv1d_metadata,
-            )
+        # ``_patched_build`` (patch_gdn_attn.py:709-750) dispatches
+        # to ``_patched_build_spec`` / ``_patched_build_prefill`` /
+        # ``_patched_build_decode``; each sets the corresponding
+        # ``*_fallback_meta`` instance attribute. Run the same
+        # sub-patchers on a merged ``temp_attn_metadata`` to
+        # populate all three. All three sub-patchers read the
+        # **same** ``common_attn_metadata.query_start_loc_cpu``
+        # (per-batch full cu_seqlen, covering BOTH spec and
+        # non-spec reqs) and split it internally via the per-req
+        # ``num_decode_draft_tokens_cpu`` spec-flag tensor
+        # (``>= 0`` ⇒ spec, ``< 0`` ⇒ non-spec — see
+        # ``_build_spec_sequence_masks_cpu`` /
+        # ``_build_spec_query_start_loc_cpu`` /
+        # ``_build_non_spec_query_start_loc_cpu``). We
+        # **reconstruct** the merged full cu_seqlen + per-req
+        # spec flag from the already-merged subset cu_seqlens
+        # computed above (the inverse of the per-dp_rank
+        # ``_build_*_query_start_loc_cpu`` filter).
+        if (merged_num_prefills > 0 or merged_num_decodes > 0
+                or merged_num_spec_decodes > 0):
             from vllm_ascend.patch.worker.patch_gdn_attn import (
-                GDNPrefillFallbackMeta,
-                _build_non_spec_causal_conv1d_host_meta,
-                _build_non_spec_chunked_prefill_meta,
-                _ensure_causal_conv1d_host_meta_state,
-                _ensure_chunk_meta_state,
+                _patched_build_decode,
+                _patched_build_prefill,
+                _patched_build_spec,
             )
+
             # Find the builder for this GDN layer (must be the
-            # same builder that ``_patched_build`` operates on).
+            # same builder ``_patched_build`` operates on).
             builder = None
             for attn_group_list in self.attn_groups:
                 for attn_group in attn_group_list:
@@ -8872,29 +8806,46 @@ class NPUModelRunner(GPUModelRunner):
                     break
             assert builder is not None, (
                 f"GDN builder not found for layer {layer_name!r}")
-            _ensure_chunk_meta_state(builder, self.device)
-            _ensure_causal_conv1d_host_meta_state(
-                builder, self.device)
 
-            # F-class (chunk_indices / chunk_offsets /
-            # nums_dict / batch_ptr /
-            # token_chunk_offset_ptr) — same as
-            # ``_ORIGINAL_BUILD`` (gdn_attn.py line 329-346) but
-            # on the merged ``non_spec_query_start_loc``.
-            cpu_qsl = merged_non_spec_query_start_loc.cpu()
-            merged_chunk_indices = prepare_chunk_indices(
-                cpu_qsl, FLA_CHUNK_SIZE).to(
-                    device=self.device, non_blocking=True)
-            merged_chunk_offsets = prepare_chunk_offsets(
-                cpu_qsl, FLA_CHUNK_SIZE).to(
-                    device=self.device, non_blocking=True)
-            (merged_nums_dict, merged_batch_ptr,
-             merged_token_chunk_offset_ptr) = (
-                compute_causal_conv1d_metadata(
-                    cpu_qsl, device=self.device))
+            # Reconstruct merged full cu_seqlen from the
+            # per-subset cumsums (inverse of
+            # ``_build_*_query_start_loc_cpu``'s filter): the
+            # merged batch has non-spec reqs first then spec
+            # reqs (matches ``argsort(spec_token_masks,
+            # stable=True)`` ordering in ``_ORIGINAL_BUILD``
+            # gdn_attn.py:271), so the full cumsum is the
+            # non-spec cumsum followed by
+            # ``spec_cumsum[1:] + non_spec_cumsum[-1]``.
+            n_non_spec = merged_num_decodes + merged_num_prefills
+            non_spec_cumsum_cpu = (
+                merged_non_spec_query_start_loc.cpu())
+            if merged_spec_query_start_loc is not None:
+                spec_cumsum_cpu = (
+                    merged_spec_query_start_loc.cpu())
+                merged_full_cumsum_cpu = torch.cat([
+                    non_spec_cumsum_cpu,
+                    spec_cumsum_cpu[1:] + non_spec_cumsum_cpu[-1],
+                ])
+            else:
+                merged_full_cumsum_cpu = non_spec_cumsum_cpu
+            # Reconstruct the per-req spec flag: ``-1`` for
+            # non-spec rows, ``0`` for spec rows. Sub-patchers'
+            # ``_build_spec_sequence_masks_cpu`` will recover
+            # ``spec_masks = nddt >= 0`` and re-derive the
+            # per-subset cumsums, which round-trip back to
+            # ``merged_spec_query_start_loc`` and
+            # ``merged_non_spec_query_start_loc``.
+            merged_nddt_cpu = torch.cat([
+                torch.full((n_non_spec,), -1, dtype=torch.int32),
+                torch.zeros(merged_num_spec_decodes, dtype=torch.int32),
+            ])
 
-            # ``GDNPrefillFallbackMeta`` — built by patched
-            # helpers on the merged cu_seqlen.
+            common_stub = _StubCommonAttnMetadata(
+                query_start_loc=torch.empty(0, device=self.device),
+                query_start_loc_cpu=merged_full_cumsum_cpu,
+                num_decode_draft_tokens_cpu=merged_nddt_cpu,
+            )
+
             temp_attn_metadata = GDNAttentionMetadata(
                 num_prefills=merged_num_prefills,
                 num_prefill_tokens=merged_num_prefill_tokens,
@@ -8914,15 +8865,37 @@ class NPUModelRunner(GPUModelRunner):
                 non_spec_token_indx=merged_non_spec_token_indx,
                 num_accepted_tokens=merged_num_accepted_tokens,
             )
-            merged_causal_conv1d = (
-                _build_non_spec_causal_conv1d_host_meta(
-                    builder, temp_attn_metadata, cpu_qsl))
-            merged_chunk = _build_non_spec_chunked_prefill_meta(
-                builder, cpu_qsl, merged_non_spec_query_start_loc)
-            merged_non_spec_prefill_fallback_meta = GDNPrefillFallbackMeta(
-                causal_conv1d=merged_causal_conv1d,
-                chunk=merged_chunk,
-            )
+            # Initialise the three ``*_fallback_meta`` to ``None``
+            # before invoking any sub-patcher — mirrors
+            # ``_patched_build`` (patch_gdn_attn.py:731-733). The
+            # sub-patchers only set the one they handle, so reads
+            # below need the others to exist (with ``None`` value)
+            # to avoid ``AttributeError`` when the corresponding
+            # sub-patcher wasn't invoked.
+            temp_attn_metadata.non_spec_prefill_fallback_meta = None
+            temp_attn_metadata.non_spec_decode_fallback_meta = None
+            temp_attn_metadata.spec_decode_fallback_meta = None
+
+            if merged_num_spec_decodes > 0:
+                _patched_build_spec(
+                    builder, temp_attn_metadata, common_stub)
+            if merged_num_prefills > 0:
+                _patched_build_prefill(
+                    builder, temp_attn_metadata, common_stub)
+            if merged_num_decodes > 0:
+                _patched_build_decode(
+                    builder, temp_attn_metadata, common_stub)
+
+            merged_non_spec_prefill_fallback_meta = (
+                temp_attn_metadata.non_spec_prefill_fallback_meta)
+            merged_non_spec_decode_fallback_meta = (
+                temp_attn_metadata.non_spec_decode_fallback_meta)
+            merged_spec_decode_fallback_meta = (
+                temp_attn_metadata.spec_decode_fallback_meta)
+        else:
+            merged_non_spec_prefill_fallback_meta = None
+            merged_non_spec_decode_fallback_meta = None
+            merged_spec_decode_fallback_meta = None
 
         attn_metadata = GDNAttentionMetadata(
             num_prefills=merged_num_prefills,
@@ -8947,13 +8920,17 @@ class NPUModelRunner(GPUModelRunner):
             batch_ptr=merged_batch_ptr,
             token_chunk_offset_ptr=merged_token_chunk_offset_ptr,
         )
-        # ``non_spec_prefill_fallback_meta`` and
-        # ``skip_graph_params_update`` are NOT dataclass fields —
-        # ``_patched_build`` sets them as instance attributes after
-        # construction (see patch_gdn_attn.py line 573/592). Mirror
-        # that for the merged batch.
+        # ``*_fallback_meta`` and ``skip_graph_params_update`` are
+        # NOT dataclass fields — ``_patched_build`` sets them as
+        # instance attributes after construction (see
+        # patch_gdn_attn.py:731-733, 838, 866). Mirror that for
+        # the merged batch.
         attn_metadata.non_spec_prefill_fallback_meta = (
             merged_non_spec_prefill_fallback_meta)
+        attn_metadata.non_spec_decode_fallback_meta = (
+            merged_non_spec_decode_fallback_meta)
+        attn_metadata.spec_decode_fallback_meta = (
+            merged_spec_decode_fallback_meta)
         attn_metadata.skip_graph_params_update = True
         return attn_metadata
 
