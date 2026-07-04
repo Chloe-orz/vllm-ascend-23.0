@@ -587,6 +587,25 @@ class NPUWorker(WorkerBase):
                     comm_postprocess=comm_postprocess,
                 )
 
+        # Edge: decide whether to send mrope_positions BEFORE segment_a runs
+        # _update_states, matching the cloud's timing. The cloud evaluates
+        # step_has_multimodal_req (worker.py:~550) BEFORE cloud_prepare_early
+        # runs _update_states. _update_states removes finished requests from
+        # self.requests (gpu_model_runner.py), so evaluating include_mrope
+        # AFTER segment_a (as before) made the edge see a just-finished
+        # multimodal request as already removed while the cloud still saw it,
+        # disagreeing on include_mrope and desyncing the mrope_positions tensor
+        # count (2 vs 3) on the edge->cloud P2P channel. Under async
+        # scheduling the orphaned recv then silently matched the next batch's
+        # send, cascading into corrupted positions / repeated-token output.
+        # The mrope_positions VALUES are still produced inside segment_a; only
+        # the send/receive DECISION is hoisted here.
+        edge_include_mrope = None
+        if forward_pass and is_edge_device():
+            edge_include_mrope = self.model_runner.step_has_multimodal_req(
+                scheduler_output
+            )
+
         if self.profiler is not None:
             self.profiler.step()
 
@@ -614,8 +633,16 @@ class NPUWorker(WorkerBase):
             # Skip for text-only batches: cloud computes M-RoPE locally then
             # (empty mm_features degrades to 1D, no grid_thw needed), saving
             # one P2P RTT.
-            include_mrope = self.model_runner.step_has_multimodal_req(
-                scheduler_output
+            # Reuse the decision computed before segment_a (edge_include_mrope
+            # above) so the edge's include_mrope matches the cloud's, which is
+            # evaluated before cloud_prepare_early's _update_states. Computing
+            # it here (after segment_a's _update_states) would make the edge
+            # disagree with the cloud when a multimodal request finishes this
+            # step, desyncing the P2P mrope tensor count.
+            include_mrope = edge_include_mrope
+            assert include_mrope is not None, (
+                "edge_include_mrope must be set before segment_a; the edge "
+                "send path is only reached when forward_pass is True"
             )
             if (include_mrope and self.model_runner.uses_mrope
                     and "hidden_states" in _gathered):
