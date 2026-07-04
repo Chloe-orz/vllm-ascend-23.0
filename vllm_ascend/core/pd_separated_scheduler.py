@@ -229,14 +229,6 @@ class PDSeparatedScheduler(Scheduler):
     # ------------------------------------------------------------------ #
     # Chunk-prefill-prior helpers                                         #
     # ------------------------------------------------------------------ #
-    def _remaining_prompt_tokens(self, req: Request, scheduled: int) -> int:
-        """Tokens remaining after scheduling ``scheduled`` tokens."""
-        return max(0, req.num_prompt_tokens - req.num_computed_tokens - scheduled)
-
-    def _has_more_chunks(self, req: Request, num_scheduled: int) -> bool:
-        """True if the request still has prompt tokens after this chunk."""
-        return self._remaining_prompt_tokens(req, num_scheduled) > 0
-
     def _can_ahead_schedule(self, req_id: str) -> bool:
         """True when the request can have one more chunk PF dispatched ahead."""
         return (
@@ -504,6 +496,16 @@ class PDSeparatedScheduler(Scheduler):
         self.chunk_prefill_first = []
         self.max_num_running_reqs -= len(saved_running)
 
+        # Snapshot num_computed_tokens before super().schedule() so that
+        # the is_last computation below uses the pre-schedule value.
+        # (super().schedule() → _update_after_schedule increments
+        # num_computed_tokens; without the snapshot we would double-count
+        # the current chunk's tokens.)
+        _num_computed_before: dict[str, int] = {
+            req.request_id: req.num_computed_tokens
+            for req in self.running
+        }
+
         scheduler_output = None
         try:
             scheduler_output = super().schedule()
@@ -553,16 +555,27 @@ class PDSeparatedScheduler(Scheduler):
                                         req.request_id
                                     ]
                                 )
-                                is_last = not self._has_more_chunks(
-                                    req, num_scheduled
+                                # Use pre-schedule num_computed_tokens
+                                # to avoid double-counting the current
+                                # chunk's tokens.
+                                num_comp_before = (
+                                    _num_computed_before.get(
+                                        req.request_id, 0
+                                    )
                                 )
+                                remaining = (
+                                    req.num_prompt_tokens
+                                    - num_comp_before
+                                    - num_scheduled
+                                )
+                                is_last = remaining <= 0
                                 flight = PrefillChunkFlight(
                                     request_id=req.request_id,
                                     head_token=scheduler_output.head_token,
                                     hidden_channel=(
                                         scheduler_output.hidden_channel
                                     ),
-                                    chunk_index=req.chunk_num,
+                                    chunk_index=max(0, req.chunk_num - 1),
                                     is_last_chunk=is_last,
                                     num_scheduled_tokens=num_scheduled,
                                 )
@@ -946,14 +959,17 @@ class PDSeparatedScheduler(Scheduler):
             )
         elif remaining == 0 and req is not None:
             # is_last_chunk was False but no more pending tails.
-            # This can happen if earlier chunks were already cleaned up
-            # (e.g. abort). Move to running as a safety measure.
-            self.running.append(req)
+            # The request still has more chunks — re-add to
+            # chunk_prefill_first so the next chunk PF can be
+            # dispatched.
+            self.chunk_prefill_first.append(req)
             self._cleanup_request_flight_state(req_id)
             logger.info(
-                "[PD-CHUNK-PRIOR] Request %s all tails resolved "
-                "(non-last chunk), moved to running[].",
+                "[PD-CHUNK-PRIOR] Request %s chunk %d PL: "
+                "all tails cleared, re-added to chunk_prefill_first[] "
+                "for next chunk.",
                 req_id,
+                flight.chunk_index,
             )
         elif ahead_before > 0:
             # The request was already ahead-scheduled; do not re-add to
@@ -1023,22 +1039,44 @@ class PDSeparatedScheduler(Scheduler):
 
     def get_request_counts(self) -> tuple[int, int]:
         num_running, num_waiting = super().get_request_counts()
+        if self.chunk_prefill_prior_enable:
+            # Use a set to avoid double-counting requests that appear in
+            # multiple tracking structures (e.g. a request in
+            # prefill_last_pending also has _pending_tail_count > 0).
+            pending_ids: set[str] = set()
+            pending_ids.update(
+                req.request_id for req in self.chunk_prefill_first
+            )
+            pending_ids.update(
+                req.request_id for req in self.prefill_last_pending
+            )
+            pending_ids.update(self._pending_tail_count.keys())
+            return (num_running + len(pending_ids), num_waiting)
         return (
             num_running
             + len(self.chunk_prefill_first)
-            + len(self.prefill_last_pending)
-            + self._total_pending_tails(),
+            + len(self.prefill_last_pending),
             num_waiting,
         )
 
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
             return 0
+        base = super().get_num_unfinished_requests()
+        if self.chunk_prefill_prior_enable:
+            pending_ids: set[str] = set()
+            pending_ids.update(
+                req.request_id for req in self.chunk_prefill_first
+            )
+            pending_ids.update(
+                req.request_id for req in self.prefill_last_pending
+            )
+            pending_ids.update(self._pending_tail_count.keys())
+            return base + len(pending_ids)
         return (
-            super().get_num_unfinished_requests()
+            base
             + len(self.chunk_prefill_first)
             + len(self.prefill_last_pending)
-            + self._total_pending_tails()
         )
 
     def finish_requests(
