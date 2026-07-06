@@ -846,8 +846,10 @@ def edge_cloud_isend_tensor_dict(
         handle = torch.distributed.isend(
             merged, dst=pp_group.ranks[dst], group=group
         )
-        if merged.is_cuda:
+        if merged.device.type == "cuda":
             merged.record_stream(torch.cuda.current_stream(merged.device))
+        elif merged.device.type == "npu":
+            merged.record_stream(torch.npu.current_stream(merged.device))
         handles.append(handle)
         # Do NOT return: keys not in merge_keys (e.g. mrope_positions) still
         # need to be sent as individual isends by the per-key loop below.
@@ -876,8 +878,10 @@ def edge_cloud_isend_tensor_dict(
         handle = torch.distributed.isend(
             value, dst=pp_group.ranks[dst], group=group
         )
-        if value.is_cuda:
+        if value.device.type == "cuda":
             value.record_stream(torch.cuda.current_stream(value.device))
+        elif value.device.type == "npu":
+            value.record_stream(torch.npu.current_stream(value.device))
         handles.append(handle)
 
     return handles
