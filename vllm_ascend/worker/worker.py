@@ -661,11 +661,34 @@ class NPUWorker(WorkerBase):
                 _gathered["mrope_positions"] = (
                     self.model_runner.mrope_positions.gpu[:, :n].t().contiguous()
                 )
+                # Debug: ensure seg_a mrope is fully materialized before isend
+                torch.npu.current_stream().synchronize()
+                if get_tp_group().rank_in_group == 0:
+                    mrope = _gathered["mrope_positions"]
+                    req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+                    logger.info(
+                        "[EdgeCloud-Edge][TP0][Batch=%s][Total=%s] e2c "
+                        "mrope_positions shape=%s dtype=%s first3=%s "
+                        "last3=%s sum=%s",
+                        req_ids,
+                        scheduler_output.total_num_scheduled_tokens,
+                        list(mrope.shape),
+                        mrope.dtype,
+                        mrope[:3].tolist()
+                        if mrope.shape[0] >= 3
+                        else mrope.tolist(),
+                        mrope[-3:].tolist()
+                        if mrope.shape[0] >= 3
+                        else mrope.tolist(),
+                        mrope.sum().item(),
+                    )
             if get_pp_group().world_size == 2:
                 # Pass scheduler total so the sender slices off any
                 # cudagraph / SP / DP padding, letting the cloud receiver
                 # allocate buffers from SchedulerOutput.total_num_scheduled_tokens
                 # without an inter-node metadata exchange.
+                # Debug sync: ensure seg_a forward is complete before isend
+                torch.npu.current_stream().synchronize()
                 self._pp_send_work = edge_cloud_isend_tensor_dict(
                     _gathered,
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
@@ -707,6 +730,8 @@ class NPUWorker(WorkerBase):
                 # back to the unpadded length on the sender side so the edge
                 # receiver can keep allocating buffers from scheduler total
                 # alone (no metadata wire transfer needed).
+                # Debug sync: ensure seg_c forward is complete before isend
+                torch.npu.current_stream().synchronize()
                 self._pp_send_work = edge_cloud_isend_tensor_dict(
                     _gathered,
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
