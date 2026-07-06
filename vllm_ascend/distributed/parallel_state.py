@@ -1094,7 +1094,16 @@ def _apply_sp_chunk_inplace(tensor_dict: dict[str, Any]) -> None:
     """
     from vllm.model_executor.models.utils import sequence_parallel_chunk
     for key, value in list(tensor_dict.items()):
-        if isinstance(value, torch.Tensor) and value.numel() > 0:
+        # Skip non-tensor, empty, and non-floating-point tensors.
+        # mrope_positions (int64) must NOT be SP-chunked: each TP rank needs
+        # the full per-token positions to index cos_sin_cache.  chunking it
+        # would leave only 1/TP of the positions valid and the rest garbage,
+        # corrupting RoPE in all cloud layers.
+        if (
+            isinstance(value, torch.Tensor)
+            and value.numel() > 0
+            and value.is_floating_point()
+        ):
             tensor_dict[key] = sequence_parallel_chunk(value)
 
 
