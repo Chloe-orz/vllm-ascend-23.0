@@ -2264,8 +2264,16 @@ class NPUModelRunner(GPUModelRunner):
                     and recv_intermediate_tensors is not None):
                 recv_intermediate_tensors.wait_for_comm()
                 recv_mrope = recv_intermediate_tensors.tensors["mrope_positions"]
-                self.mrope_positions.gpu[:, :num_tokens_padded].copy_(
-                    recv_mrope[:num_tokens_padded].t().contiguous()
+                # Only the first total_num_scheduled_tokens rows were actually
+                # transmitted (isend/irecv slice to num_tokens); the recv buffer
+                # is torch.empty beyond that. Copy only the received rows — the
+                # cudagraph/SP padding tail [total:num_tokens_padded] is zeroed
+                # just before update_cos_sin below, so garbage position ids
+                # never reach _cos_sin_cache.index_select. (Copying [:pad] here
+                # would also shape-mismatch when num_tokens_padded exceeds the
+                # TP-padded recv buffer length.)
+                self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
+                    recv_mrope[:total_num_scheduled_tokens].t().contiguous()
                 )
 
             (
@@ -2285,6 +2293,20 @@ class NPUModelRunner(GPUModelRunner):
 
             if not self.edge_cloud_cfg.role == "edge":
                 # update global cos, sin
+                # Edge-cloud cloud mrope: zero the padding tail of
+                # mrope_positions.gpu before update_cos_sin. For mm batches the
+                # recv buffer is torch.empty past total_num_scheduled_tokens;
+                # for text batches local _calc_mrope only fills [:total]. Either
+                # way the padding holds stale/garbage position ids that
+                # update_cos_sin would feed to _cos_sin_cache.index_select →
+                # out-of-range. 0 is a valid cache index (mirrors the 1D
+                # positions zero-fill in gpu_model_runner._preprocess).
+                if (self._edge_cloud_enabled
+                        and self.uses_mrope
+                        and num_tokens_padded > total_num_scheduled_tokens):
+                    self.mrope_positions.gpu[
+                        :, total_num_scheduled_tokens:num_tokens_padded
+                    ].zero_()
                 update_cos_sin(positions)
 
         if self.dynamic_eplb:
