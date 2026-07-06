@@ -156,6 +156,17 @@ def _ec_shapes(tensors: dict) -> str:
     return "; ".join(parts)
 
 
+def _use_materialized_residual_boundary(model_config) -> bool:
+    """Use a single-tensor edge-cloud boundary for supported dense models."""
+    hf_text_config = getattr(model_config, "hf_text_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    model_types = {
+        getattr(hf_text_config, "model_type", ""),
+        getattr(hf_config, "model_type", ""),
+    }
+    return bool(model_types & {"qwen3_5", "qwen3_5_text"})
+
+
 class NPUWorker(WorkerBase):
     def __init__(
         self,
@@ -636,6 +647,10 @@ class NPUWorker(WorkerBase):
                 has_residual=has_residual,
                 hc_mult=hc_mult,
                 mode=self.model_runner.edge_cloud_cfg.mode,
+                uses_mrope=self.model_config.uses_mrope,
+                materialize_residual_boundary=(
+                    _use_materialized_residual_boundary(self.model_config)
+                ),
             )
 
             # [CHER] Cloud-side hidden early-receive is a built-in part of
