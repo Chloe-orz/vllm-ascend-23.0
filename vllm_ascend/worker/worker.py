@@ -550,6 +550,15 @@ class NPUWorker(WorkerBase):
                 cloud_include_mrope = self.model_runner.step_has_multimodal_req(
                     scheduler_output
                 )
+                # Stash the decision on the model runner so that execute_model's
+                # materialize path (which runs after cloud_prepare_early's
+                # _update_states may have removed finished multimodal requests)
+                # reuses the SAME value.  Without this, the irecv and materialize
+                # can disagree when a mm request finishes this step:
+                #   - irecv: True  (mm req still in self.requests)
+                #   - materialize: False (mm req removed by _update_states)
+                # leading to received mrope being ignored and stale positions used.
+                self.model_runner._cloud_include_mrope = cloud_include_mrope
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     sp_chunk=do_sp_chunk and merge_payload,
@@ -610,6 +619,8 @@ class NPUWorker(WorkerBase):
             self.profiler.step()
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        # Clear the stashed decision so it does not leak to the next step.
+        self.model_runner._cloud_include_mrope = None
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 

@@ -2261,10 +2261,17 @@ class NPUModelRunner(GPUModelRunner):
             # `intermediate_tensors` to a local-buffer copy that omits
             # mrope_positions (the sync loop skips it).
             recv_intermediate_tensors = intermediate_tensors
+            # Cloud materialize must use the same include_mrope decision that
+            # the worker used for irecv (stored in _cloud_include_mrope), not
+            # re-evaluate step_has_multimodal_req after _update_states has
+            # potentially removed finished multimodal requests.
+            cloud_include_mrope = getattr(self, '_cloud_include_mrope', None)
+            if cloud_include_mrope is None:
+                cloud_include_mrope = self.step_has_multimodal_req(scheduler_output)
             if (self._edge_cloud_enabled
                     and self.edge_cloud_cfg.role == "cloud"
                     and self.uses_mrope
-                    and self.step_has_multimodal_req(scheduler_output)
+                    and cloud_include_mrope
                     and recv_intermediate_tensors is not None):
                 recv_intermediate_tensors.wait_for_comm()
                 recv_mrope = recv_intermediate_tensors.tensors["mrope_positions"]
