@@ -2291,27 +2291,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.mrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
                     recv_mrope[:total_num_scheduled_tokens].t().contiguous()
                 )
-                if get_tp_group().rank_in_group == 0:
-                    mrope = self.mrope_positions.gpu[
-                        :, :total_num_scheduled_tokens
-                    ]
-                    req_ids = list(
-                        scheduler_output.num_scheduled_tokens.keys()
-                    )
-                    logger.info(
-                        "[EdgeCloud-Cloud][TP0][Batch=%s] c2e "
-                        "materialized mrope_positions shape=%s "
-                        "first3=%s last3=%s sum=%s",
-                        req_ids,
-                        list(mrope.shape),
-                        mrope[:, :3].tolist()
-                        if mrope.shape[1] >= 3
-                        else mrope.tolist(),
-                        mrope[:, -3:].tolist()
-                        if mrope.shape[1] >= 3
-                        else mrope.tolist(),
-                        mrope.sum().item(),
-                    )
 
             (
                 input_ids,

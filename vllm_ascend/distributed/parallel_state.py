@@ -884,10 +884,6 @@ def edge_cloud_isend_tensor_dict(
             value.record_stream(torch.npu.current_stream(value.device))
         handles.append(handle)
 
-    # Debug sync: ensure all data is ready before isend returns
-    if hasattr(torch, "npu") and torch.npu.is_available():
-        torch.npu.current_stream().synchronize()
-
     return handles
 
 
