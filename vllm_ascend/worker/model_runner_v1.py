@@ -2292,6 +2292,22 @@ class NPUModelRunner(GPUModelRunner):
                     recv_mrope[:total_num_scheduled_tokens].t().contiguous()
                 )
 
+            # Edge side: zero the padding tail of mrope_positions.gpu before
+            # _preprocess hands positions to attention layers. For edge mm
+            # batches _calc_mrope_positions only fills [:total]; the padding
+            # tail retains stale position ids from previous (larger) batches.
+            # These stale ids flow into self.cos_sin_cache[positions] in
+            # AscendMRotaryEmbedding, corrupting padding tokens' RoPE and
+            # potentially leaking into real tokens through attention.
+            # embedding_only edge skips this entirely (no real layers).
+            if (self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "edge"
+                    and self.uses_mrope
+                    and num_tokens_padded > total_num_scheduled_tokens):
+                self.mrope_positions.gpu[
+                    :, total_num_scheduled_tokens:num_tokens_padded
+                ].zero_()
+
             (
                 input_ids,
                 inputs_embeds,
