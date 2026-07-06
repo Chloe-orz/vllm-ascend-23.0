@@ -2055,19 +2055,24 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         # ---- segment_e fast path: reuse segment_a's cached prepare results ----
-        _fast_path = (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "edge"
-            and intermediate_tensors is not None
-            and self._edge_prepare_cache is not None
-        )
+        # Temporarily disabled for debugging: force full input preparation on
+        # every step to rule out stale attn_metadata / state in the cache.
+        _fast_path = False
+        # _fast_path = (
+        #     self._edge_cloud_enabled
+        #     and self.edge_cloud_cfg.role == "edge"
+        #     and intermediate_tensors is not None
+        #     and self._edge_prepare_cache is not None
+        # )
         # ---- cloud fast path: reuse pre-computed prepare results ----
-        _cloud_fast_path = (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "cloud"
-            and intermediate_tensors is not None
-            and self._cloud_prepare_cache is not None
-        )
+        # Temporarily disabled for debugging.
+        _cloud_fast_path = False
+        # _cloud_fast_path = (
+        #     self._edge_cloud_enabled
+        #     and self.edge_cloud_cfg.role == "cloud"
+        #     and intermediate_tensors is not None
+        #     and self._cloud_prepare_cache is not None
+        # )
         if _fast_path:
             cache = self._edge_prepare_cache
             self._edge_prepare_cache = None  # consumed, clear for next iteration
