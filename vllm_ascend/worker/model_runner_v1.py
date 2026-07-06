@@ -1216,6 +1216,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.mrope_positions.cpu,
                 non_blocking=True,
             )
+            # 同步 NPU stream，确保 mrope H2D 拷贝完成后 segment_a 才读取
+            torch.npu.current_stream().synchronize()
         elif self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
             # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
@@ -1223,6 +1225,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True,
             )
+            # 同步 NPU stream，确保 xdrope H2D 拷贝完成后 segment_a 才读取
+            torch.npu.current_stream().synchronize()
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
