@@ -4483,24 +4483,71 @@ class NPUModelRunner(GPUModelRunner):
             self.supports_mm_inputs = original_supports_mm_inputs
             self.max_num_tokens = origin_max_num_tokens
 
-        # [DEBUG] Clear block_table residues after profile run to prevent
-        # dummy-run KV cache pollution on first real inference.
-        # Only for edge-cloud mode; non-edge-cloud profile_run does not
-        # split execution so dummy residues do not cross the wire.
+        # [DEBUG] Comprehensive cleanup after profile run to prevent dummy-run
+        # state pollution on first real inference (edge-cloud head-tail mode).
         if self._edge_cloud_enabled and hasattr(self, "input_batch") and self.input_batch is not None:
             # 1. Remove all residual dummy requests from input_batch
             for req_id in list(self.input_batch.req_id_to_index.keys()):
                 self.input_batch.remove_request(req_id)
             self.input_batch.condense()
-            # 2. Clear block_table index residues
+
+            # 2. Clear block_table index residues (all KV cache groups)
+            dummy_blocks: set[int] = set()
             for bt in self.input_batch.block_table.block_tables:
+                # Collect allocated block_ids before clearing
+                for row in range(bt.block_table.np.shape[0]):
+                    n = bt.num_blocks_per_row[row]
+                    if n > 0:
+                        dummy_blocks.update(bt.block_table.np[row, :n].tolist())
                 bt.block_table.np.fill(0)
                 bt.num_blocks_per_row.fill(0)
                 bt.slot_mapping.np.fill(PAD_SLOT_ID)
                 bt.slot_mapping.copy_to_gpu(bt.slot_mapping.np.shape[0])
-            # 3. Clear cached request states from dummy run
+
+            # 3. Zero KV cache physical memory for dummy blocks
+            if dummy_blocks and hasattr(self, "_kv_block_zeroer"):
+                self._kv_block_zeroer.zero_block_ids(list(dummy_blocks))
+
+            # 4. Clear cached request states
             if hasattr(self, "requests"):
                 self.requests.clear()
+
+            # 5. Reset step-level caches and state machine
+            self._edge_prepare_cache = None
+            self._cloud_prepare_cache = None
+            self.execute_model_state = None
+            self.kv_connector_output = None
+            if hasattr(self, "_draft_token_ids"):
+                self._draft_token_ids = None
+            self.intermediate_tensors = None
+
+            # 6. Reset GPU tensors that are rebuilt each step
+            if hasattr(self, "num_computed_tokens"):
+                self.num_computed_tokens.fill_(0)
+            if hasattr(self, "seq_lens"):
+                self.seq_lens.fill_(0)
+            if hasattr(self, "positions"):
+                self.positions.fill_(0)
+            if hasattr(self, "query_start_loc"):
+                self.query_start_loc.np.fill(0)
+                self.query_start_loc.copy_to_gpu()
+            if hasattr(self, "optimistic_seq_lens_cpu"):
+                self.optimistic_seq_lens_cpu.fill_(0)
+            if hasattr(self, "num_accepted_tokens"):
+                self.num_accepted_tokens.np.fill(1)
+                self.num_accepted_tokens.gpu.fill_(1)
+
+            # 7. Reset async-scheduling bookkeeping
+            self.input_batch.prev_req_id_to_index = None
+            self.input_batch.prev_sampled_token_ids = None
+
+            # 8. Reset position embeddings
+            if self.uses_mrope and hasattr(self, "mrope_positions"):
+                self.mrope_positions.cpu.fill_(0)
+                self.mrope_positions.copy_to_gpu(self.mrope_positions.np.shape[0])
+            if self.uses_xdrope_dim > 0 and hasattr(self, "xdrope_positions"):
+                self.xdrope_positions.cpu.fill_(0)
+                self.xdrope_positions.copy_to_gpu(self.xdrope_positions.np.shape[0])
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
