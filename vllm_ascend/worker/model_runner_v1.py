@@ -1485,24 +1485,23 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         # Debug: log req_ids order to detect edge/cloud reorder divergence.
-        # Batch fingerprint is computed independently on both sides from the
-        # same scheduler_output, so it serves as a shared key for pairing logs.
-        if self._edge_cloud_enabled and get_tp_group().rank_in_group == 0:
-            _fp_parts = [
-                f"{r}:{scheduler_output.num_scheduled_tokens[r]}"
-                for r in sorted(self.input_batch.req_ids)
-            ]
-            _fingerprint = (
-                f"T{scheduler_output.total_num_scheduled_tokens}_"
-                f"R{len(self.input_batch.req_ids)}_"
-                + "|".join(_fp_parts)
-            )
-            logger.info(
-                "[EdgeCloud-Reorder][%s][TP0][FP=%s] req_ids=%s",
-                self.edge_cloud_cfg.role,
-                _fingerprint,
-                list(self.input_batch.req_ids),
-            )
+        # (Temporarily commented out during _may_reorder_batch disable test.)
+        # if self._edge_cloud_enabled and get_tp_group().rank_in_group == 0:
+        #     _fp_parts = [
+        #         f"{r}:{scheduler_output.num_scheduled_tokens[r]}"
+        #         for r in sorted(self.input_batch.req_ids)
+        #     ]
+        #     _fingerprint = (
+        #         f"T{scheduler_output.total_num_scheduled_tokens}_"
+        #         f"R{len(self.input_batch.req_ids)}_"
+        #         + "|".join(_fp_parts)
+        #     )
+        #     logger.info(
+        #         "[EdgeCloud-Reorder][%s][TP0][FP=%s] req_ids=%s",
+        #         self.edge_cloud_cfg.role,
+        #         _fingerprint,
+        #         list(self.input_batch.req_ids),
+        #     )
 
         return (
             logits_indices,
