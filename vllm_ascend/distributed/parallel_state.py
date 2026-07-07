@@ -884,6 +884,11 @@ def edge_cloud_isend_tensor_dict(
             value.record_stream(torch.npu.current_stream(value.device))
         handles.append(handle)
 
+    # Temporarily block until all isends complete, to rule out HCCL async
+    # memory-reuse races on NPU (record_stream may not cover HCCL stream).
+    for handle in handles:
+        handle.wait()
+
     return handles
 
 
