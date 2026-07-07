@@ -2086,6 +2086,12 @@ class NPUModelRunner(GPUModelRunner):
             )
             # Fast path skips _update_states, so no deferred corrections.
             deferred_state_corrections_fn = None
+            if get_tp_group().rank_in_group == 0:
+                _slot_fast = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
+                logger.info(
+                    "[SlotCheck][Edge-seg_e-fast] slot_sum=%s num_reqs=%s num_tokens=%s",
+                    _slot_fast.sum().item(), num_reqs, num_tokens_padded,
+                )
         elif _cloud_fast_path:
             cache = self._cloud_prepare_cache
             self._cloud_prepare_cache = None  # consumed, clear for next iteration
@@ -2313,6 +2319,14 @@ class NPUModelRunner(GPUModelRunner):
         if (self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "edge"
             and intermediate_tensors is None):
+            if get_tp_group().rank_in_group == 0:
+                _slot_cache = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
+                logger.info(
+                    "[SlotCheck][Edge-cache-build] slot_sum=%s num_reqs=%s num_tokens=%s",
+                    _slot_cache.sum().item(),
+                    self.input_batch.num_reqs,
+                    num_tokens_padded,
+                )
             self._edge_prepare_cache = {
                 "num_tokens_padded": num_tokens_padded,
                 "num_tokens_across_dp": num_tokens_across_dp,
@@ -3299,6 +3313,10 @@ class NPUModelRunner(GPUModelRunner):
             old_layer_idx = _EXTRA_CTX.layer_idx
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
+            _slot_before = None
+            if get_tp_group().rank_in_group == 0:
+                _slot = self.input_batch.block_table[0].slot_mapping.gpu
+                _slot_before = _slot[:num_tokens_padded].clone()
             try:
                 hidden_states = seg_a(
                     input_ids=input_ids,
@@ -3315,6 +3333,19 @@ class NPUModelRunner(GPUModelRunner):
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
+            if _slot_before is not None:
+                _slot_after = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
+                if not torch.equal(_slot_before, _slot_after):
+                    logger.warning(
+                        "[SlotCheck][Edge-seg_a] slot_mapping CHANGED "
+                        "before_sum=%s after_sum=%s",
+                        _slot_before.sum().item(), _slot_after.sum().item(),
+                    )
+                else:
+                    logger.info(
+                        "[SlotCheck][Edge-seg_a] slot_mapping UNCHANGED sum=%s",
+                        _slot_after.sum().item(),
+                    )
 
             assert isinstance(hidden_states, IntermediateTensors)
             return hidden_states
@@ -3391,6 +3422,12 @@ class NPUModelRunner(GPUModelRunner):
         old_layer_idx = _EXTRA_CTX.layer_idx
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
+        if get_tp_group().rank_in_group == 0:
+            _slot_c = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
+            logger.info(
+                "[SlotCheck][Cloud-seg_c] slot_sum=%s num_tokens=%s",
+                _slot_c.sum().item(), num_tokens_padded,
+            )
         try:
             hidden_states = seg_c(
                 positions=positions,
