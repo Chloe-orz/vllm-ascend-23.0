@@ -650,6 +650,13 @@ class NPUWorker(WorkerBase):
                 _gathered["mrope_positions"] = (
                     self.model_runner.mrope_positions.gpu[:, :n].t().contiguous()
                 )
+            if "hidden_states" in _gathered and get_tp_group().rank_in_group == 0:
+                hs = _gathered["hidden_states"]
+                logger.info(
+                    "[EdgeCloud-Hash][Edge-e2c][TP0] "
+                    "hidden_states shape=%s sum=%.4f max=%.4f",
+                    list(hs.shape), hs.sum().item(), hs.abs().max().item(),
+                )
             if get_pp_group().world_size == 2:
                 # Pass scheduler total so the sender slices off any
                 # cudagraph / SP / DP padding, letting the cloud receiver
@@ -676,7 +683,13 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
-           
+            if "hidden_states" in tensor_dict and get_tp_group().rank_in_group == 0:
+                hs = tensor_dict["hidden_states"]
+                logger.info(
+                    "[EdgeCloud-Hash][Edge-c2e-in][TP0] "
+                    "hidden_states shape=%s sum=%.4f max=%.4f",
+                    list(hs.shape), hs.sum().item(), hs.abs().max().item(),
+                )
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
@@ -689,6 +702,13 @@ class NPUWorker(WorkerBase):
                 _gathered = self._all_gather_tensor_dict(output.tensors)
             else:
                 _gathered = output.tensors
+            if "hidden_states" in _gathered and get_tp_group().rank_in_group == 0:
+                hs = _gathered["hidden_states"]
+                logger.info(
+                    "[EdgeCloud-Hash][Cloud-c2e-out][TP0] "
+                    "hidden_states shape=%s sum=%.4f max=%.4f",
+                    list(hs.shape), hs.sum().item(), hs.abs().max().item(),
+                )
             if get_pp_group().world_size == 2:
                 # Cloud segment_c runs through full transformer layers and
                 # almost always with cudagraph / SP / DP padding enabled, so
