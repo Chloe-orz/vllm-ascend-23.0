@@ -636,16 +636,6 @@ class PassiveEngineCoreProc:
             tail = replace(
                 scheduler_output, batch_type=BatchType.DECODE_LAST
             )
-            # [PD-DEBUG] Record cloud intent to ship a DECODE_LAST back to the
-            # edge. The cloud has no abort visibility, so it may ship a D尾 for
-            # a req that the edge has already aborted / finished during the
-            # D-first -> D-last window. Match by head_token / req_id with
-            # [EDGE-DL-RECV-STALE] / [EDGE-FINISH] / [EDGE-DL-UPDATE-MISS].
-            logger.error(
-                "[CLOUD-DL-PUBLISH] head_token=%s req_ids=%s",
-                getattr(tail, "head_token", None),
-                list(tail.num_scheduled_tokens.keys()),
-            )
         else:
             return
         # Echo the head_token back so the edge can correlate the tail

@@ -768,18 +768,6 @@ class PDSeparatedScheduler(Scheduler):
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
     ) -> list[tuple[str, int]]:
         result = super().finish_requests(request_ids, finished_status)
-        if result:
-            # [PD-DEBUG] Log every request finish (abort OR normal completion)
-            # at ERROR so aborts happening during the D-first -> D-last window
-            # can be correlated with [CLOUD-DL-PUBLISH] /
-            # [EDGE-DL-RECV-STALE] / [EDGE-DL-UPDATE-MISS].
-            # ``finished_status`` distinguishes client abort (FINISHED_ABORTED)
-            # from normal EOS / length / stop.
-            logger.error(
-                "[EDGE-FINISH] status=%s req_ids=%s",
-                finished_status,
-                [r[0] for r in result],
-            )
         if isinstance(request_ids, str):
             request_ids = (request_ids,)
         elif request_ids is not None:

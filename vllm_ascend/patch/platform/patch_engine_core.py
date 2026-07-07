@@ -180,31 +180,6 @@ def _drain_pd_channel_inbox(self) -> None:
         if bt == BatchType.PREFILL_LAST:
             self.scheduler.prefills_last_ready.append(so)
         elif bt == BatchType.DECODE_LAST:
-            recv_req_ids = list(so.num_scheduled_tokens.keys())
-            sched_requests = getattr(self.scheduler, "requests", {})
-            finished = getattr(self.scheduler, "finished_req_ids", set())
-            stale = [r for r in recv_req_ids if r not in sched_requests]
-            if stale:
-                # [PD-DEBUG] Cloud shipped a DECODE_LAST whose req(s) are
-                # already gone from the edge scheduler (aborted / finished /
-                # freed). This is the direct evidence that "窗口内已结束的
-                # 请求其 D尾 仍被云侧回送". Match by head_token / req_id with
-                # [CLOUD-DL-PUBLISH], [EDGE-FINISH], [EDGE-DL-UPDATE-MISS].
-                logger.error(
-                    "[EDGE-DL-RECV-STALE] head_token=%s recv_req_ids=%s "
-                    "stale(not in scheduler.requests)=%s "
-                    "stale_in_finished_req_ids=%s",
-                    getattr(so, "head_token", None),
-                    recv_req_ids,
-                    stale,
-                    [r for r in stale if r in finished],
-                )
-            else:
-                logger.debug(
-                    "[EDGE-DL-RECV] head_token=%s recv_req_ids=%s (all alive)",
-                    getattr(so, "head_token", None),
-                    recv_req_ids,
-                )
             self.scheduler.decodes_last_ready.append(so)
         else:
             logger.error(
