@@ -518,7 +518,6 @@ def _patched_step_with_batch_queue(self):
     # eventually becomes batch_queue[-1] before pop().
     self._publish_pre_out_when_ready()
     future, scheduler_output, exec_model_fut = batch_queue.pop()
-    logger.error(f"batch_type {scheduler_output.batch_type}")
     # [ascend insert] Clean up PRE_OUT tracking for completed batch.
     self._clear_published_pre_out_token(scheduler_output)
     with (
