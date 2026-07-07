@@ -1,7 +1,10 @@
 import numpy as np
 import torch
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group, get_pcp_group, get_tp_group
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
+
+logger = init_logger(__name__)
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.utils import CpuGpuBuffer
@@ -149,6 +152,11 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
+        if get_tp_group().rank_in_group == 0:
+            logger.info(
+                "[CSM] pos_sum=%s num_reqs=%s num_tokens=%s",
+                int(positions.sum()), num_reqs, num_tokens,
+            )
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         _compute_slot_mapping_kernel[(num_reqs + 1,)](
