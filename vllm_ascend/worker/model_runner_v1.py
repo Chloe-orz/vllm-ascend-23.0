@@ -333,6 +333,9 @@ class NPUModelRunner(GPUModelRunner):
             hf_config is not None and hasattr(hf_config, "compress_ratios")
         )
 
+        # [DEBUG] step counter for tracing slot_mapping anomalies
+        self._slot_debug_step = 0
+
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
@@ -2011,7 +2014,10 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
-       
+
+        # [DEBUG] step counter for tracing slot_mapping anomalies
+        self._slot_debug_step += 1
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -2089,8 +2095,11 @@ class NPUModelRunner(GPUModelRunner):
             if get_tp_group().rank_in_group == 0:
                 _slot_fast = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
                 logger.info(
-                    "[SlotCheck][Edge-seg_e-fast] slot_sum=%s num_reqs=%s num_tokens=%s",
-                    _slot_fast.sum().item(), num_reqs, num_tokens_padded,
+                    "[SlotCheck][step=%s][Edge-seg_e-fast] slot_sum=%s num_reqs=%s computed0=%s",
+                    self._slot_debug_step,
+                    _slot_fast.sum().item(),
+                    num_reqs,
+                    int(self.input_batch.num_computed_tokens_cpu[0]),
                 )
         elif _cloud_fast_path:
             cache = self._cloud_prepare_cache
@@ -2322,10 +2331,11 @@ class NPUModelRunner(GPUModelRunner):
             if get_tp_group().rank_in_group == 0:
                 _slot_cache = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
                 logger.info(
-                    "[SlotCheck][Edge-cache-build] slot_sum=%s num_reqs=%s num_tokens=%s",
+                    "[SlotCheck][step=%s][Edge-cache-build] slot_sum=%s num_reqs=%s computed0=%s",
+                    self._slot_debug_step,
                     _slot_cache.sum().item(),
                     self.input_batch.num_reqs,
-                    num_tokens_padded,
+                    int(self.input_batch.num_computed_tokens_cpu[0]),
                 )
             self._edge_prepare_cache = {
                 "num_tokens_padded": num_tokens_padded,
@@ -2997,6 +3007,14 @@ class NPUModelRunner(GPUModelRunner):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+        if get_tp_group().rank_in_group == 0:
+            logger.info(
+                "[SlotCheck][step=%s][prep] nreq=%s sched0=%s comp0=%s",
+                getattr(self, "_slot_debug_step", -1),
+                num_reqs,
+                int(tokens[0]) if tokens else -1,
+                int(self.input_batch.num_computed_tokens_cpu[0]),
+            )
 
         (
             logits_indices,
@@ -3317,6 +3335,13 @@ class NPUModelRunner(GPUModelRunner):
             if get_tp_group().rank_in_group == 0:
                 _slot = self.input_batch.block_table[0].slot_mapping.gpu
                 _slot_before = _slot[:num_tokens_padded].clone()
+                logger.info(
+                    "[SlotCheck][step=%s][Edge-seg_a] slot_sum=%s num_reqs=%s computed0=%s",
+                    self._slot_debug_step,
+                    _slot_before.sum().item(),
+                    self.input_batch.num_reqs,
+                    int(self.input_batch.num_computed_tokens_cpu[0]),
+                )
             try:
                 hidden_states = seg_a(
                     input_ids=input_ids,
@@ -3337,14 +3362,9 @@ class NPUModelRunner(GPUModelRunner):
                 _slot_after = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
                 if not torch.equal(_slot_before, _slot_after):
                     logger.warning(
-                        "[SlotCheck][Edge-seg_a] slot_mapping CHANGED "
+                        "[SlotCheck][step=%s][Edge-seg_a] slot_mapping CHANGED "
                         "before_sum=%s after_sum=%s",
-                        _slot_before.sum().item(), _slot_after.sum().item(),
-                    )
-                else:
-                    logger.info(
-                        "[SlotCheck][Edge-seg_a] slot_mapping UNCHANGED sum=%s",
-                        _slot_after.sum().item(),
+                        self._slot_debug_step, _slot_before.sum().item(), _slot_after.sum().item(),
                     )
 
             assert isinstance(hidden_states, IntermediateTensors)
@@ -3425,8 +3445,11 @@ class NPUModelRunner(GPUModelRunner):
         if get_tp_group().rank_in_group == 0:
             _slot_c = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
             logger.info(
-                "[SlotCheck][Cloud-seg_c] slot_sum=%s num_tokens=%s",
-                _slot_c.sum().item(), num_tokens_padded,
+                "[SlotCheck][step=%s][Cloud-seg_c] slot_sum=%s num_reqs=%s computed0=%s",
+                self._slot_debug_step,
+                _slot_c.sum().item(),
+                self.input_batch.num_reqs,
+                int(self.input_batch.num_computed_tokens_cpu[0]),
             )
         try:
             hidden_states = seg_c(
