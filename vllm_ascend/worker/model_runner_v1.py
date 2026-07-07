@@ -2998,6 +2998,14 @@ class NPUModelRunner(GPUModelRunner):
                 "cudagraph_stats": None,
                 "num_scheduled_tokens_compressed_list": None,
             }
+        # [DEBUG] 强制按固定顺序排序 input_batch，确保 Edge 和 Cloud 一致
+        req_ids = self.input_batch.req_ids
+        for i in range(len(req_ids)):
+            for j in range(i + 1, len(req_ids)):
+                if req_ids[j] < req_ids[i]:
+                    self.input_batch.swap_states(i, j)
+                    req_ids[i], req_ids[j] = req_ids[j], req_ids[i]
+
         req_ids = self.input_batch.req_ids
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
