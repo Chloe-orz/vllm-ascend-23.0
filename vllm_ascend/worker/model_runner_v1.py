@@ -2687,6 +2687,43 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self._resume_and_validate_head_state(scheduler_output)
 
+            # [PD-FIX] Stale tail segment (PL/DL): cloud shipped a tail batch
+            # whose reqs already finished on the edge and were popped from
+            # self.requests during the head->tail window. Discard segment_e to
+            # avoid _update_states crashing on self.requests[req_id]. HeadState
+            # already popped above; hidden already received by
+            # _execute_model_edge_tail (data-plane contract preserved).
+            # update_from_output's `request is None or is_finished()` guard
+            # skips these reqs before req_id_to_index[req_id], so returning
+            # EMPTY is safe.
+            tail_req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            if tail_req_ids:
+                stale = [r for r in tail_req_ids if r not in self.requests]
+                if len(stale) == len(tail_req_ids):
+                    logger.error(
+                        "[EDGE-TAIL-STALE-DISCARD] batch_type=%s "
+                        "head_token=%s req_ids=%s all popped from "
+                        "self.requests; skip segment_e.",
+                        scheduler_output.batch_type,
+                        scheduler_output.head_token,
+                        tail_req_ids,
+                    )
+                    return EMPTY_MODEL_RUNNER_OUTPUT
+                if stale:
+                    # Partial-stale: alive reqs need the step, stale reqs would
+                    # crash. Cannot safely discard nor proceed. Full fix needs
+                    # per-req hidden slicing -- not yet implemented.
+                    logger.error(
+                        "[EDGE-TAIL-PARTIAL-STALE] batch_type=%s "
+                        "head_token=%s req_ids=%s stale=%s alive=%s; "
+                        "NOT handled, will crash.",
+                        scheduler_output.batch_type,
+                        scheduler_output.head_token,
+                        tail_req_ids,
+                        stale,
+                        [r for r in tail_req_ids if r in self.requests],
+                    )
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
