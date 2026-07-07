@@ -770,6 +770,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
+        # [PD-FIX] Set by execute_model when a stale tail segment (PL/DL) is
+        # discarded (all reqs already popped from self.requests). sample_tokens
+        # checks this to return EMPTY instead of None (which would trigger
+        # "unexpected error" in _patched_step_with_batch_queue).
+        self._tail_segment_discarded: bool = False
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
@@ -2441,6 +2446,8 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output.head_token,
                         tail_req_ids,
                     )
+                    # Signal sample_tokens to also skip (return EMPTY, not None).
+                    self._tail_segment_discarded = True
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 if stale:
                     # Partial-stale: alive reqs need the step, stale reqs would
@@ -3084,6 +3091,16 @@ class NPUModelRunner(GPUModelRunner):
             # writes back to the executor's reply mq. Cloud workers must
             # return a no-op output immediately so the broadcast protocol
             # converges and no PP/HCCL primitive is touched here.
+            self.execute_model_state = None
+            self.kv_connector_output = None
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        # [PD-FIX] execute_model discarded a stale tail segment (all reqs
+        # already popped). Skip sampling and return EMPTY so update_from_output's
+        # is_finished()/None guard skips those reqs (returning None here would
+        # trigger "unexpected error" in _patched_step_with_batch_queue).
+        if self._tail_segment_discarded:
+            self._tail_segment_discarded = False
             self.execute_model_state = None
             self.kv_connector_output = None
             return EMPTY_MODEL_RUNNER_OUTPUT
