@@ -1484,6 +1484,16 @@ class NPUModelRunner(GPUModelRunner):
                 total_num_scheduled_tokens=total_num_scheduled_tokens,
             )
 
+        # Debug: log req_ids order to detect edge/cloud reorder divergence.
+        if self._edge_cloud_enabled and get_tp_group().rank_in_group == 0:
+            logger.info(
+                "[EdgeCloud-Reorder][%s][TP0] req_ids=%s num_scheduled=%s",
+                self.edge_cloud_cfg.role,
+                list(self.input_batch.req_ids),
+                {r: scheduler_output.num_scheduled_tokens[r]
+                 for r in self.input_batch.req_ids},
+            )
+
         return (
             logits_indices,
             spec_decode_metadata,
@@ -2286,19 +2296,6 @@ class NPUModelRunner(GPUModelRunner):
             if not self.edge_cloud_cfg.role == "edge":
                 # update global cos, sin
                 update_cos_sin(positions)
-
-            # Hash log: cloud seg_c input (after e2c recv + _preprocess)
-            if (self._edge_cloud_enabled
-                    and self.edge_cloud_cfg.role == "cloud"
-                    and intermediate_tensors is not None
-                    and get_tp_group().rank_in_group == 0
-                    and "hidden_states" in intermediate_tensors.tensors):
-                hs = intermediate_tensors.tensors["hidden_states"]
-                logger.info(
-                    "[EdgeCloud-Hash][Cloud-e2c-in][TP0] "
-                    "hidden_states shape=%s sum=%.4f max=%.4f",
-                    list(hs.shape), hs.sum().item(), hs.abs().max().item(),
-                )
 
         if self.dynamic_eplb:
             with record_function_or_nullcontext("EPLB weight D2D"):
