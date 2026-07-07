@@ -762,8 +762,20 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_a_wrapper: Any = None
             self.segment_e_wrapper: Any = None
             self.segment_c_wrapper: Any = None
-            # Cache segment_a prepare results for segment_e reuse (edge-cloud only)
-            self._edge_prepare_cache: dict | None = None
+            # Cache segment_a prepare results for segment_e reuse (edge-cloud
+            # only).  Keyed by head_token so that ahead-scheduled chunks
+            # (chunk_prior with max_chunk_prefill_ahead >= 1) do not overwrite
+            # an earlier chunk's cache before its segment_e consumes it: each
+            # segment_a stores under its own head_token, and the matching
+            # segment_e pops that exact entry.  Without this keying, chunk-1's
+            # segment_a would clobber chunk-0's cache while chunk-0's segment_e
+            # is still waiting for the cloud PL, and chunk-0's PL would run
+            # segment_e with chunk-1's attn_metadata / num_tokens_padded.
+            self._edge_prepare_cache_by_token: dict[str, dict] = {}
+            # Bounded size guard: a segment_e that never arrives (e.g. request
+            # aborted mid-prefill) would otherwise leak its entry.  2P1D keeps
+            # at most 2 in-flight; the slack absorbs scheduling jitter.
+            self._edge_prepare_cache_max: int = 8
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
         else:
@@ -2246,7 +2258,7 @@ class NPUModelRunner(GPUModelRunner):
             self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "edge"
             and intermediate_tensors is not None
-            and self._edge_prepare_cache is not None
+            and scheduler_output.head_token in self._edge_prepare_cache_by_token
             and self.input_batch.num_reqs > 0
             and tuple(self.input_batch.req_ids)
             == tuple(scheduler_output.num_scheduled_tokens)
@@ -2259,8 +2271,11 @@ class NPUModelRunner(GPUModelRunner):
             and self._cloud_prepare_cache is not None
         )
         if _fast_path:
-            cache = self._edge_prepare_cache
-            self._edge_prepare_cache = None  # consumed, clear for next iteration
+            # Pop this head_token's cache so a later segment_a (different
+            # head_token) does not hand the wrong attn_metadata to this PL.
+            cache = self._edge_prepare_cache_by_token.pop(
+                scheduler_output.head_token
+            )
             total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
             num_tokens_padded = cache["num_tokens_padded"]
             num_tokens_across_dp = cache["num_tokens_across_dp"]
@@ -2506,8 +2521,24 @@ class NPUModelRunner(GPUModelRunner):
         # segment_e always receives cloud data via intermediate_tensors.
         if (self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "edge"
-            and intermediate_tensors is None):
-            self._edge_prepare_cache = {
+            and intermediate_tensors is None
+            and scheduler_output.head_token):
+            # Evict the oldest entry if the cache has grown beyond the bound.
+            # Defensive cleanup: a segment_e that never arrives (e.g. request
+            # aborted mid-prefill) would otherwise leak its entry forever.
+            # Normal chunk_prior operation keeps at most prefill_inflight_limit
+            # entries, so this branch only triggers on abnormal paths.
+            if len(self._edge_prepare_cache_by_token) >= self._edge_prepare_cache_max:
+                stale_token = next(iter(self._edge_prepare_cache_by_token))
+                logger.warning(
+                    "Edge segment_a cache exceeded bound (%d); evicting oldest "
+                    "head_token=%s (its segment_e likely never arrived, e.g. "
+                    "request abort).",
+                    self._edge_prepare_cache_max,
+                    stale_token,
+                )
+                self._edge_prepare_cache_by_token.pop(stale_token, None)
+            self._edge_prepare_cache_by_token[scheduler_output.head_token] = {
                 "num_tokens_padded": num_tokens_padded,
                 "num_tokens_across_dp": num_tokens_across_dp,
                 "attn_metadata": attn_metadata,
