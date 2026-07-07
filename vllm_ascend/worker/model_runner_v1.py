@@ -2708,6 +2708,8 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output.head_token,
                         tail_req_ids,
                     )
+                    # Signal sample_tokens to also skip (return EMPTY, not None).
+                    self._tail_segment_discarded = True
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 if stale:
                     # Partial-stale: alive reqs need the step, stale reqs would
