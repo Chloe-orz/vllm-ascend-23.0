@@ -89,6 +89,16 @@ def pad_cu_for_kernel(cu, length: int):
 
 
 @triton.jit(do_not_specialize=["max_spec_len"])
+def bonus_renew_1(
+    bonus_token_ids_ptr,
+    position,
+    output_token_ids_ptr,
+):
+    bonus_token_id = tl.load(bonus_token_ids_ptr + position)
+    tl.store(output_token_ids_ptr + position * 2 + 1, bonus_token_id)
+
+
+@triton.jit(do_not_specialize=["max_spec_len"])
 def rejection_greedy_sample_spec_len_1_triton(
     output_token_ids_ptr,  # [batch_size, 2]
     draft_token_ids_ptr,  # [num_tokens]

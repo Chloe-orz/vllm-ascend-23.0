@@ -297,6 +297,7 @@ class AscendConfig:
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
         edge_cloud_config = additional_config.get("edge_cloud_config", {})
         self.edge_cloud_config = EdgeCloudConfig(edge_cloud_config, vllm_config)
+        self._check_edge_cloud_spec_decode(vllm_config)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
