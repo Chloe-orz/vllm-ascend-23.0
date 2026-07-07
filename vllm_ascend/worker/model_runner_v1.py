@@ -4488,11 +4488,19 @@ class NPUModelRunner(GPUModelRunner):
         # Only for edge-cloud mode; non-edge-cloud profile_run does not
         # split execution so dummy residues do not cross the wire.
         if self._edge_cloud_enabled and hasattr(self, "input_batch") and self.input_batch is not None:
+            # 1. Remove all residual dummy requests from input_batch
+            for req_id in list(self.input_batch.req_id_to_index.keys()):
+                self.input_batch.remove_request(req_id)
+            self.input_batch.condense()
+            # 2. Clear block_table index residues
             for bt in self.input_batch.block_table.block_tables:
                 bt.block_table.np.fill(0)
                 bt.num_blocks_per_row.fill(0)
                 bt.slot_mapping.np.fill(PAD_SLOT_ID)
                 bt.slot_mapping.copy_to_gpu(bt.slot_mapping.np.shape[0])
+            # 3. Clear cached request states from dummy run
+            if hasattr(self, "requests"):
+                self.requests.clear()
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
