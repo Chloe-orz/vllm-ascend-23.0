@@ -152,11 +152,12 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
-        if get_tp_group().rank_in_group == 0:
-            logger.info(
-                "[CSM] pos_sum=%s num_reqs=%s num_tokens=%s",
-                int(positions.sum()), num_reqs, num_tokens,
-            )
+        # [DEBUG] CSM log (disabled)
+        # if get_tp_group().rank_in_group == 0:
+        #     logger.info(
+        #         "[CSM] pos_sum=%s num_reqs=%s num_tokens=%s",
+        #         int(positions.sum()), num_reqs, num_tokens,
+        #     )
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
         _compute_slot_mapping_kernel[(num_reqs + 1,)](

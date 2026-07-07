@@ -61,7 +61,7 @@ from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata, PAD_SLOT_ID
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -2015,8 +2015,8 @@ class NPUModelRunner(GPUModelRunner):
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
 
-        # [DEBUG] step counter for tracing slot_mapping anomalies
-        self._slot_debug_step += 1
+        # [DEBUG] step counter for tracing slot_mapping anomalies (disabled)
+        # self._slot_debug_step += 1
 
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
@@ -2092,15 +2092,16 @@ class NPUModelRunner(GPUModelRunner):
             )
             # Fast path skips _update_states, so no deferred corrections.
             deferred_state_corrections_fn = None
-            if get_tp_group().rank_in_group == 0:
-                _slot_fast = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
-                logger.info(
-                    "[SlotCheck][step=%s][Edge-seg_e-fast] slot_sum=%s num_reqs=%s computed0=%s",
-                    self._slot_debug_step,
-                    _slot_fast.sum().item(),
-                    num_reqs,
-                    int(self.input_batch.num_computed_tokens_cpu[0]),
-                )
+            # [DEBUG] slot_sum check (disabled)
+            # if get_tp_group().rank_in_group == 0:
+            #     _slot_fast = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
+            #     logger.info(
+            #         "[SlotCheck][step=%s][Edge-seg_e-fast] slot_sum=%s num_reqs=%s computed0=%s",
+            #         self._slot_debug_step,
+            #         _slot_fast.sum().item(),
+            #         num_reqs,
+            #         int(self.input_batch.num_computed_tokens_cpu[0]),
+            #     )
         elif _cloud_fast_path:
             cache = self._cloud_prepare_cache
             self._cloud_prepare_cache = None  # consumed, clear for next iteration
@@ -2328,15 +2329,16 @@ class NPUModelRunner(GPUModelRunner):
         if (self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "edge"
             and intermediate_tensors is None):
-            if get_tp_group().rank_in_group == 0:
-                _slot_cache = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
-                logger.info(
-                    "[SlotCheck][step=%s][Edge-cache-build] slot_sum=%s num_reqs=%s computed0=%s",
-                    self._slot_debug_step,
-                    _slot_cache.sum().item(),
-                    self.input_batch.num_reqs,
-                    int(self.input_batch.num_computed_tokens_cpu[0]),
-                )
+            # [DEBUG] slot_sum check (disabled)
+            # if get_tp_group().rank_in_group == 0:
+            #     _slot_cache = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
+            #     logger.info(
+            #         "[SlotCheck][step=%s][Edge-cache-build] slot_sum=%s num_reqs=%s computed0=%s",
+            #         self._slot_debug_step,
+            #         _slot_cache.sum().item(),
+            #         self.input_batch.num_reqs,
+            #         int(self.input_batch.num_computed_tokens_cpu[0]),
+            #     )
             self._edge_prepare_cache = {
                 "num_tokens_padded": num_tokens_padded,
                 "num_tokens_across_dp": num_tokens_across_dp,
@@ -3007,14 +3009,15 @@ class NPUModelRunner(GPUModelRunner):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
-        if get_tp_group().rank_in_group == 0:
-            logger.info(
-                "[SlotCheck][step=%s][prep] nreq=%s sched0=%s comp0=%s",
-                getattr(self, "_slot_debug_step", -1),
-                num_reqs,
-                int(tokens[0]) if tokens else -1,
-                int(self.input_batch.num_computed_tokens_cpu[0]),
-            )
+        # [DEBUG] slot_sum check (disabled)
+        # if get_tp_group().rank_in_group == 0:
+        #     logger.info(
+        #         "[SlotCheck][step=%s][prep] nreq=%s sched0=%s comp0=%s",
+        #         getattr(self, "_slot_debug_step", -1),
+        #         num_reqs,
+        #         int(tokens[0]) if tokens else -1,
+        #         int(self.input_batch.num_computed_tokens_cpu[0]),
+        #     )
 
         (
             logits_indices,
@@ -3332,16 +3335,18 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             _slot_before = None
-            if get_tp_group().rank_in_group == 0:
-                _slot = self.input_batch.block_table[0].slot_mapping.gpu
-                _slot_before = _slot[:num_tokens_padded].clone()
-                logger.info(
-                    "[SlotCheck][step=%s][Edge-seg_a] slot_sum=%s num_reqs=%s computed0=%s",
-                    self._slot_debug_step,
-                    _slot_before.sum().item(),
-                    self.input_batch.num_reqs,
-                    int(self.input_batch.num_computed_tokens_cpu[0]),
-                )
+            _slot_before = None
+            # [DEBUG] slot_sum check (disabled)
+            # if get_tp_group().rank_in_group == 0:
+            #     _slot = self.input_batch.block_table[0].slot_mapping.gpu
+            #     _slot_before = _slot[:num_tokens_padded].clone()
+            #     logger.info(
+            #         "[SlotCheck][step=%s][Edge-seg_a] slot_sum=%s num_reqs=%s computed0=%s",
+            #         self._slot_debug_step,
+            #         _slot_before.sum().item(),
+            #         self.input_batch.num_reqs,
+            #         int(self.input_batch.num_computed_tokens_cpu[0]),
+            #     )
             try:
                 hidden_states = seg_a(
                     input_ids=input_ids,
@@ -3358,14 +3363,15 @@ class NPUModelRunner(GPUModelRunner):
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
-            if _slot_before is not None:
-                _slot_after = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
-                if not torch.equal(_slot_before, _slot_after):
-                    logger.warning(
-                        "[SlotCheck][step=%s][Edge-seg_a] slot_mapping CHANGED "
-                        "before_sum=%s after_sum=%s",
-                        self._slot_debug_step, _slot_before.sum().item(), _slot_after.sum().item(),
-                    )
+            # [DEBUG] slot_sum check (disabled)
+            # if _slot_before is not None:
+            #     _slot_after = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
+            #     if not torch.equal(_slot_before, _slot_after):
+            #         logger.warning(
+            #             "[SlotCheck][step=%s][Edge-seg_a] slot_mapping CHANGED "
+            #             "before_sum=%s after_sum=%s",
+            #             self._slot_debug_step, _slot_before.sum().item(), _slot_after.sum().item(),
+            #         )
 
             assert isinstance(hidden_states, IntermediateTensors)
             return hidden_states
@@ -3442,15 +3448,16 @@ class NPUModelRunner(GPUModelRunner):
         old_layer_idx = _EXTRA_CTX.layer_idx
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
-        if get_tp_group().rank_in_group == 0:
-            _slot_c = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
-            logger.info(
-                "[SlotCheck][step=%s][Cloud-seg_c] slot_sum=%s num_reqs=%s computed0=%s",
-                self._slot_debug_step,
-                _slot_c.sum().item(),
-                self.input_batch.num_reqs,
-                int(self.input_batch.num_computed_tokens_cpu[0]),
-            )
+        # [DEBUG] slot_sum check (disabled)
+        # if get_tp_group().rank_in_group == 0:
+        #     _slot_c = self.input_batch.block_table[0].slot_mapping.gpu[:num_tokens_padded]
+        #     logger.info(
+        #         "[SlotCheck][step=%s][Cloud-seg_c] slot_sum=%s num_reqs=%s computed0=%s",
+        #         self._slot_debug_step,
+        #         _slot_c.sum().item(),
+        #         self.input_batch.num_reqs,
+        #         int(self.input_batch.num_computed_tokens_cpu[0]),
+        #     )
         try:
             hidden_states = seg_c(
                 positions=positions,
@@ -4475,6 +4482,17 @@ class NPUModelRunner(GPUModelRunner):
         finally:
             self.supports_mm_inputs = original_supports_mm_inputs
             self.max_num_tokens = origin_max_num_tokens
+
+        # [DEBUG] Clear block_table residues after profile run to prevent
+        # dummy-run KV cache pollution on first real inference.
+        # Only for edge-cloud mode; non-edge-cloud profile_run does not
+        # split execution so dummy residues do not cross the wire.
+        if self._edge_cloud_enabled and hasattr(self, "input_batch") and self.input_batch is not None:
+            for bt in self.input_batch.block_table.block_tables:
+                bt.block_table.np.fill(0)
+                bt.num_blocks_per_row.fill(0)
+                bt.slot_mapping.np.fill(PAD_SLOT_ID)
+                bt.slot_mapping.copy_to_gpu(bt.slot_mapping.np.shape[0])
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
