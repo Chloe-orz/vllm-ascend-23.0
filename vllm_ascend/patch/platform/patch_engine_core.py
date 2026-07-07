@@ -340,11 +340,6 @@ def _merge_pending_worker_cleanup(self, scheduler_output: SchedulerOutput) -> No
         scheduler_output.finished_req_ids = set(
             scheduler_output.finished_req_ids
         ).union(pending_finished)
-        _ever = getattr(self.scheduler, "_ever_freed_status", {})
-        scheduler_output.finished_req_id_to_status = {
-            r: _ever.get(r, "")
-            for r in scheduler_output.finished_req_ids
-        }
         pending_finished.clear()
 
     pending_mm_hashes = getattr(self, "_pd_pending_free_encoder_mm_hashes", None)
