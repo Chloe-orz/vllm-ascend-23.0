@@ -141,23 +141,6 @@ class PDSeparatedScheduler(Scheduler):
         # decode scheduling until PL completes and they are moved to running.
         self.prefill_last_pending: list[Request] = []
 
-        # Requests whose head segment (PF/DF) has been scheduled but whose
-        # tail segment (PL/DL) has not yet completed on the cloud round-trip.
-        # Aborts/finishes for these reqs are *deferred* (see ``finish_requests``
-        # and ``_flush_completed_deferred_finishes``): the cloud has already
-        # committed hidden tensors sized to ``total_num_scheduled_tokens`` for
-        # them, so the edge tail must still process those tokens.  Finishing
-        # immediately would pop the req from the worker's
-        # ``self.requests``/``input_batch`` and break data-plane alignment
-        # (KeyError in ``_update_states`` + token misalignment in
-        # ``_prepare_inputs``).  We keep KV blocks + ``self.requests`` until
-        # the matching PL/DL returns, then complete the finish.
-        self._in_flight_tail_req_ids: set[str] = set()
-        # req_id -> finished_status for reqs whose finish was deferred because
-        # their tail was in flight.  Flushed in ``update_from_output`` once the
-        # matching PL/DL completes.
-        self._deferred_finish: dict[str, RequestStatus] = {}
-
         # [新增] DECODE_LAST 延迟调度计时器。
         # D首 pick 后启动，D尾 在延迟到期前不可被调度。
         self._decode_last_delay_start_ts: float | None = None
@@ -440,10 +423,6 @@ class PDSeparatedScheduler(Scheduler):
                     scheduled_req_ids = set(
                         scheduler_output.num_scheduled_tokens.keys()
                     )
-                    # Mark these reqs as having an in-flight tail so that an
-                    # abort/finish arriving before PL returns is deferred
-                    # (see finish_requests / _flush_completed_deferred_finishes).
-                    self._in_flight_tail_req_ids.update(scheduled_req_ids)
                     for req in self.running:
                         if req.request_id in scheduled_req_ids:
                             self.prefill_last_pending.append(req)
@@ -597,12 +576,6 @@ class PDSeparatedScheduler(Scheduler):
                     self.decode_inflight_count += 1
                     self._force_decode_last = True
                     self._start_decode_last_delay()
-                    # Mark these reqs as having an in-flight tail (DL) so an
-                    # abort/finish arriving before DL returns is deferred
-                    # (see finish_requests / _flush_completed_deferred_finishes).
-                    self._in_flight_tail_req_ids.update(
-                        scheduler_output.num_scheduled_tokens.keys()
-                    )
                 for req in list(self.waiting):
                     saved_waiting.prepend_request(req)
                 self.chunk_prefill_first = saved_chunk_prefill_first
@@ -674,12 +647,6 @@ class PDSeparatedScheduler(Scheduler):
             #   - still has more chunks -> chunk_prefill_first
             #   - prefill fully done    -> running
             completed_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
-            # The tail segment for these reqs has now executed on the worker,
-            # so they are no longer in flight.  Deferred aborts/finishes for
-            # any of them are completed below (see
-            # _flush_completed_deferred_finishes) before super().update_from_output
-            # runs, so the worker no longer needs them in self.requests.
-            self._in_flight_tail_req_ids -= completed_req_ids
             newly_running: list[Request] = []
             newly_chunked: list[Request] = []
             remaining_pending: list[Request] = []
@@ -716,22 +683,10 @@ class PDSeparatedScheduler(Scheduler):
         if scheduler_output.batch_type == BatchType.DECODE_LAST:
             # decode_inflight_count 已在 DECODE_FIRST 的 update_from_output
             # 中释放，此处不再重复减 1。
-            # The tail segment (DL) for these reqs has now executed on the
-            # worker, so they are no longer in flight.  Deferred aborts/
-            # finishes for any of them are completed below.
-            self._in_flight_tail_req_ids -= set(
-                scheduler_output.num_scheduled_tokens.keys()
-            )
             logger.info(
                 f"[PD] update_from_output DECODE_LAST done, "
                 f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
             )
-        # Complete any deferred finishes whose tail segment has now returned.
-        # This must run before super().update_from_output so that aborted reqs
-        # are already finished (and thus skipped by the parent loop) instead of
-        # having their sampled token appended.  It also releases KV blocks and
-        # delivers finished_req_ids to the worker for the next batch.
-        self._flush_completed_deferred_finishes()
         outputs = super().update_from_output(scheduler_output, model_runner_output)
         self.chunk_prefill_first = [
             req for req in self.chunk_prefill_first if not req.is_finished()
@@ -757,10 +712,6 @@ class PDSeparatedScheduler(Scheduler):
             super().get_num_unfinished_requests()
             + len(self.chunk_prefill_first)
             + len(self.prefill_last_pending)
-            # Deferred finishes still hold KV blocks + a worker self.requests
-            # entry until their in-flight tail returns, so they count as
-            # unfinished work for the engine loop.
-            + len(self._deferred_finish)
         )
 
     def finish_requests(
@@ -774,112 +725,18 @@ class PDSeparatedScheduler(Scheduler):
         else:
             request_ids = self.requests.keys()
 
-        # Finish-all (e.g. shutdown): the in-flight tails will not return, so
-        # force-complete deferred finishes and clear the in-flight tracking.
-        if request_ids is None:
-            if self._deferred_finish:
-                logger.warning(
-                    "PD scheduler shutdown with %d deferred-finish reqs "
-                    "whose tails never returned (cloud failure?); "
-                    "force-finishing them: %s",
-                    len(self._deferred_finish),
-                    sorted(self._deferred_finish.keys()),
-                )
-            result = super().finish_requests(None, finished_status)
-            self._deferred_finish.clear()
-            self._in_flight_tail_req_ids.clear()
-            return result
-
-        if isinstance(request_ids, str):
-            norm: set[str] = {request_ids}
-        else:
-            norm = set(request_ids)
-
-        # Split: reqs whose tail is still in flight must be deferred (the
-        # cloud already committed hidden tensors for them); the rest finish
-        # immediately via the parent.
-        defer_ids = {r for r in norm if r in self._in_flight_tail_req_ids}
-        finish_now_ids = norm - defer_ids
-
-        result: list[tuple[str, int]] = []
-        if finish_now_ids:
-            result = super().finish_requests(finish_now_ids, finished_status)
-
-        for req_id in defer_ids:
-            # Already deferred by an earlier abort: keep the first status and
-            # do not append to the result twice.
-            if req_id in self._deferred_finish:
-                continue
-            req = self.requests.get(req_id)
-            if req is None or req.is_finished():
-                continue
-            # Remove from all scheduling queues so the aborted req is not
-            # re-scheduled (e.g. picked into another DF/PF), but KEEP its KV
-            # blocks and self.requests entry: the in-flight tail segment still
-            # needs them for data-plane-aligned attention/sampling.  The
-            # status is intentionally left as-is (RUNNING) so the deferred
-            # finish can be completed later via super().finish_requests (which
-            # skips already-finished reqs).  The real finish (block free +
-            # finished_req_ids delivery) happens in
-            # _flush_completed_deferred_finishes once the tail returns.
-            self.running = remove_all(self.running, {req})
-            self.chunk_prefill_first = remove_all(self.chunk_prefill_first, {req})
-            if req in self.prefill_last_pending:
-                self.prefill_last_pending = [
-                    r for r in self.prefill_last_pending if r is not req
-                ]
-            self._deferred_finish[req_id] = finished_status
-            result.append((req_id, req.client_index))
-            logger.info(
-                "[PD] Deferring finish (%s) for req %s: tail segment still "
-                "in flight on cloud; will complete once PL/DL returns.",
-                finished_status.name, req_id,
-            )
-
-        # Preserve existing cleanup: drop delay-free finished reqs from
-        # chunk_prefill_first (parent only clears running/waiting).
         to_remove = set()
-        for req_id in finish_now_ids:
+        for req_id in request_ids:
             req = self.requests.get(req_id)
             if req and req.is_finished():
                 to_remove.add(req)
+
         if to_remove:
             self.chunk_prefill_first = remove_all(
                 self.chunk_prefill_first, to_remove
             )
 
         return result
-
-    def _flush_completed_deferred_finishes(self) -> None:
-        """Complete deferred aborts/finishes whose tail segment has returned.
-
-        Called from ``update_from_output`` after the PL/DL branch has removed
-        the just-completed req ids from ``_in_flight_tail_req_ids``.  By now
-        the tail has executed on the worker, so it is safe to release KV
-        blocks and deliver ``finished_req_ids`` to the worker (the req is no
-        longer needed for data-plane alignment).  Must run before
-        ``super().update_from_output`` so aborted reqs are skipped there.
-        """
-        if not self._deferred_finish:
-            return
-        to_flush = [
-            (r, s) for r, s in self._deferred_finish.items()
-            if r not in self._in_flight_tail_req_ids
-        ]
-        if not to_flush:
-            return
-        # Group by finished_status: super().finish_requests takes one status.
-        by_status: dict[RequestStatus, set[str]] = {}
-        for req_id, status in to_flush:
-            self._deferred_finish.pop(req_id, None)
-            by_status.setdefault(status, set()).add(req_id)
-        for status, ids in by_status.items():
-            logger.info(
-                "[PD] Completing deferred finish (%s) for %d req(s) whose "
-                "tail just returned: %s",
-                status.name, len(ids), sorted(ids),
-            )
-            super().finish_requests(ids, status)
 
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
@@ -907,9 +764,6 @@ class PDSeparatedScheduler(Scheduler):
         stats = super().make_stats(*args, **kwargs)
         if stats is not None:
             stats.num_running_reqs += len(self.chunk_prefill_first)
-            # Deferred-finish reqs still occupy KV blocks until their
-            # in-flight tail returns; count them as running for stats.
-            stats.num_running_reqs += len(self._deferred_finish)
         return stats
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
