@@ -830,7 +830,7 @@ class PDSeparatedScheduler(Scheduler):
                 ]
             self._deferred_finish[req_id] = finished_status
             result.append((req_id, req.client_index))
-            logger.error(
+            logger.info(
                 "[PD] Deferring finish (%s) for req %s: tail segment still "
                 "in flight on cloud; will complete once PL/DL returns.",
                 finished_status.name, req_id,
@@ -874,7 +874,7 @@ class PDSeparatedScheduler(Scheduler):
             self._deferred_finish.pop(req_id, None)
             by_status.setdefault(status, set()).add(req_id)
         for status, ids in by_status.items():
-            logger.error(
+            logger.info(
                 "[PD] Completing deferred finish (%s) for %d req(s) whose "
                 "tail just returned: %s",
                 status.name, len(ids), sorted(ids),
