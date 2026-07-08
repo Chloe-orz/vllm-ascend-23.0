@@ -716,6 +716,19 @@ class PDSeparatedScheduler(Scheduler):
         assert so.batch_type == BatchType.PREFILL_LAST, (
             f"prefills_last_ready expects PREFILL_LAST, got {so.batch_type}"
         )
+        # [ascend insert] Mark whether this PL is the request's last
+        # prefill chunk.  Mid-chunk PL must not sample: prefill is still
+        # incomplete, and the would-be sampled token actually predicts a
+        # prompt token belonging to the next chunk.  sample_tokens() reads
+        # this flag to skip sampling, which also avoids decrementing
+        # num_output_placeholders (only incremented for the last chunk)
+        # below zero.  The flight is still in the map here; it is popped
+        # later in _update_from_output_prefill_last_chunk_prior.
+        flight = (
+            self._prefill_flight_by_token.get(so.head_token)
+            if so.head_token else None
+        )
+        so.is_last_prefill_chunk = True if flight is None else flight.is_last_chunk
         # Drop these reqs from chunk_prefill_first. Keep them in
         # prefill_last_pending until update_from_output() moves them to running.
         last_req_ids = set(so.num_scheduled_tokens.keys())

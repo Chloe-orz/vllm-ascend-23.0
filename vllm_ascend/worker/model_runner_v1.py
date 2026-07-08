@@ -2797,6 +2797,27 @@ class NPUModelRunner(GPUModelRunner):
         # Clear ephemeral state.
         self.execute_model_state = None
 
+        # [ascend insert] Chunk-prior mid-chunk PL: prefill is not
+        # complete, so there is no valid token to sample (the logits
+        # predict a prompt token that belongs to the next chunk).  Skip
+        # sampling and return an empty output.  This also prevents
+        # num_output_placeholders -- which vLLM only reserves for the
+        # last prefill chunk (AsyncScheduler._update_after_schedule skips
+        # is_prefill_chunk) -- from being decremented below zero in
+        # _update_request_with_output.  segment_e / KV-cache write
+        # already happened in execute_model, so skipping sampling here
+        # does not affect prefill correctness.
+        if (
+            self._edge_cloud_enabled
+            and scheduler_output.batch_type == BatchType.PREFILL_LAST
+            and not getattr(scheduler_output, "is_last_prefill_chunk", True)
+        ):
+            if kv_connector_output and not kv_connector_output.is_empty():
+                output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+                output.kv_connector_output = kv_connector_output
+                return output
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
             # here we are different from gpu_model_runner,
