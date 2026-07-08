@@ -2812,11 +2812,22 @@ class NPUModelRunner(GPUModelRunner):
             and scheduler_output.batch_type == BatchType.PREFILL_LAST
             and not getattr(scheduler_output, "is_last_prefill_chunk", True)
         ):
+            # Mid chunk: no valid token to sample. Return a placeholder that
+            # carries the req_id mapping (so super().update_from_output can
+            # look up req_index for every req_id in num_scheduled_tokens)
+            # but leaves sampled_token_ids empty (default []), so
+            # generated_token_ids is [] and _update_request_with_output is
+            # skipped -- num_output_placeholders is not decremented. Do NOT
+            # return EMPTY_MODEL_RUNNER_OUTPUT here: its req_id_to_index is
+            # empty, which raises KeyError in update_from_output.
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            output = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            )
             if kv_connector_output and not kv_connector_output.is_empty():
-                output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
                 output.kv_connector_output = kv_connector_output
-                return output
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            return output
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:

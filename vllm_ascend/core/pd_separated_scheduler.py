@@ -1005,38 +1005,49 @@ class PDSeparatedScheduler(Scheduler):
                 req_id,
                 len(self.running),
             )
-        elif remaining == 0 and req is not None:
-            # is_last_chunk was False but no more pending tails.
-            # The request still has more chunks — re-add to
-            # chunk_prefill_first so the next chunk PF can be
-            # dispatched.
-            self.chunk_prefill_first.append(req)
-            self._cleanup_request_flight_state(req_id)
-            logger.info(
-                "[PD-CHUNK-PRIOR] Request %s chunk %d PL: "
-                "all tails cleared, re-added to chunk_prefill_first[] "
-                "for next chunk.",
-                req_id,
-                flight.chunk_index,
+        else:
+            # Mid-chunk PL returned, or last chunk but other tails still
+            # pending.  Re-add for the next chunk IF there are more chunks
+            # to schedule AND the request is not already queued.  This keeps
+            # the pipeline continuous across >2 chunks: the next chunk's PF
+            # fills the prefill slot freed by this PL, overlapping other
+            # in-flight PLs (e.g. 4 chunks -> chunk2 PF starts as soon as
+            # chunk0 PL returns, overlapping chunk1's PL, instead of waiting
+            # for chunk1's PL).  The old logic skipped re-add whenever
+            # ahead_before > 0, which forced pair-wise scheduling
+            # ((0,1) then (2,3)) and left a slot idle between pairs.
+            # Do NOT call _cleanup_request_flight_state here: ahead count
+            # and in-flight flights are still needed for outstanding chunks.
+            has_more_chunks = (
+                req is not None
+                and req.num_computed_tokens < req.num_prompt_tokens
             )
-        elif ahead_before > 0:
-            # The request was already ahead-scheduled; do not re-add to
-            # chunk_prefill_first.
-            logger.info(
-                "[PD-CHUNK-PRIOR] Request %s chunk %d PL: "
-                "already ahead-scheduled, skip re-add.",
-                req_id,
-                flight.chunk_index,
+            already_queued = (
+                req is not None and req in self.chunk_prefill_first
             )
-        elif req is not None:
-            # Not ahead-scheduled and still has more chunks → add back.
-            self.chunk_prefill_first.append(req)
-            logger.info(
-                "[PD-CHUNK-PRIOR] Request %s chunk %d PL: "
-                "re-added to chunk_prefill_first[] for next chunk.",
-                req_id,
-                flight.chunk_index,
-            )
+            if has_more_chunks and not already_queued:
+                self.chunk_prefill_first.append(req)
+                logger.info(
+                    "[PD-CHUNK-PRIOR] Request %s chunk %d PL: "
+                    "re-added to chunk_prefill_first[] for next chunk "
+                    "(remaining=%d, ahead=%d).",
+                    req_id,
+                    flight.chunk_index,
+                    remaining,
+                    self._ahead_chunk_count.get(req_id, 0),
+                )
+            else:
+                logger.info(
+                    "[PD-CHUNK-PRIOR] Request %s chunk %d PL: "
+                    "skip re-add (remaining=%d, ahead=%d, more=%s, "
+                    "queued=%s).",
+                    req_id,
+                    flight.chunk_index,
+                    remaining,
+                    self._ahead_chunk_count.get(req_id, 0),
+                    has_more_chunks,
+                    already_queued,
+                )
 
     def update_from_output(
         self,
