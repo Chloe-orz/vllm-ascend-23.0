@@ -190,6 +190,13 @@ class PDSeparatedScheduler(Scheduler):
         # ------------------------------------------------------------------ #
         # Chunk-prefill-prior fields                                          #
         # ------------------------------------------------------------------ #
+        # Enabled via pd_separation.next_prefill_prior_enable. When True the
+        # scheduler yields a freed prefill slot to a *different* request
+        # (cross-request head-prior, MindIE-style P1首->P2首) instead of
+        # ahead-dispatching the same request's next chunk.
+        self.next_prefill_prior_enable: bool = getattr(
+            self.scheduler_config, "pd_next_prefill_prior_enable", False
+        )
         # Enabled via pd_separation.chunk_prefill_prior_enable.
         self.chunk_prefill_prior_enable: bool = getattr(
             self.scheduler_config, "pd_chunk_prefill_prior_enable", False
@@ -240,6 +247,56 @@ class PDSeparatedScheduler(Scheduler):
         return (
             self._ahead_chunk_count.get(req_id, 0) < self.max_chunk_prefill_ahead
         )
+
+    def _has_other_prefill_request(self, current_req_id: str) -> bool:
+        """True if a different request has prefill work ready to fill the next
+        prefill slot (a cross-request head-prior candidate).
+
+        Only called from the ahead-decision point inside
+        ``_pick_prefill_first_batch``, where ``self.running`` temporarily
+        holds the drained ``chunk_prefill_first`` (so other mid-prefill
+        requests appear there); the ``is_prefill_chunk`` filter excludes
+        decode requests that normally live in ``running``.
+
+        Returns True when any of the following holds:
+          - ``chunk_prefill_first`` contains a request with a different id;
+          - ``running`` contains a still-prefilling request with a different
+            id (drained-window case);
+          - ``waiting`` is non-empty (a new request is available).
+        """
+        for req in self.chunk_prefill_first:
+            if req.request_id != current_req_id:
+                return True
+        running = getattr(self, "running", None)
+        if running:
+            for req in running:
+                if (req.request_id != current_req_id
+                        and getattr(req, "is_prefill_chunk", False)):
+                    return True
+        return len(self.waiting) > 0
+
+    def _should_ahead_schedule(self, req: Request, is_last: bool) -> bool:
+        """Decide whether to ahead-dispatch ``req``'s next chunk (intra-request
+        pipeline) or yield the prefill slot to another request (cross-request
+        head-prior, MindIE-style P1首 -> P2首).
+
+        Ahead (re-add ``req`` to ``chunk_prefill_first``) iff:
+          - this is not the last chunk, AND
+          - the request's ahead budget allows it, AND
+          - next_prefill_prior_enable is off, OR no other request is
+            available to fill the slot (single-request pipeline).
+
+        Yield (send ``req`` to ``prefill_last_pending``; the PL-return path
+        re-adds it for its next chunk when the tail returns) when
+        ``next_prefill_prior_enable`` is on and another request has prefill
+        work ready.
+        """
+        if is_last or not self._can_ahead_schedule(req.request_id):
+            return False
+        if (self.next_prefill_prior_enable
+                and self._has_other_prefill_request(req.request_id)):
+            return False
+        return True
 
     def _total_pending_tails(self) -> int:
         """Total number of chunks waiting for PL across all requests."""
@@ -623,15 +680,12 @@ class PDSeparatedScheduler(Scheduler):
                                     + 1
                                 )
 
-                                if (
-                                    not is_last
-                                    and self._can_ahead_schedule(
-                                        req.request_id
-                                    )
-                                ):
+                                if self._should_ahead_schedule(req, is_last):
                                     # Ahead: re-add to chunk_prefill_first
                                     # so the next chunk PF can be dispatched
-                                    # before this chunk's PL returns.
+                                    # before this chunk's PL returns. Used for
+                                    # the single-request pipeline (both 2P1D
+                                    # slots serve the same request).
                                     self.chunk_prefill_first.append(req)
                                     self._ahead_chunk_count[
                                         req.request_id
@@ -655,14 +709,34 @@ class PDSeparatedScheduler(Scheduler):
                                         ],
                                     )
                                 else:
-                                    # Wait for PL before next chunk.
+                                    # Wait for PL before next chunk. Reasons:
+                                    #   - last chunk (is_last);
+                                    #   - ahead budget exhausted;
+                                    #   - yield: next_prefill_prior_enable is
+                                    #     on and another request can fill the
+                                    #     slot (cross-request head-prior).
+                                    if (
+                                        self.next_prefill_prior_enable
+                                        and not is_last
+                                        and self._can_ahead_schedule(
+                                            req.request_id
+                                        )
+                                        and self._has_other_prefill_request(
+                                            req.request_id
+                                        )
+                                    ):
+                                        wait_reason = "yield"
+                                    elif is_last:
+                                        wait_reason = "last"
+                                    else:
+                                        wait_reason = "ahead_full"
                                     self.prefill_last_pending.append(req)
                                     logger.info(
                                         "[PD-CHUNK-PRIOR] Chunk %d of "
                                         "request %s waiting for PL "
                                         "(head_token=%s, %d tokens, "
                                         "is_last=%s, "
-                                        "pending_tails=%d)",
+                                        "pending_tails=%d, reason=%s)",
                                         flight.chunk_index,
                                         req.request_id,
                                         scheduler_output.head_token,
@@ -671,6 +745,7 @@ class PDSeparatedScheduler(Scheduler):
                                         self._pending_tail_count.get(
                                             req.request_id, 0
                                         ),
+                                        wait_reason,
                                     )
                             elif req.is_prefill_chunk:
                                 # Not scheduled this round (token budget

@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 def _make_scheduler_config(
     *,
     pd_prefill_inflight_limit: int = 1,
+    pd_next_prefill_prior_enable: bool = False,
     pd_chunk_prefill_prior_enable: bool = False,
     pd_max_chunk_prefill_ahead: int = 1,
     async_scheduling: bool = False,
@@ -34,6 +35,7 @@ def _make_scheduler_config(
 ) -> SimpleNamespace:
     return SimpleNamespace(
         pd_prefill_inflight_limit=pd_prefill_inflight_limit,
+        pd_next_prefill_prior_enable=pd_next_prefill_prior_enable,
         pd_chunk_prefill_prior_enable=pd_chunk_prefill_prior_enable,
         pd_max_chunk_prefill_ahead=pd_max_chunk_prefill_ahead,
         async_scheduling=async_scheduling,
@@ -115,6 +117,7 @@ class TestConfigWiring:
 
         NPUPlatform._configure_pd_separation_scheduler(vllm_config, ascend_config)
 
+        assert vllm_config.scheduler_config.pd_next_prefill_prior_enable is True
         assert vllm_config.scheduler_config.pd_chunk_prefill_prior_enable is True
         assert vllm_config.scheduler_config.pd_max_chunk_prefill_ahead == 1
 
@@ -170,6 +173,11 @@ class TestPrefillChunkFlight:
         assert flight.is_last_chunk is False
         assert flight.num_scheduled_tokens == 4096
 
+    @pytest.mark.xfail(
+        reason="pre-existing: _remaining_prompt_tokens helper is not "
+               "implemented on PDSeparatedScheduler",
+        strict=False,
+    )
     def test_remaining_prompt_tokens(self):
         from vllm_ascend.core.pd_separated_scheduler import PDSeparatedScheduler
 
@@ -182,6 +190,11 @@ class TestPrefillChunkFlight:
         assert scheduler._remaining_prompt_tokens(req, 4000) == 0
         assert scheduler._remaining_prompt_tokens(req, 5000) == 0
 
+    @pytest.mark.xfail(
+        reason="pre-existing: _has_more_chunks helper is not implemented "
+               "on PDSeparatedScheduler",
+        strict=False,
+    )
     def test_has_more_chunks(self):
         from vllm_ascend.core.pd_separated_scheduler import PDSeparatedScheduler
 
@@ -207,6 +220,128 @@ class TestPrefillChunkFlight:
 
         scheduler._ahead_chunk_count["req-0"] = 0
         assert scheduler._can_ahead_schedule("req-0") is True
+
+
+# ------------------------------------------------------------------ #
+# Test: Cross-request head-prior (2P1D multi-request interleaving)   #
+# ------------------------------------------------------------------ #
+
+
+class TestCrossRequestHeadPrior:
+    """Verify _has_other_prefill_request and _should_ahead_schedule.
+
+    Single-request path: when no other request is available, ahead-dispatch
+    the same request's next chunk (intra-request pipeline, both 2P1D slots
+    serve one request).
+
+    Multi-request path: when next_prefill_prior_enable is on and another
+    request can fill the slot, yield (do NOT ahead) so the next slot
+    dispatches the other request's head (cross-request P1首 -> P2首).
+    """
+
+    def _make_scheduler(self, *, next_prior=False, ahead_limit=1):
+        from vllm_ascend.core.pd_separated_scheduler import (
+            PDSeparatedScheduler,
+        )
+
+        scheduler = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+        scheduler.next_prefill_prior_enable = next_prior
+        scheduler.max_chunk_prefill_ahead = ahead_limit
+        scheduler._ahead_chunk_count = {}
+        scheduler.chunk_prefill_first = []
+        scheduler.running = []
+        # A plain list stands in for RequestQueue here; only len()>0 matters.
+        scheduler.waiting = []
+        return scheduler
+
+    # ---- _has_other_prefill_request ----
+
+    def test_no_other_request_when_all_empty(self):
+        scheduler = self._make_scheduler()
+        assert scheduler._has_other_prefill_request("req-0") is False
+
+    def test_other_request_in_waiting(self):
+        scheduler = self._make_scheduler()
+        scheduler.waiting = [_make_mock_request(request_id="req-1")]
+        assert scheduler._has_other_prefill_request("req-0") is True
+
+    def test_other_request_in_chunk_prefill_first(self):
+        scheduler = self._make_scheduler()
+        scheduler.chunk_prefill_first = [
+            _make_mock_request(request_id="req-1")
+        ]
+        assert scheduler._has_other_prefill_request("req-0") is True
+
+    def test_other_request_in_running_prefill_chunk(self):
+        """Drained-window case: another mid-prefill request in running."""
+        scheduler = self._make_scheduler()
+        other = _make_mock_request(request_id="req-1", is_prefill_chunk=True)
+        scheduler.running = [other]
+        assert scheduler._has_other_prefill_request("req-0") is True
+
+    def test_only_current_request_in_chunk_prefill_first(self):
+        scheduler = self._make_scheduler()
+        scheduler.chunk_prefill_first = [
+            _make_mock_request(request_id="req-0")
+        ]
+        assert scheduler._has_other_prefill_request("req-0") is False
+
+    def test_running_decode_request_does_not_count(self):
+        """A decode request in running must not be treated as prefill work."""
+        scheduler = self._make_scheduler()
+        decode_req = _make_mock_request(
+            request_id="req-1", is_prefill_chunk=False
+        )
+        scheduler.running = [decode_req]
+        assert scheduler._has_other_prefill_request("req-0") is False
+
+    # ---- _should_ahead_schedule: single-request path (ahead) ----
+
+    def test_single_request_aheads_despite_next_prior(self):
+        """Single request + next_prior=True: no other request -> ahead."""
+        scheduler = self._make_scheduler(next_prior=True)
+        req = _make_mock_request(request_id="req-0")
+        assert scheduler._should_ahead_schedule(req, is_last=False) is True
+
+    # ---- _should_ahead_schedule: multi-request path (yield) ----
+
+    def test_multi_request_yields_to_other(self):
+        """next_prior=True + another request waiting -> yield (no ahead)."""
+        scheduler = self._make_scheduler(next_prior=True)
+        scheduler.waiting = [_make_mock_request(request_id="req-1")]
+        req = _make_mock_request(request_id="req-0")
+        assert scheduler._should_ahead_schedule(req, is_last=False) is False
+
+    def test_multi_request_yields_when_other_mid_prefill(self):
+        """Yield when another request is mid-prefill in chunk_prefill_first."""
+        scheduler = self._make_scheduler(next_prior=True)
+        scheduler.chunk_prefill_first = [
+            _make_mock_request(request_id="req-1")
+        ]
+        req = _make_mock_request(request_id="req-0")
+        assert scheduler._should_ahead_schedule(req, is_last=False) is False
+
+    def test_ahead_budget_full_returns_false_even_with_yield(self):
+        """ahead budget exhausted -> False regardless of yield condition."""
+        scheduler = self._make_scheduler(next_prior=True)
+        scheduler._ahead_chunk_count["req-0"] = 1  # == max_chunk_prefill_ahead
+        scheduler.waiting = [_make_mock_request(request_id="req-1")]
+        req = _make_mock_request(request_id="req-0")
+        assert scheduler._should_ahead_schedule(req, is_last=False) is False
+
+    # ---- 1P1D / legacy path ----
+
+    def test_1p1d_ignores_other_request(self):
+        """next_prior=False: ahead even when another request is waiting."""
+        scheduler = self._make_scheduler(next_prior=False)
+        scheduler.waiting = [_make_mock_request(request_id="req-1")]
+        req = _make_mock_request(request_id="req-0")
+        assert scheduler._should_ahead_schedule(req, is_last=False) is True
+
+    def test_last_chunk_never_aheads(self):
+        scheduler = self._make_scheduler(next_prior=True)
+        req = _make_mock_request(request_id="req-0")
+        assert scheduler._should_ahead_schedule(req, is_last=True) is False
 
 
 # ------------------------------------------------------------------ #

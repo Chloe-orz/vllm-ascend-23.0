@@ -56,6 +56,9 @@ def test_pd_scheduler_cls_is_set_to_ascend_path():
     )
     # next_prefill_prior_enable=True → limit back-filled to 2.
     assert vllm_config.scheduler_config.pd_prefill_inflight_limit == 2
+    # The flag itself is also threaded for the scheduler's cross-request
+    # head-prior (yield) decision.
+    assert vllm_config.scheduler_config.pd_next_prefill_prior_enable is True
 
 
 def test_async_pd_scheduler_cls_is_set_to_ascend_path():
@@ -82,6 +85,7 @@ def test_pd_scheduler_back_fills_default_inflight_limit_when_prior_disabled():
 
     # next_prefill_prior_enable=False → 1P1D.
     assert vllm_config.scheduler_config.pd_prefill_inflight_limit == 1
+    assert vllm_config.scheduler_config.pd_next_prefill_prior_enable is False
 
 
 def test_pd_scheduler_is_noop_when_edge_cloud_disabled():
