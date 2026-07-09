@@ -10,6 +10,7 @@ Key correctness guarantees:
 - Serialization uses raw byte reinterpretation (view), no precision loss.
 - A small JSON metadata header is prepended so the receiver can reconstruct
   shape / dtype / offsets without prior agreement.
+- Payload start is aligned to 8 bytes so view(dtype) works for any dtype.
 - Built-in validation (torch.equal) on the first iteration.
 
 Usage (2 ranks on Ascend NPU):
@@ -24,7 +25,6 @@ Usage (2 ranks on Ascend NPU):
 
 import argparse
 import json
-import math
 import os
 import struct
 import time
@@ -73,14 +73,24 @@ def dtype_name(dt: torch.dtype) -> str:
 #   [ 4 bytes ]  version = 1
 #   [ 4 bytes ]  json_meta_len
 #   [ N bytes ]  json_meta  (UTF-8)
+#   [ P bytes ]  padding to 8-byte alignment
 #   [ …       ]  raw tensor bytes (concatenated)
 #
-# This small header removes the need for "out-of-band" meta agreement.
+# Alignment is required because PyTorch view(dtype) demands that the tensor's
+# storage_offset be divisible by the target dtype's element size.
 
-_MAGIC = 0x4254_4D52
+_MAGIC = 0x42544D52
 _VERSION = 1
 _HEADER_FMT = "<III"          # magic, version, json_meta_len
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
+_ALIGNMENT = 8                 # int64 / float64 element size
+
+
+def _payload_start(meta_len: int) -> int:
+    """Return byte offset where tensor payloads begin (8-byte aligned)."""
+    raw = _HEADER_SIZE + meta_len
+    pad = (_ALIGNMENT - raw % _ALIGNMENT) % _ALIGNMENT
+    return raw + pad
 
 
 def _build_meta_json(tensors: List[torch.Tensor]) -> bytes:
@@ -105,30 +115,44 @@ def serialize(tensors: List[torch.Tensor]) -> torch.Tensor:
     Guarantees:
     - No precision loss (raw byte reinterpretation via view).
     - Self-describing header so receiver does not need external config.
+    - 8-byte payload alignment so view(dtype) works for any dtype.
     """
     # Ensure contiguous before reinterpretation
     pieces: List[torch.Tensor] = []
     for t in tensors:
         if not t.is_contiguous():
             t = t.contiguous()
-        # reinterpret as flat bytes
         flat = t.view(torch.uint8).reshape(-1)
         pieces.append(flat)
 
     meta_bytes = _build_meta_json(tensors)
     meta_len = len(meta_bytes)
+    payload_off = _payload_start(meta_len)
+    total_bytes = payload_off + sum(p.numel() for p in pieces)
 
-    # Build header on CPU then move to target device
-    header = struct.pack(_HEADER_FMT, _MAGIC, _VERSION, meta_len)
-    header_t = torch.frombuffer(header, dtype=torch.uint8)
-    meta_t = torch.frombuffer(meta_bytes, dtype=torch.uint8)
-
-    # All pieces must live on the same device
     device = tensors[0].device
-    header_t = header_t.to(device, non_blocking=False)
-    meta_t = meta_t.to(device, non_blocking=False)
+    merged = torch.empty(total_bytes, dtype=torch.uint8, device=device)
 
-    merged = torch.cat([header_t, meta_t] + pieces)
+    # Write header (small, CPU -> device copy)
+    header = struct.pack(_HEADER_FMT, _MAGIC, _VERSION, meta_len)
+    header_cpu = torch.tensor(list(header), dtype=torch.uint8)
+    merged[:_HEADER_SIZE].copy_(header_cpu.to(device, non_blocking=False))
+
+    # Write meta
+    meta_cpu = torch.tensor(list(meta_bytes), dtype=torch.uint8)
+    merged[_HEADER_SIZE:_HEADER_SIZE + meta_len].copy_(meta_cpu.to(device, non_blocking=False))
+
+    # Zero padding (if any)
+    if payload_off > _HEADER_SIZE + meta_len:
+        merged[_HEADER_SIZE + meta_len:payload_off].zero_()
+
+    # Write payloads
+    offset = payload_off
+    for flat in pieces:
+        n = flat.numel()
+        merged[offset:offset + n].copy_(flat)
+        offset += n
+
     return merged
 
 
@@ -152,16 +176,18 @@ def deserialize(merged: torch.Tensor) -> List[torch.Tensor]:
     meta_bytes = merged[_HEADER_SIZE:_HEADER_SIZE + meta_len].cpu().numpy().tobytes()
     meta = json.loads(meta_bytes.decode("utf-8"))
 
-    payload_start = _HEADER_SIZE + meta_len
+    payload_off = _payload_start(meta_len)
     out = []
     for item in meta:
         dtype = get_dtype(item["dtype"])
         shape = item["shape"]
         nbytes = item["nbytes"]
-        offset = payload_start + item["offset"]
+        offset = payload_off + item["offset"]
 
         chunk = merged[offset:offset + nbytes]
-        # chunk is a 1-D contiguous slice of a 1-D tensor → always safe to view
+        # chunk is a contiguous 1-D slice of a 1-D tensor.
+        # payload_off is 8-byte aligned and each tensor's nbytes is a multiple
+        # of its own element_size, so offset is always aligned for view().
         t = chunk.view(dtype).reshape(shape)
         # Force contiguous copy so downstream kernels do not fight strides.
         if not t.is_contiguous():
@@ -180,8 +206,6 @@ def build_tensors(config: List[Dict], device: torch.device) -> List[torch.Tensor
     for item in config:
         shape = item["shape"]
         dtype = get_dtype(item["dtype"])
-        # For floating dtypes use randn so we can verify values;
-        # for integer dtypes use randint so non-zero values survive.
         if dtype.is_floating_point:
             t = torch.randn(shape, dtype=torch.float32, device=device)
             if dtype != torch.float32:
@@ -212,11 +236,8 @@ def benchmark(rank: int, config: List[Dict], args):
 
     # Pre-allocate recv buffer on rank 1
     if rank == 1:
-        # We do not know the exact merged size yet, but we can over-allocate
-        # (header is < 1 KiB for reasonable tensor counts).
         dummy = serialize(tensors)
-        recv_buffer = torch.empty_like(dummy)
-        recv_meta = None  # populated after first recv
+        recv_buffer = torch.empty(dummy.shape, dtype=torch.uint8, device=device)
 
     # Synchronize
     torch.npu.synchronize(device)
@@ -294,8 +315,7 @@ def benchmark(rank: int, config: List[Dict], args):
                             print(f"[Rank1] FATAL [{idx}] VALUE mismatch!")
                             all_ok = False
                         else:
-                            print(f"[Rank1] [{idx}] dtype={dtype_name(recv.dtype)} shape={tuple(recv.shape)}  OK  "
-                                  f"max_abs_diff=0.0")
+                            print(f"[Rank1] [{idx}] dtype={dtype_name(recv.dtype)} shape={tuple(recv.shape)}  OK")
                     if all_ok:
                         print("[Rank1] === All tensors validated successfully ===")
 
