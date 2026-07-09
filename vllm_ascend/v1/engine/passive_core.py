@@ -622,9 +622,7 @@ class PassiveEngineCoreProc:
             # has completed and started sending hidden states back.  Store the
             # original SchedulerOutput here and publish it from
             # _drain_worker_completion_acks() after the worker reports done.
-            if batch.scheduler_output.batch_type == BatchType.DECODE_FIRST:
-                self._maybe_publish_post_out(batch.scheduler_output)
-            elif (
+            if (
                 batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
                 and (slice_info is None or slice_info.is_last_slice)
             ):
@@ -659,9 +657,17 @@ class PassiveEngineCoreProc:
                 scheduler_output, batch_type=BatchType.PREFILL_LAST
             )
         elif bt == BatchType.DECODE_FIRST:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.DECODE_LAST
+            # === Decode-first self-posting optimization ===
+            # Edge always pre-generates DECODE_LAST locally and stores it
+            # in decodes_last_ready.  Cloud never needs to send DECODE_LAST
+            # back via POST_OUT, eliminating control-plane round-trip.
+            logger.debug(
+                "[Cloud] Skipping POST_OUT for DECODE_FIRST "
+                "head_token=%s (edge pre-generates DECODE_LAST)",
+                scheduler_output.head_token,
             )
+            return
+            # ===============================================
         else:
             return
         # Echo the head_token back so the edge can correlate the tail
