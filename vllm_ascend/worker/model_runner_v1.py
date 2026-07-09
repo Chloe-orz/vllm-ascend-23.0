@@ -2132,20 +2132,6 @@ class NPUModelRunner(GPUModelRunner):
                         # cloud_prepare_early).  Return empty output consistent
                         # with the num_scheduled_tokens == 0 path.
                         return EMPTY_MODEL_RUNNER_OUTPUT
-                    req_ids = self.input_batch.req_ids
-                    tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-                    num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
-                    max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
-
-                    (
-                        logits_indices,
-                        spec_decode_metadata,
-                        total_num_scheduled_tokens,
-                        num_scheduled_tokens_compressed_list,
-                    ) = self._prepare_inputs(
-                        scheduler_output,
-                        num_scheduled_tokens_np,
-                    )
 
                     if not num_scheduled_tokens:
                         if (
@@ -2211,33 +2197,18 @@ class NPUModelRunner(GPUModelRunner):
                                 self.requests,
                                 self.mamba_state_idx,
                             )
-                    if self.use_compress:
-                        if deferred_state_corrections_fn:
-                            deferred_state_corrections_fn()
-                            deferred_state_corrections_fn = None
-                        num_reqs = self.input_batch.num_reqs
-                        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
-                        dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
-                        np.add(
-                            self.input_batch.num_computed_tokens_cpu[req_indices],
-                            self.query_pos.np[:total_num_scheduled_tokens],
-                            out=dsa_positions_np,
-                        )
-
                     # Run core input preparation.
-                    # NOTE: _prepare_inputs was already called inline above; it
-                    # is NOT idempotent (rewrites num_accepted_tokens_cpu in
-                    # place under async spec decode), so reuse its results here
-                    # instead of letting _run_input_preparation call it again.
+                    # _run_input_preparation calls _prepare_inputs (which is NOT
+                    # idempotent — it rewrites num_accepted_tokens_cpu in place
+                    # under async spec decode), then handles compress, padding,
+                    # and attention metadata.
                     cache = self._run_input_preparation(
                         scheduler_output,
-                        precomputed=(
-                            logits_indices,
-                            spec_decode_metadata,
-                            total_num_scheduled_tokens,
-                            num_scheduled_tokens_compressed_list,
-                        ),
+                        deferred_state_corrections_fn=deferred_state_corrections_fn,
                     )
+                    # Corrections were applied inside _run_input_preparation
+                    # (before compress), so clear the local reference.
+                    deferred_state_corrections_fn = None
                     total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
                     num_tokens_padded = cache["num_tokens_padded"]
                     num_tokens_across_dp = cache["num_tokens_across_dp"]
@@ -2967,7 +2938,7 @@ class NPUModelRunner(GPUModelRunner):
     def _run_input_preparation(
         self,
         scheduler_output: "SchedulerOutput",
-        precomputed: tuple | None = None,
+        deferred_state_corrections_fn: Callable | None = None,
     ) -> dict[str, Any]:
         """Run input preparation pipeline after _update_states.
 
@@ -2997,22 +2968,30 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
-        if precomputed is not None:
-            (
-                logits_indices,
-                spec_decode_metadata,
-                total_num_scheduled_tokens,
-                num_scheduled_tokens_compressed_list,
-            ) = precomputed
-        else:
-            (
-                logits_indices,
-                spec_decode_metadata,
-                total_num_scheduled_tokens,
-                num_scheduled_tokens_compressed_list,
-            ) = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
+        (
+            logits_indices,
+            spec_decode_metadata,
+            total_num_scheduled_tokens,
+            num_scheduled_tokens_compressed_list,
+        ) = self._prepare_inputs(
+            scheduler_output,
+            num_scheduled_tokens_np,
+        )
+
+        # Apply deferred state corrections before compress (which reads
+        # self.input_batch and self.query_pos that may be updated).
+        if deferred_state_corrections_fn:
+            deferred_state_corrections_fn()
+
+        # Compress handling: compute DSA positions before attention metadata.
+        if self.use_compress:
+            num_reqs = self.input_batch.num_reqs
+            req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+            dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
+            np.add(
+                self.input_batch.num_computed_tokens_cpu[req_indices],
+                self.query_pos.np[:total_num_scheduled_tokens],
+                out=dsa_positions_np,
             )
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
