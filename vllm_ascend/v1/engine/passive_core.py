@@ -542,10 +542,25 @@ class PassiveEngineCoreProc:
             True if at least one payload was enqueued, False if the
             scheduler had nothing to dispatch.
         """
+        _t0 = time.monotonic()
         self._drain_worker_completion_acks()
+        _dt_drain = (time.monotonic() - _t0) * 1000
+
+        _t0 = time.monotonic()
         self.passive_scheduler.poll_and_classify()
+        _dt_poll = (time.monotonic() - _t0) * 1000
+
+        _t0 = time.monotonic()
         batch = self.passive_scheduler.schedule()
+        _dt_sched = (time.monotonic() - _t0) * 1000
+
         if batch.is_empty():
+            if _dt_drain > 1.0 or _dt_poll > 1.0 or _dt_sched > 1.0:
+                logger.info(
+                    "[CLOUD-STEP-EMPTY] drain_acks=%.3f ms, poll=%.3f ms, "
+                    "schedule=%.3f ms",
+                    _dt_drain, _dt_poll, _dt_sched,
+                )
             return False
 
         _slice_info_str = "["
@@ -568,10 +583,13 @@ class PassiveEngineCoreProc:
         )
 
         for slice_info in batch.slices:
+            _t0 = time.monotonic()
             worker_scheduler_output = _trim_scheduler_output_for_worker_enqueue(
                 batch.scheduler_output,
                 self._prev_dispatch_req_ids,
             )
+            _dt_trim = (time.monotonic() - _t0) * 1000
+
             payload = (
                 (worker_scheduler_output, slice_info)
                 if slice_info is not None
@@ -586,12 +604,20 @@ class PassiveEngineCoreProc:
             self._prev_dispatch_req_ids = set(
                 batch.scheduler_output.num_scheduled_tokens.keys()
             )
-            _dt_ms = (time.monotonic() - _t0) * 1000
-            logger.info(
-                "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
-                bt,
-                _dt_ms,
-            )
+            _dt_enqueue = (time.monotonic() - _t0) * 1000
+            if _dt_trim > 0.5 or _dt_enqueue > 0.5:
+                logger.info(
+                    "[CLOUD-STEP] trim=%.3f ms, enqueue=%.3f ms, batch_type=%s, "
+                    "drain=%.3f ms, poll=%.3f ms, schedule=%.3f ms",
+                    _dt_trim, _dt_enqueue, bt,
+                    _dt_drain, _dt_poll, _dt_sched,
+                )
+            else:
+                logger.info(
+                    "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
+                    bt,
+                    _dt_enqueue,
+                )
             # For PREFILL_FIRST, POST_OUT must mean the cloud middle segment
             # has completed and started sending hidden states back.  Store the
             # original SchedulerOutput here and publish it from
