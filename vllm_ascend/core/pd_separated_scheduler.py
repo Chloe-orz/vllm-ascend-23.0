@@ -298,6 +298,68 @@ class PDSeparatedScheduler(Scheduler):
             return False
         return True
 
+    def _select_single_prefill_candidate(
+        self, candidates: list[Request],
+    ) -> tuple[list[Request], list[Request]]:
+        """Pick at most one prefill candidate to expose to ``super().schedule()``.
+
+        Enforces the one-request-per-PF-batch invariant. chunk-prefill-prior
+        keys one ``PrefillChunkFlight`` per ``head_token`` and the sampler
+        consumes a batch-level ``is_last_prefill_chunk`` flag, so a PF batch
+        must contain exactly one request. If two requests shared a batch they
+        would share one ``head_token`` (the second overwrites the first in
+        ``_prefill_flight_by_token``, losing its PL tracking) and the
+        batch-level ``is_last`` flag could not represent both requests'
+        last-chunk state, stalling the overwritten request.
+
+        Returns ``(exposed, rest)`` where ``exposed`` has 0 or 1 request and
+        ``rest`` holds the remaining candidates to be scheduled in their own
+        PF batches on subsequent calls.
+        """
+        if not candidates:
+            return [], []
+        return [candidates[0]], list(candidates[1:])
+
+    def _prepare_pf_running_state(
+        self,
+        saved_chunk_prefill_first: list[Request],
+        saved_running: list[Request],
+        saved_max_num_running_reqs: int,
+    ) -> tuple[list[Request], int, list[Request]]:
+        """Decide ``(running, max_num_running_reqs, rest_candidates)`` for the
+        ``super().schedule()`` call in ``_pick_prefill_first_batch``.
+
+        - ``chunk_prefill_prior_enable``: enforce one-request-per-PF-batch (the
+          flight map keys one flight per ``head_token`` and the sampler reads
+          a batch-level ``is_last_prefill_chunk`` flag, so a PF batch must
+          contain exactly one request). Expose at most one candidate; cap
+          ``max`` at 1 (continue one mid-prefill request) or a
+          capacity-gated 0/1 (admit one new request from waiting).
+        - Legacy (``chunk_prefill_prior_enable`` off): no per-chunk flight
+          tracking, so multi-request PF batches are safe (PL routes by
+          ``req_id``) and preferred for token-budget utilization. Expose all
+          candidates and cap by system capacity -- the original behavior.
+
+        The base scheduler caps scheduled running reqs by
+        ``max_num_running_reqs`` (vllm ``Scheduler.schedule`` line ~390), so
+        the value returned here directly bounds the PF batch size.
+        """
+        if self.chunk_prefill_prior_enable:
+            exposed, rest_candidates = self._select_single_prefill_candidate(
+                saved_chunk_prefill_first
+            )
+            if exposed:
+                max_num_running_reqs = 1
+            else:
+                available = saved_max_num_running_reqs - len(saved_running)
+                max_num_running_reqs = 1 if available >= 1 else 0
+            return exposed, max_num_running_reqs, rest_candidates
+        return (
+            list(saved_chunk_prefill_first),
+            saved_max_num_running_reqs - len(saved_running),
+            [],
+        )
+
     def _total_pending_tails(self) -> int:
         """Total number of chunks waiting for PL across all requests."""
         return sum(self._pending_tail_count.values())
@@ -583,9 +645,15 @@ class PDSeparatedScheduler(Scheduler):
         saved_chunk_prefill_first = self.chunk_prefill_first
         saved_max_num_running_reqs = self.max_num_running_reqs
 
-        self.running = list(saved_chunk_prefill_first)
+        # Decide what to expose to super().schedule() and the running cap.
+        # With chunk_prefill_prior_enable this enforces one-request-per-PF-batch
+        # (prevents head_token collision / is_last ambiguity); legacy keeps the
+        # original multi-request batching. See _prepare_pf_running_state.
+        self.running, pf_max, rest_candidates = self._prepare_pf_running_state(
+            saved_chunk_prefill_first, saved_running, saved_max_num_running_reqs
+        )
         self.chunk_prefill_first = []
-        self.max_num_running_reqs -= len(saved_running)
+        self.max_num_running_reqs = pf_max
 
         # Snapshot num_computed_tokens before super().schedule() so that
         # the is_last computation below uses the pre-schedule value.
@@ -767,6 +835,11 @@ class PDSeparatedScheduler(Scheduler):
                                 # Completed but not scheduled – defensive.
                                 self.prefill_last_pending.append(req)
 
+                # Restore prefill candidates not exposed to super() this round
+                # so each is scheduled in its own PF batch (one-per-batch).
+                self.chunk_prefill_first = (
+                    rest_candidates + self.chunk_prefill_first
+                )
                 self.running = saved_running
 
 

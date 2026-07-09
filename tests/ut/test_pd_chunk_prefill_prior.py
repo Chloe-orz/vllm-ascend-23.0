@@ -345,6 +345,153 @@ class TestCrossRequestHeadPrior:
 
 
 # ------------------------------------------------------------------ #
+# Test: One-request-per-PF-batch (head_token collision regression)   #
+# ------------------------------------------------------------------ #
+
+
+class TestSinglePrefillCandidate:
+    """Verify _select_single_prefill_candidate enforces one-request-per-batch.
+
+    Regression guard for the head_token collision bug: when two requests were
+    scheduled in one PF batch they shared one head_token, the second
+    overwrote the first in _prefill_flight_by_token, and the first request's
+    PL was never matched -- stalling it. _pick_prefill_first_batch now
+    exposes at most one candidate to super().schedule() via this helper.
+    """
+
+    def _make(self):
+        from vllm_ascend.core.pd_separated_scheduler import (
+            PDSeparatedScheduler,
+        )
+
+        return PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+
+    def test_empty_candidates(self):
+        scheduler = self._make()
+        exposed, rest = scheduler._select_single_prefill_candidate([])
+        assert exposed == []
+        assert rest == []
+
+    def test_single_candidate(self):
+        scheduler = self._make()
+        req0 = _make_mock_request(request_id="req-0")
+        exposed, rest = scheduler._select_single_prefill_candidate([req0])
+        assert exposed == [req0]
+        assert rest == []
+
+    def test_two_candidates_exposes_one(self):
+        scheduler = self._make()
+        req0 = _make_mock_request(request_id="req-0")
+        req1 = _make_mock_request(request_id="req-1")
+        exposed, rest = scheduler._select_single_prefill_candidate([req0, req1])
+        assert len(exposed) == 1
+        assert exposed[0] is req0
+        assert rest == [req1]
+
+    def test_three_candidates_exposes_one_rest_two(self):
+        scheduler = self._make()
+        reqs = [_make_mock_request(request_id=f"req-{i}") for i in range(3)]
+        exposed, rest = scheduler._select_single_prefill_candidate(reqs)
+        assert len(exposed) == 1
+        assert exposed[0] is reqs[0]
+        assert rest == reqs[1:]
+        # Exposed never exceeds one -- the invariant that prevents two
+        # requests from sharing a head_token in one PF batch.
+        assert len(exposed) <= 1
+
+
+# ------------------------------------------------------------------ #
+# Test: PF batch state preparation (one-per-batch gating)             #
+# ------------------------------------------------------------------ #
+
+
+class TestPreparePFBatchState:
+    """Verify _prepare_pf_running_state gates one-per-batch on chunk_prior.
+
+    With chunk_prefill_prior_enable=True, a PF batch is limited to one request
+    (head_token collision guard). With it False (legacy 2P1D), multi-request
+    batching is preserved -- the original behavior, since legacy PL routes by
+    req_id and has no flight map to collide.
+    """
+
+    def _make(self, *, chunk_prior):
+        from vllm_ascend.core.pd_separated_scheduler import (
+            PDSeparatedScheduler,
+        )
+
+        s = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+        s.chunk_prefill_prior_enable = chunk_prior
+        return s
+
+    # ---- chunk_prefill_prior_enable=True: one-per-batch ----
+
+    def test_chunk_prior_on_two_candidates_exposes_one(self):
+        s = self._make(chunk_prior=True)
+        req0 = _make_mock_request(request_id="req-0")
+        req1 = _make_mock_request(request_id="req-1")
+        running, max_num, rest = s._prepare_pf_running_state(
+            [req0, req1], saved_running=[], saved_max_num_running_reqs=256
+        )
+        assert running == [req0]
+        assert max_num == 1
+        assert rest == [req1]
+
+    def test_chunk_prior_on_no_candidates_admits_one(self):
+        s = self._make(chunk_prior=True)
+        running, max_num, rest = s._prepare_pf_running_state(
+            [], saved_running=[_make_mock_request(request_id="dec-0")],
+            saved_max_num_running_reqs=256,
+        )
+        assert running == []
+        assert max_num == 1  # capacity available -> admit one new
+        assert rest == []
+
+    def test_chunk_prior_on_no_candidates_no_capacity_blocks_admit(self):
+        """When saved_running fills the system, do not over-admit."""
+        s = self._make(chunk_prior=True)
+        decode_reqs = [_make_mock_request(request_id=f"dec-{i}")
+                       for i in range(256)]
+        running, max_num, rest = s._prepare_pf_running_state(
+            [], saved_running=decode_reqs, saved_max_num_running_reqs=256
+        )
+        assert running == []
+        assert max_num == 0  # no capacity -> block new admission
+        assert rest == []
+
+    # ---- chunk_prefill_prior_enable=False: legacy multi-request batching ----
+
+    def test_legacy_exposes_all_candidates(self):
+        """Legacy preserves original multi-request batching (no collision)."""
+        s = self._make(chunk_prior=False)
+        req0 = _make_mock_request(request_id="req-0")
+        req1 = _make_mock_request(request_id="req-1")
+        running, max_num, rest = s._prepare_pf_running_state(
+            [req0, req1], saved_running=[], saved_max_num_running_reqs=256
+        )
+        assert running == [req0, req1]  # all candidates exposed
+        assert max_num == 256  # original cap: saved_max - len(saved_running)
+        assert rest == []
+
+    def test_legacy_cap_subtracts_saved_running(self):
+        s = self._make(chunk_prior=False)
+        decode_reqs = [_make_mock_request(request_id=f"dec-{i}")
+                       for i in range(10)]
+        _, max_num, _ = s._prepare_pf_running_state(
+            [], saved_running=decode_reqs, saved_max_num_running_reqs=256
+        )
+        assert max_num == 256 - 10  # 246
+
+    def test_legacy_no_candidates(self):
+        s = self._make(chunk_prior=False)
+        running, max_num, rest = s._prepare_pf_running_state(
+            [], saved_running=[], saved_max_num_running_reqs=256
+        )
+        assert running == []
+        assert max_num == 256
+        assert rest == []
+
+
+# ------------------------------------------------------------------ #
 # Test: Chunk-flight state management                                 #
 # ------------------------------------------------------------------ #
 
