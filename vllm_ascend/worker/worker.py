@@ -20,6 +20,7 @@
 import copy
 import gc
 import logging
+import time
 from types import NoneType
 
 import torch
@@ -73,6 +74,11 @@ from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_sp,
     get_ascend_device_type,
+    pp_batch_enabled,
+    pp_log_batch,
+    pp_log_write,
+    pp_timing_enabled,
+    pp_timing_sync,
     register_ascend_customop,
     vllm_version_is,
 )
@@ -180,6 +186,9 @@ class NPUWorker(WorkerBase):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.20.2; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
+        # PP_BATCH 打印用的步序号与 prefill 步累计计数（仅 rank 0 递增）。
+        self._pp_batch_step: int = 0
+        self._pp_prefill_count: int = 0
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -525,6 +534,28 @@ class NPUWorker(WorkerBase):
                 handle.wait()
             self._pp_send_work = []
 
+        # role 在打点与 batch 打印间共用，因此无条件计算（开销可忽略，
+        # is_edge_device / is_cloud_device 在本函数下方本就每步调用）。
+        role = "standard"
+        if is_edge_device():
+            role = "edge"
+        elif is_cloud_device():
+            role = "cloud"
+
+        if pp_timing_enabled():
+            pp_timing_sync()
+            pp_log_write(f"[PP_TIMING][{role}][worker_entry] {time.perf_counter()}")
+
+        if pp_batch_enabled() and scheduler_output.total_num_scheduled_tokens > 0:
+            self._pp_batch_step += 1
+            n_prefill = pp_log_batch(role, scheduler_output, self._pp_batch_step)
+            if n_prefill > 0:
+                self._pp_prefill_count += 1
+                pp_log_write(
+                    f"[PP_BATCH][step={self._pp_batch_step}] "
+                    f"cumulative_prefill_batches={self._pp_prefill_count}"
+                )
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass:
@@ -567,6 +598,10 @@ class NPUWorker(WorkerBase):
                     comm_handles=comm_handles,
                     comm_postprocess=comm_postprocess,
                 )
+                if pp_timing_enabled():
+                    intermediate_tensors.wait_for_comm()
+                    pp_timing_sync()
+                    pp_log_write(f"[PP_TIMING][cloud][cloud_recv_done] {time.perf_counter()}")
             elif not get_pp_group().is_first_rank:
                 # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
                 # it will conflict with the all-gather operation in flashcomm1.
@@ -609,7 +644,13 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
+        if pp_timing_enabled():
+            pp_timing_sync()
+            pp_log_write(f"[PP_TIMING][{role}][runner_entry] {time.perf_counter()}")
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if pp_timing_enabled():
+            pp_timing_sync()
+            pp_log_write(f"[PP_TIMING][{role}][runner_done] {time.perf_counter()}")
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -660,6 +701,11 @@ class NPUWorker(WorkerBase):
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     include_mrope=include_mrope,
                 )
+                if pp_timing_enabled():
+                    for handle in self._pp_send_work:
+                        handle.wait()
+                    pp_timing_sync()
+                    pp_log_write(f"[PP_TIMING][edge][send_to_cloud done] {time.perf_counter()}")
             edge_sp = enable_sp()
             edge_merge = get_edge_cloud_tensor_meta().merge_payload
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
@@ -676,8 +722,18 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
-           
+            if pp_timing_enabled():
+                intermediate_tensors.wait_for_comm()
+                pp_timing_sync()
+                pp_log_write(f"[PP_TIMING][edge][recv_from_cloud] {time.perf_counter()}")
+
+            if pp_timing_enabled():
+                pp_timing_sync()
+                pp_log_write(f"[PP_TIMING][edge][runner_entry_e] {time.perf_counter()}")
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            if pp_timing_enabled():
+                pp_timing_sync()
+                pp_log_write(f"[PP_TIMING][edge][runner_done_e] {time.perf_counter()}")
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
             return output

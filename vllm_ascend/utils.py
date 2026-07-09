@@ -487,6 +487,183 @@ def attention_calculation_stream() -> torch.npu.Stream:
     return _ATNN_CALCULATION_STREAM
 
 
+# ── PP Timing / Batch 动态控制 ─────────────────────────────────────────
+# 开关均支持运行时动态切换，优先级: 文件 > 环境变量
+#   echo 1 > /tmp/vllm_pp_timing_enable   → 开启打点
+#   echo 0 > /tmp/vllm_pp_timing_enable   → 关闭打点
+#   echo 1 > /tmp/vllm_pp_timing_sync     → 开启 NPU 同步（打点前后同步设备）
+#   echo 0 > /tmp/vllm_pp_timing_sync     → 关闭 NPU 同步
+#   echo 1 > /tmp/vllm_pp_batch_enable    → 开启单步 batch 组成打印
+#   echo 0 > /tmp/vllm_pp_batch_enable    → 关闭 batch 组成打印
+#   rm /tmp/vllm_pp_*                     → 回退到环境变量
+#
+# 所有 PP_TIMING 打点与 PP_BATCH 打印均只在"每台机器的 local rank 0"上
+# 输出：单机多卡 (TP/DP) 下其余 rank 直接跳过，既避免日志刷屏，也省去
+# 重复的 sync/wait 开销。每个开关仍可独立运行时切换，互不影响。
+_PP_ENABLE_FILE = "/tmp/vllm_pp_timing_enable"
+_PP_SYNC_FILE = "/tmp/vllm_pp_timing_sync"
+_PP_BATCH_FILE = "/tmp/vllm_pp_batch_enable"
+_pp_enable_cached: bool | None = None
+_pp_sync_cached: bool | None = None
+_pp_batch_cached: bool | None = None
+_pp_cache_ts: float = 0.0
+
+# 进程稳定的"本机 local rank 0"判定结果，首次读取后缓存（rank 在进程生命
+# 周期内不变）。
+_pp_local_rank0: bool | None = None
+
+
+def _pp_is_local_rank0() -> bool:
+    """是否为本机 local rank 0（每台机器只保留一个输出进程）。
+
+    优先用 vllm world group 的 local_rank；分布式尚未初始化时回退到启动器
+    注入的 LOCAL_RANK 环境变量。结果稳定，缓存复用。
+    """
+    global _pp_local_rank0
+    if _pp_local_rank0 is not None:
+        return _pp_local_rank0
+    try:
+        from vllm.distributed.parallel_state import get_world_group
+
+        _pp_local_rank0 = get_world_group().local_rank == 0
+    except Exception:
+        _pp_local_rank0 = os.environ.get("LOCAL_RANK", "0") == "0"
+    return _pp_local_rank0
+
+
+def _pp_read_cache() -> None:
+    """Refresh cached values (called max once per second)."""
+    import time
+
+    global _pp_enable_cached, _pp_sync_cached, _pp_batch_cached, _pp_cache_ts
+    now = time.monotonic()
+    if now - _pp_cache_ts < 1.0:
+        return
+    _pp_cache_ts = now
+    for var, filepath, cache_attr in [
+        ("PP_TIMING_ENABLE", _PP_ENABLE_FILE, "_pp_enable_cached"),
+        ("PP_TIMING_SYNC", _PP_SYNC_FILE, "_pp_sync_cached"),
+        ("PP_BATCH_ENABLE", _PP_BATCH_FILE, "_pp_batch_cached"),
+    ]:
+        if os.path.exists(filepath):
+            with open(filepath) as f:
+                val = f.read().strip() == "1"
+        else:
+            val = os.environ.get(var, "0") == "1"
+        globals()[cache_attr] = val
+
+
+def pp_timing_enabled() -> bool:
+    """打点开关 AND 本机 local rank 0。
+
+    非本机 rank 0 的进程恒返回 False，从而跳过全部 PP_TIMING 打印及其
+    相关 sync/wait：既避免日志刷屏，也省去多卡重复开销。
+    """
+    if not _pp_is_local_rank0():
+        return False
+    _pp_read_cache()
+    return _pp_enable_cached or False
+
+
+def should_pp_timing_sync() -> bool:
+    """Returns True if NPU sync should be performed for timing markers."""
+    _pp_read_cache()
+    return _pp_sync_cached or False
+
+
+def pp_timing_sync() -> None:
+    """Perform NPU synchronize if timing sync is enabled."""
+    if should_pp_timing_sync():
+        import torch
+
+        torch.npu.synchronize()
+
+
+def pp_log_write(msg: str) -> None:
+    """统一输出 PP 打点日志行。
+
+    优先写环境变量 ``PP_LOG_FILE`` 指定的文件（追加，行缓冲，每行 flush）；
+    未设置时回退到 ``print``（控制台）。仅在 rank0 进程被调用，故单机无并发写。
+    跨机各写各自文件，避免混写同一文件争用。
+    """
+    path = os.environ.get("PP_LOG_FILE")
+    if not path:
+        print(msg)
+        return
+    try:
+        # line buffering + flush 每行, 保证跨机/实时 tail 可读
+        with open(path, "a", encoding="utf-8", buffering=1) as f:
+            f.write(msg + "\n")
+            f.flush()
+    except OSError:
+        # 文件不可写(路径不存在/权限)时回退控制台, 不让打点拖垮推理
+        print(msg)
+
+
+def pp_batch_enabled() -> bool:
+    """单步 batch 组成打印开关 AND 本机 local rank 0。"""
+    if not _pp_is_local_rank0():
+        return False
+    _pp_read_cache()
+    return _pp_batch_cached or False
+
+
+def pp_log_batch(role: str, scheduler_output, step: int) -> int:
+    """打印单步推理的 batch 组成，用于排查 prefill/decode 混批。
+
+    典型用途：长 prompt（如 64k）在 token 上限（如 8192）下应只产生固定次数
+    的 prefill batch；若实际多出一次且最后一次偏小，可通过本打印确认是否有
+    decode 请求被混入 prefill 步骤。
+
+    每个请求分类：
+      - prefill(new)   : 首次调度的请求（开始 prefill），附带 prompt 长度与
+                         已计算 token 数，便于观察 chunked prefill 进度。
+      - prefill(chunk) : 已调度过的请求且本步调度 >1 token（续 prefill）。
+      - decode         : 本步调度 1 token。
+
+    Args:
+        role: 角色标签（standard / edge / cloud），与 PP_TIMING 一致。
+        scheduler_output: 本次 execute_model 的调度输出。
+        step: 单调递增的步序号（仅在有实际 token 调度时计数）。
+
+    Returns:
+        本步 prefill 请求数（>0 表示本步为 prefill 步）。
+    """
+    num_sched = scheduler_output.num_scheduled_tokens  # req_id -> int
+    new_reqs = {r.req_id: r for r in scheduler_output.scheduled_new_reqs}
+
+    prefill = decode = 0
+    lines: list[str] = []
+    for rid, tok in num_sched.items():
+        if rid in new_reqs:
+            prefill += 1
+            r = new_reqs[rid]
+            plen = len(r.prompt_token_ids) if r.prompt_token_ids else None
+            lines.append(
+                f"    {rid}: tokens={tok} phase=prefill(new) "
+                f"prompt_len={plen} computed={r.num_computed_tokens}"
+            )
+        elif tok > 1:
+            prefill += 1
+            lines.append(f"    {rid}: tokens={tok} phase=prefill(chunk)")
+        else:
+            decode += 1
+            lines.append(f"    {rid}: tokens={tok} phase=decode")
+
+    with_prefill = prefill > 0
+    mixed = prefill > 0 and decode > 0
+    pp_log_write(
+        f"[PP_BATCH][step={step}][role={role}]"
+        f"[prefill={'Y' if with_prefill else 'N'}]"
+        f"[mixed={'Y' if mixed else 'N'}]"
+        f" total_tokens={scheduler_output.total_num_scheduled_tokens}"
+        f" num_reqs={len(num_sched)} prefill={prefill} decode={decode}"
+    )
+    for ln in lines:
+        pp_log_write(ln)
+    return prefill
+
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
