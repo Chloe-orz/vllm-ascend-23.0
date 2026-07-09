@@ -421,6 +421,9 @@ class TestPreparePFBatchState:
 
         s = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
         s.chunk_prefill_prior_enable = chunk_prior
+        # State read by _select_pf_candidate_head_prior.
+        s._pending_tail_count = {}
+        s.waiting = []
         return s
 
     # ---- chunk_prefill_prior_enable=True: one-per-batch ----
@@ -456,6 +459,67 @@ class TestPreparePFBatchState:
         )
         assert running == []
         assert max_num == 0  # no capacity -> block new admission
+        assert rest == []
+
+    # ---- chunk_prefill_prior_enable=True: cross-request head-prior ----
+
+    def test_head_prior_prefers_fresh_over_in_flight(self):
+        """A fresh candidate (no in-flight chunk) is picked before an
+        in-flight one, so the freed slot refills a different request instead
+        of clustering on the in-flight request."""
+        s = self._make(chunk_prior=True)
+        in_flight = _make_mock_request(request_id="req-0")
+        fresh = _make_mock_request(request_id="req-1")
+        s._pending_tail_count = {"req-0": 1}  # req-0 has a chunk in flight
+        running, max_num, rest = s._prepare_pf_running_state(
+            [in_flight, fresh], saved_running=[], saved_max_num_running_reqs=256
+        )
+        assert running == [fresh]  # fresh head chosen, not the in-flight req
+        assert max_num == 1
+        assert rest == [in_flight]
+
+    def test_head_prior_yields_to_new_when_no_fresh(self):
+        """No fresh candidate + a new request waiting -> admit the new
+        request (cross-request) instead of clustering on an in-flight req."""
+        s = self._make(chunk_prior=True)
+        in_flight = _make_mock_request(request_id="req-0")
+        waiting_new = _make_mock_request(request_id="req-1")
+        s._pending_tail_count = {"req-0": 1}
+        s.waiting = [waiting_new]
+        running, max_num, rest = s._prepare_pf_running_state(
+            [in_flight], saved_running=[], saved_max_num_running_reqs=256
+        )
+        assert running == []  # yield slot -> admit new from waiting
+        assert max_num == 1
+        assert rest == [in_flight]  # in-flight candidate preserved for later
+
+    def test_head_prior_falls_back_to_in_flight_when_alone(self):
+        """No fresh candidate, no waiting request -> ahead-dispatch the
+        in-flight candidate (single-request 2P1D pipeline)."""
+        s = self._make(chunk_prior=True)
+        in_flight = _make_mock_request(request_id="req-0")
+        s._pending_tail_count = {"req-0": 1}
+        running, max_num, rest = s._prepare_pf_running_state(
+            [in_flight], saved_running=[], saved_max_num_running_reqs=256
+        )
+        assert running == [in_flight]  # ahead fallback
+        assert max_num == 1
+        assert rest == []
+
+    def test_head_prior_fresh_refill_preferred_over_new_admit(self):
+        """A fresh candidate (PL just returned, ready for next chunk) is
+        refilled before admitting a brand-new request -- keeps each in-flight
+        request's pipeline continuous."""
+        s = self._make(chunk_prior=True)
+        fresh = _make_mock_request(request_id="req-0")
+        waiting_new = _make_mock_request(request_id="req-1")
+        s._pending_tail_count = {"req-0": 0}  # fresh
+        s.waiting = [waiting_new]
+        running, max_num, rest = s._prepare_pf_running_state(
+            [fresh], saved_running=[], saved_max_num_running_reqs=256
+        )
+        assert running == [fresh]  # refill fresh, not admit new
+        assert max_num == 1
         assert rest == []
 
     # ---- chunk_prefill_prior_enable=False: legacy multi-request batching ----

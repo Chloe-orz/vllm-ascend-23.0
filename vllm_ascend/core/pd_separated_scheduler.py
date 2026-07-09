@@ -320,6 +320,42 @@ class PDSeparatedScheduler(Scheduler):
             return [], []
         return [candidates[0]], list(candidates[1:])
 
+    def _select_pf_candidate_head_prior(
+        self, candidates: list[Request],
+    ) -> tuple[Request | None, list[Request]]:
+        """Pick at most one PF candidate for cross-request head-prior.
+
+        Prefers a *fresh* candidate -- one with no in-flight chunk
+        (``_pending_tail_count[req] == 0``), i.e. its previous chunk's PL has
+        returned and it has no other chunk on the cloud. Refilling a freed
+        slot with a fresh candidate keeps one in-flight chunk per request, so
+        the two 2P1D prefill slots spread across different requests
+        (MindIE-style ``P1首 / P2首`` interleaving).
+
+        Decision order:
+          1. First fresh candidate in ``candidates`` -> expose it (refill its
+             slot with its next chunk).
+          2. No fresh candidate but ``waiting`` is non-empty -> return
+             ``(None, candidates)`` so the caller admits a *new* request from
+             waiting instead of clustering another chunk on an already
+             in-flight request (cross-request head-prior).
+          3. No fresh candidate and no waiting request -> fall back to the
+             first (in-flight) candidate: ahead-dispatch its next chunk so
+             both 2P1D slots serve the single request (intra-request
+             pipeline).
+
+        Returns ``(exposed_or_None, rest)`` where ``exposed_or_None`` is 0 or
+        1 request. ``rest`` holds the remaining candidates (untouched when
+        admitting new, so they stay eligible for later batches).
+        """
+        for req in candidates:
+            if self._pending_tail_count.get(req.request_id, 0) == 0:
+                return req, [r for r in candidates if r is not req]
+        if len(self.waiting) > 0:
+            return None, list(candidates)
+        exposed_list, rest = self._select_single_prefill_candidate(candidates)
+        return (exposed_list[0] if exposed_list else None), rest
+
     def _prepare_pf_running_state(
         self,
         saved_chunk_prefill_first: list[Request],
@@ -332,8 +368,10 @@ class PDSeparatedScheduler(Scheduler):
         - ``chunk_prefill_prior_enable``: enforce one-request-per-PF-batch (the
           flight map keys one flight per ``head_token`` and the sampler reads
           a batch-level ``is_last_prefill_chunk`` flag, so a PF batch must
-          contain exactly one request). Expose at most one candidate; cap
-          ``max`` at 1 (continue one mid-prefill request) or a
+          contain exactly one request). Candidate selection prefers a fresh
+          head (no in-flight chunk) or a new waiting request over clustering
+          on an in-flight request -- cross-request head-prior. ``max`` is
+          capped at 1 (continue one candidate, no new admission) or a
           capacity-gated 0/1 (admit one new request from waiting).
         - Legacy (``chunk_prefill_prior_enable`` off): no per-chunk flight
           tracking, so multi-request PF batches are safe (PL routes by
@@ -345,15 +383,19 @@ class PDSeparatedScheduler(Scheduler):
         the value returned here directly bounds the PF batch size.
         """
         if self.chunk_prefill_prior_enable:
-            exposed, rest_candidates = self._select_single_prefill_candidate(
+            exposed, rest_candidates = self._select_pf_candidate_head_prior(
                 saved_chunk_prefill_first
             )
-            if exposed:
-                max_num_running_reqs = 1
-            else:
-                available = saved_max_num_running_reqs - len(saved_running)
-                max_num_running_reqs = 1 if available >= 1 else 0
-            return exposed, max_num_running_reqs, rest_candidates
+            if exposed is not None:
+                # Continue one candidate; cap at 1 so the base does not admit
+                # a new request alongside it (one-per-batch).
+                return [exposed], 1, rest_candidates
+            # No candidate to continue: admit at most one new request from
+            # waiting, gated by system capacity (saved_running occupy their
+            # slots) so we never exceed max_num_running_reqs system-wide.
+            available = saved_max_num_running_reqs - len(saved_running)
+            max_num_running_reqs = 1 if available >= 1 else 0
+            return [], max_num_running_reqs, rest_candidates
         return (
             list(saved_chunk_prefill_first),
             saved_max_num_running_reqs - len(saved_running),
