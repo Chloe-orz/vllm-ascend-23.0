@@ -276,14 +276,15 @@ def _build_edge_cloud_tensor_meta(
             merged_shape_tail = leading_dims[1:] + (last_dim_sum,)
             split_sizes = sizes
 
-    # Byte-merge: when merge_payload is enabled we always switch to the
-    # byte-reinterpret path because it handles heterogeneous dtypes (e.g.
-    # bf16 hidden/residual + int64 mrope) without extra P2P RTTs.
+    # Byte-merge: only enable when the model uses M-RoPE (heterogeneous dtype
+    # mrope_positions int64 vs bf16 hidden/residual).  In text-only models
+    # merge_payload already packs hidden+residual via torch.cat, which is
+    # slightly faster than view(uint8)+copy_; no need to replace it.
     byte_merge = False
     byte_merge_keys: list[str] = []
     byte_merge_offsets: dict[str, int] = {}
     byte_merge_row_bytes = 0
-    if merge_payload:
+    if merge_payload and uses_mrope:
         byte_merge = True
         offset = 0
         for key, meta_v in metadata_list:
@@ -293,6 +294,14 @@ def _build_edge_cloud_tensor_meta(
                 continue
             byte_merge_keys.append(key)
             row_bytes = math.prod(meta_v.size[1:]) * _element_size(meta_v.dtype)
+            # Defensive: the start offset of this key must be divisible by its
+            # dtype element size so the receiver can safely call view(dtype).
+            # For the first key offset==0 (trivially true); for later keys this
+            # checks that the previous key's row_bytes did not break alignment.
+            assert offset % _element_size(meta_v.dtype) == 0, (
+                f"byte_merge offset misalignment for '{key}': "
+                f"offset={offset} not divisible by {_element_size(meta_v.dtype)}"
+            )
             byte_merge_offsets[key] = offset
             offset += row_bytes
         byte_merge_row_bytes = offset
