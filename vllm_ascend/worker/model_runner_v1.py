@@ -3479,10 +3479,11 @@ class NPUModelRunner(GPUModelRunner):
                 # first-layer special branch). Return all keys from the local
                 # buffer so residual is always present.
                 for k, v in intermediate_tensors.items():
-                    # See the non-embedding_only branch: mrope_positions is a
-                    # side-channel tensor not present in the local intermediate
-                    # buffer; skip it here too.
-                    if k == "mrope_positions":
+                    # Skip edge-cloud side-channel keys that do not exist in
+                    # the local intermediate buffer (mrope_positions lives in
+                    # self.mrope_positions; __merged_payload__ is a transient
+                    # compact buffer used only for TP broadcast).
+                    if k in ("mrope_positions", "__merged_payload__"):
                         continue
                     copy_len = num_tokens
                     self.intermediate_tensors[k][:copy_len].copy_(
@@ -3496,14 +3497,9 @@ class NPUModelRunner(GPUModelRunner):
                 )
             else:
                 for k, v in intermediate_tensors.items():
-                    # mrope_positions is an edge-cloud side-channel tensor that
-                    # lives outside the model's layer-to-layer intermediate
-                    # buffer (self.intermediate_tensors, declared by
-                    # make_empty_intermediate_tensors as hidden/residual only).
-                    # It is materialized into self.mrope_positions.gpu directly
-                    # in execute_model before _preprocess; skip it here so the
-                    # copy-into-local-buffer loop does not KeyError on it.
-                    if k == "mrope_positions":
+                    # Skip edge-cloud side-channel keys that do not exist in
+                    # the local intermediate buffer (see comment above).
+                    if k in ("mrope_positions", "__merged_payload__"):
                         continue
                     copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                     # Clamp copy_len to the source tensor's actual dim-0 size.
