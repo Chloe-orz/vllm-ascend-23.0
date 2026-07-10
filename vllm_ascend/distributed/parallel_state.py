@@ -899,9 +899,6 @@ def edge_cloud_isend_tensor_dict(
         merged = _get_byte_merge_send_buf(ec_meta, actual_num_tokens, device)
 
         offset = 0
-        copy_evt_start = torch.npu.Event(enable_timing=True)
-        copy_evt_end = torch.npu.Event(enable_timing=True)
-        copy_evt_start.record()
         for key in ec_meta.byte_merge_keys:
             if key not in send_keys:
                 continue
@@ -921,9 +918,6 @@ def edge_cloud_isend_tensor_dict(
             n = flat.numel()
             merged[offset:offset + n].copy_(flat)
             offset += n
-        copy_evt_end.record()
-        torch.npu.synchronize(device)
-        copy_ms = copy_evt_start.elapsed_time(copy_evt_end)
 
         handle = torch.distributed.isend(
             merged, dst=pp_group.ranks[dst], group=group
@@ -931,15 +925,6 @@ def edge_cloud_isend_tensor_dict(
         if merged.is_cuda:
             merged.record_stream(torch.cuda.current_stream(merged.device))
         handles.append(handle)
-        logger.info(
-            "[EdgeCloud][Send] byte_merge: keys=%s num_tokens=%d bytes=%d "
-            "isend_count=%d copy_ms=%.3f",
-            [k for k in ec_meta.byte_merge_keys if k in send_keys],
-            actual_num_tokens,
-            merged.numel(),
-            len(handles),
-            copy_ms,
-        )
         # Every send_key is inside the compact buffer; no per-key loop needed.
         return handles
 
@@ -947,9 +932,6 @@ def edge_cloud_isend_tensor_dict(
         # Legacy dim-cat path (homogeneous dtype only).  Kept as fallback
         # in case byte_merge is ever disabled explicitly.
         pieces: list[torch.Tensor] = []
-        cat_evt_start = torch.npu.Event(enable_timing=True)
-        cat_evt_end = torch.npu.Event(enable_timing=True)
-        cat_evt_start.record()
         for key in ec_meta.merge_keys:
             value = tensor_dict[key]
             if not isinstance(value, torch.Tensor) or value.numel() == 0:
@@ -965,9 +947,6 @@ def edge_cloud_isend_tensor_dict(
                 value = value.contiguous()
             pieces.append(value)
         merged = torch.cat(pieces, dim=-1)
-        cat_evt_end.record()
-        torch.npu.synchronize()
-        cat_ms = cat_evt_start.elapsed_time(cat_evt_end)
         assert merged.is_contiguous()
         assert ec_meta.merged_shape_tail is not None
         assert merged.shape[1:] == ec_meta.merged_shape_tail, (
@@ -983,12 +962,6 @@ def edge_cloud_isend_tensor_dict(
         if merged.is_cuda:
             merged.record_stream(torch.cuda.current_stream(merged.device))
         handles.append(handle)
-        logger.info(
-            "[EdgeCloud][Send] legacy_merge: merge_keys=%s isend_count_so_far=%d cat_ms=%.3f",
-            ec_meta.merge_keys,
-            len(handles),
-            cat_ms,
-        )
         # Do NOT return: keys not in merge_keys still need per-key isends.
 
     merged_key_set = set(ec_meta.merge_keys) if ec_meta.merge_payload else set()
@@ -1174,9 +1147,6 @@ def edge_cloud_irecv_tensor_dict(
         tensor_dict["__merged_payload__"] = compact
 
         def _split_byte_merged(compact=compact, tensor_dict=tensor_dict) -> None:
-            copy_evt_start = torch.npu.Event(enable_timing=True)
-            copy_evt_end = torch.npu.Event(enable_timing=True)
-            copy_evt_start.record()
             offset = 0
             for key in ec_meta.byte_merge_keys:
                 if key not in send_keys:
@@ -1188,15 +1158,6 @@ def edge_cloud_irecv_tensor_dict(
                 t = chunk.view(meta.dtype).reshape((num_tokens,) + meta.size[1:])
                 tensor_dict[key][:num_tokens].copy_(t)
                 offset += nbytes
-            copy_evt_end.record()
-            torch.npu.synchronize()
-            copy_ms = copy_evt_start.elapsed_time(copy_evt_end)
-            logger.info(
-                "[EdgeCloud][Recv] byte_merge unpack: keys=%s num_tokens=%d copy_ms=%.3f",
-                [k for k in ec_meta.byte_merge_keys if k in send_keys],
-                num_tokens,
-                copy_ms,
-            )
 
         postprocess.append(_split_byte_merged)
         return tensor_dict, handles, postprocess
@@ -1211,20 +1172,8 @@ def edge_cloud_irecv_tensor_dict(
         handles.append(handle)
 
         def _split_into_dict(merged=merged) -> None:
-            split_evt_start = torch.npu.Event(enable_timing=True)
-            split_evt_end = torch.npu.Event(enable_timing=True)
-            split_evt_start.record()
             split = _split_merged_buffer_into_dict(merged, ec_meta)
             tensor_dict.update(split)
-            split_evt_end.record()
-            torch.npu.synchronize()
-            split_ms = split_evt_start.elapsed_time(split_evt_end)
-            logger.info(
-                "[EdgeCloud][Recv] legacy_merge split: merge_keys=%s num_tokens=%d split_ms=%.3f",
-                ec_meta.merge_keys,
-                num_tokens,
-                split_ms,
-            )
 
         postprocess.append(_split_into_dict)
         tensor_dict["__merged_payload__"] = merged
