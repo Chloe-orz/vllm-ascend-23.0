@@ -52,18 +52,14 @@ from vllm.distributed.parallel_state import is_edge_device, is_edge_cloud_pp_mod
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.model_loader import get_model, get_model_loader
-from vllm.model_executor.model_loader.utils import (
-    initialize_model,
-    process_weights_after_loading,
-)
+from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
-from vllm.utils.torch_utils import get_dtype_size, set_default_torch_dtype
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -173,10 +169,7 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPManager
-from vllm_ascend.model_loader.layer_shard_loader import (
-    EdgeCloudLayerPlan,
-    LayerShardLoader,
-)
+
 
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -692,6 +685,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
+        # [PD-FIX] Set by execute_model when a stale tail segment (PL/DL) is
+        # discarded (all reqs already popped from self.requests). sample_tokens
+        # checks this to return EMPTY instead of None (which would trigger
+        # "unexpected error" in _patched_step_with_batch_queue).
+        self._tail_segment_discarded: bool = False
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
@@ -2212,6 +2210,45 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self._resume_and_validate_head_state(scheduler_output)
 
+            # [PD-FIX] Stale tail segment (PL/DL): cloud shipped a tail batch
+            # whose reqs already finished on the edge and were popped from
+            # self.requests during the head->tail window. Discard segment_e to
+            # avoid _update_states crashing on self.requests[req_id]. HeadState
+            # already popped above; hidden already received by
+            # _execute_model_edge_tail (data-plane contract preserved).
+            # update_from_output's `request is None or is_finished()` guard
+            # skips these reqs before req_id_to_index[req_id], so returning
+            # EMPTY is safe.
+            tail_req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            if tail_req_ids:
+                stale = [r for r in tail_req_ids if r not in self.requests]
+                if len(stale) == len(tail_req_ids):
+                    logger.error(
+                        "[EDGE-TAIL-STALE-DISCARD] batch_type=%s "
+                        "head_token=%s req_ids=%s all popped from "
+                        "self.requests; skip segment_e.",
+                        scheduler_output.batch_type,
+                        scheduler_output.head_token,
+                        tail_req_ids,
+                    )
+                    # Signal sample_tokens to also skip (return EMPTY, not None).
+                    self._tail_segment_discarded = True
+                    return EMPTY_MODEL_RUNNER_OUTPUT
+                if stale:
+                    # Partial-stale: alive reqs need the step, stale reqs would
+                    # crash. Cannot safely discard nor proceed. Full fix needs
+                    # per-req hidden slicing -- not yet implemented.
+                    logger.error(
+                        "[EDGE-TAIL-PARTIAL-STALE] batch_type=%s "
+                        "head_token=%s req_ids=%s stale=%s alive=%s; "
+                        "NOT handled, will crash.",
+                        scheduler_output.batch_type,
+                        scheduler_output.head_token,
+                        tail_req_ids,
+                        stale,
+                        [r for r in tail_req_ids if r in self.requests],
+                    )
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -2753,6 +2790,16 @@ class NPUModelRunner(GPUModelRunner):
             # writes back to the executor's reply mq. Cloud workers must
             # return a no-op output immediately so the broadcast protocol
             # converges and no PP/HCCL primitive is touched here.
+            self.execute_model_state = None
+            self.kv_connector_output = None
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        # [PD-FIX] execute_model discarded a stale tail segment (all reqs
+        # already popped). Skip sampling and return EMPTY so update_from_output's
+        # is_finished()/None guard skips those reqs (returning None here would
+        # trigger "unexpected error" in _patched_step_with_batch_queue).
+        if self._tail_segment_discarded:
+            self._tail_segment_discarded = False
             self.execute_model_state = None
             self.kv_connector_output = None
             return EMPTY_MODEL_RUNNER_OUTPUT
@@ -3632,10 +3679,6 @@ class NPUModelRunner(GPUModelRunner):
                     **model_kwargs,
                 )
             finally:
-                # 恢复 layer_idx 前先同步当前流，确保 weight_prefetch 等
-                # 依赖 layer_idx 的异步任务已在正确层号下完成，防止后续段读到错层权重
-                # if seg_a_graph:
-                #     torch.npu.current_stream().synchronize()
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
 
@@ -3656,11 +3699,10 @@ class NPUModelRunner(GPUModelRunner):
             _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
         try:
-            if seg_e_graph:
-                tail_layer_indices = list(range(
-                    self.num_layers - self.tail_k,
-                    self.num_layers,
-                ))
+            tail_layer_indices = list(range(
+                self.num_layers - self.tail_k,
+                self.num_layers,
+            ))
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
@@ -3703,18 +3745,18 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
@@ -3740,17 +3782,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -4035,15 +4077,6 @@ class NPUModelRunner(GPUModelRunner):
             else:
                 _EXTRA_CTX.layer_idx = self.head_k
 
-        # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
-        # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
-        # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
-        if seg_c_graph and not forward_context.capturing:
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions,
-                layer_indices=cloud_layer_indices,
-                graph_wrapper=seg_c,
-            )
         if layer_slice_info is not None:
             model_kwargs = dict(model_kwargs)
             model_kwargs["layer_slice_start"] = (
@@ -4054,12 +4087,18 @@ class NPUModelRunner(GPUModelRunner):
             )
             if not layer_slice_info.is_last_slice:
                 model_kwargs["layer_slice_return_intermediate"] = True
-
         hidden_states = seg_c(
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             **model_kwargs,
         )
+        if seg_c_graph and not forward_context.capturing:
+            self._update_full_graph_params_if_needed(
+                forward_context, num_tokens_padded, positions,
+                layer_indices=cloud_layer_indices,
+                graph_wrapper=seg_c,
+            )
+        
         if old_layer_idx is not None:
             _EXTRA_CTX.layer_idx = old_layer_idx
 
@@ -4107,6 +4146,12 @@ class NPUModelRunner(GPUModelRunner):
                     and self.edge_cloud_cfg.role == "cloud"
                     and self.edge_cloud_cfg.mode == "embedding_only"
                     and self.supports_mm_inputs):
+                # In edge-cloud embedding-only multimodal mode the edge sends
+                # the full sequence (it does not SP-chunk, see worker.py).
+                # The Cloud's first transformer layer expects full
+                # hidden_states/residual and handles TP/SP internally (e.g. VL
+                # first-layer special branch). Return all keys from the local
+                # buffer so residual is always present.
                 for k, v in intermediate_tensors.items():
                     copy_len = num_tokens
                     self.intermediate_tensors[k][:copy_len].copy_(
