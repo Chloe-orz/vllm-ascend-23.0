@@ -368,17 +368,43 @@ def benchmark(rank: int, config: List[Dict], args):
                                 f"recv_value={flat_recv[first_pos].item()}, "
                                 f"ref_value={flat_ref[first_pos].item()}"
                             )
-                            # Print ALL elements for manual inspection
-                            print(f"[Rank1] [{idx}] recv_full = {flat_recv.tolist()}")
-                            print(f"[Rank1] [{idx}] ref_full  = {flat_ref.tolist()}")
+                            # Print head / mid / tail for manual inspection
+                            n = flat_recv.numel()
+                            head = 30
+                            tail = 30
+                            mid_start = max(head, n // 2 - 15)
+                            mid_end = min(n - tail, mid_start + 30)
+                            print(
+                                f"[Rank1] [{idx}] recv_head({head})={flat_recv[:head].tolist()}, "
+                                f"mid({mid_start}-{mid_end})={flat_recv[mid_start:mid_end].tolist()}, "
+                                f"tail({tail})={flat_recv[-tail:].tolist()}"
+                            )
+                            print(
+                                f"[Rank1] [{idx}] ref_head ({head})={flat_ref[:head].tolist()}, "
+                                f"mid({mid_start}-{mid_end})={flat_ref[mid_start:mid_end].tolist()}, "
+                                f"tail({tail})={flat_ref[-tail:].tolist()}"
+                            )
                             all_ok = False
                         else:
                             print(f"[Rank1] [{idx}] dtype={dtype_name(recv.dtype)} shape={tuple(recv.shape)}  OK")
-                            # Print ALL elements for manual inspection
+                            # Print head / mid / tail for manual inspection
                             flat_recv = recv.cpu().reshape(-1)
                             flat_ref = ref.cpu().reshape(-1)
-                            print(f"[Rank1] [{idx}] recv_full = {flat_recv.tolist()}")
-                            print(f"[Rank1] [{idx}] ref_full  = {flat_ref.tolist()}")
+                            n = flat_recv.numel()
+                            head = 30
+                            tail = 30
+                            mid_start = max(head, n // 2 - 15)
+                            mid_end = min(n - tail, mid_start + 30)
+                            print(
+                                f"[Rank1] [{idx}] recv_head({head})={flat_recv[:head].tolist()}, "
+                                f"mid({mid_start}-{mid_end})={flat_recv[mid_start:mid_end].tolist()}, "
+                                f"tail({tail})={flat_recv[-tail:].tolist()}"
+                            )
+                            print(
+                                f"[Rank1] [{idx}] ref_head ({head})={flat_ref[:head].tolist()}, "
+                                f"mid({mid_start}-{mid_end})={flat_ref[mid_start:mid_end].tolist()}, "
+                                f"tail({tail})={flat_ref[-tail:].tolist()}"
+                            )
                     if all_ok:
                         print("[Rank1] === All tensors validated successfully ===")
 
