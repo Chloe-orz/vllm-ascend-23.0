@@ -368,19 +368,17 @@ def benchmark(rank: int, config: List[Dict], args):
                                 f"recv_value={flat_recv[first_pos].item()}, "
                                 f"ref_value={flat_ref[first_pos].item()}"
                             )
-                            # Print first 20 elements for manual inspection
-                            preview_len = min(20, flat_recv.numel())
-                            print(f"[Rank1] [{idx}] recv_preview (first {preview_len}) = {flat_recv[:preview_len].tolist()}")
-                            print(f"[Rank1] [{idx}] ref_preview  (first {preview_len}) = {flat_ref[:preview_len].tolist()}")
+                            # Print ALL elements for manual inspection
+                            print(f"[Rank1] [{idx}] recv_full = {flat_recv.tolist()}")
+                            print(f"[Rank1] [{idx}] ref_full  = {flat_ref.tolist()}")
                             all_ok = False
                         else:
                             print(f"[Rank1] [{idx}] dtype={dtype_name(recv.dtype)} shape={tuple(recv.shape)}  OK")
-                            # Print first 20 elements for manual inspection
+                            # Print ALL elements for manual inspection
                             flat_recv = recv.cpu().reshape(-1)
                             flat_ref = ref.cpu().reshape(-1)
-                            preview_len = min(20, flat_recv.numel())
-                            print(f"[Rank1] [{idx}] recv_preview (first {preview_len}) = {flat_recv[:preview_len].tolist()}")
-                            print(f"[Rank1] [{idx}] ref_preview  (first {preview_len}) = {flat_ref[:preview_len].tolist()}")
+                            print(f"[Rank1] [{idx}] recv_full = {flat_recv.tolist()}")
+                            print(f"[Rank1] [{idx}] ref_full  = {flat_ref.tolist()}")
                     if all_ok:
                         print("[Rank1] === All tensors validated successfully ===")
 
