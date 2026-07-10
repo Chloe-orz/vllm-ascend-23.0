@@ -283,24 +283,23 @@ def benchmark(rank: int, config: List[Dict], args):
             _ = deserialize(recv_buffer)
         torch.npu.synchronize(device)
 
-    # Measurement containers
-    serialize_times = []
-    deserialize_times = []
-    comm_times = []
+    # -----------------------------------------------------------------
+    # Experiment A: byte-merge (merged uint8 buffer, single isend)
+    # -----------------------------------------------------------------
+    ser_times_a = []
+    deser_times_a = []
+    comm_times_a = []
 
     for i in range(args.iter):
-        # --- Serialize ---
         torch.npu.synchronize(device)
         t0 = time.perf_counter()
         merged = serialize(tensors)
         torch.npu.synchronize(device)
         t1 = time.perf_counter()
-        serialize_times.append((t1 - t0) * 1000.0)
+        ser_times_a.append((t1 - t0) * 1000.0)
 
-        # --- HCCL P2P (byte-merge) ---
         start_evt = torch.npu.Event(enable_timing=True)
         end_evt = torch.npu.Event(enable_timing=True)
-
         if rank == 0:
             start_evt.record()
             handle = dist.isend(merged, dst=1)
@@ -311,128 +310,128 @@ def benchmark(rank: int, config: List[Dict], args):
             handle = dist.irecv(recv_buffer, src=0)
             handle.wait()
             end_evt.record()
-
         torch.npu.synchronize(device)
-        comm_times.append(start_evt.elapsed_time(end_evt))
+        comm_times_a.append(start_evt.elapsed_time(end_evt))
 
-        # --- Deserialize ---
         if rank == 1:
             torch.npu.synchronize(device)
             t2 = time.perf_counter()
             out_tensors = deserialize(recv_buffer)
             torch.npu.synchronize(device)
             t3 = time.perf_counter()
-            deserialize_times.append((t3 - t2) * 1000.0)
+            deser_times_a.append((t3 - t2) * 1000.0)
 
-            # Full validation on first iteration:
-            # 1) Ask rank 0 to send raw tensors (ground truth via HCCL)
-            # 2) Receive raw tensors
-            # 3) Compare byte-merge result vs raw result
-            if i == 0:
-                # Signal rank 0 to send raw tensors
-                signal = torch.tensor([1], dtype=torch.int32, device=device)
-                dist.send(signal, dst=0)
+    # -----------------------------------------------------------------
+    # Experiment B: legacy separate (per-tensor isend, 2+ calls)
+    # -----------------------------------------------------------------
+    # Pre-allocate per-tensor recv buffers on rank 1
+    sep_recv_bufs = []
+    if rank == 1:
+        for t in tensors:
+            sep_recv_bufs.append(torch.empty_like(t))
 
-                for ref_buf in ref_recv_bufs:
-                    handle = dist.irecv(ref_buf, src=0)
-                    handle.wait()
+    comm_times_b = []
 
-                if len(out_tensors) != len(ref_recv_bufs):
-                    print(f"[Rank1] FATAL: tensor count mismatch!")
-                else:
-                    all_ok = True
-                    for idx, (recv, ref) in enumerate(zip(out_tensors, ref_recv_bufs)):
-                        if recv.dtype != ref.dtype:
-                            print(f"[Rank1] FATAL [{idx}] dtype mismatch: {recv.dtype} vs {ref.dtype}")
-                            all_ok = False
-                            continue
-                        if recv.shape != ref.shape:
-                            print(f"[Rank1] FATAL [{idx}] shape mismatch: {tuple(recv.shape)} vs {tuple(ref.shape)}")
-                            all_ok = False
-                            continue
-                        if not torch.equal(recv.cpu(), ref.cpu()):
-                            # Strict element-by-element comparison failed.
-                            # Find the first mismatch and print it precisely.
-                            recv_cpu = recv.cpu()
-                            ref_cpu = ref.cpu()
-                            flat_recv = recv_cpu.reshape(-1)
-                            flat_ref = ref_cpu.reshape(-1)
-                            mismatch_positions = (flat_recv != flat_ref).nonzero(as_tuple=False)
-                            total_mismatch = mismatch_positions.numel()
-                            first_pos = int(mismatch_positions[0].item())
-                            first_idx = np.unravel_index(first_pos, recv_cpu.shape)
-                            print(
-                                f"[Rank1] FATAL [{idx}] VALUE mismatch! "
-                                f"total_mismatched_elements={total_mismatch} / {recv.numel()}, "
-                                f"first_mismatch_at_index={first_idx}, "
-                                f"recv_value={flat_recv[first_pos].item()}, "
-                                f"ref_value={flat_ref[first_pos].item()}"
-                            )
-                            # Print head / mid / tail for manual inspection
-                            n = flat_recv.numel()
-                            head = 30
-                            tail = 30
-                            mid_start = max(head, n // 2 - 15)
-                            mid_end = min(n - tail, mid_start + 30)
-                            print(
-                                f"[Rank1] [{idx}] recv_head({head})={flat_recv[:head].tolist()}, "
-                                f"mid({mid_start}-{mid_end})={flat_recv[mid_start:mid_end].tolist()}, "
-                                f"tail({tail})={flat_recv[-tail:].tolist()}"
-                            )
-                            print(
-                                f"[Rank1] [{idx}] ref_head ({head})={flat_ref[:head].tolist()}, "
-                                f"mid({mid_start}-{mid_end})={flat_ref[mid_start:mid_end].tolist()}, "
-                                f"tail({tail})={flat_ref[-tail:].tolist()}"
-                            )
-                            all_ok = False
-                        else:
-                            print(f"[Rank1] [{idx}] dtype={dtype_name(recv.dtype)} shape={tuple(recv.shape)}  OK")
-                            # Print head / mid / tail for manual inspection
-                            flat_recv = recv.cpu().reshape(-1)
-                            flat_ref = ref.cpu().reshape(-1)
-                            n = flat_recv.numel()
-                            head = 30
-                            tail = 30
-                            mid_start = max(head, n // 2 - 15)
-                            mid_end = min(n - tail, mid_start + 30)
-                            print(
-                                f"[Rank1] [{idx}] recv_head({head})={flat_recv[:head].tolist()}, "
-                                f"mid({mid_start}-{mid_end})={flat_recv[mid_start:mid_end].tolist()}, "
-                                f"tail({tail})={flat_recv[-tail:].tolist()}"
-                            )
-                            print(
-                                f"[Rank1] [{idx}] ref_head ({head})={flat_ref[:head].tolist()}, "
-                                f"mid({mid_start}-{mid_end})={flat_ref[mid_start:mid_end].tolist()}, "
-                                f"tail({tail})={flat_ref[-tail:].tolist()}"
-                            )
-                    if all_ok:
-                        print("[Rank1] === All tensors validated successfully ===")
+    for i in range(args.iter):
+        start_evt = torch.npu.Event(enable_timing=True)
+        end_evt = torch.npu.Event(enable_timing=True)
 
-        # Rank 0: wait for validation request and send raw tensors as ground truth
-        if rank == 0 and i == 0:
-            signal = torch.tensor([0], dtype=torch.int32, device=device)
-            dist.recv(signal, src=1)
+        if rank == 0:
+            start_evt.record()
+            handles = []
             for t in tensors:
-                handle = dist.isend(t.contiguous(), dst=1)
-                handle.wait()
+                h = dist.isend(t.contiguous(), dst=1)
+                handles.append(h)
+            for h in handles:
+                h.wait()
+            end_evt.record()
+        else:
+            start_evt.record()
+            handles = []
+            for buf in sep_recv_bufs:
+                h = dist.irecv(buf, src=0)
+                handles.append(h)
+            for h in handles:
+                h.wait()
+            end_evt.record()
 
-    # Report
+        torch.npu.synchronize(device)
+        comm_times_b.append(start_evt.elapsed_time(end_evt))
+
+    # -----------------------------------------------------------------
+    # Ground-truth validation (byte-merge vs raw HCCL)
+    # -----------------------------------------------------------------
+    if rank == 1:
+        merged = serialize(tensors)
+        if rank == 0:
+            h = dist.isend(merged, dst=1)
+            h.wait()
+        else:
+            h = dist.irecv(recv_buffer, src=0)
+            h.wait()
+        out_tensors = deserialize(recv_buffer)
+
+        # Ask rank 0 to re-send raw tensors
+        signal = torch.tensor([1], dtype=torch.int32, device=device)
+        dist.send(signal, dst=0)
+        for ref_buf in ref_recv_bufs:
+            h = dist.irecv(ref_buf, src=0)
+            h.wait()
+
+        all_ok = True
+        for idx, (recv, ref) in enumerate(zip(out_tensors, ref_recv_bufs)):
+            if recv.dtype != ref.dtype or recv.shape != ref.shape:
+                print(f"[Rank1] FATAL [{idx}] dtype/shape mismatch")
+                all_ok = False
+                continue
+            if not torch.equal(recv.cpu(), ref.cpu()):
+                recv_cpu = recv.cpu()
+                ref_cpu = ref.cpu()
+                flat_recv = recv_cpu.reshape(-1)
+                flat_ref = ref_cpu.reshape(-1)
+                mismatch_positions = (flat_recv != flat_ref).nonzero(as_tuple=False)
+                total_mismatch = mismatch_positions.numel()
+                first_pos = int(mismatch_positions[0].item())
+                first_idx = np.unravel_index(first_pos, recv_cpu.shape)
+                print(
+                    f"[Rank1] FATAL [{idx}] VALUE mismatch! "
+                    f"total_mismatched_elements={total_mismatch} / {recv.numel()}, "
+                    f"first_mismatch_at_index={first_idx}, "
+                    f"recv_value={flat_recv[first_pos].item()}, "
+                    f"ref_value={flat_ref[first_pos].item()}"
+                )
+                all_ok = False
+            else:
+                print(f"[Rank1] [{idx}] dtype={dtype_name(recv.dtype)} shape={tuple(recv.shape)}  OK")
+        if all_ok:
+            print("[Rank1] === All tensors validated successfully ===")
+
     if rank == 0:
-        avg_ser = sum(serialize_times) / len(serialize_times)
-        avg_comm = sum(comm_times) / len(comm_times)
-        overhead_ratio = avg_ser / avg_comm * 100 if avg_comm > 0 else float('inf')
-        print(f"\n[Rank0] ===== Results ({args.iter} iters) =====")
-        print(f"[Rank0] Avg serialize time      : {avg_ser:.4f} ms")
-        print(f"[Rank0] Avg HCCL send time      : {avg_comm:.4f} ms")
-        print(f"[Rank0] Ser / Comm overhead     : {overhead_ratio:.2f}%")
+        signal = torch.tensor([0], dtype=torch.int32, device=device)
+        dist.recv(signal, src=1)
+        for t in tensors:
+            h = dist.isend(t.contiguous(), dst=1)
+            h.wait()
+
+    # -----------------------------------------------------------------
+    # Report
+    # -----------------------------------------------------------------
+    if rank == 0:
+        print(f"\n{'='*60}")
+        print(f"[Rank0] Experiment A (byte-merge, single isend)")
+        print(f"  Avg serialize : {sum(ser_times_a)/len(ser_times_a):.4f} ms")
+        print(f"  Avg HCCL send : {sum(comm_times_a)/len(comm_times_a):.4f} ms")
+        print(f"\n[Rank0] Experiment B (legacy separate, {len(tensors)} isends)")
+        print(f"  Avg HCCL send : {sum(comm_times_b)/len(comm_times_b):.4f} ms")
+        print(f"\n[Rank0] Diff (B - A) : {(sum(comm_times_b)-sum(comm_times_a))/len(comm_times_a):.4f} ms")
     else:
-        avg_des = sum(deserialize_times) / len(deserialize_times)
-        avg_comm = sum(comm_times) / len(comm_times)
-        overhead_ratio = avg_des / avg_comm * 100 if avg_comm > 0 else float('inf')
-        print(f"\n[Rank1] ===== Results ({args.iter} iters) =====")
-        print(f"[Rank1] Avg deserialize time    : {avg_des:.4f} ms")
-        print(f"[Rank1] Avg HCCL recv time      : {avg_comm:.4f} ms")
-        print(f"[Rank1] Deser / Comm overhead   : {overhead_ratio:.2f}%")
+        print(f"\n{'='*60}")
+        print(f"[Rank1] Experiment A (byte-merge, single irecv)")
+        print(f"  Avg deserialize : {sum(deser_times_a)/len(deser_times_a):.4f} ms")
+        print(f"  Avg HCCL recv   : {sum(comm_times_a)/len(comm_times_a):.4f} ms")
+        print(f"\n[Rank1] Experiment B (legacy separate, {len(tensors)} irecvs)")
+        print(f"  Avg HCCL recv   : {sum(comm_times_b)/len(comm_times_b):.4f} ms")
+        print(f"\n[Rank1] Diff (B - A) : {(sum(comm_times_b)-sum(comm_times_a))/len(comm_times_a):.4f} ms")
 
 
 def main():
