@@ -260,6 +260,12 @@ def benchmark(rank: int, config: List[Dict], args):
         dummy = serialize(tensors)
         recv_buffer = torch.empty(dummy.shape, dtype=torch.uint8, device=device)
 
+    # Extra reference buffers for full-validation (only on first iter)
+    ref_recv_bufs: list[torch.Tensor] = []
+    if rank == 1:
+        for t in tensors:
+            ref_recv_bufs.append(torch.empty_like(t))
+
     # Synchronize
     torch.npu.synchronize(device)
 
@@ -290,7 +296,7 @@ def benchmark(rank: int, config: List[Dict], args):
         t1 = time.perf_counter()
         serialize_times.append((t1 - t0) * 1000.0)
 
-        # --- HCCL P2P ---
+        # --- HCCL P2P (byte-merge) ---
         start_evt = torch.npu.Event(enable_timing=True)
         end_evt = torch.npu.Event(enable_timing=True)
 
@@ -317,28 +323,54 @@ def benchmark(rank: int, config: List[Dict], args):
             t3 = time.perf_counter()
             deserialize_times.append((t3 - t2) * 1000.0)
 
-            # Strict validation on first iteration
+            # Full validation on first iteration:
+            # 1) Ask rank 0 to send raw tensors (ground truth via HCCL)
+            # 2) Receive raw tensors
+            # 3) Compare byte-merge result vs raw result
             if i == 0:
-                if len(out_tensors) != len(tensors):
+                # Signal rank 0 to send raw tensors
+                signal = torch.tensor([1], dtype=torch.int32, device=device)
+                dist.send(signal, dst=0)
+
+                for ref_buf in ref_recv_bufs:
+                    handle = dist.irecv(ref_buf, src=0)
+                    handle.wait()
+
+                if len(out_tensors) != len(ref_recv_bufs):
                     print(f"[Rank1] FATAL: tensor count mismatch!")
                 else:
                     all_ok = True
-                    for idx, (orig, recv) in enumerate(zip(tensors, out_tensors)):
-                        if orig.dtype != recv.dtype:
-                            print(f"[Rank1] FATAL [{idx}] dtype mismatch: {orig.dtype} vs {recv.dtype}")
+                    for idx, (recv, ref) in enumerate(zip(out_tensors, ref_recv_bufs)):
+                        if recv.dtype != ref.dtype:
+                            print(f"[Rank1] FATAL [{idx}] dtype mismatch: {recv.dtype} vs {ref.dtype}")
                             all_ok = False
                             continue
-                        if orig.shape != recv.shape:
-                            print(f"[Rank1] FATAL [{idx}] shape mismatch: {tuple(orig.shape)} vs {tuple(recv.shape)}")
+                        if recv.shape != ref.shape:
+                            print(f"[Rank1] FATAL [{idx}] shape mismatch: {tuple(recv.shape)} vs {tuple(ref.shape)}")
                             all_ok = False
                             continue
-                        if not torch.equal(orig.cpu(), recv.cpu()):
-                            print(f"[Rank1] FATAL [{idx}] VALUE mismatch!")
+                        if not torch.equal(recv.cpu(), ref.cpu()):
+                            # Dump first mismatch for debugging
+                            diff = (recv - ref).abs()
+                            max_diff = diff.max().item()
+                            mismatch_count = (diff > 0).sum().item()
+                            print(
+                                f"[Rank1] FATAL [{idx}] VALUE mismatch! "
+                                f"max_abs_diff={max_diff}, mismatch_count={mismatch_count}"
+                            )
                             all_ok = False
                         else:
                             print(f"[Rank1] [{idx}] dtype={dtype_name(recv.dtype)} shape={tuple(recv.shape)}  OK")
                     if all_ok:
                         print("[Rank1] === All tensors validated successfully ===")
+
+        # Rank 0: wait for validation request and send raw tensors as ground truth
+        if rank == 0 and i == 0:
+            signal = torch.tensor([0], dtype=torch.int32, device=device)
+            dist.recv(signal, src=1)
+            for t in tensors:
+                handle = dist.isend(t.contiguous(), dst=1)
+                handle.wait()
 
     # Report
     if rank == 0:
