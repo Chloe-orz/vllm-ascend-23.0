@@ -25,6 +25,7 @@ Usage (2 ranks on Ascend NPU):
 
 import argparse
 import json
+import math
 import os
 import struct
 import time
@@ -202,18 +203,38 @@ def deserialize(merged: torch.Tensor) -> List[torch.Tensor]:
 # ---------------------------------------------------------------------------
 
 def build_tensors(config: List[Dict], device: torch.device) -> List[torch.Tensor]:
+    """Build deterministic tensors so both ranks generate identical data.
+
+    Random seeds are per-process and per-device; using torch.randn on rank 0
+    and rank 1 produces different values, which breaks the torch.equal
+    validation.  Instead we use a deterministic arange-based pattern that is
+    identical on every rank.
+    """
     tensors = []
+    global_idx = 0
     for item in config:
         shape = item["shape"]
         dtype = get_dtype(item["dtype"])
+        numel = math.prod(shape)
         if dtype.is_floating_point:
-            t = torch.randn(shape, dtype=torch.float32, device=device)
+            # Deterministic float pattern: arange -> mod -> scale to (-1, 1)
+            t = torch.arange(
+                global_idx, global_idx + numel,
+                dtype=torch.float32, device=device,
+            )
+            t = ((t % 1000) - 500) / 500.0  # range (-1.0, 1.0)
             if dtype != torch.float32:
                 t = t.to(dtype)
         else:
-            t = torch.randint(-1000, 1000, shape, dtype=dtype, device=device)
-        t = t.contiguous()
+            # Deterministic integer pattern
+            t = torch.arange(
+                global_idx, global_idx + numel,
+                dtype=dtype, device=device,
+            )
+            t = (t % 2000) - 1000  # range [-1000, 999]
+        t = t.reshape(shape).contiguous()
         tensors.append(t)
+        global_idx += numel
     return tensors
 
 
