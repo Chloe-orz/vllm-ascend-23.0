@@ -945,6 +945,14 @@ def edge_cloud_isend_tensor_dict(
         if merged.is_cuda:
             merged.record_stream(torch.cuda.current_stream(merged.device))
         handles.append(handle)
+        logger.info(
+            "[EdgeCloud][Send] byte_merge path: keys=%s, "
+            "num_tokens=%d, bytes=%d, isend_count=%d",
+            [k for k in ec_meta.byte_merge_keys if k in send_keys],
+            actual_num_tokens,
+            merged.numel(),
+            len(handles),
+        )
         # Every send_key is inside the compact buffer; no per-key loop needed.
         return handles
 
@@ -982,9 +990,16 @@ def edge_cloud_isend_tensor_dict(
         if merged.is_cuda:
             merged.record_stream(torch.cuda.current_stream(merged.device))
         handles.append(handle)
+        logger.info(
+            "[EdgeCloud][Send] legacy_merge path: merge_keys=%s, "
+            "isend_count_so_far=%d",
+            ec_meta.merge_keys,
+            len(handles),
+        )
         # Do NOT return: keys not in merge_keys still need per-key isends.
 
     merged_key_set = set(ec_meta.merge_keys) if ec_meta.merge_payload else set()
+    per_key_keys: list[str] = []
     for key in send_keys:
         if key in merged_key_set:
             continue
@@ -1003,7 +1018,15 @@ def edge_cloud_isend_tensor_dict(
         if value.is_cuda:
             value.record_stream(torch.cuda.current_stream(value.device))
         handles.append(handle)
+        per_key_keys.append(key)
 
+    if per_key_keys:
+        logger.info(
+            "[EdgeCloud][Send] per-key isends: keys=%s, "
+            "total_isend_count=%d",
+            per_key_keys,
+            len(handles),
+        )
     return handles
 
 
@@ -1172,6 +1195,14 @@ def edge_cloud_irecv_tensor_dict(
                 offset += nbytes
 
         postprocess.append(_split_byte_merged)
+        logger.info(
+            "[EdgeCloud][Recv] byte_merge path: keys=%s, "
+            "num_tokens=%d, recv_bytes=%d, irecv_count=%d",
+            [k for k in ec_meta.byte_merge_keys if k in send_keys],
+            num_tokens,
+            compact.numel(),
+            len(handles),
+        )
         return tensor_dict, handles, postprocess
 
     if ec_meta.merge_payload:
@@ -1189,8 +1220,15 @@ def edge_cloud_irecv_tensor_dict(
 
         postprocess.append(_split_into_dict)
         tensor_dict["__merged_payload__"] = merged
+        logger.info(
+            "[EdgeCloud][Recv] legacy_merge path: merge_keys=%s, "
+            "irecv_count_so_far=%d",
+            ec_meta.merge_keys,
+            len(handles),
+        )
 
     # Per-key irecv for keys NOT in the merge group, plus recv-only keys.
+    per_key_keys: list[str] = []
     for key, value in ec_meta.metadata_list:
         if not isinstance(value, TensorMetadata):
             continue
@@ -1213,10 +1251,18 @@ def edge_cloud_irecv_tensor_dict(
                 recv_view, src=pp_group.ranks[src], group=group
             )
             handles.append(handle)
+            per_key_keys.append(key)
         else:
             full_tensor.zero_()
         tensor_dict[key] = full_tensor
 
+    if per_key_keys:
+        logger.info(
+            "[EdgeCloud][Recv] per-key irecvs: keys=%s, "
+            "total_irecv_count=%d",
+            per_key_keys,
+            len(handles),
+        )
     return tensor_dict, handles, postprocess
 
 
