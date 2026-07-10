@@ -31,6 +31,7 @@ import struct
 import time
 from typing import Dict, List, Tuple
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -350,13 +351,22 @@ def benchmark(rank: int, config: List[Dict], args):
                             all_ok = False
                             continue
                         if not torch.equal(recv.cpu(), ref.cpu()):
-                            # Dump first mismatch for debugging
-                            diff = (recv - ref).abs()
-                            max_diff = diff.max().item()
-                            mismatch_count = (diff > 0).sum().item()
+                            # Strict element-by-element comparison failed.
+                            # Find the first mismatch and print it precisely.
+                            recv_cpu = recv.cpu()
+                            ref_cpu = ref.cpu()
+                            flat_recv = recv_cpu.reshape(-1)
+                            flat_ref = ref_cpu.reshape(-1)
+                            mismatch_positions = (flat_recv != flat_ref).nonzero(as_tuple=False)
+                            total_mismatch = mismatch_positions.numel()
+                            first_pos = int(mismatch_positions[0].item())
+                            first_idx = np.unravel_index(first_pos, recv_cpu.shape)
                             print(
                                 f"[Rank1] FATAL [{idx}] VALUE mismatch! "
-                                f"max_abs_diff={max_diff}, mismatch_count={mismatch_count}"
+                                f"total_mismatched_elements={total_mismatch} / {recv.numel()}, "
+                                f"first_mismatch_at_index={first_idx}, "
+                                f"recv_value={flat_recv[first_pos].item()}, "
+                                f"ref_value={flat_ref[first_pos].item()}"
                             )
                             all_ok = False
                         else:
