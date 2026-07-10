@@ -55,12 +55,6 @@ _EDGE_CLOUD_TENSOR_META_C2E: "EdgeCloudTensorMeta | None" = None
 # Dense (c2e) meta kept for backward-compatible access / tests.
 _EDGE_CLOUD_TENSOR_META: "EdgeCloudTensorMeta | None" = None
 
-# Byte-merge pre-allocated send/recv buffers (keyed by id(ec_meta)).
-# These eliminate per-step torch.empty overhead (~0.7 ms) in the hot path.
-_BYTE_MERGE_SEND_BUFS: dict[int, torch.Tensor] = {}
-_BYTE_MERGE_RECV_BUFS: dict[int, torch.Tensor] = {}
-
-
 def _element_size(dtype: torch.dtype) -> int:
     """Return the size in bytes of a single element of ``dtype``."""
     # Use a small tensor as fallback for any dtype PyTorch supports.
@@ -80,31 +74,18 @@ def _get_byte_merge_send_buf(
     num_tokens: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """Return a pre-allocated (or freshly-allocated) uint8 send buffer slice."""
-    global _BYTE_MERGE_SEND_BUFS
-    buf = _BYTE_MERGE_SEND_BUFS.get(id(ec_meta))
+    """Allocate a fresh uint8 send buffer (same as bench / legacy path)."""
     needed = num_tokens * ec_meta.byte_merge_row_bytes
-    if buf is None or buf.numel() < needed:
-        # Over-allocate so minor num_tokens fluctuations do not realloc.
-        alloc = max(needed, 4 * 1024 * 1024)  # 4 MiB minimum
-        buf = torch.empty(alloc, dtype=torch.uint8, device=device)
-        _BYTE_MERGE_SEND_BUFS[id(ec_meta)] = buf
-    return buf[:needed]
+    return torch.empty(needed, dtype=torch.uint8, device=device)
 
 
 def _get_byte_merge_recv_buf(
     ec_meta: "EdgeCloudTensorMeta",
     num_tokens: int,
 ) -> torch.Tensor:
-    """Return a pre-allocated (or freshly-allocated) uint8 recv buffer slice."""
-    global _BYTE_MERGE_RECV_BUFS
-    buf = _BYTE_MERGE_RECV_BUFS.get(id(ec_meta))
+    """Allocate a fresh uint8 recv buffer (same as bench / legacy path)."""
     needed = num_tokens * ec_meta.byte_merge_row_bytes
-    if buf is None or buf.numel() < needed:
-        alloc = max(needed, 4 * 1024 * 1024)
-        buf = torch.empty(alloc, dtype=torch.uint8, device="npu")
-        _BYTE_MERGE_RECV_BUFS[id(ec_meta)] = buf
-    return buf[:needed]
+    return torch.empty(needed, dtype=torch.uint8, device="npu")
 
 
 @dataclass
