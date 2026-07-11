@@ -437,6 +437,22 @@ class PDSeparatedScheduler(Scheduler):
 
                 self.running = saved_running
 
+                # [方案B] Edge 侧建议 Cloud 是否切层。
+                # 必须在 self.running 恢复为 saved_running 之后检查，
+                # 否则 self.running 被临时替换为 prefill 请求，永远为 False。
+                if scheduler_output.total_num_scheduled_tokens > 0:
+                    suggest = len(self.running) > 0
+                    scheduler_output.cloud_suggest_slicing = suggest
+                    if not suggest:
+                        logger.error(
+                            "[PD-EDGE-NO-SLICE] PREFILL_FIRST "
+                            "cloud_suggest_slicing=False, running=%d, "
+                            "chunk_prefill_first=%d, total_tokens=%d",
+                            len(self.running),
+                            len(self.chunk_prefill_first),
+                            scheduler_output.total_num_scheduled_tokens,
+                        )
+
 
             else:
                 self.chunk_prefill_first = saved_chunk_prefill_first
