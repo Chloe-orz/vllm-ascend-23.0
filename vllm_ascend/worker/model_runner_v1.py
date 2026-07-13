@@ -130,9 +130,6 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
-from vllm_ascend.compilation.edge_cloud_compiler import (
-    EdgeCloudCompiledSegment,
-)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -722,39 +719,12 @@ class NPUModelRunner(GPUModelRunner):
         确保 ACLGraphWrapper 包裹的是标准 nn.Module，与标准流程的
         图捕获方式对齐（torch.npu.graph 捕获 nn.Module.forward()）。
 
-        当 enable_npugraph_ex 开启且 cudagraph_mode 支持全图编译时，
-        额外包裹 EdgeCloudCompiledSegment，使 segment 先经过
-        torch.compile → npugraph_ex_compile 编译时优化，
-        再由 ACLGraphWrapper 进行运行时图捕获，对齐标准流程的两层图优化。
-
         边云场景下所有模型均已在加载阶段通过对应 patch 文件注入
         forward_edge_cloud_segment，因此直接委托即可，无需额外 fallback。
         """
-        segment = EdgeCloudSegment(
+        return EdgeCloudSegment(
             model, start_layer, end_layer, is_first_segment, is_last_segment
         )
-
-        # 若全局 enable_npugraph_ex 开启且当前处于全图模式，
-        # 对 segment 应用 npugraph_ex 编译时优化（第1层）。
-        # 第2层（ACLGraphWrapper 运行时捕获）由 _wrap_segment_if_needed 负责。
-        ascend_compilation_config = get_ascend_config().ascend_compilation_config
-        if (
-            ascend_compilation_config.enable_npugraph_ex
-            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        ):
-            logger.info(
-                "EdgeCloudCompiledSegment wrapping segment [%d, %d) "
-                "with npugraph_ex compile-time optimization.",
-                start_layer,
-                end_layer,
-            )
-            segment = EdgeCloudCompiledSegment(
-                segment,
-                self.vllm_config,
-                ascend_compilation_config,
-            )
-
-        return segment
 
     def _wrap_segment_if_needed(
         self,
@@ -2188,54 +2158,53 @@ class NPUModelRunner(GPUModelRunner):
                     if deferred_state_corrections_fn:
                         deferred_state_corrections_fn()
                         deferred_state_corrections_fn = None
-                    if self.cache_config.mamba_cache_mode == "align":
-                        if vllm_version_is("0.20.2"):
-                            mamba_bufs = self._get_mamba_copy_bufs()
-                            preprocess_bufs = mamba_bufs
-                        else:
-                            mamba_bufs = self._get_mamba_bufs()
-                            preprocess_bufs = mamba_bufs.preprocess
-                        mamba_utils.preprocess_mamba(
-                            scheduler_output,
-                            self.kv_cache_config,
-                            self.cache_config,
-                            self.mamba_state_idx,
-                            self.input_batch,
-                            self.requests,
-                            self.compilation_config.static_forward_context,
-                            self.model.get_mamba_state_copy_func(),
-                            preprocess_bufs,
-                        )
-                        # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                        # for requests whose state was copied to a new block.
-                        # Re-sync to GPU so the mamba kernel reads from the
-                        # correct initial state slot (init_token_idx = 0).
-                        self.num_accepted_tokens.np[:num_reqs] = (
-                            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                        )
-                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                    if vllm_version_is("0.20.2"):
+                        mamba_bufs = self._get_mamba_copy_bufs()
+                        preprocess_bufs = mamba_bufs
+                    else:
+                        mamba_bufs = self._get_mamba_bufs()
+                        preprocess_bufs = mamba_bufs.preprocess
+                    mamba_utils.preprocess_mamba(
+                        scheduler_output,
+                        self.kv_cache_config,
+                        self.cache_config,
+                        self.mamba_state_idx,
+                        self.input_batch,
+                        self.requests,
+                        self.compilation_config.static_forward_context,
+                        self.model.get_mamba_state_copy_func(),
+                        preprocess_bufs,
+                    )
+                    # preprocess_mamba resets num_accepted_tokens_cpu to 1
+                    # for requests whose state was copied to a new block.
+                    # Re-sync to GPU so the mamba kernel reads from the
+                    # correct initial state slot (init_token_idx = 0).
+                    self.num_accepted_tokens.np[:num_reqs] = (
+                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                    )
+                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-                        if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
-                            mamba_utils.stage_postprocess_inputs_to_gpu(
-                                mamba_bufs.postprocess_align,
-                                scheduler_output,
-                                self.input_batch.req_ids,
-                                num_reqs,
-                                self.requests,
-                                self.mamba_state_idx,
-                            )
-                    if self.use_compress:
-                        if deferred_state_corrections_fn:
-                            deferred_state_corrections_fn()
-                            deferred_state_corrections_fn = None
-                        num_reqs = self.input_batch.num_reqs
-                        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
-                        dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
-                        np.add(
-                            self.input_batch.num_computed_tokens_cpu[req_indices],
-                            self.query_pos.np[:total_num_scheduled_tokens],
-                            out=dsa_positions_np,
+                    if not vllm_version_is("0.20.2") and mamba_bufs.postprocess_align is not None:
+                        mamba_utils.stage_postprocess_inputs_to_gpu(
+                            mamba_bufs.postprocess_align,
+                            scheduler_output,
+                            self.input_batch.req_ids,
+                            num_reqs,
+                            self.requests,
+                            self.mamba_state_idx,
                         )
+                if self.use_compress:
+                    if deferred_state_corrections_fn:
+                        deferred_state_corrections_fn()
+                        deferred_state_corrections_fn = None
+                    num_reqs = self.input_batch.num_reqs
+                    req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+                    dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
+                    np.add(
+                        self.input_batch.num_computed_tokens_cpu[req_indices],
+                        self.query_pos.np[:total_num_scheduled_tokens],
+                        out=dsa_positions_np,
+                    )
 
                 if (
                     cudagraph_mode == CUDAGraphMode.FULL
@@ -2249,6 +2218,27 @@ class NPUModelRunner(GPUModelRunner):
                         num_tokens_padded, num_reqs_padded, num_reqs, cudagraph_mode, batch_desc.num_reqs
                     )
 
+                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+
+                (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
+                    num_tokens=(
+                        num_tokens_unpadded
+                        if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
+                        else total_num_scheduled_tokens
+                    ),
+                    num_tokens_padded=num_tokens_padded,
+                    num_reqs=num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    max_query_len=max_num_scheduled_tokens,
+                    ubatch_slices=ubatch_slices_attn,
+                    logits_indices=logits_indices,
+                    use_spec_decode=use_spec_decode,
+                    num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                    num_scheduled_tokens_np=num_scheduled_tokens_np,
+                    cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    num_scheduled_tokens_compressed_list=num_scheduled_tokens_compressed_list,
+                )
 
             # Edge-cloud cloud side: reuse the M-RoPE positions edge computed
             # and pushed via intermediate_tensors (cloud skipped
