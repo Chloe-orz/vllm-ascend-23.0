@@ -18,6 +18,7 @@
 #
 
 import math
+import re
 import sys
 import time
 from collections import defaultdict
@@ -5459,12 +5460,43 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
-        # embedding_only edge has no local attention layers; the spec
-        # is already empty (returned early above).  Cloud side keeps
-        # With the PP-reuse init path make_layers directly creates
-        # PPMissingLayer for non-local indices — no stale entries
-        # ever register in static_forward_context, so no filtering
-        # is needed.
+        # [DEBUG] Verify kv_cache_spec does not contain non-local layers
+        # in edge-cloud mode. If it does, allocator will allocate ghost
+        # blocks for layers that never write KV, causing decode errors.
+        # Only check once per model-runner to avoid log spam.
+        if (
+            self._edge_cloud_enabled
+            and self.model is not None
+            and not getattr(self, "_kv_spec_checked", False)
+        ):
+            self._kv_spec_checked = True
+            local_layer_indices = set()
+            if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+                layers = self.model.model.layers
+            else:
+                layers = self.model.language_model.model.layers
+            for idx, layer in enumerate(layers):
+                if not isinstance(layer, PPMissingLayer):
+                    local_layer_indices.add(idx)
+            non_local = []
+            for layer_name in kv_cache_spec.keys():
+                match = re.search(r"layers\.(\d+)", layer_name)
+                if match and int(match.group(1)) not in local_layer_indices:
+                    non_local.append(layer_name)
+            if non_local:
+                logger.error(
+                    "[KVSpecCheck] NON-LOCAL layers in spec: %s "
+                    "local_layers=%s role=%s head_k=%d tail_k=%d num_layers=%d",
+                    non_local, sorted(local_layer_indices),
+                    self.edge_cloud_cfg.role, self.head_k, self.tail_k,
+                    len(layers),
+                )
+            else:
+                logger.info(
+                    "[KVSpecCheck] OK role=%s local=%s spec_keys=%d",
+                    self.edge_cloud_cfg.role, sorted(local_layer_indices),
+                    len(kv_cache_spec),
+                )
 
         return kv_cache_spec
 
