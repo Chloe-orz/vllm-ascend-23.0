@@ -3038,18 +3038,18 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                hidden_states = seg_a(
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
                 if seg_a_graph and not forward_context.capturing:
                     self._update_full_graph_params_if_needed(
                         forward_context, num_tokens_padded, positions,
                         layer_indices=list(range(0, self.head_k)),
                         graph_wrapper=seg_a,
                     )
+                hidden_states = seg_a(
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
             finally:
                 # 恢复 layer_idx 前先同步当前流，确保 weight_prefetch 等
                 # 依赖 layer_idx 的异步任务已在正确层号下完成，防止后续段读到错层权重
