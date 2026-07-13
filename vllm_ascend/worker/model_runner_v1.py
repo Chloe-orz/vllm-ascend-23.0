@@ -3090,6 +3090,11 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_layers - self.tail_k,
                     self.num_layers,
                 ))
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
