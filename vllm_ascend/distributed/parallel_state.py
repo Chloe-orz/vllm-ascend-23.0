@@ -1312,6 +1312,8 @@ def edge_cloud_broadcast_recv(
                 # Byte-merge: broadcast the compact uint8 buffer, then each
                 # TP rank splits locally into its own per-key full buffers.
                 send_keys = set(ec_meta.send_tensor_keys or ec_meta.tensor_keys)
+                if not include_mrope:
+                    send_keys.discard("mrope_positions")
 
                 def broadcast_postprocess(
                     merged_buf=merged_buf,
@@ -1401,6 +1403,8 @@ def edge_cloud_broadcast_recv(
 
         if ec_meta.uses_mrope:
             # Byte-merge: allocate per-key full buffers + one compact buffer.
+            if not include_mrope:
+                send_keys.discard("mrope_positions")
             for key, value in ec_meta.metadata_list:
                 if not isinstance(value, TensorMetadata):
                     continue
