@@ -529,10 +529,6 @@ class NPUWorker(WorkerBase):
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass:
             if is_cloud_device():
-                # Pre-compute input preparation while edge runs segment_a.
-                # This overlaps cloud's _update_states, _prepare_inputs,
-                # _determine_batch_execution_and_padding, and
-                # _build_attention_metadata with edge's segment_a forward.
                 # On the merge_payload fast path the per-key tensors are
                 # materialized lazily inside comm_postprocess (after the
                 # merged buffer is split), so SP chunking must run there too
@@ -555,7 +551,6 @@ class NPUWorker(WorkerBase):
                     sp_chunk=do_sp_chunk and merge_payload,
                     include_mrope=cloud_include_mrope,
                 )
-                self.model_runner.cloud_prepare_early(scheduler_output)
 
                 if do_sp_chunk and not merge_payload:
                     tensor_dict = {
@@ -676,7 +671,8 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
-           
+            # 确保 HCCL 回传数据在 NPU 上可用后再启动 segment_e forward
+            torch.npu.synchronize()
             output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
                 return output
