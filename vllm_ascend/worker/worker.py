@@ -908,6 +908,7 @@ class NPUWorker(WorkerBase):
             _gathered = self._all_gather_tensor_dict(output.tensors)
         else:
             _gathered = output.tensors
+
         # In the shared-model edge-cloud topology the cloud
         # first-worker of each dp_rank is in the shared PP group
         # with the edge and must send its middle-layer output
