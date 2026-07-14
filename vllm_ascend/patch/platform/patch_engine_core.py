@@ -129,15 +129,19 @@ def _patched_engine_core_init(self, *args, **kwargs):
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
     self._pp_pd_channel = None
     if pd_enabled and getattr(parallel_config, "is_edge_node", False):
+        dp_rank = getattr(parallel_config, "data_parallel_rank", 0)
+
         # Discover the cloud's IP via a one-shot TCPStore. The edge
-        # acts as store master on ``master_port + 1``; the cloud
-        # connects and writes its ``get_ip()`` result. See
-        # passive_core.py for the symmetric writer side.
+        # acts as store master on ``master_port + 1 + dp_rank`` so
+        # that each DP rank has its own store port (no EADDRINUSE).
+        # The cloud connects once per edge DP rank and writes its
+        # ``get_ip()`` result. See passive_core.py for the
+        # symmetric writer side.
         import torch.distributed as dist
         from datetime import timedelta
         _addr_store = dist.TCPStore(
             host_name=parallel_config.master_addr,
-            port=parallel_config.master_port + 1,
+            port=parallel_config.master_port + 1 + dp_rank,
             world_size=2,
             is_master=True,
             timeout=timedelta(seconds=300),
@@ -145,12 +149,19 @@ def _patched_engine_core_init(self, *args, **kwargs):
         cloud_addr = _addr_store.get("cloud_ip").decode()
         del _addr_store
 
-        pre_out = pd_config.get_pre_out_bind_addr()
-        post_out = pd_config.get_post_out_connect_addr(cloud_addr)
+        # Each DP rank needs its own ZMQ port pair to avoid bind
+        # conflicts within the same edge process. Offset by 2 per
+        # dp_rank: dp_rank 0 → {pre_out, post_out}, dp_rank 1 →
+        # {pre_out+2, post_out+2}, etc. The cloud side must mirror
+        # this offsetting in its own PPSchedulerZmqChannel setup.
+        pre_out_port = pd_config.pre_out_port + dp_rank * 2
+        post_out_port = pd_config.post_out_port + dp_rank * 2
+        pre_out = f"tcp://*:{pre_out_port}"
+        post_out = f"tcp://{cloud_addr}:{post_out_port}"
         self._pp_pd_channel = PPSchedulerZmqChannel(
             send_endpoint=pre_out,
             recv_endpoint=post_out,
-            name="pd-edge",
+            name=f"pd-edge-dp{dp_rank}",
         )
         logger.info(
             "PD-separation edge channel: PRE_OUT=%s, POST_OUT=%s "
