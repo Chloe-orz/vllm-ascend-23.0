@@ -1176,7 +1176,8 @@ def edge_cloud_broadcast_recv(
     list[Handle],
     list[Callable[[], None]],
 ]:
-    """Receive PP tensors and broadcast within the local edge/cloud TP group.
+    """Receive PP tensors on the selected Phase6 channel and broadcast them
+    within the local edge/cloud TP group.
 
     Uses locally computed metadata instead of receiving it from the sender.
     This eliminates the inter-node pickle+Gloo metadata exchange, while
