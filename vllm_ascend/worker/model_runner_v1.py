@@ -2110,6 +2110,13 @@ class NPUModelRunner(GPUModelRunner):
                         # consistent with the num_scheduled_tokens == 0 path.
                         return EMPTY_MODEL_RUNNER_OUTPUT
 
+                    # If _update_states added new requests after an empty batch,
+                    # the pre-defined num_scheduled_tokens_np is empty — recompute.
+                    if num_scheduled_tokens_np.size == 0:
+                        req_ids = self.input_batch.req_ids
+                        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                        num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+
                     max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
                     (
