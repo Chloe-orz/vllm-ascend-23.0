@@ -141,6 +141,17 @@ class PDSeparatedScheduler(Scheduler):
         # decode scheduling until PL completes and they are moved to running.
         self.prefill_last_pending: list[Request] = []
 
+        # [新增] 限制 PREFILL_FIRST 每个 batch 最多只组 1 个请求。
+        # 配置路径: additional_config.edge_cloud_config.pd_separation.limit_prefill_batch_size
+        self.limit_prefill_batch_size: bool = False
+        _additional = getattr(self.vllm_config, "additional_config", None)
+        if isinstance(_additional, dict):
+            _ec = _additional.get("edge_cloud_config", {})
+            _pd = _ec.get("pd_separation", {})
+            self.limit_prefill_batch_size = bool(
+                _pd.get("limit_prefill_batch_size", False)
+            )
+
         # [新增] DECODE_LAST 延迟调度计时器。
         # D首 pick 后启动，D尾 在延迟到期前不可被调度。
         self._decode_last_delay_start_ts: float | None = None
@@ -414,8 +425,32 @@ class PDSeparatedScheduler(Scheduler):
         saved_chunk_prefill_first = self.chunk_prefill_first
         saved_max_num_running_reqs = self.max_num_running_reqs
 
-        self.running = list(saved_chunk_prefill_first)
-        self.chunk_prefill_first = []
+        if self.limit_prefill_batch_size:
+            # 限制每个 P首 batch 最多只包含 1 个请求。
+            # 1. chunk_prefill_first 非空时，取第一个请求到 running，
+            #    清空 waiting 防止 super().schedule() 再取更多。
+            # 2. chunk_prefill_first 为空时，从 waiting 中只保留 1 个请求，
+            #    让 super().schedule() 在 waiting 中正常调度（生成 NewRequestData）。
+            #    其余 waiting 请求暂存，在 finally 中恢复。
+            if saved_chunk_prefill_first:
+                self.running = [saved_chunk_prefill_first[0]]
+                self.chunk_prefill_first = list(saved_chunk_prefill_first[1:])
+                saved_waiting_rest = []
+            else:
+                self.running = []
+                self.chunk_prefill_first = []
+                if len(self.waiting) > 0:
+                    first_req = self.waiting.pop_request()
+                    saved_waiting_rest = list(self.waiting)
+                    self.waiting.clear()
+                    self.waiting.append(first_req)
+                else:
+                    saved_waiting_rest = []
+        else:
+            self.running = list(saved_chunk_prefill_first)
+            self.chunk_prefill_first = []
+            saved_waiting_rest = []
+
         self.max_num_running_reqs -= len(saved_running)
 
         scheduler_output = None
@@ -427,17 +462,10 @@ class PDSeparatedScheduler(Scheduler):
             if scheduler_output is not None:
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     scheduler_output.batch_type = BatchType.EMPTY
-                    # No request was actually scheduled this round.
-                    # self.running currently holds saved_chunk_prefill_first
-                    # (requests already scheduled at least once before),
-                    # plus any newly-scheduled requests appended by the base
-                    # class. Since total_num_scheduled_tokens == 0, the latter
-                    # set is empty, so we only restore the former.
                     for req in self.running:
                         if req.is_prefill_chunk:
                             self.chunk_prefill_first.append(req)
                         else:
-                            # Prefill finished but not yet moved to running.
                             self.prefill_last_pending.append(req)
                 else:
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
@@ -449,11 +477,6 @@ class PDSeparatedScheduler(Scheduler):
                     )
                     self.prefill_inflight_count += 1
 
-                    # === 核心修改 ===
-                    # All requests scheduled in this PF batch enter
-                    # prefill_last_pending immediately. They may NOT be
-                    # re-scheduled for the next chunk until the cloud
-                    # returns the matching PL (PREFILL_LAST).
                     scheduled_req_ids = set(
                         scheduler_output.num_scheduled_tokens.keys()
                     )
@@ -461,13 +484,9 @@ class PDSeparatedScheduler(Scheduler):
                         if req.request_id in scheduled_req_ids:
                             self.prefill_last_pending.append(req)
                         elif req.is_prefill_chunk:
-                            # Not scheduled this round (e.g. token budget
-                            # exhausted), keep in chunk_prefill_first.
                             self.chunk_prefill_first.append(req)
                         else:
-                            # Completed but not scheduled – defensive.
                             self.prefill_last_pending.append(req)
-                    # ================
 
                 self.running = saved_running
 
@@ -487,10 +506,28 @@ class PDSeparatedScheduler(Scheduler):
                             scheduler_output.total_num_scheduled_tokens,
                         )
 
-
             else:
                 self.chunk_prefill_first = saved_chunk_prefill_first
                 self.running = saved_running
+
+            # 恢复 waiting 中其余请求（仅在 limit_prefill_batch_size 时）
+            if self.limit_prefill_batch_size and saved_waiting_rest:
+                for req in saved_waiting_rest:
+                    self.waiting.append(req)
+
+        if (
+            self.limit_prefill_batch_size
+            and scheduler_output is not None
+            and scheduler_output.total_num_scheduled_tokens > 0
+        ):
+            logger.info(
+                "[PD-LIMIT-PREFILL] PREFILL_FIRST batch_size=%d, "
+                "total_tokens=%d, chunk_first_remaining=%d, waiting_remaining=%d",
+                len(scheduler_output.num_scheduled_tokens),
+                scheduler_output.total_num_scheduled_tokens,
+                len(self.chunk_prefill_first),
+                len(self.waiting),
+            )
 
         return scheduler_output  # type: ignore[return-value]
 
