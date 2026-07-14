@@ -782,7 +782,7 @@ class PassiveEngineCoreProc:
                 pp_pd_channel = PPSchedulerZmqChannel(
                     send_endpoint=post_out_bind,
                     recv_endpoint=pre_out_connect,
-                    name=f"pd-cloud-dp{_cloud_dp_rank}",
+                    name=f"pd-cloud-dp{_dp_rank}",
                 )
                 scheduler_input = pp_pd_channel
                 logger.info(
