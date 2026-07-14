@@ -165,6 +165,12 @@ class PDSeparatedScheduler(Scheduler):
         self._layer_slice_config_path: str | None = None
         self._layer_slice_config_mtime: float = 0.0
         self._load_layer_slice_config()
+        # After scheduling a DECODE_LAST, briefly reserve the next scheduling
+        # opportunity for DECODE_FIRST only.  This keeps decode middle work fed
+        # without blocking; if no decode head can be scheduled within the window,
+        # normal scheduling resumes.
+        self._decode_first_only_start_ts: float | None = None
+        self._decode_first_only_window_ms: int = 10
 
     def schedule(self) -> SchedulerOutput:
         return self._schedule_pd_separated()
@@ -187,7 +193,35 @@ class PDSeparatedScheduler(Scheduler):
             self._log_scheduler_state(state, scheduler_output.batch_type)
         return scheduler_output
 
+    def _decode_first_only_active(self) -> bool:
+        started_at = self._decode_first_only_start_ts
+        if started_at is None:
+            return False
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        if elapsed_ms >= self._decode_first_only_window_ms:
+            self._decode_first_only_start_ts = None
+            return False
+        return True
+
+    def _start_decode_first_only_window(self) -> None:
+        self._decode_first_only_start_ts = time.monotonic()
+
+    def _clear_decode_first_only_window(self) -> None:
+        self._decode_first_only_start_ts = None
+
+    def _pick_decode_first_only_or_empty(self) -> SchedulerOutput | None:
+        if not self._decode_first_only_active():
+            return None
+        if self._can_schedule_decode_first():
+            self._clear_decode_first_only_window()
+            return self._pick_decode_first_batch()
+        return self._make_empty_batch()
+
     def _pick_by_state(self, state: PrefillState) -> SchedulerOutput:
+        decode_first_only = self._pick_decode_first_only_or_empty()
+        if decode_first_only is not None:
+            return decode_first_only
+
         # D尾必须无条件优先于 D首，防止 decode_inflight_count 在 D首
         # 完成后立即释放导致 D尾 starvation。
         if state == PrefillState.IDLE:
@@ -456,6 +490,22 @@ class PDSeparatedScheduler(Scheduler):
 
                 self.running = saved_running
 
+                # [方案B] Edge 侧建议 Cloud 是否切层。
+                # 必须在 self.running 恢复为 saved_running 之后检查，
+                # 否则 self.running 被临时替换为 prefill 请求，永远为 False。
+                if scheduler_output.total_num_scheduled_tokens > 0:
+                    suggest = len(self.running) > 0
+                    scheduler_output.cloud_suggest_slicing = suggest
+                    if not suggest:
+                        logger.error(
+                            "[PD-EDGE-NO-SLICE] PREFILL_FIRST "
+                            "cloud_suggest_slicing=False, running=%d, "
+                            "chunk_prefill_first=%d, total_tokens=%d",
+                            len(self.running),
+                            len(self.chunk_prefill_first),
+                            scheduler_output.total_num_scheduled_tokens,
+                        )
+
             else:
                 self.chunk_prefill_first = saved_chunk_prefill_first
                 self.running = saved_running
@@ -538,6 +588,7 @@ class PDSeparatedScheduler(Scheduler):
             f"decodes_last_ready expects DECODE_LAST, got {so.batch_type}"
         )
         self._validate_decode_tail_channel(so)
+        self._start_decode_first_only_window()
         self._force_decode_last = False
         return so
 
