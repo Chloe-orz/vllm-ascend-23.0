@@ -151,6 +151,21 @@ class BlockTable:
         num_tokens = positions.shape[0]
         total_cp_world_size = self.pcp_world_size * self.dcp_world_size
         total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+
+        # 检测 scheduler 是否分配了足够的 block
+        if num_reqs > 0:
+            import os
+            if os.environ.get("LOCAL_RANK", "0") == "0":
+                import torch.distributed as dist
+                if not dist.is_initialized() or dist.get_rank() == 0:
+                    max_pos = positions[:num_reqs].cpu().numpy().max() if num_reqs > 0 else 0
+                    needed_blocks = max_pos // self.block_size + 1 if max_pos > 0 else 0
+                    actual_blocks = self.num_blocks_per_row[0]
+                    if actual_blocks > 0 and needed_blocks > actual_blocks:
+                        print(f"[DEBUG COMPUTE_SLOT] BLOCK UNDERRUN: "
+                              f"req0 needs {needed_blocks} blocks but only has {actual_blocks} "
+                              f"(max_pos={max_pos} block_size={self.block_size})")
+
         _compute_slot_mapping_kernel[(num_reqs + 1,)](
             num_tokens,
             self.max_num_batched_tokens,
@@ -235,22 +250,9 @@ class BlockTable:
             block_offsets = positions % self.block_size
             np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
-            import os
-            if os.environ.get("LOCAL_RANK", "0") == "0" and req_indices.shape[0] > 0:
-                import torch.distributed as dist
-                rank_ok = not dist.is_initialized() or dist.get_rank() == 0
-                if rank_ok:
-                    print(f"[DEBUG COMPUTE_SLOT] req0_block_first5={self.block_table.np[0, :5].tolist()} "
-                          f"slot_first5={self.slot_mapping.np[:5].tolist()}")
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
-        import os
-        if os.environ.get("LOCAL_RANK", "0") == "0" and num_reqs > 0:
-            import torch.distributed as dist
-            rank_ok = not dist.is_initialized() or dist.get_rank() == 0
-            if rank_ok:
-                print(f"[DEBUG COMMIT_BT] req0_block_first5={self.block_table.np[0, :5].tolist()}")
 
     def clear(self) -> None:
         self.block_table.fill_(0)
@@ -416,6 +418,11 @@ class MultiGroupBlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
+        # HOTFIX: non_blocking=True 的异步 copy 可能导致
+        # compute_slot_mapping kernel 读取到 stale block_table。
+        # 在 commit 后同步当前 stream，确保 GPU 上的 block_table
+        # 已更新后再执行 slot mapping kernel。
+        torch.npu.current_stream().synchronize()
 
     def clear(self) -> None:
         for block_table in self.block_tables:
