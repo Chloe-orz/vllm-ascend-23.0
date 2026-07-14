@@ -633,8 +633,6 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_c_wrapper: Any = None
             # Cache segment_a prepare results for segment_e reuse (edge-cloud only)
             self._edge_prepare_cache: dict | None = None
-            # Cache cloud-side prepare results to overlap with edge segment_a
-            self._cloud_prepare_cache: dict | None = None
         else:
             self.head_k = 0
             self.tail_k = 0
@@ -845,12 +843,6 @@ class NPUModelRunner(GPUModelRunner):
         else:
             transformer_layers = self.model.language_model.model.layers
         self.num_layers = len(transformer_layers)
-
-        # set_moe_parameters() 在 __init__ 中只遍历到本地层，因此不存在
-        # 非本地层 stale 引用问题。但为确保 moe_layers/moe_mlp_layers
-        # 引用正确，重新收集一次（与标准 PP 行为对齐）。
-        if hasattr(self.model, 'set_moe_parameters'):
-            self.model.set_moe_parameters()
 
         # 打印每层最终状态（诊断用）
         layer_states = []
@@ -2049,6 +2041,14 @@ class NPUModelRunner(GPUModelRunner):
         )):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        # Build num_scheduled_tokens_np before _update_states, matching old behaviour.
+        num_reqs_before_update = self.input_batch.num_reqs
+        if num_reqs_before_update > 0:
+            req_ids_before = self.input_batch.req_ids
+            tokens_before = [scheduler_output.num_scheduled_tokens[i] for i in req_ids_before]
+            num_scheduled_tokens_np = np.array(tokens_before, dtype=np.int32)
+        else:
+            num_scheduled_tokens_np = np.array([], dtype=np.int32)
 
         # ---- segment_e fast path: reuse segment_a's cached prepare results ----
         _fast_path = (
@@ -2056,13 +2056,6 @@ class NPUModelRunner(GPUModelRunner):
             and self.edge_cloud_cfg.role == "edge"
             and intermediate_tensors is not None
             and self._edge_prepare_cache is not None
-        )
-        # ---- cloud fast path: reuse pre-computed prepare results ----
-        _cloud_fast_path = (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "cloud"
-            and intermediate_tensors is not None
-            and self._cloud_prepare_cache is not None
         )
         if _fast_path:
             cache = self._edge_prepare_cache
@@ -2086,23 +2079,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             # Fast path skips _update_states, so no deferred corrections.
             deferred_state_corrections_fn = None
-        elif _cloud_fast_path:
-            cache = self._cloud_prepare_cache
-            self._cloud_prepare_cache = None  # consumed, clear for next iteration
-            total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
-            num_tokens_padded = cache["num_tokens_padded"]
-            num_tokens_across_dp = cache["num_tokens_across_dp"]
-            attn_metadata = cache["attn_metadata"]
-            logits_indices = cache["logits_indices"]
-            spec_decode_metadata = cache["spec_decode_metadata"]
-            spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
-            cudagraph_mode = cache["cudagraph_mode"]
-            batch_desc = cache["batch_desc"]
-            cudagraph_stats = cache["cudagraph_stats"]
-            deferred_state_corrections_fn = None
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
-                if not _fast_path and not _cloud_fast_path:
+                if not _fast_path:
                     # Fix up prev_req_id_to_index for requests that were discarded
                     # in the previous sample_tokens step. If a request has
                     # prev_num_draft_len > 0 but is missing from
@@ -2127,14 +2106,10 @@ class NPUModelRunner(GPUModelRunner):
 
                     num_reqs = self.input_batch.num_reqs
                     if num_reqs == 0:
-                        # No active requests remaining (e.g. all were completed
-                        # or removed by a prior _update_states call in
-                        # cloud_prepare_early).  Return empty output consistent
-                        # with the num_scheduled_tokens == 0 path.
+                        # No active requests remaining. Return empty output
+                        # consistent with the num_scheduled_tokens == 0 path.
                         return EMPTY_MODEL_RUNNER_OUTPUT
-                    req_ids = self.input_batch.req_ids
-                    tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-                    num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+
                     max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
                     (
@@ -3133,101 +3108,6 @@ class NPUModelRunner(GPUModelRunner):
                 and self.step_has_multimodal_req(scheduler_output)):
             return
         super()._calc_mrope_positions(scheduler_output)
-
-    def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
-        """Pre-compute input preparation on cloud while edge runs segment_a.
-
-        Caches results in self._cloud_prepare_cache so that when edge data
-        arrives, execute_model can skip _update_states, _prepare_inputs,
-        _determine_batch_execution_and_padding, and _build_attention_metadata,
-        going directly to _preprocess (sync_and_gather) + _model_forward.
-        """
-        assert self._edge_cloud_enabled, (
-            "cloud_prepare_early should only be called in edge-cloud mode"
-        )
-        assert self.edge_cloud_cfg.role == "cloud", (
-            "cloud_prepare_early should only be called on cloud side"
-        )
-
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if not num_scheduled_tokens:
-            self._cloud_prepare_cache = None
-            return
-
-        # Replicate scheduler_output handling from execute_model
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.use_ngram_gpu()
-        ):
-            num_scheduled_tokens_copy = (
-                scheduler_output.num_scheduled_tokens.copy()
-            )
-            spec_decode_tokens_copy = (
-                scheduler_output.scheduled_spec_decode_tokens.copy()
-            )
-            scheduler_output = replace(
-                scheduler_output,
-                num_scheduled_tokens=num_scheduled_tokens_copy,
-                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
-            )
-
-        if (
-            (
-                self.use_async_scheduling
-                and self.num_spec_tokens
-                and self._draft_token_ids is None
-            )
-            or (
-                self.pcp_size > 1
-                and self.supports_mm_inputs
-                and get_pp_group().is_first_rank
-                and not self.model_config.is_encoder_decoder
-            )
-        ):
-            scheduler_output = deepcopy(scheduler_output)
-
-        # Fix up prev_req_id_to_index (same as execute_model)
-        if (
-            self.use_async_scheduling
-            and self.num_spec_tokens
-            and self.input_batch.prev_req_id_to_index is not None
-        ):
-            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                if (
-                    req_id not in self.input_batch.prev_req_id_to_index
-                    and (req_state := self.requests.get(req_id)) is not None
-                    and req_state.prev_num_draft_len
-                ):
-                    req_state.prev_num_draft_len = 0
-
-        # --- _update_states ---
-        self._update_states(scheduler_output)
-
-        # --- Run core input preparation ---
-        # cloud_prepare_early runs BEFORE the forward pass (outside
-        # torch.inference_mode), but GDN attention builder does in-place
-        # tensor copies that require inference mode.  Wrap the whole
-        # preparation inside inference_mode to stay compatible with
-        # PyTorch >= 2.0 inference tensor protection.
-        with torch.inference_mode():
-            cache = self._run_input_preparation(scheduler_output)
-
-        # If the batch became empty after _update_states (num_reqs == 0),
-        # _run_input_preparation returns a zeroed placeholder.  Don't cache
-        # it — let execute_model fall through to the normal slow path which
-        # will return EMPTY_MODEL_RUNNER_OUTPUT.
-        if cache["total_num_scheduled_tokens"] == 0:
-            self._cloud_prepare_cache = None
-            return
-
-        # --- update_cos_sin ---
-        num_input_tokens = cache["num_tokens_padded"]
-        if self.use_cp and self.pcp_manager.pcp_use_hybrid_attn:
-            num_input_tokens = cache["total_num_scheduled_tokens"]
-        update_cos_sin(self.positions[:num_input_tokens])
-
-        # --- Cache all results ---
-        self._cloud_prepare_cache = cache
 
     def _edge_cloud_forward(
         self,
@@ -5201,15 +5081,9 @@ class NPUModelRunner(GPUModelRunner):
                 continue
             max_num_blocks_per_req = cdiv(max_model_len, block_sizes[i] * get_total_cp_world_size())
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
-                if self.cache_config.enable_prefix_caching:
-                    mamba_blocks_per_req = max_num_blocks_per_req
-                else:
-                    max_chunks = cdiv(
-                        max_model_len,
-                        self.cache_config.block_size * get_total_cp_world_size(),
-                    )
-                    mamba_blocks_per_req = max(max_num_blocks_per_req, max_chunks)
-                mamba_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
+                mamba_blocks_per_req = (
+                    max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
+                ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
             max_num_blocks.append(max_num_blocks_per_req)
 
@@ -5459,12 +5333,41 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
-        # embedding_only edge has no local attention layers; the spec
-        # is already empty (returned early above).  Cloud side keeps
-        # With the PP-reuse init path make_layers directly creates
-        # PPMissingLayer for non-local indices — no stale entries
-        # ever register in static_forward_context, so no filtering
-        # is needed.
+        if (
+            self._edge_cloud_enabled
+            and hasattr(self, "model")
+            and self.model is not None
+        ):
+            # In embedding_only mode, edge side has no transformer layers but
+            # still needs kv_cache_spec to be non-empty so the scheduler can
+            # allocate KV cache and schedule requests. Cloud side manages the
+            # actual KV cache usage; edge side keeps the spec for scheduling.
+            if not (
+                self.edge_cloud_cfg.mode == "embedding_only"
+                and self.edge_cloud_cfg.role == "edge"
+            ):
+                import re
+
+                # Locate the transformer layers
+                if (
+                    hasattr(self.model, "model")
+                    and hasattr(self.model.model, "layers")
+                ):
+                    transformer_layers = self.model.model.layers
+                else:
+                    transformer_layers = self.model.language_model.model.layers
+
+                local_layer_indices = {
+                    idx
+                    for idx, layer in enumerate(transformer_layers)
+                    if not isinstance(layer, PPMissingLayer)
+                }
+                filtered_spec: dict[str, KVCacheSpec] = {}
+                for layer_name, spec in kv_cache_spec.items():
+                    match = re.search(r"layers\.(\d+)", layer_name)
+                    if match is None or int(match.group(1)) in local_layer_indices:
+                        filtered_spec[layer_name] = spec
+                kv_cache_spec = filtered_spec
 
         return kv_cache_spec
 

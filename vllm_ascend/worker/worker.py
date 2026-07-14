@@ -555,7 +555,6 @@ class NPUWorker(WorkerBase):
                     sp_chunk=do_sp_chunk and merge_payload,
                     include_mrope=cloud_include_mrope,
                 )
-                self.model_runner.cloud_prepare_early(scheduler_output)
 
                 if do_sp_chunk and not merge_payload:
                     tensor_dict = {

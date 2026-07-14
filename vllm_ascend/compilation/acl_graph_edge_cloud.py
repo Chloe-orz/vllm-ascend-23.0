@@ -71,7 +71,7 @@ def graph_params_scope(
         yield
     finally:
         if graph_params is not None:
-            torch.npu.current_stream().synchronize()
+            torch.npu.synchronize()
         _acl_graph._graph_params = old_graph_params
         _acl_graph._draft_graph_params = old_draft_graph_params
 
@@ -136,8 +136,7 @@ class EdgeCloudACLGraphWrapper(ACLGraphWrapper):
         self.draft_graph_params: GraphParams | None = None
 
     def __call__(self, *args, **kwargs):
-        # 使用 no_sync 变体：capture 时仅切换 _graph_params 指针供 attention 后端
-        # 填充本 segment 参数，replay 时指针切换无副作用（replay 不再读取全局指针）。
-        # 不在退出时同步主 stream，避免 replay 后 host-block 破坏 CPU-NPU 掩盖。
-        with graph_params_scope_no_sync(self.graph_params, self.draft_graph_params):
+        # 使用全流同步的 graph_params_scope：退出时同步所有 NPU stream，
+        # 确保 segment 切换时不会有异步任务仍在引用旧 segment 的 graph_params。
+        with graph_params_scope(self.graph_params, self.draft_graph_params):
             return super().__call__(*args, **kwargs)
