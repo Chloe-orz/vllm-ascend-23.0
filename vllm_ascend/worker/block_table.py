@@ -418,11 +418,6 @@ class MultiGroupBlockTable:
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
             block_table.commit_block_table(num_reqs)
-        # HOTFIX: non_blocking=True 的异步 copy 可能导致
-        # compute_slot_mapping kernel 读取到 stale block_table。
-        # 在 commit 后同步当前 stream，确保 GPU 上的 block_table
-        # 已更新后再执行 slot mapping kernel。
-        torch.npu.current_stream().synchronize()
 
     def clear(self) -> None:
         for block_table in self.block_tables:

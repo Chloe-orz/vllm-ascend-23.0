@@ -38,11 +38,13 @@ class CompressAttentionManager(FullAttentionManager):
     ) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
-        # assert isinstance(self.kv_cache_spec, (CompressAttentionSpec, C4IndexerSpec))
-
-        num_tokens //= self.compress_ratio
-        num_tokens_main_model //= self.compress_ratio
-
+        # NOTE: Do NOT divide num_tokens by compress_ratio here.
+        # compress_ratio only affects the physical storage density of KV cache
+        # (how many tokens share one slot), not the logical block count.
+        # BlockTable.block_size is the physical block size (e.g. 128 original
+        # tokens), and compute_slot_mapping kernel uses this physical block_size
+        # to calculate block indices. Dividing num_tokens by compress_ratio would
+        # under-allocate blocks and cause BLOCK UNDERRUN.
         return super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
@@ -85,7 +87,7 @@ class CompressAttentionManager(FullAttentionManager):
         req_blocks = self.req_to_blocks[request_id]
         assert len(req_blocks) == 0
         num_total_computed_tokens = num_local_computed_tokens + num_external_computed_tokens
-        num_total_computed_tokens //= self.compress_ratio
+        # NOTE: Do NOT divide by compress_ratio. See get_num_blocks_to_allocate.
         num_skipped_tokens = self.get_num_skipped_tokens(num_total_computed_tokens)
         num_skipped_blocks = num_skipped_tokens // self.block_size
         if num_skipped_blocks > 0:
@@ -135,13 +137,18 @@ class CompressAttentionManager(FullAttentionManager):
         Returns:
             The new allocated blocks.
         """
-        num_tokens //= self.compress_ratio
+        # NOTE: Do NOT divide by compress_ratio. See get_num_blocks_to_allocate.
         ## TODO: check spec decode
-        num_tokens_main_model //= self.compress_ratio
-
         req_blocks = self.req_to_blocks[request_id]
         num_required_blocks = cdiv(num_tokens, self.block_size)
         num_new_blocks = num_required_blocks - len(req_blocks)
+        import os
+        if os.environ.get("LOCAL_RANK", "0") == "0" and num_new_blocks != 0:
+            import torch.distributed as dist
+            if not dist.is_initialized() or dist.get_rank() == 0:
+                print(f"[DEBUG ALLOC] req={request_id} num_tokens={num_tokens} "
+                      f"block_size={self.block_size} num_required={num_required_blocks} "
+                      f"existing={len(req_blocks)} new={num_new_blocks}")
         if num_new_blocks <= 0:
             return []
         else:
@@ -158,8 +165,7 @@ class CompressAttentionManager(FullAttentionManager):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
         """
-        num_tokens //= self.compress_ratio
-
+        # NOTE: Do NOT divide by compress_ratio. See get_num_blocks_to_allocate.
         return super().cache_blocks(request, num_tokens)
 
     @classmethod
@@ -237,11 +243,13 @@ def get_manager_for_kv_cache_spec(
     if isinstance(kv_cache_spec, MLAAttentionSpec) and kv_cache_spec.compress_ratio > 1:
         manager_class = CompressAttentionManager
         if max_model_len is not None:
-            # Compressed-MLA peak in blocks: ceil(max_model_len/compress/block).
-            compress_ratio = kv_cache_spec.compress_ratio
+            # Peak in blocks should be calculated with original (uncompressed)
+            # token count, because BlockTable.block_size is the physical block
+            # size that manages original tokens.
+            # compress_ratio only affects the physical storage density, not the
+            # logical block count that compute_slot_mapping uses.
             block_size = kv_cache_spec.block_size
-            max_compressed_tokens = max_model_len // compress_ratio
-            kwargs["max_admission_blocks_per_request"] = cdiv(max_compressed_tokens, block_size) + 1
+            kwargs["max_admission_blocks_per_request"] = cdiv(max_model_len, block_size) + 1
     elif isinstance(kv_cache_spec, (SlidingWindowSpec, ChunkedLocalAttentionSpec)):
         # Replicate the upstream PR #40946 cap setting for recycling specs.
         # We override the vLLM factory above, so the upstream block that does
