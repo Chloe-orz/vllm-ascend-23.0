@@ -2041,14 +2041,6 @@ class NPUModelRunner(GPUModelRunner):
         )):
             scheduler_output = deepcopy(scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        # Build num_scheduled_tokens_np before _update_states, matching old behaviour.
-        num_reqs_before_update = self.input_batch.num_reqs
-        if num_reqs_before_update > 0:
-            req_ids_before = self.input_batch.req_ids
-            tokens_before = [scheduler_output.num_scheduled_tokens[i] for i in req_ids_before]
-            num_scheduled_tokens_np = np.array(tokens_before, dtype=np.int32)
-        else:
-            num_scheduled_tokens_np = np.array([], dtype=np.int32)
 
         # ---- segment_e fast path: reuse segment_a's cached prepare results ----
         _fast_path = (
@@ -2109,14 +2101,9 @@ class NPUModelRunner(GPUModelRunner):
                         # No active requests remaining. Return empty output
                         # consistent with the num_scheduled_tokens == 0 path.
                         return EMPTY_MODEL_RUNNER_OUTPUT
-
-                    # If _update_states added new requests after an empty batch,
-                    # the pre-defined num_scheduled_tokens_np is empty — recompute.
-                    if num_scheduled_tokens_np.size == 0:
-                        req_ids = self.input_batch.req_ids
-                        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-                        num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
-
+                    req_ids = self.input_batch.req_ids
+                    tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                    num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                     max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
                     (
