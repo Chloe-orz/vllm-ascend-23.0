@@ -235,9 +235,22 @@ class BlockTable:
             block_offsets = positions % self.block_size
             np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
+            import os
+            if os.environ.get("LOCAL_RANK", "0") == "0" and req_indices.shape[0] > 0:
+                import torch.distributed as dist
+                rank_ok = not dist.is_initialized() or dist.get_rank() == 0
+                if rank_ok:
+                    print(f"[DEBUG COMPUTE_SLOT] req0_block_first5={self.block_table.np[0, :5].tolist()} "
+                          f"slot_first5={self.slot_mapping.np[:5].tolist()}")
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
+        import os
+        if os.environ.get("LOCAL_RANK", "0") == "0" and num_reqs > 0:
+            import torch.distributed as dist
+            rank_ok = not dist.is_initialized() or dist.get_rank() == 0
+            if rank_ok:
+                print(f"[DEBUG COMMIT_BT] req0_block_first5={self.block_table.np[0, :5].tolist()}")
 
     def clear(self) -> None:
         self.block_table.fill_(0)
