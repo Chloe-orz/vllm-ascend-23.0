@@ -36,7 +36,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
 import vllm.compilation.monitor as _monitor
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.parallel_state import (
@@ -3723,11 +3723,27 @@ class NPUModelRunner(GPUModelRunner):
                     elif self.use_compress:
                         # DSA dummy/graph-capture runs do not go through
                         # _prepare_inputs(), so no fresh compressed cache
-                        # metadata is computed for them. Reusing values from
-                        # the previous real request can feed stale block-table
-                        # and [block, offset] scatter indices to DSA kernels.
-                        slot_mapping[:num_tokens_padded].fill_(0)
-                        blk_table_tensor[:maybe_num_reqs_padded].fill_(0)
+                        # metadata is computed for them.
+                        # HOTFIX: 不要把实际 token 的 slot_mapping 覆盖为 0，
+                        # 否则所有 token 都写到 slot 0，导致 KV cache 互相覆盖。
+                        # 只填充 padding 位置，保留已有的实际 token slot 值。
+                        if get_tensor_model_parallel_rank() == 0:
+                            logger.info(
+                                "[DEBUG FIX] use_compress branch num_tokens=%d num_tokens_padded=%d "
+                                "slot_first_before=%s slot_last_before=%s",
+                                num_tokens,
+                                num_tokens_padded,
+                                slot_mapping[:min(5, num_tokens)].cpu().numpy().tolist(),
+                                slot_mapping[num_tokens - 1].item() if num_tokens > 0 else -1,
+                            )
+                        slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
+                        blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
+                        if get_tensor_model_parallel_rank() == 0:
+                            logger.info(
+                                "[DEBUG FIX] after fix slot_first=%s slot_last=%s",
+                                slot_mapping[:min(5, num_tokens)].cpu().numpy().tolist(),
+                                slot_mapping[num_tokens - 1].item() if num_tokens > 0 else -1,
+                            )
                     else:
                         slot_mapping[num_tokens:num_tokens_padded].fill_(-1)
                         blk_table_tensor[num_reqs:num_reqs_padded].fill_(0)
@@ -3961,6 +3977,17 @@ class NPUModelRunner(GPUModelRunner):
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
+        if get_tensor_model_parallel_rank() == 0:
+            logger.info(
+                "[DEBUG BLOCK] num_tokens=%d num_reqs=%d "
+                "bt_shape=%s bt_first=%s slot_first=%s slot_last=%s",
+                num_tokens,
+                num_reqs,
+                cm_base.block_table_tensor.shape,
+                cm_base.block_table_tensor[0][:5].cpu().numpy().tolist() if num_reqs > 0 else [],
+                cm_base.slot_mapping[:min(5, num_tokens)].cpu().numpy().tolist(),
+                cm_base.slot_mapping[num_tokens - 1].item() if num_tokens > 0 else -1,
+            )
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
