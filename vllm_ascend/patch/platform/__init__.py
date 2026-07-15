@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
@@ -41,12 +39,17 @@ import vllm_ascend.patch.platform.patch_qwen3_5_config  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 
-if (
-    os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
-    or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
-    or os.getenv("VLLM_PP_NON_LEADER_ENGINE_CORE", "0") in ("1", "true", "True")
-):
-    import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
+# Unconditional: AscendMultiprocExecutor/AscendWorkerProc must replace the
+# upstream classes in every process (edge leader, cloud PassiveEngineCore,
+# workers).  Gating on VLLM_PP_NON_LEADER_ENGINE_CORE breaks the cloud
+# PassiveEngineCore process: it imports vllm_ascend (triggering this patch)
+# during spawn bootstrap BEFORE run_passive_engine_core sets that env var, so
+# the cloud executor stayed the upstream MultiprocExecutor and never built
+# cloud_recv_hint_mq (CHER silently disabled, no [CHER] logs).  The patched
+# classes are no-op when edge-cloud / EPLB are off (they delegate to the
+# upstream path), so unconditional import is safe -- same rationale as
+# patch_engine_core below being unconditional.
+import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 
