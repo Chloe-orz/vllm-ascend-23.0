@@ -219,6 +219,17 @@ class PDSeparatedScheduler(Scheduler):
         # PL return so the request is not re-added to chunk_prefill_first.
         self._ahead_chunk_count: dict[str, int] = {}
 
+        # 限制 PREFILL_FIRST 每个 batch 最多只组 1 个请求。
+        # 配置路径: additional_config.edge_cloud_config.pd_separation.limit_prefill_batch_size
+        self.limit_prefill_batch_size: bool = False
+        _additional = getattr(self.vllm_config, "additional_config", None)
+        if isinstance(_additional, dict):
+            _ec = _additional.get("edge_cloud_config", {})
+            _pd = _ec.get("pd_separation", {})
+            self.limit_prefill_batch_size = bool(
+                _pd.get("limit_prefill_batch_size", False)
+            )
+
         # [新增] DECODE_LAST 延迟调度计时器。
         # D首 pick 后启动，D尾 在延迟到期前不可被调度。
         self._decode_last_delay_start_ts: float | None = None
@@ -232,6 +243,12 @@ class PDSeparatedScheduler(Scheduler):
         self._layer_slice_config_path: str | None = None
         self._layer_slice_config_mtime: float = 0.0
         self._load_layer_slice_config()
+        # After scheduling a DECODE_LAST, briefly reserve the next scheduling
+        # opportunity for DECODE_FIRST only.  This keeps decode middle work fed
+        # without blocking; if no decode head can be scheduled within the window,
+        # normal scheduling resumes.
+        self._decode_first_only_start_ts: float | None = None
+        self._decode_first_only_window_ms: int = 10
 
     # ------------------------------------------------------------------ #
     # Chunk-prefill-prior helpers                                         #
@@ -390,6 +407,19 @@ class PDSeparatedScheduler(Scheduler):
             available = saved_max_num_running_reqs - len(saved_running)
             max_num_running_reqs = 1 if available >= 1 else 0
             return [], max_num_running_reqs, rest_candidates
+        if self.limit_prefill_batch_size:
+            if saved_chunk_prefill_first:
+                return (
+                    [saved_chunk_prefill_first[0]],
+                    saved_max_num_running_reqs - len(saved_running),
+                    [],
+                )
+            else:
+                return (
+                    [],
+                    saved_max_num_running_reqs - len(saved_running),
+                    [],
+                )
         return (
             list(saved_chunk_prefill_first),
             saved_max_num_running_reqs - len(saved_running),
@@ -433,7 +463,35 @@ class PDSeparatedScheduler(Scheduler):
             self._log_scheduler_state(state, scheduler_output.batch_type)
         return scheduler_output
 
+    def _decode_first_only_active(self) -> bool:
+        started_at = self._decode_first_only_start_ts
+        if started_at is None:
+            return False
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        if elapsed_ms >= self._decode_first_only_window_ms:
+            self._decode_first_only_start_ts = None
+            return False
+        return True
+
+    def _start_decode_first_only_window(self) -> None:
+        self._decode_first_only_start_ts = time.monotonic()
+
+    def _clear_decode_first_only_window(self) -> None:
+        self._decode_first_only_start_ts = None
+
+    def _pick_decode_first_only_or_empty(self) -> SchedulerOutput | None:
+        if not self._decode_first_only_active():
+            return None
+        if self._can_schedule_decode_first():
+            self._clear_decode_first_only_window()
+            return self._pick_decode_first_batch()
+        return self._make_empty_batch()
+
     def _pick_by_state(self, state: PrefillState) -> SchedulerOutput:
+        decode_first_only = self._pick_decode_first_only_or_empty()
+        if decode_first_only is not None:
+            return decode_first_only
+
         # D尾必须无条件优先于 D首，防止 decode_inflight_count 在 D首
         # 完成后立即释放导致 D尾 starvation。
         if state == PrefillState.IDLE:
@@ -657,11 +715,33 @@ class PDSeparatedScheduler(Scheduler):
         # With chunk_prefill_prior_enable this enforces one-request-per-PF-batch
         # (prevents head_token collision / is_last ambiguity); legacy keeps the
         # original multi-request batching. See _prepare_pf_running_state.
-        self.running, pf_max, rest_candidates = self._prepare_pf_running_state(
+        self.running, self.max_num_running_reqs, rest_candidates = self._prepare_pf_running_state(
             saved_chunk_prefill_first, saved_running, saved_max_num_running_reqs
         )
-        self.chunk_prefill_first = []
-        self.max_num_running_reqs = pf_max
+
+        if self.limit_prefill_batch_size:
+            # 限制每个 P首 batch 最多只包含 1 个请求。
+            # 1. chunk_prefill_first 非空时，取第一个请求到 running，
+            #    清空 waiting 防止 super().schedule() 再取更多。
+            # 2. chunk_prefill_first 为空时，从 waiting 中只保留 1 个请求，
+            #    让 super().schedule() 在 waiting 中正常调度（生成 NewRequestData）。
+            #    其余 waiting 请求暂存，在 finally 中恢复。
+            if saved_chunk_prefill_first:
+                self.chunk_prefill_first = list(saved_chunk_prefill_first[1:])
+                saved_waiting_rest = []
+            else:
+                self.chunk_prefill_first = []
+                if len(self.waiting) > 0:
+                    first_req = self.waiting.pop_request()
+                    saved_waiting_rest = list(self.waiting)
+                    self.waiting.clear()
+                    self.waiting.append(first_req)
+                else:
+                    saved_waiting_rest = []
+        else:
+            self.chunk_prefill_first = []
+            saved_waiting_rest = []
+
 
         # Snapshot num_computed_tokens before super().schedule() so that
         # the is_last computation below uses the pre-schedule value.
@@ -682,17 +762,10 @@ class PDSeparatedScheduler(Scheduler):
             if scheduler_output is not None:
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     scheduler_output.batch_type = BatchType.EMPTY
-                    # No request was actually scheduled this round.
-                    # self.running currently holds saved_chunk_prefill_first
-                    # (requests already scheduled at least once before),
-                    # plus any newly-scheduled requests appended by the base
-                    # class. Since total_num_scheduled_tokens == 0, the latter
-                    # set is empty, so we only restore the former.
                     for req in self.running:
                         if req.is_prefill_chunk:
                             self.chunk_prefill_first.append(req)
                         else:
-                            # Prefill finished but not yet moved to running.
                             self.prefill_last_pending.append(req)
                 else:
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
@@ -850,10 +923,44 @@ class PDSeparatedScheduler(Scheduler):
                 )
                 self.running = saved_running
 
+                # [方案B] Edge 侧建议 Cloud 是否切层。
+                # 必须在 self.running 恢复为 saved_running 之后检查，
+                # 否则 self.running 被临时替换为 prefill 请求，永远为 False。
+                if scheduler_output.total_num_scheduled_tokens > 0:
+                    suggest = len(self.running) > 0
+                    scheduler_output.cloud_suggest_slicing = suggest
+                    if not suggest:
+                        logger.error(
+                            "[PD-EDGE-NO-SLICE] PREFILL_FIRST "
+                            "cloud_suggest_slicing=False, running=%d, "
+                            "chunk_prefill_first=%d, total_tokens=%d",
+                            len(self.running),
+                            len(self.chunk_prefill_first),
+                            scheduler_output.total_num_scheduled_tokens,
+                        )
 
             else:
                 self.chunk_prefill_first = saved_chunk_prefill_first
                 self.running = saved_running
+
+            # 恢复 waiting 中其余请求（仅在 limit_prefill_batch_size 时）
+            if self.limit_prefill_batch_size and saved_waiting_rest:
+                for req in saved_waiting_rest:
+                    self.waiting.append(req)
+
+        if (
+            self.limit_prefill_batch_size
+            and scheduler_output is not None
+            and scheduler_output.total_num_scheduled_tokens > 0
+        ):
+            logger.info(
+                "[PD-LIMIT-PREFILL] PREFILL_FIRST batch_size=%d, "
+                "total_tokens=%d, chunk_first_remaining=%d, waiting_remaining=%d",
+                len(scheduler_output.num_scheduled_tokens),
+                scheduler_output.total_num_scheduled_tokens,
+                len(self.chunk_prefill_first),
+                len(self.waiting),
+            )
 
         return scheduler_output  # type: ignore[return-value]
 
@@ -927,6 +1034,7 @@ class PDSeparatedScheduler(Scheduler):
             f"decodes_last_ready expects DECODE_LAST, got {so.batch_type}"
         )
         self._validate_decode_tail_channel(so)
+        self._start_decode_first_only_window()
         self._force_decode_last = False
         return so
 
@@ -1006,6 +1114,21 @@ class PDSeparatedScheduler(Scheduler):
                     self.decode_inflight_count += 1
                     self._force_decode_last = True
                     self._start_decode_last_delay()
+
+                    # === Decode-first self-posting optimization ===
+                    # Cloud's _maybe_publish_post_out merely replaces
+                    # batch_type with DECODE_LAST.  We pre-generate it on
+                    # the edge side and stash it in decodes_last_ready so
+                    # that scheduling DECODE_LAST needs no round-trip
+                    # through POST_OUT.  The cloud unconditionally skips
+                    # POST_OUT for all DECODE_FIRST batches.
+                    from dataclasses import replace
+                    decode_last = replace(
+                        scheduler_output,
+                        batch_type=BatchType.DECODE_LAST,
+                    )
+                    self.decodes_last_ready.append(decode_last)
+                    # ===============================================
                 for req in list(self.waiting):
                     saved_waiting.prepend_request(req)
                 self.chunk_prefill_first = saved_chunk_prefill_first

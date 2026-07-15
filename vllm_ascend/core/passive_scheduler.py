@@ -461,6 +461,23 @@ class PassiveScheduler:
             is_last_slice=(slice_idx == total_slices - 1),
         )
 
+    def _do_slice(
+        self, so: SchedulerOutput
+    ) -> list["LayerSliceInfo | None"]:
+        """Compute layer slices for a prefill-like batch."""
+        total_slices = self._resolve_slice_count(
+            so.total_num_scheduled_tokens
+        )
+        if total_slices <= 1:
+            return [None]
+        boundaries = self._compute_slice_boundaries(
+            self._num_local_layers, total_slices
+        )
+        return [
+            self._make_slice_info(i, total_slices, boundaries)
+            for i in range(total_slices)
+        ]
+
     def _slice_for(
         self, so: SchedulerOutput
     ) -> list["LayerSliceInfo | None"]:
@@ -473,21 +490,18 @@ class PassiveScheduler:
         ):
             return [None]
 
-        total_slices = self._resolve_slice_count(
-            so.total_num_scheduled_tokens
-        )
-        # Slicing disabled or trivially 1 slice.
-        if total_slices <= 1:
-            return [None]
+        # [方案B] Cloud 侧决策：
+        # 1. 已有 decode 到达 Cloud → 强制切层（确定性收益）
+        if self.ready_decodes:
+            return self._do_slice(so)
 
-        boundaries = self._compute_slice_boundaries(
-            self._num_local_layers, total_slices
-        )
-        # PURE_PREFILL / PREFILL_FIRST / PD_MIX → expand into N slice payloads.
-        return [
-            self._make_slice_info(i, total_slices, boundaries)
-            for i in range(total_slices)
-        ]
+        # 2. Edge 建议切层（decode 正在路上）→ 切层
+        if getattr(so, "cloud_suggest_slicing", False):
+            return self._do_slice(so)
+
+        # 3. Edge 建议不切层 + Cloud 无 decode → 明确不切层（冷启动优化）
+        # 短 prefill（<8k）执行太快，decode 来不及穿插，同样不切层
+        return [None]
 
     # ------------------------------------------------------------------ #
     # Dispatch                                                           #
@@ -531,7 +545,7 @@ class PassiveScheduler:
         elapsed_ms = (time.monotonic() - started_at) * 1000
         limit_ms = self._prefill_middle_throttle_seconds * 1000
         if elapsed_ms >= limit_ms:
-            logger.info(
+            logger.error(
                 f"[PD-PASSIVE] Throttle timeout: waited {elapsed_ms:.1f}ms, "
                 f"fallback to prefill",
             )
