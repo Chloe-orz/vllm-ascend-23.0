@@ -2681,6 +2681,9 @@ class NPUModelRunner(GPUModelRunner):
                     # is NOT idempotent (rewrites num_accepted_tokens_cpu in
                     # place under async spec decode), so reuse its results here
                     # instead of letting _run_input_preparation call it again.
+
+                    # skip_dsa_fill: already filled above between first
+                    # _prepare_inputs and here, using the first call's values.
                     cache = self._run_input_preparation(
                         scheduler_output,
                         precomputed=(
@@ -2689,6 +2692,7 @@ class NPUModelRunner(GPUModelRunner):
                             total_num_scheduled_tokens,
                             num_scheduled_tokens_compressed_list,
                         ),
+                        skip_dsa_fill=True
                     )
                     total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
                     num_tokens_padded = cache["num_tokens_padded"]
@@ -3824,6 +3828,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         precomputed: tuple | None = None,
+        skip_dsa_fill: bool = False,
     ) -> dict[str, Any]:
         """Run input preparation pipeline after _update_states.
 
@@ -3840,6 +3845,10 @@ class NPUModelRunner(GPUModelRunner):
         results via ``precomputed`` so we reuse them instead of re-running.
         ``cloud_prepare_early`` has no prior inline call and passes
         ``precomputed=None`` so we run it here exactly once.
+        Args:
+            skip_dsa_fill: If True, skip filling _dsa_positions_cpu_buf
+                (caller already filled it, e.g. slow path between first
+                _prepare_inputs and _run_input_preparation).
         """
         num_reqs = self.input_batch.num_reqs
         # Guard against empty batch after _update_states
@@ -3879,6 +3888,24 @@ class NPUModelRunner(GPUModelRunner):
             ) = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
+            )
+
+        # Fill _dsa_positions_cpu_buf for DSA compression.
+        # cloud_prepare_early calls _run_input_preparation directly and
+        # relies on this fill.  The slow path passes skip_dsa_fill=True
+        # because it already filled above (between the first _prepare_inputs
+        # and _run_input_preparation, to use the first call's values).
+        if self.use_compress and not skip_dsa_fill:
+            req_indices = np.repeat(
+                self.arange_np[:num_reqs], num_scheduled_tokens_np
+            )
+            dsa_positions_np = self._dsa_positions_np_buf[
+                :total_num_scheduled_tokens
+            ]
+            np.add(
+                self.input_batch.num_computed_tokens_cpu[req_indices],
+                self.query_pos.np[:total_num_scheduled_tokens],
+                out=dsa_positions_np,
             )
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
