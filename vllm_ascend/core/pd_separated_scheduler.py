@@ -1070,15 +1070,11 @@ class PDSeparatedScheduler(Scheduler):
             cached_reqs.num_output_tokens,
         ):
             if num_output_tokens > 0 and req_id not in cached_reqs.all_token_ids:
-                # np.ndarray(int32): zerocopy via PickleBuffer on the wire
-                # (see scheduler._make_cached_request_data). This back-fill is
-                # the dominant payload on DECODE_FIRST; int32 avoids the
-                # per-int PyLong alloc that made dequeue grow under load.
-                # NOTE: upstream removed the Request-level cached ndarray
-                # (ConstantList refactor), so build it inline like the base
-                # scheduler does.
-                cached_reqs.all_token_ids[req_id] = np.asarray(
-                    self.requests[req_id].all_token_ids, dtype=np.int32)
+                # Use the Request-level cached np.ndarray to avoid repeated
+                # np.asarray() conversion of the Python list (dominant
+                # bottleneck on long-sequence decode batches).
+                cached_reqs.all_token_ids[req_id] = (
+                    self.requests[req_id].cached_all_token_ids_np)
 
     def _pick_decode_first_batch(self) -> SchedulerOutput:
         if not self.running:
