@@ -955,31 +955,19 @@ class NPUWorker(WorkerBase):
                     scheduler_output.total_num_scheduled_tokens,
                 )
             if entry is not None:
-                _post_ts = getattr(entry, "_cher_post_ts", None)
-                _ahead_ms = (
-                    (time.monotonic() - _post_ts) * 1000
-                    if _post_ts is not None else -1.0
-                )
+                logger.debug("[CHER] consume early-recv head_token=%s", _ht)
                 # cloud_prepare_early overlaps input prep with the (already
                 # in-flight or done) recv; run it before execute_model uses
                 # the intermediate tensors.
                 self.model_runner.cloud_prepare_early(scheduler_output)
-                # Measure the actual irecv wait cost: if the guard posted far
-                # ahead (post_to_consume_ms >> transfer time), this should be
-                # near 0 (CHER payoff); if ~transfer time, the irecv did not
-                # make progress in the background (stream blocked).
-                _t0 = time.monotonic()
-                entry.wait_for_comm()
-                _wait_ms = (time.monotonic() - _t0) * 1000
-                logger.info(
-                    "[CHER] consume early-recv head_token=%s, wait_for_comm cost_ms=%.1f",
-                    _ht, _wait_ms,
-                )
                 intermediate_tensors = entry
                 # wait_for_comm() runs implicitly on first .tensors access
                 # inside execute_model (AsyncIntermediateTensors.__getattr__),
                 # which both waits the HCCL handles and runs comm_postprocess
-                # (the TP collective) on all ranks synchronized.
+                # (the TP collective) on all ranks synchronized.  Do NOT call
+                # it explicitly here: doing so blocks busy_loop on the recv
+                # wait BEFORE execute_model, defeating cloud_prepare_early's
+                # overlap and stalling the pipeline (TPOT regression).
             else:
                 # Fallback: synchronous recv (CHER off, or get_or_post failed).
                 # Pre-compute input preparation while edge runs segment_a.
