@@ -4140,18 +4140,18 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
             finally:
                 if old_layer_idx is not None:
                     _EXTRA_CTX.layer_idx = old_layer_idx
@@ -4177,17 +4177,17 @@ class NPUModelRunner(GPUModelRunner):
                 self.num_layers - self.tail_k,
                 self.num_layers,
             ))
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_e_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=tail_layer_indices,
                     graph_wrapper=seg_e,
                 )
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
         finally:
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
@@ -4232,20 +4232,17 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.head_k
         try:
-            # 图回放前预更新 attention 参数（seq_lens、block_table、KV cache 指针等），
-            # 确保第一次 decode 回放不使用 warmup 时期的 stale 参数（否则 attention kernel
-            # 用错误的 seq_lens 访问 KV cache 越界 → NaN）。
+            hidden_states = seg_c(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
             if seg_c_graph and not forward_context.capturing:
                 self._update_full_graph_params_if_needed(
                     forward_context, num_tokens_padded, positions,
                     layer_indices=cloud_layer_indices,
                     graph_wrapper=seg_c,
                 )
-            hidden_states = seg_c(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
         finally:
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
@@ -4278,13 +4275,6 @@ class NPUModelRunner(GPUModelRunner):
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         if enable_sp(self.vllm_config) or enable_sp_by_pass() or self.edge_cloud_cfg.cloud_enable_sp:
-            pc = self.vllm_config.parallel_config
-            # Edge-cloud mode: edge node should pad to cloud's tp_size so that
-            # the full sequence after all_gather is directly chunkable by cloud SP.
-            # During cudagraph/ACL graph capture, skip this extra padding so that
-            # graph keys match the normal SP-aligned capture sizes.
-            if pc.enable_edge_cloud and pc.is_edge_node and not for_cudagraph_capture:
-                tp_size = max(tp_size, pc.cloud_npu_count)
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
