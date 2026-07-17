@@ -490,6 +490,29 @@ class PassiveEngineCoreProc:
                 _pd_enabled,
                 "on" if pp_pd_channel is not None else "off",
             )
+            # [CHER] Cloud-side hidden early-receive: a built-in part of
+            # PD-separation masking -- always active on the cloud role when
+            # PD-separation is enabled (no separate flag).  step() fires a
+            # recv-hint to the cloud worker's sideband cloud_recv_hint_mq so
+            # the guard thread posts irecv ahead of execute_model.  Read from
+            # vllm_config (parallel_config + additional_config dict, both
+            # serialized fields) so the gate does not depend on ascend_config
+            # singleton init order or on dynamic scheduler_config attributes.
+            _pc = vllm_config.parallel_config
+            _ac = getattr(vllm_config, "additional_config", None) or {}
+            _ec = _ac.get("edge_cloud_config", {}) if isinstance(_ac, dict) else {}
+            _pd = _ec.get("pd_separation", {}) if isinstance(_ec, dict) else {}
+            self._cher_enabled = bool(
+                getattr(_pc, "enable_edge_cloud", False)
+                and not getattr(_pc, "is_edge_node", True)
+                and _pd.get("enabled", False)
+            )
+            # Track which head_tokens we have already sent a hint for, so
+            # layer-slicing's multiple first-slice steps fire it only once.
+            self._cher_hint_sent: set[str] = set()
+        else:
+            self._cher_enabled = False
+            self._cher_hint_sent = set()
         self._idle_sleep_seconds = 0.001
 
         self._prev_dispatch_req_ids: set[str] = set()
@@ -581,6 +604,75 @@ class PassiveEngineCoreProc:
             f"slices_count={len(batch.slices)}, "
             f"slice_info={_slice_info_str}",
         )
+
+        # [CHER] Fire a recv-hint so the cloud worker's guard thread posts
+        # the edge->cloud prefill hidden irecv ahead of this batch's
+        # execute_model.  Only for the first slice of a PREFILL_FIRST batch:
+        # the hidden transfer is initiated by the edge P-head and consumed
+        # by the cloud P-middle's first slice; later slices reuse the same
+        # intermediate tensors and must not re-post.  Sent BEFORE the
+        # pp_scheduler_output enqueue: the sideband MQ is independent of the
+        # (possibly back-pressured) rpc_broadcast_mq, so the hint is never
+        # delayed by pp_scheduler_output's enqueue even when busy_loop is
+        # blocked.  No gating: schedule() ran already and P-middle is being
+        # dispatched regardless; the hint only decides *when* the irecv is
+        # posted, not whether P-middle runs.
+        so = batch.scheduler_output
+        if (
+            self._cher_enabled
+            and so.batch_type == BatchType.PREFILL_FIRST
+            and getattr(so, "head_token", None)
+        ):
+            _is_first_slice = (
+                not batch.slices
+                or batch.slices[0] is None
+                or getattr(batch.slices[0], "is_first_slice", True)
+            )
+            _ht = so.head_token
+            if _is_first_slice and _ht not in self._cher_hint_sent:
+                _channel = getattr(so, "hidden_channel", None)
+                _hint = {
+                    "head_token": _ht,
+                    "hidden_channel": (
+                        _channel.value if _channel is not None else None
+                    ),
+                    "num_tokens": so.total_num_scheduled_tokens,
+                }
+                _hint_mq = getattr(self.executor, "cloud_recv_hint_mq", None)
+                if _hint_mq is not None:
+                    try:
+                        # Non-blocking (timeout=0): the hint is fire-and-forget.
+                        # If the guard thread hasn't drained the sideband MQ
+                        # (slow / contended on _early_recv_lock), we DROP the
+                        # hint rather than block PassiveEC.step() here -- a
+                        # blocked step can't drain acks, which fills
+                        # response_mq, which blocks the worker's ack enqueue,
+                        # which stops it from dequeuing rpc_broadcast_mq, which
+                        # blocks PassiveEC's dispatch -> circular deadlock.
+                        # When a hint is dropped, busy_loop's get_or_post_early
+                        # _recv posts the irecv itself (synchronous), so only
+                        # the early-post overlap is lost, never correctness.
+                        _hint_mq.enqueue(
+                            (b"pp_recv_hint", (_hint,), {}, None),
+                            timeout=0,
+                        )
+                        self._cher_hint_sent.add(_ht)
+                        logger.debug(
+                            "[CHER] send recv-hint head_token=%s channel=%s",
+                            _ht, _hint["hidden_channel"],
+                        )
+                    except TimeoutError:
+                        logger.warning(
+                            "[CHER] recv-hint dropped (ring full) "
+                            "head_token=%s; busy_loop will post irecv itself",
+                            _ht,
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            "[CHER] recv-hint dropped (error=%r) "
+                            "head_token=%s; busy_loop will post irecv itself",
+                            _e, _ht,
+                        )
 
         for slice_info in batch.slices:
             _t0 = time.monotonic()

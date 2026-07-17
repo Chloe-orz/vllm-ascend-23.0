@@ -760,8 +760,20 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_a_wrapper: Any = None
             self.segment_e_wrapper: Any = None
             self.segment_c_wrapper: Any = None
-            # Cache segment_a prepare results for segment_e reuse (edge-cloud only)
-            self._edge_prepare_cache: dict | None = None
+            # Cache segment_a prepare results for segment_e reuse (edge-cloud
+            # only).  Keyed by head_token so that ahead-scheduled chunks
+            # (chunk_prior with max_chunk_prefill_ahead >= 1) do not overwrite
+            # an earlier chunk's cache before its segment_e consumes it: each
+            # segment_a stores under its own head_token, and the matching
+            # segment_e pops that exact entry.  Without this keying, chunk-1's
+            # segment_a would clobber chunk-0's cache while chunk-0's segment_e
+            # is still waiting for the cloud PL, and chunk-0's PL would run
+            # segment_e with chunk-1's attn_metadata / num_tokens_padded.
+            self._edge_prepare_cache_by_token: dict[str, dict] = {}
+            # Bounded size guard: a segment_e that never arrives (e.g. request
+            # aborted mid-prefill) would otherwise leak its entry.  2P1D keeps
+            # at most 2 in-flight; the slack absorbs scheduling jitter.
+            self._edge_prepare_cache_max: int = 8
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
         else:
@@ -2283,7 +2295,7 @@ class NPUModelRunner(GPUModelRunner):
             self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "edge"
             and intermediate_tensors is not None
-            and self._edge_prepare_cache is not None
+            and scheduler_output.head_token in self._edge_prepare_cache_by_token
             and self.input_batch.num_reqs > 0
             and tuple(self.input_batch.req_ids)
             == tuple(scheduler_output.num_scheduled_tokens)
@@ -2296,8 +2308,11 @@ class NPUModelRunner(GPUModelRunner):
             and self._cloud_prepare_cache is not None
         )
         if _fast_path:
-            cache = self._edge_prepare_cache
-            self._edge_prepare_cache = None  # consumed, clear for next iteration
+            # Pop this head_token's cache so a later segment_a (different
+            # head_token) does not hand the wrong attn_metadata to this PL.
+            cache = self._edge_prepare_cache_by_token.pop(
+                scheduler_output.head_token
+            )
             total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
             num_tokens_padded = cache["num_tokens_padded"]
             num_tokens_across_dp = cache["num_tokens_across_dp"]
@@ -2543,8 +2558,24 @@ class NPUModelRunner(GPUModelRunner):
         # segment_e always receives cloud data via intermediate_tensors.
         if (self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "edge"
-            and intermediate_tensors is None):
-            self._edge_prepare_cache = {
+            and intermediate_tensors is None
+            and scheduler_output.head_token):
+            # Evict the oldest entry if the cache has grown beyond the bound.
+            # Defensive cleanup: a segment_e that never arrives (e.g. request
+            # aborted mid-prefill) would otherwise leak its entry forever.
+            # Normal chunk_prior operation keeps at most prefill_inflight_limit
+            # entries, so this branch only triggers on abnormal paths.
+            if len(self._edge_prepare_cache_by_token) >= self._edge_prepare_cache_max:
+                stale_token = next(iter(self._edge_prepare_cache_by_token))
+                logger.warning(
+                    "Edge segment_a cache exceeded bound (%d); evicting oldest "
+                    "head_token=%s (its segment_e likely never arrived, e.g. "
+                    "request abort).",
+                    self._edge_prepare_cache_max,
+                    stale_token,
+                )
+                self._edge_prepare_cache_by_token.pop(stale_token, None)
+            self._edge_prepare_cache_by_token[scheduler_output.head_token] = {
                 "num_tokens_padded": num_tokens_padded,
                 "num_tokens_across_dp": num_tokens_across_dp,
                 "attn_metadata": attn_metadata,
@@ -2812,6 +2843,38 @@ class NPUModelRunner(GPUModelRunner):
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+
+        # [ascend insert] Chunk-prior mid-chunk PL: prefill is not
+        # complete, so there is no valid token to sample (the logits
+        # predict a prompt token that belongs to the next chunk).  Skip
+        # sampling and return an empty output.  This also prevents
+        # num_output_placeholders -- which vLLM only reserves for the
+        # last prefill chunk (AsyncScheduler._update_after_schedule skips
+        # is_prefill_chunk) -- from being decremented below zero in
+        # _update_request_with_output.  segment_e / KV-cache write
+        # already happened in execute_model, so skipping sampling here
+        # does not affect prefill correctness.
+        if (
+            self._edge_cloud_enabled
+            and scheduler_output.batch_type == BatchType.PREFILL_LAST
+            and not getattr(scheduler_output, "is_last_prefill_chunk", True)
+        ):
+            # Mid chunk: no valid token to sample. Return a placeholder that
+            # carries the req_id mapping (so super().update_from_output can
+            # look up req_index for every req_id in num_scheduled_tokens)
+            # but leaves sampled_token_ids empty (default []), so
+            # generated_token_ids is [] and _update_request_with_output is
+            # skipped -- num_output_placeholders is not decremented. Do NOT
+            # return EMPTY_MODEL_RUNNER_OUTPUT here: its req_id_to_index is
+            # empty, which raises KeyError in update_from_output.
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            output = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            )
+            if kv_connector_output and not kv_connector_output.is_empty():
+                output.kv_connector_output = kv_connector_output
+            return output
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
