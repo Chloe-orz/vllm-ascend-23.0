@@ -4154,9 +4154,21 @@ class NPUModelRunner(GPUModelRunner):
                 # buffer so residual is always present.
                 for k, v in intermediate_tensors.items():
                     copy_len = num_tokens
-                    self.intermediate_tensors[k][:copy_len].copy_(
-                        v[:copy_len], non_blocking=True
-                    )
+                    dst = self.intermediate_tensors[k][:copy_len]
+                    # Senders transmit only real tokens (edge may send fewer
+                    # than the cloud's padded num_tokens, e.g. a small chunk
+                    # under chunk_prefill_prior padded up to a cudagraph size).
+                    # Copy only the rows actually received and zero-fill the
+                    # graph padding tail -- mirrors the non-embedding_only
+                    # branch below.  Without this min(), v[:copy_len] indexes
+                    # past v's real rows (aclnnInplaceCopy error 161002).
+                    recv_len = min(v.shape[0], copy_len)
+                    if recv_len:
+                        dst[:recv_len].copy_(
+                            v[:recv_len], non_blocking=True
+                        )
+                    if recv_len < copy_len:
+                        dst[recv_len:].zero_()
                 return IntermediateTensors(
                     {
                         k: v[:num_tokens]
