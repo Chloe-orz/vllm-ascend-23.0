@@ -187,6 +187,11 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        # Import edge-cloud model patches early so that ModelConfig sees the
+        # updated supports_pp flags before is_pp_supported_model is checked.
+        import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
+        import vllm_ascend.patch.models.eagle3_edge_cloud  # noqa: F401
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
@@ -650,7 +655,17 @@ class NPUPlatform(Platform):
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             if not vllm_config.compilation_config.pass_config.enable_sp:
                 parallel_config.all2all_backend = "flashinfer_all2allv"
-            if is_310p():
+            if (parallel_config.is_shared_model_edge
+                    and parallel_config.is_edge_node):
+                # Shared-model edge-cloud topology: the edge side
+                # uses a dedicated edge worker class that lets
+                # multiple DP-rank edge workers live in a single
+                # process and share one ``nn.Module`` replica.
+                # The cloud side keeps using NPUWorker.
+                parallel_config.worker_cls = (
+                    "vllm_ascend.worker.edge_cloud."
+                    "shared_model_edge_worker.SharedModelEdgeWorker")
+            elif is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:
                 logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
