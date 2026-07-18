@@ -69,7 +69,13 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import (
+    edge_cloud_broadcast_recv,
+    edge_cloud_isend_tensor_dict,
+    get_edge_cloud_tensor_meta,
+    init_ascend_model_parallel,
+    init_edge_cloud_tensor_meta,
+)
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
@@ -586,6 +592,29 @@ class NPUWorker(WorkerBase):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
+        # Initialize edge-cloud tensor metadata for optimized communication
+        # (skips inter-node metadata sync in irecv_tensor_dict/isend_tensor_dict)
+        if getattr(self.model_runner, '_edge_cloud_enabled', False):
+            hidden_size = self.model_config.hf_text_config.hidden_size
+            # Derive dtype directly from model config (same as MindIE's
+            # self.config.torch_dtype from config.json), instead of
+            # requiring a separate user-configured hidden_dtype.
+            # model_config.dtype is a torch.dtype resolved from the
+            # model's config.json torch_dtype field by _get_and_verify_dtype().
+            hidden_dtype = self.model_config.dtype
+            has_residual = _detect_has_residual(self.model_config)
+            # DeepSeek V4 uses hc_mult > 1 (HC mechanism produces 3D
+            # intermediate tensors).  Standard models (Qwen3.5, Llama,
+            # etc.) do not have hc_mult, defaulting to 1 (2D tensors).
+            hc_mult = getattr(self.model_config.hf_text_config, 'hc_mult', 1)
+            init_edge_cloud_tensor_meta(
+                hidden_size=hidden_size,
+                hidden_dtype=hidden_dtype,
+                has_residual=has_residual,
+                hc_mult=hc_mult,
+                mode=self.model_runner.edge_cloud_cfg.mode,
+            )
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -651,6 +680,25 @@ class NPUWorker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
+
+        # For embedding_only edge, the edge device does not actually store KV
+        # cache tensors. Return a very large virtual value so that
+        # get_kv_cache_configs() does not clamp num_blocks to the edge's
+        # (small) available memory. The real num_blocks is determined by cloud.
+        if (
+            self.model_runner.edge_cloud_cfg.enabled
+            and self.model_runner.edge_cloud_cfg.mode == "embedding_only"
+            and self.model_runner.edge_cloud_cfg.role == "edge"
+        ):
+            virtual_memory = 1 << 40  # 1 TiB virtual
+            logger.info(
+                "[EdgeCloud] embedding_only edge using virtual available_memory "
+                "(%.2f GiB) instead of real %.2f GiB to avoid limiting cloud "
+                "KV cache size.",
+                GiB(virtual_memory),
+                GiB(self.available_kv_cache_memory_bytes),
+            )
+            self.available_kv_cache_memory_bytes = virtual_memory
 
         logger.debug(profile_result)
         logger.info_once(

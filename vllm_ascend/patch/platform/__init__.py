@@ -14,12 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mla_prefill_backend  # noqa
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa
 import vllm_ascend.patch.platform.patch_use_v2_model_runner  # noqa
+from vllm_ascend import envs
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 if not is_310p():
@@ -40,6 +43,9 @@ import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 
+if os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1") or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
+    import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
+
 # Unconditional: AscendMultiprocExecutor/AscendWorkerProc must replace the
 # upstream classes in every process (edge leader, cloud PassiveEngineCore,
 # workers).  Gating on VLLM_PP_NON_LEADER_ENGINE_CORE breaks the cloud
@@ -55,8 +61,39 @@ import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
+import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
+import vllm_ascend.patch.platform.patch_deepseek_v4_thinking  # noqa
+
+# PD separation / edge-cloud scheduling patches
+import vllm_ascend.patch.platform.patch_engine_core  # noqa
+import vllm_ascend.patch.platform.patch_pd_scheduler_shim  # noqa
+import vllm_ascend.patch.platform.patch_serve_headless  # noqa
+import vllm_ascend.patch.platform.patch_qwen3_5_config  # noqa
 
 if not vllm_version_is("0.23.0"):
     import vllm_ascend.patch.platform.patch_fused_moe  # noqa
     import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
+
+# Edge-cloud / scheduling additions (kept incremental; baseline imports above
+# are preserved).
+import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
+import vllm_ascend.patch.platform.patch_pd_scheduler_shim  # noqa
+import vllm_ascend.patch.platform.patch_serve_headless  # noqa
+import vllm_ascend.patch.platform.patch_deepseek_v4_thinking  # noqa
+import vllm_ascend.patch.platform.patch_qwen3_5_config  # noqa
+
+if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
+    import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
+    import vllm_ascend.patch.platform.patch_speculative_config  # noqa
+
+# EngineCore PD-separation / edge-cloud / passive-PP hooks. Unconditionally
+# loaded — every behavior change inside the patch is gated at runtime by the
+# ``ascend_config.edge_cloud_config.pd_separation.enabled`` /
+# ``parallel_config.is_edge_node`` checks, so when none of those are on the
+# patched code paths are byte-equivalent to
+# upstream vLLM. Loading must be unconditional because the leader (edge)
+# process has no env-level signal at platform-init time that PD/edge-cloud is
+# requested — the flag is set on
+# the VllmConfig only and reaches us via ``EngineCore.__init__``.
+import vllm_ascend.patch.platform.patch_engine_core  # noqa

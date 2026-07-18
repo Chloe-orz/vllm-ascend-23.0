@@ -432,6 +432,28 @@ class NPUPlatform(Platform):
         return method is not None and "mtp" in str(method).lower()
 
     @classmethod
+    def _configure_pd_separation_scheduler(
+        cls, vllm_config: VllmConfig, ascend_config
+    ) -> None:
+        """Configure scheduler_cls for PD separation mode."""
+        edge_cloud = getattr(ascend_config, "edge_cloud_config", None)
+        if edge_cloud is None:
+            return
+        pd_sep = getattr(edge_cloud, "pd_separation", None)
+        if pd_sep is None or not getattr(pd_sep, "enabled", False):
+            return
+        # Determine the scheduler class based on async scheduling
+        if vllm_config.scheduler_config.async_scheduling:
+            scheduler_cls = (
+                "vllm_ascend.core.pd_separated_scheduler.AsyncPDSeparatedScheduler"
+            )
+        else:
+            scheduler_cls = (
+                "vllm_ascend.core.pd_separated_scheduler.PDSeparatedScheduler"
+            )
+        vllm_config.scheduler_config.scheduler_cls = scheduler_cls
+
+    @classmethod
     def _validate_pd_pp_mtp_config(cls, vllm_config: VllmConfig) -> None:
         speculative_config = getattr(vllm_config, "speculative_config", None)
         if not cls._is_mtp_speculative_config(speculative_config):
@@ -478,6 +500,11 @@ class NPUPlatform(Platform):
         cls._fix_incompatible_config(vllm_config)
 
         ascend_config = init_ascend_config(vllm_config)
+
+        from vllm_ascend.scheduler_conflicts import validate_pd_separation_scheduler_conflicts
+
+        validate_pd_separation_scheduler_conflicts(vllm_config, ascend_config)
+        cls._configure_pd_separation_scheduler(vllm_config, ascend_config)
 
         from vllm_ascend.logger import configure_ascend_file_logging
         from vllm_ascend.logger import configure_ascend_logging
