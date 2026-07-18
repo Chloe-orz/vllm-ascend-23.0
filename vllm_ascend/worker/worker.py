@@ -17,9 +17,13 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
+from enum import Enum
+from typing import Any
 import copy
 import gc
 import logging
+import threading
+import time
 from types import NoneType
 
 import torch
@@ -46,7 +50,12 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    BatchType,
+    GrammarOutput,
+    HiddenChannelType,
+    SchedulerOutput,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -73,6 +82,13 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+class SchedulerBatchType(Enum):
+    """Enum for the batch type of a SchedulerOutput step."""
+    ALL_PREFILL = "ALL_PREFILL"
+    ALL_DECODE = "ALL_DECODE"
+    PREFILL_DECODE_MIXED = "PREFILL_DECODE_MIXED"
+
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -187,6 +203,28 @@ class NPUWorker(WorkerBase):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.23.0; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
+        self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
+
+        # [CHER/EHER] Cloud-side hidden early-receive (and its edge-side
+        # mirror) cache.  The guard thread posts irecv ahead of the batch's
+        # execute_model (keyed by head_token); execute_model pops the cached
+        # AsyncIntermediateTensors and runs wait_for_comm() (which both
+        # waits the HCCL handles and runs comm_postprocess, the latter being
+        # a TP collective that must run inside execute_model on all ranks).
+        # Shared by CHER (cloud) and EHER (edge) since the recv primitives
+        # are direction-agnostic (driven by hidden_channel + num_tokens).
+        self._early_recv_handles: dict[str, AsyncIntermediateTensors] = {}
+        self._early_recv_lock = threading.Lock()
+        # head_tokens already consumed by busy_loop (get_or_post_early_recv).
+        # Prevents the guard thread from posting a duplicate (orphan) irecv
+        # when its hint arrives after busy_loop already posted its own.
+        self._early_recv_consumed: set[str] = set()
+        # Whether cloud-side hidden early-receive (CHER) is active on this
+        # worker.  CHER is a built-in part of PD-separation masking, so on a
+        # PD-separated cloud worker (local_rank==0) this is always True; False
+        # (edge role, non-rank0, or PD off) => the legacy sync recv path is
+        # used.
+        self._cloud_hidden_early_recv_enabled: bool = False
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -624,15 +662,30 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
+        layer_slice_info: Any = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
-        # enable msMonitor to monitor the performance of vllm-ascend
-        if get_ascend_config().msmonitor_use_daemon:
+        batch_type = scheduler_output.batch_type
+        use_alt_group = (batch_type == SchedulerBatchType.ALL_DECODE)
+
+        if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
 
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
+        # Edge-cloud PD separation can keep one outstanding send per hidden
+        # channel.  Only wait on the channel about to be reused; legacy PP waits
+        # for all outstanding sends to preserve the original behavior.
+        if self.model_runner._edge_cloud_enabled:
+            bt = scheduler_output.batch_type
+            if bt in (
+                BatchType.PREFILL_FIRST,
+                BatchType.DECODE_FIRST,
+                BatchType.PREFILL_LAST,
+                BatchType.DECODE_LAST,
+            ):
+                self._wait_pp_send_work(self._hidden_channel_for(scheduler_output))
+            else:
+                self._wait_pp_send_work()
+        else:
+            self._wait_pp_send_work()
 
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
@@ -656,7 +709,17 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
-        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        output = self.model_runner.execute_model(
+            scheduler_output, intermediate_tensors,
+            layer_slice_info=layer_slice_info,
+        )
+
+        is_last_slice = (
+            layer_slice_info is None or layer_slice_info.is_last_slice
+        )
+        if not is_last_slice:
+            return None
+
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 
@@ -678,8 +741,6 @@ class NPUWorker(WorkerBase):
         if not kv_connector_output:
             return None
 
-        # In case of PP with kv transfer, we need to pass through the
-        # kv_connector_output
         if not kv_connector_output.finished_sending and not kv_connector_output.finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)

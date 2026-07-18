@@ -19,6 +19,7 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -60,7 +61,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -171,6 +172,7 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_snapshot_to_gpu
+
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -326,6 +328,28 @@ class NPUModelRunner(GPUModelRunner):
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
+
+        # Layerwise chunking: state saved by chunk 0 and consumed by
+        # continuation chunks (1..N-1).
+        self._layerwise_intermediate: IntermediateTensors | None = None
+        self._layerwise_positions: torch.Tensor | None = None
+        self._layerwise_attn_metadata: Any = None
+        self._layerwise_num_tokens_padded: int = 0
+        self._layerwise_num_tokens_across_dp: int | None = None
+        self._layerwise_batch_desc: Any = None
+        self._layerwise_scheduler_output: Any = None
+        # Additional state needed by the last chunk on the last PP rank
+        # for logits computation and execute_model_state setup.
+        self._layerwise_logits_indices: torch.Tensor | None = None
+        self._layerwise_spec_decode_metadata: Any = None
+        self._layerwise_spec_decode_common_attn_metadata: Any = None
+        self._layerwise_ec_connector_output: Any = None
+        self._layerwise_cudagraph_stats: Any = None
+
+        # Edge-cloud PD-separation: suspended head-segment states keyed by
+        # head_token.  Each entry holds the minimal context needed to verify
+        # that a later tail-segment batch matches its head segment.
+        self._pending_head_states: dict[str, "HeadState"] = {}
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -572,6 +596,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
+        # [PD-FIX] Set by execute_model when a stale tail segment (PL/DL) is
+        # discarded (all reqs already popped from self.requests). sample_tokens
+        # checks this to return EMPTY instead of None (which would trigger
+        # "unexpected error" in _patched_step_with_batch_queue).
+        self._tail_segment_discarded: bool = False
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
@@ -1948,6 +1977,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
+        layer_slice_info: Any = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
             if self.routed_experts_initialized:
@@ -2303,6 +2333,36 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
+
+        # Save per-step state for layer slice continuation.
+        if layer_slice_info is not None and not layer_slice_info.is_last_slice:
+            self._layerwise_positions = positions
+            # Deep-clone device tensors inside attn_metadata to prevent
+            # corruption by subsequent decode batches.  The metadata's
+            # device tensors (query_start_loc, state_indices, etc.) are
+            # views into shared common_attn_metadata buffers that get
+            # rebuilt on every batch.  If a decode batch runs between
+            # two prefill slices, it overwrites these buffers in-place,
+            # corrupting the saved metadata.  Cloning at save time
+            # preserves the correct prefill values.
+            if isinstance(attn_metadata, dict):
+                self._layerwise_attn_metadata = {
+                    k: _clone_gdn_attn_metadata(v) for k, v in attn_metadata.items()
+                }
+            elif attn_metadata is not None:
+                self._layerwise_attn_metadata = _clone_gdn_attn_metadata(attn_metadata)
+            else:
+                self._layerwise_attn_metadata = attn_metadata
+            self._layerwise_num_tokens_padded = num_tokens_padded
+            self._layerwise_num_tokens_across_dp = num_tokens_across_dp
+            self._layerwise_batch_desc = batch_desc
+            self._layerwise_scheduler_output = scheduler_output
+            self._layerwise_logits_indices = logits_indices
+            self._layerwise_spec_decode_metadata = spec_decode_metadata
+            self._layerwise_spec_decode_common_attn_metadata = spec_decode_common_attn_metadata
+            self._layerwise_ec_connector_output = ec_connector_output
+            self._layerwise_cudagraph_stats = cudagraph_stats
+
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2330,7 +2390,9 @@ class NPUModelRunner(GPUModelRunner):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                num_tokens_padded, input_ids, positions, intermediate_tensors,
+                inputs_embeds, layer_slice_info=layer_slice_info,
+                **model_kwargs
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
@@ -2430,6 +2492,28 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        if self._edge_cloud_enabled and not self.parallel_config.is_edge_node:
+            # Cloud workers do not own segment_e / LM head / sampler in the
+            # edge-cloud PD-separation topology. When the edge EngineCore
+            # issues sample_tokens via collective_rpc, every worker dequeues
+            # the request, but only the edge (rank 0) actually samples and
+            # writes back to the executor's reply mq. Cloud workers must
+            # return a no-op output immediately so the broadcast protocol
+            # converges and no PP/HCCL primitive is touched here.
+            self.execute_model_state = None
+            self.kv_connector_output = None
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        # [PD-FIX] execute_model discarded a stale tail segment (all reqs
+        # already popped). Skip sampling and return EMPTY so update_from_output's
+        # is_finished()/None guard skips those reqs (returning None here would
+        # trigger "unexpected error" in _patched_step_with_batch_queue).
+        if self._tail_segment_discarded:
+            self._tail_segment_discarded = False
+            self.execute_model_state = None
+            self.kv_connector_output = None
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
         pp = get_pp_group()
@@ -2563,6 +2647,38 @@ class NPUModelRunner(GPUModelRunner):
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+
+        # [ascend insert] Chunk-prior mid-chunk PL: prefill is not
+        # complete, so there is no valid token to sample (the logits
+        # predict a prompt token that belongs to the next chunk).  Skip
+        # sampling and return an empty output.  This also prevents
+        # num_output_placeholders -- which vLLM only reserves for the
+        # last prefill chunk (AsyncScheduler._update_after_schedule skips
+        # is_prefill_chunk) -- from being decremented below zero in
+        # _update_request_with_output.  segment_e / KV-cache write
+        # already happened in execute_model, so skipping sampling here
+        # does not affect prefill correctness.
+        if (
+            self._edge_cloud_enabled
+            and scheduler_output.batch_type == BatchType.PREFILL_LAST
+            and not getattr(scheduler_output, "is_last_prefill_chunk", True)
+        ):
+            # Mid chunk: no valid token to sample. Return a placeholder that
+            # carries the req_id mapping (so super().update_from_output can
+            # look up req_index for every req_id in num_scheduled_tokens)
+            # but leaves sampled_token_ids empty (default []), so
+            # generated_token_ids is [] and _update_request_with_output is
+            # skipped -- num_output_placeholders is not decremented. Do NOT
+            # return EMPTY_MODEL_RUNNER_OUTPUT here: its req_id_to_index is
+            # empty, which raises KeyError in update_from_output.
+            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            output = ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            )
+            if kv_connector_output and not kv_connector_output.is_empty():
+                output.kv_connector_output = kv_connector_output
+            return output
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -3262,6 +3378,7 @@ class NPUModelRunner(GPUModelRunner):
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        layer_slice_info: Any = None,
         **model_kwargs: dict[str, Any],
     ):
         assert self.model is not None

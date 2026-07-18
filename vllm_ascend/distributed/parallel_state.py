@@ -17,6 +17,66 @@ _EMBED_TP: GroupCoordinator | None = None
 # flashcomm specific groups
 _FLASHCOMM2_OTP: GroupCoordinator | None = None
 _FLASHCOMM2_ODP: GroupCoordinator | None = None
+
+# ------------------------------------------------------------------ #
+# Per-channel dedicated streams for edge-cloud P2P (isend/irecv).     #
+# ------------------------------------------------------------------ #
+# Each hidden channel (PREFILL_1, PREFILL_2) gets its own NPU stream
+# so that isend/irecv on different channels don't serialize on the
+# default stream.  Without this, a guard-thread early-posted irecv on
+# prefill_2 can block a busy_loop isend on prefill_1 (both on the
+# default stream, FIFO), creating a circular deadlock at 2P request
+# boundaries:
+#   cloud  stream: [irecv hidden_P2 (prefill_2)] [isend result_P1 (prefill_1)]
+#   edge   stream: [irecv result_P1 (prefill_1)] [isend hidden_P2 (prefill_2)]
+# TP-broadcast (intra-node collective) stays on the default stream --
+# it runs inside execute_model's wait_for_comm() on all TP ranks
+# synchronized; only the cross-node P2P (isend/irecv) uses the
+# per-channel stream, and handle.wait() syncs back to the default
+# stream before the broadcast.
+_hidden_channel_streams: dict[Any, Any] = {}
+_hidden_channel_stream_lock = threading.Lock()
+
+
+def _get_hidden_channel_stream(channel: Any) -> Any:
+    """Return the dedicated NPU stream for *channel*, creating it lazily.
+    Thread-safe (double-checked locking)."""
+    stream = _hidden_channel_streams.get(channel)
+    if stream is not None:
+        return stream
+    with _hidden_channel_stream_lock:
+        stream = _hidden_channel_streams.get(channel)
+        if stream is None:
+            stream = torch.npu.Stream()
+            _hidden_channel_streams[channel] = stream
+            logger.info(
+                "[edge-cloud] created dedicated stream for hidden "
+                "channel %s", channel,
+            )
+        return stream
+
+
+@contextlib.contextmanager
+def _hidden_channel_stream_ctx(
+    channel: Any | None, *, wait_for_default: bool = True,
+):
+    """Switch to the channel's dedicated stream for P2P isend/irecv.
+
+    *wait_for_default* – True for the **send** path (the tensor being
+    sent was produced on the default/compute stream, so the channel
+    stream must wait for it).  False for the **recv** path (writing
+    into a freshly allocated buffer, no prior producer to wait for).
+    When *channel* is None (legacy non-hidden-channel path) this is a
+    no-op (stays on the current/default stream).
+    """
+    if channel is None:
+        yield
+        return
+    stream = _get_hidden_channel_stream(channel)
+    if wait_for_default:
+        stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        yield
 _FC3_QUANT_X: GroupCoordinator | None = None
 
 # shard_weight across rank groups
@@ -497,6 +557,21 @@ def init_ascend_model_parallel(
             # For standard tp, use global tp group_ranks
             tp_group_ranks = all_ranks.view(-1, global_tp_size)
             _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
+
+    # Create alternate PP groups for dual-channel communication.
+    # Primary (device_group/cpu_group): used for non-ALL_DECODE batches
+    #   (ALL_PREFILL + PREFILL_DECODE_MIXED).
+    # Alternate (alt_device_group/alt_cpu_group): used for ALL_DECODE batches.
+    # Both groups cover the same PP ranks but are independent ProcessGroup
+    # instances, allowing the HCCL backend to maintain separate communication
+    # streams and avoid head-of-line blocking between decode and
+    # prefill/mixed traffic.
+    if global_pp_size > 1:
+        pp_group = get_pp_group()
+        backend = torch.distributed.get_backend(get_world_group().device_group)
+        pp_group.create_alternate_groups(backend)
+        if hasattr(pp_group, "create_hidden_channel_groups"):
+            pp_group.create_hidden_channel_groups(backend)
 
 
 def model_parallel_initialized():
