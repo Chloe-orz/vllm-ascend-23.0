@@ -907,6 +907,9 @@ class EdgeCloudConfig:
         self.transfer_config: dict = user_config.get("transfer_config", {})
         self.hidden_dtype: str = user_config.get("hidden_dtype", "bf16")
         self.cloud_enable_sp: bool = user_config.get("cloud_enable_sp", False)
+        self.pd_separation = PDSeparationConfig(
+            user_config.get("pd_separation", {}) or {}
+        )
 
         # Keep a handle to vllm_config so _validate() can inspect orthogonal
         # parallel features (PCP/DCP) that are incompatible with edge-cloud's
