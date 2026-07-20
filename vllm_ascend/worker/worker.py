@@ -724,6 +724,28 @@ class NPUWorker(WorkerBase):
             scheduler_output, layer_slice_info, use_alt_group
         )
 
+    def _record_pp_send_work(
+        self, handles: list[Handle], channel: HiddenChannelType | None = None
+    ) -> None:
+        if channel is None:
+            self._pp_send_work = handles
+        else:
+            self._pp_send_work_by_channel[channel.value] = handles
+
+    def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
+        if channel is None:
+            for handle in self._pp_send_work:
+                handle.wait()
+            self._pp_send_work = []
+            for handles in self._pp_send_work_by_channel.values():
+                for handle in handles:
+                    handle.wait()
+            self._pp_send_work_by_channel.clear()
+            return
+        handles = self._pp_send_work_by_channel.pop(channel.value, [])
+        for handle in handles:
+            handle.wait()
+
     def _hidden_channel_for(self, scheduler_output: "SchedulerOutput") -> HiddenChannelType:
         channel = scheduler_output.hidden_channel
         if channel is not None:
