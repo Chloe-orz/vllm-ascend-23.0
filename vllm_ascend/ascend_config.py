@@ -295,12 +295,26 @@ class AscendConfig:
 
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+
+        # Whether to use NPU device group for DP metadata all_reduce.
+        # "True": use NPU device group, "False" (default): use CPU group.
+        self.dp_allreduce_on_npu = additional_config.get("dp_allreduce_on_npu", False)
+
         edge_cloud_config = additional_config.get("edge_cloud_config", {})
         self.edge_cloud_config = EdgeCloudConfig(edge_cloud_config, vllm_config)
         self._check_edge_cloud_spec_decode(vllm_config)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
+
+        self.hamming_sparse = additional_config.get("hamming_sparse", {"enabled": False, "sparse_json_location": ""})
+        self.enable_hamming_sparse = self.hamming_sparse["enabled"]
+        self.sparse_json = self.hamming_sparse["sparse_json_location"]
+        self._check_enable_hamming_sparse()
+
+        # Enable Block Verify and Entropy Verify in Rejection Sampler
+        rejection_sampler_config = additional_config.get("rejection_sampler_config", {})
+        self.rejection_sampler_config = RejectionSamplerConfig(rejection_sampler_config)
 
         self.hamming_sparse = additional_config.get("hamming_sparse", {"enabled": False, "sparse_json_location": ""})
         self.enable_hamming_sparse = self.hamming_sparse["enabled"]
