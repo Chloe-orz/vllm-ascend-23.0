@@ -13,13 +13,10 @@
  * \brief
  */
 
-#if (__CCE_AICORE__ == 220)
-#include "arch32/compressor_kernel.h"
-#include "arch32/compressor_kernel_perf.h"
-#else
-#include "arch35/compressor_kernel.h"
-#include "arch35/compressor_kernel_full_load.h"
-#endif
+#include "compressor_kernel.h"
+// #if (__CCE_AICORE__ == 220)
+#include "compressor_kernel_perf.h"
+// #endif
 
 using namespace Compressor;
 
@@ -62,10 +59,16 @@ __global__ __aicore__ void compressor(
     constexpr auto ropeDtype = static_cast<ROPE_DTYPE>(RopeDType);
     constexpr auto coff = static_cast<COFF>(Coff);
     constexpr auto rotaryMode = static_cast<ROTARY_MODE>(RotaryMode);
-#if (__CCE_AICORE__ != 220)
     constexpr auto cacheMode = static_cast<CACHE_MODE>(CacheMode);
-#endif
-#if (__CCE_AICORE__ == 220)
+// #if (__CCE_AICORE__ == 220)
+//     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::PERF) {
+//         INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, coff, rotaryMode);
+//     } else {
+//         INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
+//     }
+// #else
+//     INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernel, xLayout, xDtype, coff, rotaryMode);
+// #endif
     if constexpr (static_cast<TEMPLATE_ID>(TemplateId) == TEMPLATE_ID::PERF) {
         INVOKE_COMPRESSOR_GENERAL_OP_IMPL(CompressorKernelPerf, xLayout, xDtype, ropeDtype, coff, rotaryMode);
     } else {
