@@ -940,6 +940,27 @@ def _pad_num_tokens_to_tp_multiple(num_tokens: int) -> int:
     return num_tokens + (tp_size - remainder)
 
 
+def edge_cloud_send_tensor_dict(
+    tensor_dict: dict[str, torch.Tensor | Any],
+    dst: int | None = None,
+    num_tokens: int | None = None,
+    channel=None,
+) -> list[Handle]:
+    """Synchronous send — isend + wait.
+
+    Convenience wrapper around :func:`edge_cloud_isend_tensor_dict` for
+    callers that need a blocking send.  Returns the list of handles (all
+    completed) so callers can inspect them without additional waits.
+    """
+    handles = edge_cloud_isend_tensor_dict(
+        tensor_dict, dst=dst, num_tokens=num_tokens
+    )
+    for handle in handles:
+        if handle is not None:
+            handle.wait()
+    return handles
+
+
 def edge_cloud_irecv_tensor_dict(
     num_tokens: int,
     src: int | None = None,

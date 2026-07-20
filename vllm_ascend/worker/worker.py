@@ -69,6 +69,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
     edge_cloud_isend_tensor_dict,
+    edge_cloud_send_tensor_dict,
     get_edge_cloud_tensor_meta,
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
