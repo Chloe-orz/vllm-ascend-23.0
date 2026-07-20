@@ -155,39 +155,6 @@ def npugraph_ex_compile(
         config = torchair.CompilerConfig()
         _configure_backend(config, ascend_compilation_config, vllm_config)
         npugraph_ex = torchair.get_npu_backend(compiler_config=config)
-
-        def patched_get_compiled_gm(self, graph, example_inputs):
-            compiled_gm = _original_get_compiled_gm(self, graph, example_inputs)
-            if cache_path:
-                py_code = compiled_gm.get_code()
-                if py_code:
-                    # Triton kernel indices (kernel_side_table) are registered in-process
-                    # at compile time and are not serializable across process boundaries.
-                    # Graphs containing triton_kernel_wrapper calls must not be cached,
-                    # because loading the py_code in a new process will hit an
-                    # AssertionError in kernel_side_table.get_kernel().
-                    if "triton_kernel_wrapper" in py_code:
-                        logger.info(
-                            "Skipping npugraph_ex cache for graph containing Triton kernels "
-                            "(kernel_side_table indices are process-local): %s",
-                            cache_path,
-                        )
-                    else:
-                        os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                        with open(cache_path, "w") as f:
-                            f.write(py_code)
-                        logger.info("Saved compiled graph to cache: %s", cache_path)
-            return compiled_gm
-
-        nfx._NpuFxCompiler._get_compiled_gm = patched_get_compiled_gm
-        backend = nge.get_npu_backend(compiler_config=config)
-        # torch.compile requires the output of the fx graph to be a tuple
-        if not graph_returns_tuple(graph):
-            compiled_fn = make_graph_return_tuple(graph, example_inputs, backend)
-        else:
-            compiled_fn = backend(graph, example_inputs)
-        nfx._NpuFxCompiler._get_compiled_gm = _original_get_compiled_gm
-        return compiled_fn, (key, cache_path)
     except ImportError:
         import torchair
 

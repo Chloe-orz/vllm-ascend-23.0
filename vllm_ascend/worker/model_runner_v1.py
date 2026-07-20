@@ -94,8 +94,6 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
-from vllm.v1.worker.utils import select_common_block_size
-
 from vllm_ascend.utils import vllm_version_is
 
 if not vllm_version_is("0.20.2"):
@@ -193,7 +191,8 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.pcp_utils import PCPManager
+from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
+from vllm_ascend.worker.utils import copy_snapshot_to_gpu
 
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
@@ -206,8 +205,6 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 )
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
-
-from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
