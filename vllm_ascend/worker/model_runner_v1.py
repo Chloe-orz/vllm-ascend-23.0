@@ -4701,12 +4701,6 @@ class NPUModelRunner(GPUModelRunner):
                 use_graph, forward_context, layer_slice_info=layer_slice_info,
                 **model_kwargs,
             )
-        else:
-            return self._edge_cloud_forward_cloud(
-                num_tokens_padded, positions, intermediate_tensors,
-                use_graph, forward_context, layer_slice_info=layer_slice_info,
-                **model_kwargs,
-            )
 
     def _edge_cloud_forward_edge(
         self,
