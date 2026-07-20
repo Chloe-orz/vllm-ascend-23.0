@@ -539,6 +539,17 @@ class PassiveScheduler:
         self._prefill_middle_throttle_started_at = None
 
     def _can_fallback_to_prefill_in_decode_state(self) -> bool:
+        # Optimization: when the next prefill to schedule has
+        # cloud_suggest_slicing=False, the edge signaled "no running decode
+        # in flight" -> decode is not about to arrive, so waiting (throttling)
+        # for it is pure idle.  Skip the throttle and fall back to prefill
+        # immediately.  This also means the P-middle is unsliced (see
+        # _slice_for), so there is no slice interleaving to protect either.
+        if self.ready_prefills and not getattr(
+            self.ready_prefills[0], "cloud_suggest_slicing", False
+        ):
+            self._clear_prefill_middle_throttle()
+            return True
         started_at = self._prefill_middle_throttle_started_at
         if started_at is None:
             return True
@@ -649,7 +660,15 @@ class PassiveScheduler:
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE
                 )
-                self._start_prefill_middle_throttle()
+                # Only throttle-for-decode when the prefill is sliced
+                # (cloud_suggest_slicing=True): slicing means a decode is in
+                # flight worth waiting for; an unsliced prefill signals no
+                # decode is coming, so skip the throttle (see
+                # _can_fallback_to_prefill_in_decode_state).
+                if getattr(
+                    self.ready_prefills[0], "cloud_suggest_slicing", False
+                ):
+                    self._start_prefill_middle_throttle()
                 return self._build_batch(self.ready_prefills.popleft())
             if self.ready_decodes:
                 self._clear_prefill_middle_throttle()
@@ -666,7 +685,16 @@ class PassiveScheduler:
                     self._start_prefill_middle_throttle()
                     return self._build_active_prefill_slice_batch()
                 if self.ready_prefills:
-                    self._start_prefill_middle_throttle()
+                    # Only start the post-prefill decode-wait throttle when the
+                    # prefill was sliced (cloud_suggest_slicing=True): slicing
+                    # means a decode is in flight and worth waiting for.  An
+                    # unsliced prefill (cloud_suggest_slicing=False) signals no
+                    # decode is coming, so throttle would be pure idle.
+                    if getattr(
+                        self.ready_prefills[0],
+                        "cloud_suggest_slicing", False
+                    ):
+                        self._start_prefill_middle_throttle()
                     return self._build_batch(self.ready_prefills.popleft())
             else:
                 return ScheduledBatch.empty()
