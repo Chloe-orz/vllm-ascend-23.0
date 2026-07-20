@@ -44,7 +44,7 @@ def _reset_meta():
 def test_init_meta_merge_enabled_2d():
     """Standard 2D case: hidden_states + residual cat along dim=-1."""
     with patch.object(
-        ps.envs_ascend := __import__(
+        __import__(
             "vllm_ascend.envs", fromlist=["VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD"]
         ),
         "VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD",
@@ -235,7 +235,7 @@ def test_init_meta_direction_aware_embedding_only():
 def test_init_meta_direction_aware_head_tail():
     """head_tail: both directions carry residual (identical)."""
     with patch.object(
-        ps.envs_ascend := __import__(
+        __import__(
             "vllm_ascend.envs", fromlist=["VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD"]
         ),
         "VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD",

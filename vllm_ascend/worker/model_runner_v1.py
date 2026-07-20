@@ -4647,49 +4647,6 @@ class NPUModelRunner(GPUModelRunner):
             and self.edge_cloud_cfg.enable_decode_graph
         )
 
-        model_inputs: dict[str, Any] = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "intermediate_tensors": intermediate_tensors,
-            "inputs_embeds": inputs_embeds,
-            **model_kwargs,
-        }
-
-        # Layer-sliced execution: inject the layer range for the current
-        # slice so the model forward only runs those layers.
-        if layer_slice_info is not None:
-            slice_start = layer_slice_info.start_layer
-            slice_end = layer_slice_info.end_layer
-            # Edge-cloud cloud: the slice indices from PassiveScheduler are
-            # relative to the cloud's local middle layers (0..num_local_layers).
-            # forward_edge_cloud_segment operates on the *global* layer list
-            # (0..num_hidden_layers) because the model keeps all layers
-            # (non-local ones are PPMissingLayer).  Add head_k offset so the
-            # slice covers the correct global range.
-            if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
-                slice_start += self.head_k
-                slice_end += self.head_k
-            model_inputs["layer_slice_start"] = slice_start
-            model_inputs["layer_slice_end"] = slice_end
-            # Non-last slices, and the last slice on a non-final PP rank,
-            # must return IntermediateTensors.  The last slice on the last
-            # PP rank should run norm + lm_head and return logits.
-            if not layer_slice_info.is_last_slice or not get_pp_group().is_last_rank:
-                model_inputs["layer_slice_return_intermediate"] = True
-
-        if self._edge_cloud_enabled:
-            if self.edge_cloud_cfg.role == "edge":
-                segment = (
-                    self.segment_a_wrapper
-                    if intermediate_tensors is None
-                    else self.segment_e_wrapper
-                )
-            else:
-                segment = self.segment_c_wrapper
-            run_model = partial(segment, **model_inputs)
-        else:
-            run_model = partial(self.model, **model_inputs)
-
         if self.edge_cloud_cfg.role == "edge":
             return self._edge_cloud_forward_edge(
                 num_tokens_padded, input_ids, positions, intermediate_tensors,
@@ -4701,84 +4658,6 @@ class NPUModelRunner(GPUModelRunner):
                 use_graph, forward_context, layer_slice_info=layer_slice_info,
                 **model_kwargs,
             )
-
-    def _edge_cloud_forward_edge(
-        self,
-        num_tokens_padded: int,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor | None,
-        intermediate_tensors: IntermediateTensors | None,
-        inputs_embeds: torch.Tensor | None,
-        use_graph: bool,
-        forward_context,
-        **model_kwargs: dict[str, Any],
-    ):
-        """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
-        seg_a = self.segment_a_wrapper if use_graph else self.segment_a
-        seg_e = self.segment_e_wrapper if use_graph else self.segment_e
-        seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
-        seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
-
-        if intermediate_tensors is None:
-            # Step 1：执行 Segment A（embedding + 首 head_k 层）
-            # 此时 input_ids 有效，输出 IntermediateTensors 供跨节点传输
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-            old_layer_idx = _EXTRA_CTX.layer_idx
-            if _EXTRA_CTX.layer_idx is not None:
-                _EXTRA_CTX.layer_idx = 0
-            try:
-                hidden_states = seg_a(
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
-            finally:
-                if old_layer_idx is not None:
-                    _EXTRA_CTX.layer_idx = old_layer_idx
-
-            assert isinstance(hidden_states, IntermediateTensors)
-            return hidden_states
-
-        # Step 2：执行 Segment E（尾 tail_k 层 + norm）
-        # intermediate_tensors 已由 NPUWorker 从 Cloud 侧接收
-        #
-        # 注意：segment_e 与 segment_a 共用同一个 scheduler_output，num_tokens
-        # 保持不变（scheduler_output 在同一迭代内不变化）。若两者 num_tokens
-        # 出现不一致，会导致 cudagraph shape 不匹配，引发图执行错误。
-        # 关键：重置 layer_idx，使 weight_prefetch / EPLB 定位到尾段起始层，
-        # 执行完毕后恢复原值，避免影响后续非边云路径
-        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-        old_layer_idx = _EXTRA_CTX.layer_idx
-        if _EXTRA_CTX.layer_idx is not None:
-            _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
-
-        try:
-            tail_layer_indices = list(range(
-                self.num_layers - self.tail_k,
-                self.num_layers,
-            ))
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
-            if seg_e_graph and not forward_context.capturing:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions,
-                    layer_indices=tail_layer_indices,
-                    graph_wrapper=seg_e,
-                )
-        finally:
-            # segment_e 执行完毕后恢复原始 layer_idx
-            if old_layer_idx is not None:
-                _EXTRA_CTX.layer_idx = old_layer_idx
 
     def _edge_cloud_forward_edge(
         self,
