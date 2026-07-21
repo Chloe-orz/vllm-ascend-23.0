@@ -21,6 +21,30 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.utils import vllm_version_is
 
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_project_kv_cache_groups_to_worker = (
+    vllm.v1.core.kv_cache_utils._project_kv_cache_groups_to_worker
+)
+
+
+def _ascend_project_kv_cache_groups_to_worker(
+    global_kv_cache_groups: list[KVCacheGroupSpec],
+    worker_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    """Ascend-compatible projection that drops empty groups per worker.
+
+    In edge-cloud / pipeline-parallel setups a worker may own no layers from
+    some global KV cache group.  Upstream keeps those empty groups, and the
+    downstream ``get_kv_cache_config_from_groups`` later computes
+    ``group_size = max(len(g.layer_names))`` which becomes 0 and triggers
+    ``AssertionError: group_size must be greater than 0``.
+
+    Filter out projected groups with no local layers so each worker only gets
+    groups it actually participates in.
+    """
+    projected = _orig_project_kv_cache_groups_to_worker(
+        global_kv_cache_groups, worker_spec
+    )
+    return [group for group in projected if group.layer_names]
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -251,6 +275,9 @@ def _get_kv_cache_config_deepseek_v4(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.core.kv_cache_utils._project_kv_cache_groups_to_worker = (
+    _ascend_project_kv_cache_groups_to_worker
+)
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 # vllm v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and
