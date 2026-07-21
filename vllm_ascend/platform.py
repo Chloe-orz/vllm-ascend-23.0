@@ -187,6 +187,11 @@ class NPUPlatform(Platform):
 
         adapt_patch(is_global_patch=True)
 
+        # Import edge-cloud model patches early so that ModelConfig sees the
+        # updated supports_pp flags before is_pp_supported_model is checked.
+        import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
+        import vllm_ascend.patch.models.eagle3_edge_cloud  # noqa: F401
+
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
@@ -446,6 +451,31 @@ class NPUPlatform(Platform):
             "pipeline_parallel_size=1 and may combine data parallelism with MTP."
         )
 
+    def _configure_pd_separation_scheduler(
+        cls, vllm_config: VllmConfig, ascend_config
+    ) -> None:
+        edge_cloud = getattr(ascend_config, "edge_cloud_config", None)
+        if edge_cloud is None or not getattr(edge_cloud, "enabled", False):
+            return
+        pd = getattr(edge_cloud, "pd_separation", None)
+        if pd is None or not getattr(pd, "enabled", False):
+            return
+
+        scheduler_config = vllm_config.scheduler_config
+        # The integer ``prefill_inflight_limit`` is the legacy field consumed
+        # by ``PDSeparatedScheduler``; back-fill it from the bool-flavoured
+        # user config so the scheduler's reader stays unchanged.
+        scheduler_config.pd_prefill_inflight_limit = pd.prefill_inflight_limit
+
+        if getattr(scheduler_config, "async_scheduling", False):
+            scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.pd_separated_scheduler.AsyncPDSeparatedScheduler"
+            )
+        else:
+            scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.pd_separated_scheduler.PDSeparatedScheduler"
+            )
+
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
@@ -479,6 +509,10 @@ class NPUPlatform(Platform):
 
         configure_ascend_file_logging()
         configure_ascend_logging()
+        from vllm_ascend.scheduler_conflicts import validate_pd_separation_scheduler_conflicts
+
+        validate_pd_separation_scheduler_conflicts(vllm_config, ascend_config)
+        cls._configure_pd_separation_scheduler(vllm_config, ascend_config)
 
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)
@@ -650,7 +684,17 @@ class NPUPlatform(Platform):
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             if not vllm_config.compilation_config.pass_config.enable_sp:
                 parallel_config.all2all_backend = "flashinfer_all2allv"
-            if is_310p():
+            if (parallel_config.is_shared_model_edge
+                    and parallel_config.is_edge_node):
+                # Shared-model edge-cloud topology: the edge side
+                # uses a dedicated edge worker class that lets
+                # multiple DP-rank edge workers live in a single
+                # process and share one ``nn.Module`` replica.
+                # The cloud side keeps using NPUWorker.
+                parallel_config.worker_cls = (
+                    "vllm_ascend.worker.edge_cloud."
+                    "shared_model_edge_worker.SharedModelEdgeWorker")
+            elif is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:
                 logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")

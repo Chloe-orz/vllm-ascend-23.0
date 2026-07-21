@@ -1062,6 +1062,13 @@ class DeepseekV4Model(nn.Module):
                         dtype=dtype,
                         device=device,
                     ),
+                    # Edge-cloud mode passes the residual across nodes together
+                    # with hidden_states.
+                    "residual": torch.zeros(
+                        (batch_size, self.hc_mult, config.hidden_size),
+                        dtype=dtype,
+                        device=device,
+                    ),
                 }
             )
 

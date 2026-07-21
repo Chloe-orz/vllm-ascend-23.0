@@ -646,7 +646,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     global _ATTN_KEYS_BUFFER
                     if attn_keys_length == 0:
                         return
-                    if not _ATTN_KEYS_BUFFER or len(_ATTN_KEYS_BUFFER) != attn_keys_length:
+                    # In edge-cloud mode, different segments have different
+                    # attn_keys. Recompute the buffer when the current keys
+                    # don't match the cached one.
+                    if (not _ATTN_KEYS_BUFFER
+                            or len(_ATTN_KEYS_BUFFER) != attn_keys_length
+                            or set(_ATTN_KEYS_BUFFER) != set(attn_keys[:attn_keys_length])):
                         import regex as re
 
                         def extract_layer_index(key: str) -> int:
