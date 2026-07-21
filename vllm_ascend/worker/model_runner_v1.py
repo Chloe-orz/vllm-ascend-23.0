@@ -7684,15 +7684,47 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_support = cg_support
                     min_cg_attn_backend = attn_backend.__name__
 
-        with update_pass_config(self):
-            cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
-                min_cg_support,
-                min_cg_attn_backend,
-                self.uniform_decode_query_len,
-                self.parallel_config.tensor_parallel_size,
-                self.kv_cache_config,
-                self.max_num_reqs,
+        # Edge-cloud with decode graphs disabled cannot capture FULL decode
+        # cudagraphs, so downgrade before resolution to avoid the upstream Mamba
+        # cache-block check (which would raise because num_blocks is computed
+        # against the cloud's limited KV-cache budget).
+        original_cudagraph_mode = self.compilation_config.cudagraph_mode
+        if (
+            self._edge_cloud_enabled
+            and not self.edge_cloud_cfg.enable_decode_graph
+            and original_cudagraph_mode.has_full_cudagraphs()
+        ):
+            if original_cudagraph_mode == CUDAGraphMode.FULL:
+                downgraded_mode = CUDAGraphMode.PIECEWISE
+            elif original_cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                downgraded_mode = CUDAGraphMode.NONE
+            elif original_cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                downgraded_mode = CUDAGraphMode.PIECEWISE
+            else:
+                downgraded_mode = original_cudagraph_mode
+            logger.warning(
+                "[EdgeCloud] enable_decode_graph=False, downgrading cudagraph_mode "
+                "from %s to %s to avoid FULL decode graph requirements.",
+                original_cudagraph_mode,
+                downgraded_mode,
             )
+            self.compilation_config.cudagraph_mode = downgraded_mode
+
+        with update_pass_config(self):
+            try:
+                cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+                    min_cg_support,
+                    min_cg_attn_backend,
+                    self.uniform_decode_query_len,
+                    self.parallel_config.tensor_parallel_size,
+                    self.kv_cache_config,
+                    self.max_num_reqs,
+                )
+            finally:
+                # Restore the user-requested mode in the shared config object;
+                # the resolved (possibly downgraded) mode is stored in
+                # self.cudagraph_mode by resolve_cudagraph_mode_and_sizes.
+                self.compilation_config.cudagraph_mode = original_cudagraph_mode
             self.cudagraph_dispatcher.initialize_cudagraph_keys(
                 cudagraph_mode, self.uniform_decode_query_len
             )
