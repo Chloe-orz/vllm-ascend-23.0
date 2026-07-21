@@ -451,6 +451,7 @@ class NPUPlatform(Platform):
             "pipeline_parallel_size=1 and may combine data parallelism with MTP."
         )
 
+    @classmethod
     def _configure_pd_separation_scheduler(
         cls, vllm_config: VllmConfig, ascend_config
     ) -> None:
