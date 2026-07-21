@@ -33,6 +33,7 @@ from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized, get_kv_transfer_group, has_kv_transfer_group
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
 from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
