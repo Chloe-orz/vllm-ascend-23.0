@@ -732,6 +732,10 @@ class NPUWorker(WorkerBase):
         scheduler_output: "SchedulerOutput",
         layer_slice_info: Any = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # ALL_DECODE(纯 decode)批次走 alternate PP 通信组，与其余 PP 流量隔离
+        # （v0.20.2 源分支的 SchedulerBatchType.ALL_DECODE 对应 v0.23 的
+        # BatchType.PURE_DECODE）。
+        use_alt_group = scheduler_output.batch_type == BatchType.PURE_DECODE
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()
@@ -770,7 +774,7 @@ class NPUWorker(WorkerBase):
                 )
 
         # Fallback: original path for non-edge-cloud or unhandled batch types.
-        return self._execute_model_legacy(scheduler_output, layer_slice_info)
+        return self._execute_model_legacy(scheduler_output, layer_slice_info, use_alt_group)
 
     def _hidden_channel_for(self, scheduler_output: "SchedulerOutput") -> HiddenChannelType:
         channel = scheduler_output.hidden_channel
@@ -989,6 +993,7 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
         layer_slice_info: Any,
+        use_alt_group: bool = False,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Original non-edge-cloud path (standard PP, layer-slicing, etc.)."""
         # Only receive intermediate tensors on the first slice.
@@ -1006,7 +1011,8 @@ class NPUWorker(WorkerBase):
             else:
                 all_gather_group = get_tp_group()
             tensor_dict, comm_handles, comm_postprocess = get_pp_group().irecv_tensor_dict(
-                all_gather_group=all_gather_group
+                all_gather_group=all_gather_group,
+                use_alt_group=use_alt_group,
             )
             assert tensor_dict is not None
             intermediate_tensors = AsyncIntermediateTensors(
@@ -1035,17 +1041,22 @@ class NPUWorker(WorkerBase):
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
-        assert parallel_config.distributed_executor_backend != ("external_launcher") and not get_pp_group().is_last_rank
-        # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
-        # it will conflict with the all-gather operation in flashcomm1.
-        if enable_sp():
-            all_gather_group = None
-        else:
-            all_gather_group = get_tp_group()
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=all_gather_group,
-        )
+        # 边云 PP 模式下 edge 侧的 is_last_rank 为 True（edge 同时是首尾段），
+        # 其 output 为 IntermediateTensors 属正常，legacy PP 发送需跳过——
+        # 恢复源分支的 if 守卫形式而非合并 assert。
+        if not get_pp_group().is_last_rank:
+            assert parallel_config.distributed_executor_backend != "external_launcher"
+            # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise
+            # it will conflict with the all-gather operation in flashcomm1.
+            if enable_sp():
+                all_gather_group = None
+            else:
+                all_gather_group = get_tp_group()
+            self._pp_send_work = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=all_gather_group,
+                use_alt_group=use_alt_group,
+            )
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
