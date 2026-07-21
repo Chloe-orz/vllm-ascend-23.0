@@ -3177,38 +3177,38 @@ class NPUModelRunner(GPUModelRunner):
                         out=dsa_positions_np,
                     )
 
-                    # Run core input preparation.
-                    # NOTE: _prepare_inputs was already called inline above; it
-                    # is NOT idempotent (rewrites num_accepted_tokens_cpu in
-                    # place under async spec decode), so reuse its results here
-                    # instead of letting _run_input_preparation call it again.
-                    cache = self._run_input_preparation(
-                        scheduler_output,
-                        precomputed=(
-                            logits_indices,
-                            spec_decode_metadata,
-                            total_num_scheduled_tokens,
-                            num_scheduled_tokens_compressed_list,
-                        ),
-                    )
-                    total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
-                    num_tokens_padded = cache["num_tokens_padded"]
-                    num_tokens_across_dp = cache["num_tokens_across_dp"]
-                    attn_metadata = cache["attn_metadata"]
-                    logits_indices = cache["logits_indices"]
-                    spec_decode_metadata = cache["spec_decode_metadata"]
-                    spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
-                    cudagraph_mode = cache["cudagraph_mode"]
-                    batch_desc = cache["batch_desc"]
-                    cudagraph_stats = cache["cudagraph_stats"]
+                # Run core input preparation.
+                # NOTE: _prepare_inputs was already called inline above; it
+                # is NOT idempotent (rewrites num_accepted_tokens_cpu in
+                # place under async spec decode), so reuse its results here
+                # instead of letting _run_input_preparation call it again.
+                cache = self._run_input_preparation(
+                    scheduler_output,
+                    precomputed=(
+                        logits_indices,
+                        spec_decode_metadata,
+                        total_num_scheduled_tokens,
+                        num_scheduled_tokens_compressed_list,
+                    ),
+                )
+                total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
+                num_tokens_padded = cache["num_tokens_padded"]
+                num_tokens_across_dp = cache["num_tokens_across_dp"]
+                attn_metadata = cache["attn_metadata"]
+                logits_indices = cache["logits_indices"]
+                spec_decode_metadata = cache["spec_decode_metadata"]
+                spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
+                cudagraph_mode = cache["cudagraph_mode"]
+                batch_desc = cache["batch_desc"]
+                cudagraph_stats = cache["cudagraph_stats"]
 
-                    logger.debug(
-                        "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
-                        "num_tokens_across_dp: %s",
-                        cudagraph_mode,
-                        batch_desc,
-                        num_tokens_across_dp,
-                    )
+                logger.debug(
+                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                    "num_tokens_across_dp: %s",
+                    cudagraph_mode,
+                    batch_desc,
+                    num_tokens_across_dp,
+                )
 
                 # Save spec_decode_common_attn_metadata for cloud-side
                 # MTP draft proposal.  On the cloud side,
