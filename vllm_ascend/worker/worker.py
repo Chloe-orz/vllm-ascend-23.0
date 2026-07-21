@@ -38,7 +38,7 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, is_cloud_device
+from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group, is_cloud_device, is_edge_device
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -1060,6 +1060,21 @@ class NPUWorker(WorkerBase):
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
+            # Edge-cloud: on the edge device the legacy PP send above is
+            # skipped (edge is both first and last stage), so an
+            # IntermediateTensors here is a head-segment product (e.g. an
+            # embedding_only PD_MIX batch whose tail segment arrives
+            # separately). Returning None breaks the EngineCore batch-queue
+            # contract ("unexpected error" on future.result()); return the
+            # same req_ids placeholder used by _execute_model_edge_head so
+            # the scheduler can correlate the batch without sampled tokens.
+            if (getattr(self.model_runner, '_edge_cloud_enabled', False)
+                    and is_edge_device()):
+                req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+                return ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+                )
             return None
 
         # In case of PP with kv transfer, we need to pass through the
