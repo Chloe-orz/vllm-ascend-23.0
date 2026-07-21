@@ -18,6 +18,7 @@ from vllm.v1.sample.rejection_sampler import (
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
+from vllm.logger import logger
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,

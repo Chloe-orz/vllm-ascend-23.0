@@ -10,7 +10,13 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_config, get_ascend_device_type
+from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    get_ascend_config,
+    get_ascend_device_type,
+    is_pd_decode_recompute_scheduler_enabled,
+)
 from vllm_ascend.worker.kvcomp_utils import KVCompMetaData
 
 SFA_QSFA_TILE_SIZE = 128

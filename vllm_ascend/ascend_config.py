@@ -160,8 +160,10 @@ class AscendConfig:
                 "only guaranteed when the recompute scheduler is enabled."
             )
         self.enable_cpu_binding = additional_config.get("enable_cpu_binding", True)
+        self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsa_preprocess = additional_config.get("multistream_dsa_preprocess", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", False)
+        self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
         self.prefill_comm_compute_overlap = additional_config.get("prefill_comm_compute_overlap", False)
 
         self.enable_matmul_allreduce = self._get_config_value(
@@ -176,6 +178,13 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
+        if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
+            self.multistream_overlap_shared_expert = False
+            logger.warning_once(
+                "enable_fused_mc2 and multistream_overlap_shared_expert "
+                "cannot be enabled at the same time. "
+                "Disabling multistream_overlap_shared_expert."
+            )
         self.enable_mlapo = self._get_config_value(
             additional_config,
             "enable_mlapo",

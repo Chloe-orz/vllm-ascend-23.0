@@ -28,6 +28,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from vllm.config import VllmConfig
+from vllm.logger import logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.utils import CpuGpuBuffer
 
