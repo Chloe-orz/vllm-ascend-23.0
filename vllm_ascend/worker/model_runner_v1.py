@@ -3152,7 +3152,10 @@ class NPUModelRunner(GPUModelRunner):
                         mamba_bufs = None
                     self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-                    if mamba_bufs.postprocess_align is not None:
+                    if (
+                        mamba_bufs is not None
+                        and mamba_bufs.postprocess_align is not None
+                    ):
                         mamba_utils.stage_postprocess_inputs_to_gpu(
                             mamba_bufs.postprocess_align,
                             scheduler_output,
