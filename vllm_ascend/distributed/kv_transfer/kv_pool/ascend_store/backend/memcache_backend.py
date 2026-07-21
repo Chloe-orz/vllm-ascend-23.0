@@ -9,6 +9,7 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 

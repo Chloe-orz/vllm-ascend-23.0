@@ -22,6 +22,7 @@ from collections.abc import Iterable
 import torch
 from vllm.model_executor.models.minimax_m2 import (
     MiniMaxM2Attention,
+    MiniMaxM2ForCausalLM,
     MiniMaxM2Model,
     MiniMaxM2MoE,
 )
