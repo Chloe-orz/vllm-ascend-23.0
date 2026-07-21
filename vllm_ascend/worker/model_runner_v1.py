@@ -146,6 +146,7 @@ from vllm_ascend.compilation.edge_cloud_compiler import (
 )
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
