@@ -3589,27 +3589,30 @@ class NPUModelRunner(GPUModelRunner):
                             for i, req_id in enumerate(self.input_batch.req_ids)
                         }
 
-                    if self.model_config.is_hybrid:
-                        if self.cache_config.mamba_cache_mode == "align":
-                            for i, num_tokens in enumerate(
-                                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
-                            ):
-                                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
-                            mamba_utils.postprocess_mamba(
-                                self._last_scheduler_output,
-                                self.kv_cache_config,
-                                self.cache_config,
-                                self.input_batch,
-                                self.requests,
-                                self.mamba_state_idx,
-                                self.compilation_config.static_forward_context,
-                                self.model.get_mamba_state_copy_func(),
-                                self._get_mamba_copy_bufs(),
-                            )
-                        else:
-                            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
-                                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
-                            )
+                    if (
+                        self.model_config.is_hybrid
+                        and self.cache_config.mamba_cache_mode == "align"
+                        and self.kv_cache_config.has_mamba_layers
+                    ):
+                        for i, num_tokens in enumerate(
+                            self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+                        ):
+                            self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+                        mamba_utils.postprocess_mamba(
+                            self._last_scheduler_output,
+                            self.kv_cache_config,
+                            self.cache_config,
+                            self.input_batch,
+                            self.requests,
+                            self.mamba_state_idx,
+                            self.compilation_config.static_forward_context,
+                            self.model.get_mamba_state_copy_func(),
+                            self._get_mamba_bufs().postprocess,
+                        )
+                    elif self.model_config.is_hybrid:
+                        self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                            self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
+                        )
                     else:
                         # For non-hybrid edge-cloud MTP/EAGLE3, keep CPU mirror
                         # in sync so _prepare_inputs sees corrected
