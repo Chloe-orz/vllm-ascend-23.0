@@ -761,7 +761,11 @@ class PDSeparationConfig:
 class EdgeCloudConfig:
     """Configuration for edge-cloud collaborative inference."""
 
-    def __init__(self, user_config: dict | None = None, vllm_config: "VllmConfig | None" = None,):
+    def __init__(
+        self,
+        user_config: dict | None = None,
+        vllm_config: "VllmConfig | None" = None,
+    ):
         if user_config is None:
             user_config = {}
         self.enabled: bool = user_config.get("enabled", False)
