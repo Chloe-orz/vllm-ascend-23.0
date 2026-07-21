@@ -46,6 +46,11 @@ def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
     return tuple(tensor.tolist())
 
 
+# task update 阶段创建的设备张量保活表：graph task 以指针引用这些张量，
+# 局部临时变量被回收会导致 replay 读到已释放内存。按 handle id 覆盖式保存。
+_CONV1D_UPDATE_KEEPALIVE: dict[int, tuple] = {}
+
+
 def _check_and_get_host_args(attn_metadata, field_name: str, sub_field_name: str):
     if (fallback_meta := getattr(attn_metadata, field_name, None)) is None:
         raise RuntimeError(
@@ -217,6 +222,8 @@ def update_conv1d_graph_params(
             torch.npu.graph_task_update_begin(update_stream, handle)
             # v0.23 算子签名改为 Tensor?：把新的 host 取值落成设备张量，
             # task update 会以新指针重写捕获的 kernel 参数。
+            # 注意：update_stream 不是捕获流，H2D 拷贝合法；但张量必须保活，
+            # 否则 replay 时指针已被回收。
             update_device = conv_state.device
             new_qsl_dev = (
                 torch.tensor(new_query_start_loc, dtype=torch.int32, device=update_device)
@@ -233,6 +240,7 @@ def update_conv1d_graph_params(
                 if new_num_accepted
                 else None
             )
+            _CONV1D_UPDATE_KEEPALIVE[id(handle)] = (new_qsl_dev, new_ci_dev, new_nat_dev)
             torch.ops._C_ascend.npu_causal_conv1d_custom(
                 output,
                 mixed_qkv,
@@ -489,26 +497,20 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
 
                 torch.npu.graph_task_group_begin(stream)
-                # v0.23 起 npu_causal_conv1d_custom 的 query_start_loc/cache_indices/
-                # num_accepted_tokens 参数改为 Tensor?（原为 int[]），捕获时需传入
-                # 设备张量；取值在 replay 前的 update 阶段重写。
-                spec_qsl_dev = torch.tensor(spec_qsl_host, dtype=torch.int32, device=output_spec.device)
-                spec_ci_dev = torch.tensor(spec_ci_host, dtype=torch.int32, device=output_spec.device)
-                spec_nat_dev = (
-                    torch.tensor(spec_nat_host, dtype=torch.int32, device=output_spec.device)
-                    if spec_nat_host
-                    else None
-                )
+                # v0.23 起算子签名改为 Tensor?。捕获流上禁止 H2D 同步拷贝
+                # （不能 torch.tensor(host, device=npu)），直接使用 metadata
+                # 中已有的设备张量（与 eager 路径一致，值为 dummy 但 tiling
+                # 合法）；真实取值在 replay 前的 update 阶段重写。
                 torch.ops._C_ascend.npu_causal_conv1d_custom(
                     output_spec,
                     mixed_qkv_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=spec_qsl_dev,
-                    cache_indices_opt=spec_ci_dev,
+                    query_start_loc_opt=spec_query_start_loc_device,
+                    cache_indices_opt=spec_causal_conv1d_meta.cache_indices,
                     initial_state_mode_opt=None,
-                    num_accepted_tokens_opt=spec_nat_dev,
+                    num_accepted_tokens_opt=spec_causal_conv1d_meta.num_accepted_tokens,
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
@@ -668,17 +670,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
 
                 torch.npu.graph_task_group_begin(stream)
-                # 同 spec 分支：v0.23 算子签名改为 Tensor?，传设备张量。
-                non_spec_qsl_dev = torch.tensor(non_spec_qsl_host, dtype=torch.int32, device=output_non_spec.device)
-                non_spec_ci_dev = torch.tensor(non_spec_ci_host, dtype=torch.int32, device=output_non_spec.device)
+                # 同 spec 分支：v0.23 算子签名改为 Tensor?，捕获流上禁止 H2D
+                # 拷贝，直接用 metadata 已有的设备张量。
                 torch.ops._C_ascend.npu_causal_conv1d_custom(
                     output_non_spec,
                     mixed_qkv_non_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=non_spec_qsl_dev,
-                    cache_indices_opt=non_spec_ci_dev,
+                    query_start_loc_opt=non_spec_query_start_loc_device,
+                    cache_indices_opt=non_spec_causal_conv1d_meta.cache_indices,
                     initial_state_mode_opt=None,
                     num_accepted_tokens_opt=None,
                     activation_mode=activation_num,
