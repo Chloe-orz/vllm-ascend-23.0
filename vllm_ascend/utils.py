@@ -1747,3 +1747,57 @@ def get_c_env(name: str, encoding: str = "utf-8") -> str | None:
     if raw is None:
         return None
     return raw.decode(encoding)
+
+# ============================================================================
+# Edge-cloud utility functions (migrated from lwd_squash_0718)
+# ============================================================================
+def update_aclgraph_sizes(vllm_config: "VllmConfig") -> None:
+    """Update ACL graph capture sizes based on hardware limitations"""
+    MAX_CAPTURE_SIZE = 1800
+    CP_ADDITIONAL_STREAM_NUM = 100
+    compilation_config = vllm_config.compilation_config
+    original_sizes = compilation_config.cudagraph_capture_sizes
+    compilation_config.cudagraph_capture_sizes = None
+    if not vllm_config.model_config:
+        logger.warning(
+            "Got empty model config, skipping ACL graph size update.")
+        return
+    parallel_config = vllm_config.parallel_config
+    dcp_size = max(parallel_config.decode_context_parallel_size, 1)
+    pcp_size = max(parallel_config.prefill_context_parallel_size, 1)
+    tp_size = max(parallel_config.tensor_parallel_size, 1)
+    pp_size = max(parallel_config.pipeline_parallel_size, 1)
+    if getattr(parallel_config, "enable_edge_cloud", False):
+        if parallel_config.is_edge_node:
+            tp_size = parallel_config.edge_npu_count
+        else:
+            tp_size = parallel_config.cloud_npu_count
+    parallel_factor = dcp_size * pcp_size * tp_size
+    MAX_STREAM_SIZE = 2048
+    max_stream_per_graph = max(
+        MAX_CAPTURE_SIZE // max(parallel_factor, 1) - CP_ADDITIONAL_STREAM_NUM, 1)
+    logger.info(
+        "update_aclgraph_sizes: MAX_CAPTURE_SIZE=%s, parallel_factor=%s, "
+        "suggested capture sizes: [1 .. %s]",
+        MAX_CAPTURE_SIZE, parallel_factor,
+        min(max_stream_per_graph, MAX_STREAM_SIZE))
+    cudagraph_capture_sizes = []
+    for stream_num in range(1, MAX_STREAM_SIZE + 1):
+        if stream_num > max_stream_per_graph:
+            break
+        cudagraph_capture_sizes.append(stream_num)
+    if max_stream_per_graph not in cudagraph_capture_sizes:
+        cudagraph_capture_sizes.append(max_stream_per_graph)
+    if MAX_STREAM_SIZE not in cudagraph_capture_sizes:
+        cudagraph_capture_sizes.append(MAX_STREAM_SIZE)
+    compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
+    compilation_config.post_init_cudagraph_sizes()
+
+
+def prefill_context_parallel_enable() -> bool:
+    """Check if prefill context parallel is enabled."""
+    from vllm.config import get_current_vllm_config
+    config = get_current_vllm_config()
+    if config is None:
+        return False
+    return config.parallel_config.prefill_context_parallel_size > 1

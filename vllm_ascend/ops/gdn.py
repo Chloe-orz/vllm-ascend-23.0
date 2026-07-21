@@ -64,6 +64,96 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return AscendGDNAttentionBackend
 
+    attn_metadata = forward_context.attn_metadata
+    if is_draft_model and draft_attn_metadatas is not None:
+        attn_metadata = draft_attn_metadatas
+
+    with torch.npu.stream(update_stream):
+        for param, handle, event in zip(
+            graph_params.conv1d_params[num_tokens],
+            graph_params.conv1d_handles[num_tokens],
+            graph_params.conv1d_events[num_tokens],
+        ):
+            # Unpack parameters captured during graph capture
+            (
+                output,
+                mixed_qkv,
+                conv_weights_T,
+                conv_state,
+                bias,
+                activation_num,
+                pad_slot_id,
+                run_mode,
+                branch,
+                layer_prefix,
+                _,
+                _,
+                _,
+                q_per_seq,
+            ) = param
+
+            new_query_start_loc: tuple[int, ...] = ()
+            new_cache_indices: tuple[int, ...] = ()
+            new_num_accepted: tuple[int, ...] = ()
+
+            if run_mode == 1 and attn_metadata is not None:
+                # get gdn metadata by captured layer_prefix
+                meta = attn_metadata
+                if isinstance(meta, dict):
+                    meta = meta.get(layer_prefix, None)
+                    assert isinstance(meta, GDNAttentionMetadata)
+
+                if meta is None:
+                    continue
+
+                cap_x_dim0 = int(mixed_qkv.size(0))
+                if branch == "spec" and meta.spec_sequence_masks is not None:
+                    qsl_host, cidx_host, num_accepted_host = get_spec_causal_conv1d_update_host_args(meta)
+                    new_query_start_loc, new_cache_indices, new_num_accepted = _pad_conv1d_host_args_to_capture(
+                        qsl_host,
+                        cidx_host,
+                        num_accepted_host,
+                        cap_x_dim0=cap_x_dim0,
+                        q_per_seq=q_per_seq,
+                        with_num_accepted=True,
+                    )
+                elif branch == "non_spec_decode":
+                    non_sdq_host, non_sd_cidx_host = get_causal_conv1d_update_host_args(meta)
+                    new_query_start_loc, new_cache_indices, _ = _pad_conv1d_host_args_to_capture(
+                        non_sdq_host,
+                        non_sd_cidx_host,
+                        (),
+                        cap_x_dim0=cap_x_dim0,
+                        q_per_seq=q_per_seq,
+                        with_num_accepted=False,
+                    )
+                    new_num_accepted = ()
+
+            torch.npu.graph_task_update_begin(update_stream, handle)
+            torch.ops._C_ascend.npu_causal_conv1d_custom(
+                output,
+                mixed_qkv,
+                conv_weights_T,
+                conv_state=conv_state,
+                bias_opt=bias,
+                query_start_loc_opt=new_query_start_loc,
+                cache_indices_opt=new_cache_indices,
+                initial_state_mode_opt=(),
+                num_accepted_tokens_opt=new_num_accepted,
+                activation_mode=activation_num,
+                pad_slot_id=pad_slot_id,
+                run_mode=run_mode,
+            )
+            torch.npu.graph_task_update_end(update_stream)
+            event.record(update_stream)
+
+
+def get_non_spec_chunked_prefill_meta(attn_metadata):
+    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "chunk")
+    return fallback_meta.chunk
+
+
+class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -164,6 +254,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        has_initial_state = attn_metadata.has_initial_state
+        # Edge-cloud layer-sliced inference: when this is a non-first slice
+        # continuation, conv_state and ssm_state for this layer have never
+        # been populated by the current request.  Force has_initial_state
+        # to an all-False tensor so that both the causal_conv1d and
+        # recurrent attention kernels start from a clean zero state instead
+        # of reading stale data left by a prior decode that was interleaved
+        # between slices.
+        if getattr(attn_metadata, "_is_layer_slice_continuation", False):
+            if has_initial_state is not None:
+                has_initial_state = torch.zeros_like(has_initial_state)
+        spec_query_start_loc = attn_metadata.spec_query_start_loc
+        non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         spec_sequence_masks = attn_metadata.spec_sequence_masks
         spec_token_indx = attn_metadata.spec_token_indx
         non_spec_token_indx = attn_metadata.non_spec_token_indx
@@ -266,6 +369,38 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 else:
                     conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
+                    (
+                        query_start_loc_opt,
+                        cache_indices_opt,
+                        initial_state_mode_opt,
+                    ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
+
+                    # Edge-cloud layer-sliced inference: when a decode batch is
+                    # interleaved between two prefill slices, the decode path
+                    # (causal_conv1d_update_npu) in-place updates conv_state for
+                    # the decode requests' slots via a sliding-window write-back.
+                    # The slots occupied by the current prefill request may overlap
+                    # with those previously used by completed decode requests that
+                    # have since been freed and reassigned.  As a result, the
+                    # conv_state data at the prefill slots can be "polluted" by
+                    # the decode's sliding-window format, which is incompatible
+                    # with the format expected by npu_causal_conv1d_custom's
+                    # InitRing (FN mode reads width-1 history columns from
+                    # conv_state at a fixed offset, whereas decode writes them
+                    # at a shifted offset).  When has_initial_state=True under
+                    # these conditions, the CANN kernel reads stale/misaligned
+                    # conv_state data and triggers aclnnCausalConv1d EZ9999.
+                    #
+                    # Fix: detect the layer-sliced continuation scenario (where
+                    # conv_state for this layer was potentially written by a
+                    # decode since the prefill metadata was built) and force
+                    # initial_state_mode to all-zeros so the kernel initialises
+                    # the ring buffer from scratch instead of reading the
+                    # polluted conv_state.
+                    initial_state_mode_opt = _maybe_reset_initial_state_for_layer_slice(
+                        attn_metadata, initial_state_mode_opt
+                    )
+
                     mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
                     torch.ops._C_ascend.npu_causal_conv1d_custom(
                         mixed_qkv_non_spec_output,
