@@ -330,6 +330,31 @@ class AscendConfig:
             )
         return env_value
 
+    def _check_mooncake_c8_kv_cache_quant(self, vllm_config: "VllmConfig") -> None:
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        if kv_transfer_config is None:
+            return
+
+        quant_config = getattr(vllm_config, "quant_config", None)
+        enable_c8_quant = getattr(quant_config, "enable_c8_quant", False)
+        if enable_c8_quant is not True:
+            return
+
+        from vllm_ascend.utils import is_gqa_backend, uses_mooncake_connector
+
+        if not is_gqa_backend(vllm_config):
+            return
+
+        if not uses_mooncake_connector(kv_transfer_config):
+            return
+
+        raise ValueError(
+            "MooncakeConnector does not support C8 KV cache quantization on GQA models. "
+            "The producer keeps KV cache in bf16 while the consumer allocates int8 KV cache, so raw "
+            "Mooncake transfer would reinterpret bf16 bytes as int8. Please disable C8 KV cache quantization "
+            "or use MooncakeLayerwiseConnector, which quantizes KV cache before transfer."
+        )
+
     def _check_mix_placement(self):
         if self.mix_placement:
             if self.enable_shared_expert_dp or self.multistream_overlap_shared_expert:
