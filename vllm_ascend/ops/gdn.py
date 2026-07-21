@@ -215,16 +215,34 @@ def update_conv1d_graph_params(
                         new_num_accepted = ()
 
             torch.npu.graph_task_update_begin(update_stream, handle)
+            # v0.23 算子签名改为 Tensor?：把新的 host 取值落成设备张量，
+            # task update 会以新指针重写捕获的 kernel 参数。
+            update_device = conv_state.device
+            new_qsl_dev = (
+                torch.tensor(new_query_start_loc, dtype=torch.int32, device=update_device)
+                if new_query_start_loc
+                else None
+            )
+            new_ci_dev = (
+                torch.tensor(new_cache_indices, dtype=torch.int32, device=update_device)
+                if new_cache_indices
+                else None
+            )
+            new_nat_dev = (
+                torch.tensor(new_num_accepted, dtype=torch.int32, device=update_device)
+                if new_num_accepted
+                else None
+            )
             torch.ops._C_ascend.npu_causal_conv1d_custom(
                 output,
                 mixed_qkv,
                 conv_weights_T,
                 conv_state=conv_state,
                 bias_opt=bias,
-                query_start_loc_opt=new_query_start_loc,
-                cache_indices_opt=new_cache_indices,
-                initial_state_mode_opt=(),
-                num_accepted_tokens_opt=new_num_accepted,
+                query_start_loc_opt=new_qsl_dev,
+                cache_indices_opt=new_ci_dev,
+                initial_state_mode_opt=None,
+                num_accepted_tokens_opt=new_nat_dev,
                 activation_mode=activation_num,
                 pad_slot_id=pad_slot_id,
                 run_mode=run_mode,
@@ -235,8 +253,8 @@ def update_conv1d_graph_params(
 
 def _maybe_reset_initial_state_for_layer_slice(
     attn_metadata: GDNAttentionMetadata,
-    initial_state_mode_opt: tuple[int, ...],
-) -> tuple[int, ...]:
+    initial_state_mode_opt,
+):
     """Reset initial_state_mode to all-zeros when conv_state may be polluted.
 
     In edge-cloud layer-sliced inference, a decode batch can be interleaved
@@ -266,6 +284,9 @@ def _maybe_reset_initial_state_for_layer_slice(
     # Force all entries to 0: no sequence should read initial state from
     # conv_state in a layer-slice continuation, because this layer has
     # never seen this request before.
+    # v0.23 起 initial_state_mode 为设备张量（原为 host tuple），按类型处理。
+    if isinstance(initial_state_mode_opt, torch.Tensor):
+        return torch.zeros_like(initial_state_mode_opt)
     return tuple(0 for _ in initial_state_mode_opt)
 
 
@@ -468,16 +489,26 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
 
                 torch.npu.graph_task_group_begin(stream)
+                # v0.23 起 npu_causal_conv1d_custom 的 query_start_loc/cache_indices/
+                # num_accepted_tokens 参数改为 Tensor?（原为 int[]），捕获时需传入
+                # 设备张量；取值在 replay 前的 update 阶段重写。
+                spec_qsl_dev = torch.tensor(spec_qsl_host, dtype=torch.int32, device=output_spec.device)
+                spec_ci_dev = torch.tensor(spec_ci_host, dtype=torch.int32, device=output_spec.device)
+                spec_nat_dev = (
+                    torch.tensor(spec_nat_host, dtype=torch.int32, device=output_spec.device)
+                    if spec_nat_host
+                    else None
+                )
                 torch.ops._C_ascend.npu_causal_conv1d_custom(
                     output_spec,
                     mixed_qkv_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=spec_qsl_host,
-                    cache_indices_opt=spec_ci_host,
-                    initial_state_mode_opt=(),
-                    num_accepted_tokens_opt=spec_nat_host,
+                    query_start_loc_opt=spec_qsl_dev,
+                    cache_indices_opt=spec_ci_dev,
+                    initial_state_mode_opt=None,
+                    num_accepted_tokens_opt=spec_nat_dev,
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
@@ -637,16 +668,19 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
 
                 torch.npu.graph_task_group_begin(stream)
+                # 同 spec 分支：v0.23 算子签名改为 Tensor?，传设备张量。
+                non_spec_qsl_dev = torch.tensor(non_spec_qsl_host, dtype=torch.int32, device=output_non_spec.device)
+                non_spec_ci_dev = torch.tensor(non_spec_ci_host, dtype=torch.int32, device=output_non_spec.device)
                 torch.ops._C_ascend.npu_causal_conv1d_custom(
                     output_non_spec,
                     mixed_qkv_non_spec,
                     conv_weights_T,
                     conv_state=self_kv_cache[0],
                     bias_opt=self.conv1d.bias,
-                    query_start_loc_opt=non_spec_qsl_host,
-                    cache_indices_opt=non_spec_ci_host,
-                    initial_state_mode_opt=(),
-                    num_accepted_tokens_opt=[],
+                    query_start_loc_opt=non_spec_qsl_dev,
+                    cache_indices_opt=non_spec_ci_dev,
+                    initial_state_mode_opt=None,
+                    num_accepted_tokens_opt=None,
                     activation_mode=activation_num,
                     pad_slot_id=PAD_SLOT_ID,
                     run_mode=1,
