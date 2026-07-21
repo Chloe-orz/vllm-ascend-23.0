@@ -341,3 +341,54 @@ def _ascend_unify_kv_cache_spec_page_size(kv_cache_spec):
 vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size = (
     _ascend_unify_kv_cache_spec_page_size
 )
+
+# -------- edge-cloud: skip cross-worker min-clamping of num_blocks ----------
+# In edge-cloud mode each worker has its own device and memory budget.  The
+# upstream get_kv_cache_configs computes per-worker num_blocks from per-worker
+# available_memory *before* taking min across all workers.  That min-clamping
+# is wrong here because the edge worker's available memory may be dominated by
+# embedding / output weights, while the cloud has most of the KV-cache layers
+# and a far larger budget.  Clamping the cloud to the edge's tiny num_blocks
+# leads to "available Mamba cache blocks (1)" at cudagraph resolution time.
+_orig_get_kv_cache_configs = vllm.v1.core.kv_cache_utils.get_kv_cache_configs
+
+
+def _ascend_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory):
+    kv_cache_configs = _orig_get_kv_cache_configs(
+        vllm_config, kv_cache_specs, available_memory
+    )
+
+    if not getattr(vllm_config.parallel_config, "enable_edge_cloud", False):
+        return kv_cache_configs
+
+    # Per-worker restoration: the original function already computed correct
+    # num_blocks per worker from each worker's available_memory, then clamped
+    # all to the minimum.  Re-derive each worker's own num_blocks by applying
+    # the same divisor (_pool_bytes_per_block) to its available_memory.
+    for cfg, avail in zip(kv_cache_configs, available_memory):
+        if not cfg.kv_cache_groups:
+            continue
+        bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block(
+            cfg.kv_cache_groups
+        )
+        if bytes_per_block <= 0:
+            continue
+        new_num_blocks = max(avail // bytes_per_block, 0)
+        new_num_blocks = may_override_num_blocks(vllm_config, new_num_blocks)
+
+        old_num_blocks = cfg.num_blocks
+        if old_num_blocks > 0 and new_num_blocks != old_num_blocks:
+            for tensor in cfg.kv_cache_tensors:
+                assert tensor.size % old_num_blocks == 0, (
+                    "Tensor size not divisible by old num_blocks"
+                )
+                tensor.size = tensor.size // old_num_blocks * new_num_blocks
+        cfg.num_blocks = new_num_blocks
+
+    return kv_cache_configs
+
+
+vllm.v1.core.kv_cache_utils.get_kv_cache_configs = _ascend_get_kv_cache_configs
+# ``core.py`` does ``from ... import get_kv_cache_configs``, which copies the
+# name into its own namespace — patch the engine-core reference as well.
+vllm.v1.engine.core.get_kv_cache_configs = _ascend_get_kv_cache_configs
