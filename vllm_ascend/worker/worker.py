@@ -456,8 +456,16 @@ class NPUWorker(WorkerBase):
             # unbounded growth / OOM) and the guard draining fast (skipped hints
             # cost no NPU alloc), so the small hint ring never fills.
             if self._cloud_hidden_early_recv_enabled:
-                _next_prior = bool(_pd.get("next_prefill_prior_enable", False))
-                self._early_recv_max_inflight = 2 if _next_prior else 1
+                # CHER early-recv cache cap.  Empirically (see logs) the guard
+                # thread posts one entry at a time: each chunk's POST is
+                # followed by a busy_loop HIT before the next POST, so the
+                # cache never holds more than 1 entry even when
+                # next_prefill_prior_enable (2P) is on.  Capping at 1 keeps
+                # exactly one recv buffer (~80MB at 8192 tokens) resident
+                # instead of two, reducing caching-allocator fragmentation in
+                # the "64k then 4k" workload (different-sized buffers in the
+                # free list could not be reused).
+                self._early_recv_max_inflight = 1
             else:
                 self._early_recv_max_inflight = 0
             if self._cloud_hidden_early_recv_enabled:
