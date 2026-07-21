@@ -38,13 +38,13 @@ def make_graph_params(aclgraph_capture_sizes: list[int]) -> GraphParams:
     EdgeCloudACLGraphWrapper 持有，实现 segment 间参数隔离。
     """
     return GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        events={size: [] for size in aclgraph_capture_sizes},
+        workspaces={size: None for size in aclgraph_capture_sizes},
+        handles={size: [] for size in aclgraph_capture_sizes},
+        attn_params={size: [] for size in aclgraph_capture_sizes},
+        conv1d_params={size: [] for size in aclgraph_capture_sizes},
+        conv1d_handles={size: [] for size in aclgraph_capture_sizes},
+        conv1d_events={size: [] for size in aclgraph_capture_sizes},
     )
 
 

@@ -448,6 +448,11 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
+    # GDN causal_conv1d graph update parameters, populated by
+    # AscendGatedDeltaNetAttention during FULL-graph capture.
+    conv1d_params: dict[int, list[tuple]]
+    conv1d_handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
+    conv1d_events: dict[int, list[torch.npu.ExternalEvent]]
 
 
 _graph_params: GraphParams | None = None
@@ -459,10 +464,13 @@ def set_graph_params(aclgraph_capture_sizes: list[int]):
         logger.info("Graph parameters have already been set!")
         return
     _graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        events={size: [] for size in aclgraph_capture_sizes},
+        workspaces={size: None for size in aclgraph_capture_sizes},
+        handles={size: [] for size in aclgraph_capture_sizes},
+        attn_params={size: [] for size in aclgraph_capture_sizes},
+        conv1d_params={size: [] for size in aclgraph_capture_sizes},
+        conv1d_handles={size: [] for size in aclgraph_capture_sizes},
+        conv1d_events={size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -484,10 +492,13 @@ def set_draft_graph_params(aclgraph_capture_sizes: list[int]):
     if _draft_graph_params is not None:
         raise ValueError("DraftGraph parameters have already been set!")
     _draft_graph_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        events={size: [] for size in aclgraph_capture_sizes},
+        workspaces={size: None for size in aclgraph_capture_sizes},
+        handles={size: [] for size in aclgraph_capture_sizes},
+        attn_params={size: [] for size in aclgraph_capture_sizes},
+        conv1d_params={size: [] for size in aclgraph_capture_sizes},
+        conv1d_handles={size: [] for size in aclgraph_capture_sizes},
+        conv1d_events={size: [] for size in aclgraph_capture_sizes},
     )
 
 
@@ -509,10 +520,13 @@ def set_draft_graph_prefill_params(aclgraph_capture_sizes: list[int]):
     if _draft_graph_prefill_params is not None:
         raise ValueError("DraftGraph preill parameters have already been set!")
     _draft_graph_prefill_params = GraphParams(
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: None for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
-        {size: [] for size in aclgraph_capture_sizes},
+        events={size: [] for size in aclgraph_capture_sizes},
+        workspaces={size: None for size in aclgraph_capture_sizes},
+        handles={size: [] for size in aclgraph_capture_sizes},
+        attn_params={size: [] for size in aclgraph_capture_sizes},
+        conv1d_params={size: [] for size in aclgraph_capture_sizes},
+        conv1d_handles={size: [] for size in aclgraph_capture_sizes},
+        conv1d_events={size: [] for size in aclgraph_capture_sizes},
     )
 
 

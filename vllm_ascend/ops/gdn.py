@@ -36,37 +36,132 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
 
-class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
-    def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        if hasattr(self, "split_ba"):
-            return self.split_ba(ba)
-        return ba.chunk(2, dim=-1)
+def _pad_conv1d_host_args_to_capture(
+    qsl_host,
+    cidx_host,
+    num_accepted_host,
+    cap_x_dim0: int,
+    q_per_seq: int,
+    with_num_accepted: bool,
+):
+    """Pad causal_conv1d host args to the capture-time token dimension.
 
-    def get_state_shape(
-        self,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            self.tp_size,
-            self.num_k_heads,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-            self.conv_kernel_size,
-            self.num_spec,
-        )
+    FULL-graph capture fixes the mixed_qkv dimension to ``cap_x_dim0``.  At
+    replay time the real batch may be smaller, so the CPU-side arguments that
+    drive the update kernel must be padded to the captured shape.
+    """
+    del q_per_seq  # reserved for future per-sequence query scaling
 
-    def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
-        return
+    qsl = list(qsl_host)
+    cidx = list(cidx_host)
+    # query_start_loc has num_seqs + 1 entries; pad the terminal value.
+    if len(qsl) < cap_x_dim0 + 1:
+        qsl.extend([qsl[-1]] * (cap_x_dim0 + 1 - len(qsl)))
+    # cache_indices has one entry per token; pad with PAD_SLOT_ID.
+    if len(cidx) < cap_x_dim0:
+        cidx.extend([PAD_SLOT_ID] * (cap_x_dim0 - len(cidx)))
 
-    def _warmup_prefill_kernels_v0202(self, mixed_qkv: torch.Tensor) -> None:
-        return
+    if with_num_accepted:
+        na = list(num_accepted_host)
+        if len(na) < cap_x_dim0:
+            na.extend([1] * (cap_x_dim0 - len(na)))
+        return tuple(qsl), tuple(cidx), tuple(na)
+    return tuple(qsl), tuple(cidx), ()
 
-    def get_attn_backend(self) -> type[AttentionBackend]:
-        return AscendGDNAttentionBackend
 
-    attn_metadata = forward_context.attn_metadata
+def get_spec_causal_conv1d_update_host_args(meta: GDNAttentionMetadata):
+    """Return CPU-side host args for speculative causal_conv1d graph update."""
+    spec_causal_conv1d = meta.spec_decode_metadata.spec_causal_conv1d
+    qsl_host = spec_causal_conv1d.query_start_loc.cpu().tolist()
+    cidx_host = spec_causal_conv1d.cache_indices.cpu().tolist()
+    num_accepted_host = spec_causal_conv1d.num_accepted_tokens.cpu().tolist()
+    return qsl_host, cidx_host, num_accepted_host
+
+
+def get_causal_conv1d_update_host_args(meta: GDNAttentionMetadata):
+    """Return CPU-side host args for non-spec decode causal_conv1d graph update."""
+    non_spec_decode = meta.non_spec_decode_metadata
+    causal_conv1d = non_spec_decode.causal_conv1d
+    qsl_host = causal_conv1d.query_start_loc.cpu().tolist()
+    cidx_host = causal_conv1d.cache_indices.cpu().tolist()
+    return qsl_host, cidx_host
+
+
+def get_non_spec_causal_conv1d_host_args(attn_metadata: GDNAttentionMetadata):
+    """Return device tensors consumed by npu_causal_conv1d_custom for prefill."""
+    causal_conv1d = attn_metadata.non_spec_prefill_metadata.causal_conv1d
+    return (
+        causal_conv1d.query_start_loc,
+        causal_conv1d.cache_indices,
+        causal_conv1d.initial_state_mode,
+    )
+
+
+def _check_and_get_host_args(attn_metadata, attr_name: str, subattr_name: str):
+    """Prefer fallback metadata if present, otherwise use the live prefill metadata."""
+    fallback = getattr(attn_metadata, attr_name, None)
+    if fallback is not None:
+        return getattr(fallback, subattr_name)
+    return getattr(attn_metadata.non_spec_prefill_metadata, subattr_name)
+
+
+def get_non_spec_chunked_prefill_meta(attn_metadata):
+    fallback_meta = _check_and_get_host_args(
+        attn_metadata, "non_spec_prefill_fallback_meta", "chunk"
+    )
+    return fallback_meta
+
+
+def _maybe_reset_initial_state_for_layer_slice(attn_metadata, initial_state_mode_opt):
+    """Force zero initial_state_mode for edge-cloud layer-slice continuations.
+
+    When a decode batch is interleaved between two prefill slices, the decode
+    path may in-place update conv_state in a format incompatible with the
+    prefill kernel's InitRing.  Resetting initial_state_mode to zeros makes the
+    kernel initialise the ring buffer from scratch instead of reading stale
+    conv_state data.
+    """
+    if getattr(attn_metadata, "_is_layer_slice_continuation", False):
+        if initial_state_mode_opt is not None:
+            initial_state_mode_opt = torch.zeros_like(initial_state_mode_opt)
+    return initial_state_mode_opt
+
+
+def update_conv1d_graph_params(
+    update_stream,
+    forward_context,
+    num_tokens,
+    vllm_config,
+    is_draft_model,
+    draft_attn_metadatas,
+):
+    """Update GDN causal_conv1d graph parameters before the next replay.
+
+    This function is invoked from ``update_full_graph_params`` after the
+    attention backend update, so that the AscendC causal_conv1d tasks captured
+    in the FULL graph are refreshed with runtime metadata.
+    """
+    # Local import avoids a circular dependency: acl_graph imports this
+    # function at runtime, and this module only needs the graph params getters
+    # inside this function.
+    from vllm_ascend.compilation.acl_graph import (
+        get_draft_graph_params,
+        get_graph_params,
+    )
+
     if is_draft_model and draft_attn_metadatas is not None:
-        attn_metadata = draft_attn_metadatas
+        attn_metadata_source = draft_attn_metadatas
+        graph_params = get_draft_graph_params()
+    else:
+        attn_metadata_source = forward_context.attn_metadata
+        graph_params = get_graph_params()
+
+    if graph_params is None:
+        return
+
+    conv1d_params = graph_params.conv1d_params.get(num_tokens, [])
+    if not conv1d_params:
+        return
 
     with torch.npu.stream(update_stream):
         for param, handle, event in zip(
@@ -96,14 +191,20 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             new_cache_indices: tuple[int, ...] = ()
             new_num_accepted: tuple[int, ...] = ()
 
-            if run_mode == 1 and attn_metadata is not None:
-                # get gdn metadata by captured layer_prefix
-                meta = attn_metadata
-                if isinstance(meta, dict):
-                    meta = meta.get(layer_prefix, None)
-                    assert isinstance(meta, GDNAttentionMetadata)
+            if run_mode == 1 and attn_metadata_source is not None:
+                # Resolve the GDN metadata entry by captured layer_prefix.
+                meta = None
+                if isinstance(attn_metadata_source, dict):
+                    meta = attn_metadata_source.get(layer_prefix, None)
+                elif isinstance(attn_metadata_source, list):
+                    # Draft model: list of per-step metadata dicts.  Pick the
+                    # first step that contains this layer prefix.
+                    for per_step_meta in attn_metadata_source:
+                        if isinstance(per_step_meta, dict) and layer_prefix in per_step_meta:
+                            meta = per_step_meta[layer_prefix]
+                            break
 
-                if meta is None:
+                if meta is None or not isinstance(meta, GDNAttentionMetadata):
                     continue
 
                 cap_x_dim0 = int(mixed_qkv.size(0))
@@ -148,12 +249,34 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             event.record(update_stream)
 
 
-def get_non_spec_chunked_prefill_meta(attn_metadata):
-    fallback_meta = _check_and_get_host_args(attn_metadata, "non_spec_prefill_fallback_meta", "chunk")
-    return fallback_meta.chunk
-
-
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    def _split_ba_for_tp(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if hasattr(self, "split_ba"):
+            return self.split_ba(ba)
+        return ba.chunk(2, dim=-1)
+
+    def get_state_shape(
+        self,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        return MambaStateShapeCalculator.gated_delta_net_state_shape(
+            self.tp_size,
+            self.num_k_heads,
+            self.num_v_heads,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.conv_kernel_size,
+            self.num_spec,
+        )
+
+    def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
+        return
+
+    def _warmup_prefill_kernels_v0202(self, mixed_qkv: torch.Tensor) -> None:
+        return
+
+    def get_attn_backend(self) -> type[AttentionBackend]:
+        return AscendGDNAttentionBackend
+
     def forward(
         self,
         hidden_states: torch.Tensor,
