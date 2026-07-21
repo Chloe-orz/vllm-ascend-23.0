@@ -25,6 +25,7 @@ from vllm.model_executor.models.minimax_m2 import (
     MiniMaxM2Model,
     MiniMaxM2MoE,
 )
+from vllm.distributed import get_pp_group
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
