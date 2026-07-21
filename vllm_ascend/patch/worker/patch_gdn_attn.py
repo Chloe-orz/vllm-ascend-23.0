@@ -885,3 +885,50 @@ if not _IS_PATCHED and not is_310p():
     gdn_attn.GDNAttentionMetadataBuilder.build = _patched_build
     gdn_attn.GDNAttentionMetadataBuilder._init_reorder_batch_threshold = _init_reorder_batch_threshold
     _IS_PATCHED = True
+
+    # v0.23 引入的 AscendGDNAttentionMetadataBuilder 完整覆写了 build()
+    # 且不调用基类实现，上面的基类 patch 对它不生效。
+    # 这里对它做同样的包装：调用原始 build 后补齐 GDN 捕获/回退所需的
+    # fallback meta（non_spec_decode_fallback_meta 等），否则边云图捕获
+    # 路径会在 gdn.py 报 "Expected attn_metadata.non_spec_decode_fallback_meta"。
+    from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
+
+    _original_ascend_build = AscendGDNAttentionMetadataBuilder.build
+
+    def _patched_ascend_build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata,
+        num_accepted_tokens: torch.Tensor | None = None,
+        num_decode_draft_tokens_cpu: torch.Tensor | None = None,
+        fast_build: bool = False,
+    ):
+        attn_metadata = _original_ascend_build(
+            self,
+            common_prefix_len,
+            common_attn_metadata,
+            num_accepted_tokens=num_accepted_tokens,
+            num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            fast_build=fast_build,
+        )
+        # 与 _patched_build 保持一致的后处理
+        attn_metadata.skip_graph_params_update = True
+        attn_metadata.non_spec_prefill_fallback_meta = None
+        attn_metadata.non_spec_decode_fallback_meta = None
+        attn_metadata.spec_decode_fallback_meta = None
+        if getattr(attn_metadata, "spec_sequence_masks", None) is not None:
+            _patched_build_spec(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
+        if attn_metadata.num_prefills > 0:
+            _patched_build_prefill(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
+        if attn_metadata.num_decodes > 0:
+            _patched_build_decode(self, attn_metadata, common_attn_metadata, num_decode_draft_tokens_cpu)
+        if (
+            self.use_full_cuda_graph
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_spec_decodes == 0
+            and attn_metadata.num_decodes <= self.decode_cudagraph_max_bs
+        ):
+            self.non_spec_state_indices_tensor[attn_metadata.num_actual_tokens:].fill_(NULL_BLOCK_ID)
+        return attn_metadata
+
+    AscendGDNAttentionMetadataBuilder.build = _patched_ascend_build
