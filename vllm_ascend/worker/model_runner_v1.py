@@ -1662,14 +1662,19 @@ class NPUModelRunner(GPUModelRunner):
         torch.Tensor,
         SpecDecodeMetadata | None,
         int,
+        list | None,
     ]:
         """
         :return: tuple[
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
+            num_scheduled_tokens_compressed_list,
         ]
         """
+        # num_scheduled_tokens_compressed_list is not computed here; it is
+        # set by the edge-cloud path after attention metadata is built.
+        num_scheduled_tokens_compressed_list = None
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -2182,6 +2187,7 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices,
             spec_decode_metadata,
             total_num_scheduled_tokens,
+            num_scheduled_tokens_compressed_list,
         )
 
     def _preprocess(
@@ -5471,6 +5477,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        num_scheduled_tokens_compressed_list: list | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
