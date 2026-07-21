@@ -514,7 +514,10 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
-                if result.get("batch_type") != BatchType.PREFILL_FIRST:
+                if result.get("batch_type") not in (
+                    BatchType.PREFILL_FIRST,
+                    BatchType.MTP_DRAFT_FIRST,
+                ):
                     continue
                 head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
@@ -526,8 +529,9 @@ class PassiveEngineCoreProc:
                     continue
                 self._published_post_out_tokens.add(head_token)
                 logger.info(
-                    "[CLOUD-POST-OUT] Publishing PREFILL_LAST after worker done, "
-                    "head_token=%s",
+                    "[CLOUD-POST-OUT] Publishing tail for %s after worker "
+                    "done, head_token=%s",
+                    scheduler_output.batch_type.value,
                     head_token,
                 )
                 self._maybe_publish_post_out(scheduler_output)
@@ -599,7 +603,10 @@ class PassiveEngineCoreProc:
             if batch.scheduler_output.batch_type == BatchType.DECODE_FIRST:
                 self._maybe_publish_post_out(batch.scheduler_output)
             elif (
-                batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
+                batch.scheduler_output.batch_type in (
+                    BatchType.PREFILL_FIRST,
+                    BatchType.MTP_DRAFT_FIRST,
+                )
                 and (slice_info is None or slice_info.is_last_slice)
             ):
                 head_token = getattr(batch.scheduler_output, "head_token", None)
@@ -618,6 +625,7 @@ class PassiveEngineCoreProc:
         Mapping (cloud-side):
             PREFILL_FIRST → PREFILL_LAST
             DECODE_FIRST  → DECODE_LAST
+            MTP_DRAFT_FIRST → MTP_DRAFT_LAST
             anything else → dropped (legacy PP batches don't trigger return)
 
         Uses a shallow copy via :py:func:`dataclasses.replace` so the original
@@ -636,6 +644,20 @@ class PassiveEngineCoreProc:
             tail = replace(
                 scheduler_output, batch_type=BatchType.DECODE_LAST
             )
+        elif bt == BatchType.MTP_DRAFT_FIRST:
+            tail = replace(
+                scheduler_output, batch_type=BatchType.MTP_DRAFT_LAST
+            )
+            if not tail.head_token:
+                raise RuntimeError("MTP_DRAFT_LAST POST_OUT missing head_token")
+            if not tail.mtp_draft_task_id:
+                raise RuntimeError(
+                    "MTP_DRAFT_LAST POST_OUT missing mtp_draft_task_id"
+                )
+            if tail.draft_step_idx is None:
+                raise RuntimeError(
+                    "MTP_DRAFT_LAST POST_OUT missing draft_step_idx"
+                )
         else:
             return
         # Echo the head_token back so the edge can correlate the tail

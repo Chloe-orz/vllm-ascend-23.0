@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.utils.network_utils import get_distributed_init_method, get_loopback_ip, get_open_port
 from vllm.utils.system_utils import get_mp_context
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import FailureCallback
 from vllm.v1.executor.multiproc_executor import (
     FutureWrapper,
@@ -19,6 +20,7 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
     set_multiprocessing_worker_envs,
 )
+from vllm.v1.outputs import DraftTokenIds
 
 
 class AscendMultiprocExecutor(MultiprocExecutor):
@@ -201,6 +203,40 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             return 0
         return super()._get_output_rank()
 
+    def _edge_local_only(self) -> bool:
+        """Keep edge-owned control RPCs off the cross-node work queue."""
+        return bool(
+            getattr(self.parallel_config, "enable_edge_cloud", False)
+            and getattr(self.parallel_config, "is_edge_node", False)
+        )
+
+    def take_pending_mtp_draft_scheduler_output(
+        self,
+    ) -> SchedulerOutput | None:
+        return self.collective_rpc(
+            "take_pending_mtp_draft_scheduler_output",
+            unique_reply_rank=self.output_rank,
+            local_only=self._edge_local_only(),
+        )
+
+    def take_completed_mtp_draft_result(
+        self,
+    ) -> tuple[DraftTokenIds, SchedulerOutput] | None:
+        return self.collective_rpc(
+            "take_completed_mtp_draft_result",
+            unique_reply_rank=self.output_rank,
+            local_only=self._edge_local_only(),
+        )
+
+    def clear_pending_mtp_draft_for_req_ids(
+        self, req_ids: set[str] | list[str]
+    ) -> None:
+        self.collective_rpc(
+            "clear_pending_mtp_draft_for_req_ids",
+            args=(req_ids,),
+            local_only=self._edge_local_only(),
+        )
+
 
 class AscendWorkerProc(WorkerProc):
     def _init_message_queues(
@@ -233,7 +269,7 @@ class AscendWorkerProc(WorkerProc):
             )
             self.worker_response_mq, self.peer_response_handles = (
                 get_inner_dp_world_group().create_single_reader_mq_broadcasters(
-                    reader_rank_in_group=0
+                    reader_rank_in_group=0, vllm_config=vllm_config
                 )
             )
         else:
