@@ -825,7 +825,22 @@ class NPUWorker(WorkerBase):
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput:
         """Run one cloud-side Qwen-MTP middle step."""
-        self.model_runner._run_mtp_cloud_segment(scheduler_output)
+        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
+        send_handles = self.model_runner._run_mtp_cloud_segment(
+            scheduler_output
+        )
+        # Record the cloud->edge draft payload send instead of waiting it:
+        # the edge posts the matching tail recv (MTP_DRAFT_LAST) only after
+        # this worker's ack lets the cloud EngineCore publish the tail
+        # SchedulerOutput.  Waited lazily before the next DECODE-channel
+        # reuse, same as _execute_model_cloud.
+        if send_handles:
+            self._record_pp_send_work(
+                send_handles, channel=HiddenChannelType.DECODE
+            )
+        logger.info(
+            f"Execute model, batch_type: {scheduler_output.batch_type}, after."
+        )
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
             req_ids=req_ids,
@@ -836,6 +851,7 @@ class NPUWorker(WorkerBase):
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput:
         """Run and send one edge-side Qwen-MTP first segment."""
+        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         output = self.model_runner._run_mtp_edge_first_segment(
             scheduler_output
         )
@@ -857,6 +873,10 @@ class NPUWorker(WorkerBase):
                 edge_cloud_send_tensor_dict_mtp(tensor_dict),
                 channel=HiddenChannelType.DECODE,
             )
+            logger.info(
+                "Send intermediate tensors to cloud, "
+                f"hidden_channel: {HiddenChannelType.DECODE.value}"
+            )
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
             req_ids=req_ids,
@@ -867,6 +887,7 @@ class NPUWorker(WorkerBase):
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput:
         """Receive and finish one edge-side Qwen-MTP draft step."""
+        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         tensor_dict, comm_handles, comm_postprocess = (
             edge_cloud_broadcast_recv_mtp()
         )
@@ -874,6 +895,10 @@ class NPUWorker(WorkerBase):
             handle.wait()
         for postprocess in comm_postprocess:
             postprocess()
+        logger.info(
+            "Receive intermediate tensors from cloud after, "
+            f"hidden_channel: {HiddenChannelType.DECODE.value}"
+        )
         assert tensor_dict is not None
         self.model_runner._validate_mtp_payload_identity(
             scheduler_output, tensor_dict
