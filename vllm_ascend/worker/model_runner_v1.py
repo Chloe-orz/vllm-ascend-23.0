@@ -3081,6 +3081,15 @@ class NPUModelRunner(GPUModelRunner):
                             scheduler_output
                         )
 
+                    # Early return if _update_states removed all active
+                    # requests (e.g. all finished during the head→tail
+                    # window in edge-cloud mode). Without this guard the
+                    # code falls through to _prepare_inputs on an empty
+                    # batch and can corrupt input_batch state.
+                    num_reqs = self.input_batch.num_reqs
+                    if num_reqs == 0:
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+
                     if has_ec_transfer() and get_ec_transfer().is_producer:
                         with self.maybe_get_ec_connector_output(
                             scheduler_output,

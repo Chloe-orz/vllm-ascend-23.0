@@ -24,8 +24,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.triton.reject_sample import (
     cal_grid_and_block_size,
     expand_triton,
-    pad_cu_for_kernel,
-    pad_tail_to,
     rejection_greedy_sample_with_triton,
     rejection_random_sample_block_verify_kernel,
     rejection_random_sample_kernel,
@@ -425,31 +423,14 @@ def rejection_sample(
     # past the real batch still TOUCHES DDR -- and a masked cu load even returns
     # garbage that drives an out-of-bounds inner loop. We therefore launch with
     # NO masked lanes: pad every offset-indexed buffer up to grid*block_size and
-    # pass vec_len = grid*block_size, so every lane is a valid, in-bounds access.
-    # Padded lanes get num_draft_tokens == 0 (cu repeats its last value) and only
-    # write a bonus token into padded output rows, which are sliced off before
-    # returning. This is what makes edge-cloud match the non-edge-cloud path
-    # (whose batch is already graph-padded, so these buffers already have slack).
-    if HAS_TRITON:
-        grid, block_size = cal_grid_and_block_size(batch_size)
-        pad_len = grid * block_size
-    else:
-        grid, block_size = None, None
-        pad_len = batch_size
-
-    # Create output buffer (padded rows for the kernels; sliced to batch_size at
-    # return).
-    output_token_ids = torch.empty(
-        (pad_len, max_spec_len + 1),
-        dtype=torch.int32,  # Consistent with SamplerOutput.sampled_token_ids.
-        device=device,
-    )
-    output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
-
     if sampling_metadata.all_greedy:
         is_greedy = None
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+    if HAS_TRITON:
+        grid, block_size = cal_grid_and_block_size(batch_size)
+    else:
+        grid, block_size = None, None
 
     if using_block_verify or using_entropy_verify:
         logger.info_once(
@@ -466,21 +447,14 @@ def rejection_sample(
             sampling_metadata.all_random,
         )
 
-    if HAS_TRITON and pad_len > batch_size:
-        # cu uses a front-guard + tail view (pad_cu_for_kernel): the front guard
-        # makes the offset-1 == -1 tile read at block 0 land in mapped memory
-        # (the actual Ascend fault), and the repeated-last tail makes padded
-        # lanes see num_draft_tokens == 0. is_greedy padded with 1 (greedy) so
-        # the random kernels skip padded lanes; bonus repeats its last row so a
-        # padded greedy lane has a valid bonus source (written into sliced-off
-        # output rows).
-        cu_num_draft_tokens_k = pad_cu_for_kernel(cu_num_draft_tokens, pad_len)
-        bonus_token_ids_k = pad_tail_to(bonus_token_ids, pad_len, repeat_last=True)
-        is_greedy_k = None if is_greedy is None else pad_tail_to(is_greedy, pad_len, fill=1)
-    else:
-        cu_num_draft_tokens_k = cu_num_draft_tokens
-        bonus_token_ids_k = bonus_token_ids
-        is_greedy_k = is_greedy
+    # Create output buffer sized for batch_size (no padding — padding leaked
+    # stale token data between requests in edge-cloud mode).
+    output_token_ids = torch.empty(
+        (batch_size, max_spec_len + 1),
+        dtype=torch.int32,  # Consistent with SamplerOutput.sampled_token_ids.
+        device=device,
+    )
+    output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
 
     # For greedy sampling, we need to do allgather first to get global argmax
     if not sampling_metadata.all_random:
@@ -494,11 +468,11 @@ def rejection_sample(
             rejection_greedy_sample_with_triton(
                 output_token_ids,
                 num_draft_tokens,
-                cu_num_draft_tokens_k,
+                cu_num_draft_tokens,
                 draft_token_ids,
                 target_argmax,
-                bonus_token_ids_k,
-                is_greedy_k,
+                bonus_token_ids,
+                is_greedy,
                 max_spec_len,
                 grid,
                 block_size,
@@ -523,7 +497,7 @@ def rejection_sample(
                     is_greedy,
                 )
         if sampling_metadata.all_greedy:
-            return output_token_ids[:batch_size]
+            return output_token_ids
 
     # For random sampling with selected logits
     # target_logits is [num_tokens, top_k*tp_size] with indices [num_tokens, top_k*tp_size]
@@ -565,19 +539,19 @@ def rejection_sample(
             if HAS_TRITON:
                 rejection_random_sample_kernel[(grid,)](
                     output_token_ids,
-                    cu_num_draft_tokens_k,
+                    cu_num_draft_tokens,
                     draft_token_ids,
                     draft_probs,
                     target_probs,
                     target_indices,
-                    bonus_token_ids_k,
+                    bonus_token_ids,
                     recovered_token_ids,
                     uniform_probs.to(torch.float32),
-                    is_greedy_k,
+                    is_greedy,
                     max_spec_len,
                     selected_vocab_size,
                     global_vocab_size,
-                    pad_len,
+                    batch_size,
                     ori_target_probs,
                     NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
@@ -617,19 +591,19 @@ def rejection_sample(
             if HAS_TRITON:
                 rejection_random_sample_block_verify_kernel[(grid,)](
                     output_token_ids,
-                    cu_num_draft_tokens_k,
+                    cu_num_draft_tokens,
                     draft_token_ids,
                     draft_probs,
                     target_probs,
                     target_indices,
-                    bonus_token_ids_k,
+                    bonus_token_ids,
                     recovered_token_ids,
                     uniform_probs.to(torch.float32),
-                    is_greedy_k,
+                    is_greedy,
                     max_spec_len,
                     selected_vocab_size,
                     global_vocab_size,
-                    pad_len,
+                    batch_size,
                     ori_target_probs,
                     NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
@@ -707,19 +681,19 @@ def rejection_sample(
             if HAS_TRITON:
                 rejection_random_sample_kernel[(grid,)](
                     output_token_ids,
-                    cu_num_draft_tokens_k,
+                    cu_num_draft_tokens,
                     draft_token_ids,
                     draft_probs,
                     target_probs,
                     None,  # target_indices
-                    bonus_token_ids_k,
+                    bonus_token_ids,
                     recovered_token_ids,
                     uniform_probs.to(torch.float32),
-                    is_greedy_k,
+                    is_greedy,
                     max_spec_len,
                     vocab_size,
                     global_vocab_size,
-                    pad_len,
+                    batch_size,
                     ori_target_probs,
                     NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
@@ -757,19 +731,19 @@ def rejection_sample(
             if HAS_TRITON:
                 rejection_random_sample_block_verify_kernel[(grid,)](
                     output_token_ids,
-                    cu_num_draft_tokens_k,
+                    cu_num_draft_tokens,
                     draft_token_ids,
                     draft_probs,
                     target_probs,
                     None,  # target_indices
-                    bonus_token_ids_k,
+                    bonus_token_ids,
                     recovered_token_ids,
                     uniform_probs.to(torch.float32),
-                    is_greedy_k,
+                    is_greedy,
                     max_spec_len,
                     vocab_size,
                     global_vocab_size,
-                    pad_len,
+                    batch_size,
                     ori_target_probs,
                     NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
@@ -804,7 +778,7 @@ def rejection_sample(
                     ori_target_probs=ori_target_probs,
                 )
 
-    return output_token_ids[:batch_size]
+    return output_token_ids
 
 
 def expand_batch_to_tokens(
