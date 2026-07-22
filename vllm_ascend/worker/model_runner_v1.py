@@ -3182,22 +3182,17 @@ class NPUModelRunner(GPUModelRunner):
                         self.num_accepted_tokens.np[:num_reqs] = (
                             self.input_batch.num_accepted_tokens_cpu[:num_reqs]
                         )
-                    else:
-                        mamba_bufs = None
-                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
+                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
 
-                    if (
-                        mamba_bufs is not None
-                        and mamba_bufs.postprocess_align is not None
-                    ):
-                        mamba_utils.stage_postprocess_inputs_to_gpu(
-                            mamba_bufs.postprocess_align,
-                            scheduler_output,
-                            self.input_batch.req_ids,
-                            num_reqs,
-                            self.requests,
-                            self.mamba_state_idx,
-                        )
+                        if mamba_bufs is not None and mamba_bufs.postprocess_align is not None:
+                            mamba_utils.stage_postprocess_inputs_to_gpu(
+                                mamba_bufs.postprocess_align,
+                                scheduler_output,
+                                self.input_batch.req_ids,
+                                num_reqs,
+                                self.requests,
+                                self.mamba_state_idx,
+                            )
                     if self.use_compress:
                         if deferred_state_corrections_fn:
                             deferred_state_corrections_fn()
