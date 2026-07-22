@@ -355,11 +355,25 @@ def _trim_scheduler_output_for_worker_enqueue(
 ) -> SchedulerOutput:
     """Trim large cached token lists before cloud EngineCore -> worker MQ.
 
-    Cloud worker ``_update_states`` only needs ``all_token_ids`` for cached
-    requests that are not already in its persistent batch and have output
-    tokens.  The best local approximation is the previous cloud dispatch batch:
-    continuously dispatched requests can drop ``all_token_ids`` while newly
-    appearing / resumed requests keep it.
+    Cloud worker ``_update_states`` looks up ``all_token_ids[req_id]`` for any
+    cached request that has output tokens but is not in its persistent batch
+    (``req_index is None``; see gpu_model_runner.py ``use_async_scheduling``
+    branch).  The worker evicts a request from the persistent batch whenever a
+    processed batch does not contain it, so membership in the previous
+    dispatch batch is NOT a reliable predictor of worker-side residency in
+    multi-request PD-separation flows (PF/DF batches of different requests
+    interleave on the cloud, and any extra/missed ``_update_states`` breaks
+    the one-deep ``prev_dispatch_req_ids`` approximation).  Dropping the entry
+    in that case crashes the cloud worker with ``KeyError`` in
+    ``_update_states``.
+
+    Therefore keep ``all_token_ids`` for EVERY cached request that has output
+    tokens, but trim each entry to the trailing ``num_output_tokens`` tokens —
+    that suffix is all ``_update_states`` consumes
+    (``all_token_ids[req_id][-num_output_tokens:]``), so this is
+    serialization-safe and still sheds the (typically dominant) prompt part.
+    Entries with ``num_output_tokens == 0`` are never looked up and are
+    dropped entirely.
     """
     cached = scheduler_output.scheduled_cached_reqs
     if cached is None:
@@ -369,6 +383,8 @@ def _trim_scheduler_output_for_worker_enqueue(
     if not all_token_ids:
         return scheduler_output
 
+    # prev_dispatch_req_ids / resumed_req_ids are retained for the debug log
+    # below; correctness no longer depends on them (see docstring).
     prev_dispatch_req_ids = prev_dispatch_req_ids or set()
     resumed_req_ids = getattr(cached, "resumed_req_ids", set()) or set()
     num_output_tokens_by_req = {
@@ -381,11 +397,7 @@ def _trim_scheduler_output_for_worker_enqueue(
     keep_req_ids = {
         req_id
         for req_id in all_token_ids
-        if req_id in resumed_req_ids
-        or (
-            req_id not in prev_dispatch_req_ids
-            and num_output_tokens_by_req.get(req_id, 0) > 0
-        )
+        if num_output_tokens_by_req.get(req_id, 0) > 0
     }
     trimmed_all_token_ids = {}
     for req_id, token_ids in all_token_ids.items():
