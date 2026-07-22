@@ -873,11 +873,20 @@ class NPUWorker(WorkerBase):
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
         )
+        logger.info(
+            "[EDGE-TAIL] is_last_slice=%s layer_slice_info=%s output_type=%s",
+            is_last_slice,
+            layer_slice_info,
+            type(output).__name__ if output is not None else "None",
+        )
         if not is_last_slice:
+            logger.warning("[EDGE-TAIL] returning None: not last slice")
             return None
 
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
+            logger.info("[EDGE-TAIL] returning output type=%s", type(output).__name__)
             return output
+        logger.info("[EDGE-TAIL] returning output (fallback) type=%s", type(output).__name__)
         return output
 
     def _execute_model_cloud(
