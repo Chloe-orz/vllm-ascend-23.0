@@ -570,8 +570,7 @@ def init_ascend_model_parallel(
             tp_group_ranks = all_ranks.view(-1, global_tp_size)
             _SHARD_WEIGHT = create_shard_weight_group(tp_group_ranks)
 
-    # Edge-cloud / PD-separation only: create alternate PP groups for
-    # dual-channel communication.
+    # Create alternate PP groups for dual-channel communication.
     # Primary (device_group/cpu_group): used for non-ALL_DECODE batches
     #   (ALL_PREFILL + PREFILL_DECODE_MIXED).
     # Alternate (alt_device_group/alt_cpu_group): used for ALL_DECODE batches.
@@ -579,9 +578,7 @@ def init_ascend_model_parallel(
     # instances, allowing the HCCL backend to maintain separate communication
     # streams and avoid head-of-line blocking between decode and
     # prefill/mixed traffic.
-    # Gated on enable_edge_cloud so the baseline (non edge-cloud) PP path is
-    # unaffected.
-    if parallel_config.enable_edge_cloud and global_pp_size > 1:
+    if global_pp_size > 1:
         pp_group = get_pp_group()
         backend = torch.distributed.get_backend(get_world_group().device_group)
         pp_group.create_alternate_groups(backend)
