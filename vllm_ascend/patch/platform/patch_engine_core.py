@@ -296,6 +296,10 @@ def _needs_sample_tokens(self, scheduler_output: SchedulerOutput) -> bool:
     if getattr(self, "_pp_pd_channel", None) is None:
         return True
     bt = scheduler_output.batch_type
+    # PD_MIX is the head segment (like PREFILL_FIRST); sampling happens
+    # only after the cloud returns and the tail segment (PREFILL_LAST) runs.
+    if bt == BatchType.PD_MIX:
+        return False
     return bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST)
 
 
@@ -449,7 +453,7 @@ def _patched_step_with_batch_queue(self):
         if (
             getattr(self, "_pp_pd_channel", None) is not None
             and scheduler_output.batch_type in (
-                BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST
+                BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST, BatchType.PD_MIX
             )
             and not getattr(scheduler_output, "head_token", None)
         ):
