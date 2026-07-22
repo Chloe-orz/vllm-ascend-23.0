@@ -3495,6 +3495,14 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        logger.info(
+            "[SAMPLE-TOKENS] entry: edge_cloud=%s is_edge=%s "
+            "execute_model_state=%s tail_discarded=%s",
+            self._edge_cloud_enabled,
+            self.parallel_config.is_edge_node,
+            self.execute_model_state is not None,
+            getattr(self, "_tail_segment_discarded", None),
+        )
         if self._edge_cloud_enabled and not self.parallel_config.is_edge_node:
             # Cloud workers do not own segment_e / LM head / sampler in the
             # edge-cloud PD-separation topology. When the edge EngineCore

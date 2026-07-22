@@ -505,6 +505,11 @@ def _patched_step_with_batch_queue(self):
                     grammar_output = self.scheduler.get_grammar_bitmask(
                         scheduler_output
                     )
+                    vllm_logger.info(
+                        "[BATCH_QUEUE] dispatching sample_tokens: batch_type=%s",
+                        scheduler_output.batch_type.value
+                        if scheduler_output.batch_type else "N/A",
+                    )
                     future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
