@@ -794,12 +794,12 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Edge head segment (PF/DF): segment_a -> isend -> suspend -> return EMPTY."""
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
+        # logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors=None,
             layer_slice_info=layer_slice_info,
         )
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
+        # logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -825,7 +825,7 @@ class NPUWorker(WorkerBase):
                                             num_tokens=scheduler_output.total_num_scheduled_tokens),
                 channel=channel,
             )
-            logger.info(f"Send intermediate tensors to cloud, hidden_channel: {channel.value}")
+            # logger.info(f"Send intermediate tensors to cloud, hidden_channel: {channel.value}")
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
         # because sampling happens in the tail segment (PL/DL).
@@ -843,14 +843,14 @@ class NPUWorker(WorkerBase):
         """Edge tail segment (PL/DL): recv -> segment_e -> return output."""
         edge_sp = enable_sp()
         edge_merge = get_edge_cloud_tensor_meta().merge_payload
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
+        # logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         channel = self._hidden_channel_for(scheduler_output)
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
             num_tokens=scheduler_output.total_num_scheduled_tokens,
             channel=channel,
             sp_chunk=edge_sp and edge_merge,
         )
-        logger.info(f"Receive intermediate tensors from cloud after, hidden_channel: {channel.value}")
+        # logger.info(f"Receive intermediate tensors from cloud after, hidden_channel: {channel.value}")
 
         if edge_sp and not edge_merge:
             tensor_dict = {
@@ -868,7 +868,7 @@ class NPUWorker(WorkerBase):
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
         )
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
+        # logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -886,14 +886,14 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Cloud middle segment: recv -> segment_b/c -> isend -> return."""
-        logger.info(
-            f"Execute model, batch_type: {scheduler_output.batch_type}, " + (
-                f"slice: {layer_slice_info.slice_index + 1}/{layer_slice_info.total_slices}, "
-                f"layers: [{layer_slice_info.start_layer},{layer_slice_info.end_layer})"
-                if layer_slice_info is not None
-                else ""
-            )
-        )
+        # logger.info(
+        #     f"Execute model, batch_type: {scheduler_output.batch_type}, " + (
+        #         f"slice: {layer_slice_info.slice_index + 1}/{layer_slice_info.total_slices}, "
+        #         f"layers: [{layer_slice_info.start_layer},{layer_slice_info.end_layer})"
+        #         if layer_slice_info is not None
+        #         else ""
+        #     )
+        # )
         intermediate_tensors = None
         is_first_slice = (
             layer_slice_info is None or layer_slice_info.is_first_slice
@@ -941,7 +941,7 @@ class NPUWorker(WorkerBase):
                 src=0,
                 **recv_kwargs,
             )
-            logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value if channel is not None else 'default'}")
+            # logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value if channel is not None else 'default'}")
 
             self.model_runner.cloud_prepare_early(scheduler_output)
             if do_sp_chunk and not merge_payload:
@@ -962,7 +962,7 @@ class NPUWorker(WorkerBase):
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
         )
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
+        # logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -1004,7 +1004,7 @@ class NPUWorker(WorkerBase):
                                                 dst=0),
                     channel=channel,
                 )
-                logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")
+                # logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")
             else:
                 self._record_pp_send_work(
                     edge_cloud_isend_tensor_dict(
@@ -1013,7 +1013,7 @@ class NPUWorker(WorkerBase):
                         num_tokens=scheduler_output.total_num_scheduled_tokens,
                     )
                 )
-                logger.info("Send intermediate tensors to edge, hidden_channel=default")
+                # logger.info("Send intermediate tensors to edge, hidden_channel=default")
         return output
 
     def _execute_model_legacy(

@@ -204,7 +204,7 @@ def _drain_pd_channel_inbox(self) -> None:
     new_outputs = self._pp_pd_channel.consume_new_outputs()
     for _seq, so in new_outputs:
         bt = so.batch_type
-        logger.info(f"Received scheduler_output from cloud, batch_type: {bt}")
+        # logger.info(f"Received scheduler_output from cloud, batch_type: {bt}")
         if bt == BatchType.PREFILL_LAST:
             self.scheduler.prefills_last_ready.append(so)
         elif bt == BatchType.DECODE_LAST:
@@ -244,10 +244,11 @@ def _maybe_publish_pre_out(
     ):
         return
     else:
-        logger.debug(
-            "PD-separation PRE_OUT skipping non-separated batch_type=%s",
-            bt.value if bt is not None else "<none>",
-        )
+        # logger.debug(
+        #     "PD-separation PRE_OUT skipping non-separated batch_type=%s",
+        #     bt.value if bt is not None else "<none>",
+        # )
+        pass
 
 
 def _publish_pre_out_when_ready(self) -> None:
@@ -284,11 +285,11 @@ def _publish_pre_out_when_ready(self) -> None:
 
     ch.publish(oldest_so)
     published.add(head_token)
-    logger.info(
-        "[PRE_OUT] Published PREFILL_FIRST (head_token=%s) when it became next to execute, "
-        "queue_len=%d",
-        head_token, len(batch_queue),
-    )
+    # logger.info(
+    #     "[PRE_OUT] Published PREFILL_FIRST (head_token=%s) when it became next to execute, "
+    #     "queue_len=%d",
+    #     head_token, len(batch_queue),
+    # )
 
 
 def _clear_published_pre_out_token(self, scheduler_output: SchedulerOutput) -> None:
@@ -520,16 +521,16 @@ def _patched_step_with_batch_queue(self):
             if not deferred_scheduler_output:
                 batch_queue.appendleft((future, scheduler_output, exec_future))
                 # [ascend insert] Log batch_queue contents for debugging.
-                queue_types = [
-                    so.batch_type.value
-                    for _, so, _ in batch_queue
-                ]
-                vllm_logger.info(
-                    "[BATCH_QUEUE] Enqueued %s, queue_len=%d, types=%s",
-                    scheduler_output.batch_type.value,
-                    len(batch_queue),
-                    queue_types,
-                )
+                # queue_types = [
+                #     so.batch_type.value
+                #     for _, so, _ in batch_queue
+                # ]
+                # vllm_logger.info(
+                #     "[BATCH_QUEUE] Enqueued %s, queue_len=%d, types=%s",
+                #     scheduler_output.batch_type.value,
+                #     len(batch_queue),
+                #     queue_types,
+                # )
                 if (
                     model_executed
                     and len(batch_queue) < self.batch_queue_size
@@ -675,7 +676,8 @@ def _patched_process_input_queue(self):
 
         try:
             if block and self.input_queue.empty():
-                logger.info("input_queue is empty, EngineCore waiting for work.")
+                # logger.info("input_queue is empty, EngineCore waiting for work.")
+                pass
             req = self.input_queue.get(block=block)
             self._handle_client_request(*req)
         except _queue_mod.Empty:

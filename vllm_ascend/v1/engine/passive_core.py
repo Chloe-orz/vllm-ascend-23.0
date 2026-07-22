@@ -219,17 +219,17 @@ class PPSchedulerZmqSubscriber:
                     continue
                 with self._lock:
                     self._received_outputs.append((seq, scheduler_output))
-                logger.info(
-                    "PP rank1 received SchedulerOutput seq=%d, "
-                    "total_scheduled_tokens=%d, "
-                    "new_reqs=%d, cached_reqs=%d, "
-                    "finished_req_ids=%s",
-                    seq,
-                    scheduler_output.total_num_scheduled_tokens,
-                    len(scheduler_output.scheduled_new_reqs),
-                    scheduler_output.scheduled_cached_reqs.num_reqs,
-                    scheduler_output.finished_req_ids,
-                )
+                # logger.info(
+                #     "PP rank1 received SchedulerOutput seq=%d, "
+                #     "total_scheduled_tokens=%d, "
+                #     "new_reqs=%d, cached_reqs=%d, "
+                #     "finished_req_ids=%s",
+                #     seq,
+                #     scheduler_output.total_num_scheduled_tokens,
+                #     len(scheduler_output.scheduled_new_reqs),
+                #     scheduler_output.scheduled_cached_reqs.num_reqs,
+                #     scheduler_output.finished_req_ids,
+                # )
             except zmq.ZMQError:
                 if self._running:
                     logger.exception("ZMQ error in PP scheduler subscriber")
@@ -329,10 +329,10 @@ class PPSchedulerZmqChannel:
 
     def publish(self, scheduler_output: SchedulerOutput) -> None:
         """Queue a SchedulerOutput for the peer. Non-blocking."""
-        logger.info(
-            f"Send scheduler_output to edge, batch_type: "
-            f"{scheduler_output.batch_type}",
-        )
+        # logger.info(
+        #     f"Send scheduler_output to edge, batch_type: "
+        #     f"{scheduler_output.batch_type}",
+        # )
         self._publisher.publish(scheduler_output)
 
     def consume_new_outputs(self) -> list[tuple[int, SchedulerOutput]]:
@@ -410,18 +410,18 @@ def _trim_scheduler_output_for_worker_enqueue(
     after_tokens = sum(
         len(token_ids) for token_ids in trimmed_all_token_ids.values()
     )
-    logger.info(
-        "[CLOUD-MQ-TRIM] batch_type=%s reqs=%d prev_dispatch_reqs=%d "
-        "resumed=%d all_token_ids entries %d->%d tokens %d->%d",
-        scheduler_output.batch_type.value,
-        len(getattr(cached, "req_ids", ())),
-        len(prev_dispatch_req_ids),
-        len(resumed_req_ids),
-        len(all_token_ids),
-        len(trimmed_all_token_ids),
-        before_tokens,
-        after_tokens,
-    )
+    # logger.info(
+    #     "[CLOUD-MQ-TRIM] batch_type=%s reqs=%d prev_dispatch_reqs=%d "
+    #     "resumed=%d all_token_ids entries %d->%d tokens %d->%d",
+    #     scheduler_output.batch_type.value,
+    #     len(getattr(cached, "req_ids", ())),
+    #     len(prev_dispatch_req_ids),
+    #     len(resumed_req_ids),
+    #     len(all_token_ids),
+    #     len(trimmed_all_token_ids),
+    #     before_tokens,
+    #     after_tokens,
+    # )
 
     so_copy = copy.copy(scheduler_output)
     cached_copy = copy.copy(cached)
@@ -525,11 +525,11 @@ class PassiveEngineCoreProc:
                 if scheduler_output is None:
                     continue
                 self._published_post_out_tokens.add(head_token)
-                logger.info(
-                    "[CLOUD-POST-OUT] Publishing PREFILL_LAST after worker done, "
-                    "head_token=%s",
-                    head_token,
-                )
+                # logger.info(
+                #     "[CLOUD-POST-OUT] Publishing PREFILL_LAST after worker done, "
+                #     "head_token=%s",
+                #     head_token,
+                # )
                 self._maybe_publish_post_out(scheduler_output)
 
     def step(self) -> bool:
@@ -548,24 +548,24 @@ class PassiveEngineCoreProc:
         if batch.is_empty():
             return False
 
-        _slice_info_str = "["
-        for s in batch.slices:
-            if s is not None:
-                _slice_info_str += (
-                    f"slice_index={s.slice_index},"
-                    f"start={s.start_layer},"
-                    f"end={s.end_layer},"
-                    f"is_last={s.is_last_slice};"
-                )
-            else:
-                _slice_info_str += "None;"
-        _slice_info_str += "]"
-        logger.info(
-            f"\r\n[Cloud] Step dispatched batch_type: "
-            f"{batch.scheduler_output.batch_type}, "
-            f"slices_count={len(batch.slices)}, "
-            f"slice_info={_slice_info_str}",
-        )
+        # _slice_info_str = "["
+        # for s in batch.slices:
+        #     if s is not None:
+        #         _slice_info_str += (
+        #             f"slice_index={s.slice_index},"
+        #             f"start={s.start_layer},"
+        #             f"end={s.end_layer},"
+        #             f"is_last={s.is_last_slice};"
+        #         )
+        #     else:
+        #         _slice_info_str += "None;"
+        # _slice_info_str += "]"
+        # logger.info(
+        #     f"\r\n[Cloud] Step dispatched batch_type: "
+        #     f"{batch.scheduler_output.batch_type}, "
+        #     f"slices_count={len(batch.slices)}, "
+        #     f"slice_info={_slice_info_str}",
+        # )
 
         for slice_info in batch.slices:
             worker_scheduler_output = _trim_scheduler_output_for_worker_enqueue(
@@ -578,7 +578,7 @@ class PassiveEngineCoreProc:
                 else (worker_scheduler_output,)
             )
             bt = batch.scheduler_output.batch_type.value
-            logger.info("[CLOUD-MQ] About to enqueue batch_type=%s", bt)
+            # logger.info("[CLOUD-MQ] About to enqueue batch_type=%s", bt)
             _t0 = time.monotonic()
             self.executor.rpc_broadcast_mq.enqueue(
                 (b"pp_scheduler_output", payload, {}, None)
@@ -587,11 +587,11 @@ class PassiveEngineCoreProc:
                 batch.scheduler_output.num_scheduled_tokens.keys()
             )
             _dt_ms = (time.monotonic() - _t0) * 1000
-            logger.info(
-                "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
-                bt,
-                _dt_ms,
-            )
+            # logger.info(
+            #     "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
+            #     bt,
+            #     _dt_ms,
+            # )
             # For PREFILL_FIRST, POST_OUT must mean the cloud middle segment
             # has completed and started sending hidden states back.  Store the
             # original SchedulerOutput here and publish it from

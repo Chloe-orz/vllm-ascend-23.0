@@ -4843,16 +4843,16 @@ class NPUModelRunner(GPUModelRunner):
             # sliced prefill while keeping graph/compile for decode and
             # non-sliced prefill.
             seg_c = self.segment_c_raw
-            logger.debug(
-                "[EdgeCloud] Cloud sliced prefill uses raw segment: "
-                "slice=%d/%d local=[%d,%d) global=[%d,%d)",
-                layer_slice_info.slice_index + 1,
-                layer_slice_info.total_slices,
-                layer_slice_info.start_layer,
-                layer_slice_info.end_layer,
-                layer_slice_info.start_layer + self.head_k,
-                layer_slice_info.end_layer + self.head_k,
-            )
+            # logger.debug(
+            #     "[EdgeCloud] Cloud sliced prefill uses raw segment: "
+            #     "slice=%d/%d local=[%d,%d) global=[%d,%d)",
+            #     layer_slice_info.slice_index + 1,
+            #     layer_slice_info.total_slices,
+            #     layer_slice_info.start_layer,
+            #     layer_slice_info.end_layer,
+            #     layer_slice_info.start_layer + self.head_k,
+            #     layer_slice_info.end_layer + self.head_k,
+            # )
         else:
             seg_c = self.segment_c_wrapper if use_graph else self.segment_c
         seg_c_graph = isinstance(seg_c, ACLGraphWrapper)
