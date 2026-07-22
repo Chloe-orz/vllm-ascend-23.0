@@ -516,7 +516,7 @@ class PassiveEngineCoreProc:
 
                 if result.get("batch_type") not in (
                     BatchType.PREFILL_FIRST,
-                    BatchType.MTP_DRAFT_FIRST,
+                    BatchType.DRAFT_FIRST,
                 ):
                     continue
                 head_token = result.get("head_token")
@@ -605,7 +605,7 @@ class PassiveEngineCoreProc:
             elif (
                 batch.scheduler_output.batch_type in (
                     BatchType.PREFILL_FIRST,
-                    BatchType.MTP_DRAFT_FIRST,
+                    BatchType.DRAFT_FIRST,
                 )
                 and (slice_info is None or slice_info.is_last_slice)
             ):
@@ -625,7 +625,7 @@ class PassiveEngineCoreProc:
         Mapping (cloud-side):
             PREFILL_FIRST → PREFILL_LAST
             DECODE_FIRST  → DECODE_LAST
-            MTP_DRAFT_FIRST → MTP_DRAFT_LAST
+            DRAFT_FIRST     → DRAFT_LAST
             anything else → dropped (legacy PP batches don't trigger return)
 
         Uses a shallow copy via :py:func:`dataclasses.replace` so the original
@@ -644,19 +644,19 @@ class PassiveEngineCoreProc:
             tail = replace(
                 scheduler_output, batch_type=BatchType.DECODE_LAST
             )
-        elif bt == BatchType.MTP_DRAFT_FIRST:
+        elif bt == BatchType.DRAFT_FIRST:
             tail = replace(
-                scheduler_output, batch_type=BatchType.MTP_DRAFT_LAST
+                scheduler_output, batch_type=BatchType.DRAFT_LAST
             )
             if not tail.head_token:
-                raise RuntimeError("MTP_DRAFT_LAST POST_OUT missing head_token")
-            if not tail.mtp_draft_task_id:
+                raise RuntimeError("DRAFT_LAST POST_OUT missing head_token")
+            if not tail.draft_task_id:
                 raise RuntimeError(
-                    "MTP_DRAFT_LAST POST_OUT missing mtp_draft_task_id"
+                    "DRAFT_LAST POST_OUT missing draft_task_id"
                 )
             if tail.draft_step_idx is None:
                 raise RuntimeError(
-                    "MTP_DRAFT_LAST POST_OUT missing draft_step_idx"
+                    "DRAFT_LAST POST_OUT missing draft_step_idx"
                 )
         else:
             return
