@@ -3339,7 +3339,10 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
-            if self.cache_config.mamba_cache_mode == "align":
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and self.kv_cache_config.has_mamba_layers
+            ):
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors,
