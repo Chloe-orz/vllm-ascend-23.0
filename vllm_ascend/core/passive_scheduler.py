@@ -162,8 +162,12 @@ class PassiveScheduler:
         self._layer_slice_config: dict[int, int] | None = None
         self._layer_slice_config_mtime: float = 0.0
         self._layer_slice_config_path: str | None = None
+        # Use hf_text_config (not the root hf_config) so multimodal models
+        # whose layer count lives in a nested text sub-config (e.g. KimiK2.5
+        # -> DeepseekV3Config) resolve correctly. For plain-text models
+        # hf_text_config == hf_config, so this is a no-op there.
         num_hidden_layers = (
-            vllm_config.model_config.hf_config.num_hidden_layers
+            vllm_config.model_config.hf_text_config.num_hidden_layers
         )
         pp_size = vllm_config.parallel_config.pipeline_parallel_size
         if vllm_config.parallel_config.enable_edge_cloud:
