@@ -5530,11 +5530,13 @@ class NPUModelRunner(GPUModelRunner):
             from vllm_ascend.utils import extract_dsv4_layer_index
 
             assert len(self.kv_caches) == 0
+            self.kv_cache_names: list[str] = []
             for layer_name in sorted(
                     kv_caches,
                     key=lambda name: (extract_dsv4_layer_index(
                         self.model_config.hf_text_config, name), name)):
                 self.kv_caches.append(kv_caches[layer_name])
+                self.kv_cache_names.append(layer_name)
             for layer_name, kv_cache in kv_caches.items():
                 self.compilation_config.static_forward_context[
                     layer_name].kv_cache = [kv_cache]
@@ -6452,7 +6454,51 @@ class NPUModelRunner(GPUModelRunner):
             wrapper.concrete_aclgraph_entries.clear()
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
+        self._zero_dsa_state_block0()
         return result
+
+    def _zero_dsa_state_block0(self) -> None:
+        """Zero physical block 0 (null/dummy block) of every DSA compressor
+        state cache. Always-on; called once at the end of capture_model.
+
+        The compressor kernel indexes state_cache in raw-position space
+        (block_table[req][pos // 8]), but the decode-time state block table
+        carries only one valid block; positions >= 8 hit zero-padding
+        entries. Kernel writes to entry 0 are silently dropped, while reads
+        are NOT guarded and land on physical block 0, whose content is
+        capture-order-dependent residue (NaN when the size-1 capture runs
+        last -> accuracy corruption at the first decode compression
+        boundary). Zeroing block 0 makes the phantom read deterministic and
+        restores eager parity.
+
+        Once after capture is sufficient: real inference never writes state
+        block 0 (kernel writes to entry 0 are dropped; decode padding slots
+        are -1, not 0), so the zeroed content persists for the process
+        lifetime. Verified: b0nan stays constant across prefill+decode.
+        """
+        try:
+            caches = getattr(self, "_dsa_state_caches_for_zero", None)
+            if not caches:
+                # （重）收集。profile/dummy 阶段 KV cache 尚未初始化，此时
+                # 收集到 0 个属正常——不能缓存空列表，否则后续永远不再重试。
+                caches = []
+                names = getattr(self, "kv_cache_names", None) or []
+                runner_caches = getattr(self, "kv_caches", None) or []
+                for i, name in enumerate(names):
+                    if "compressor.state_cache" not in name or i >= len(runner_caches):
+                        continue
+                    entry = runner_caches[i]
+                    cache = entry[0] if isinstance(entry, (list, tuple)) else entry
+                    if isinstance(cache, torch.Tensor) and cache.numel() > 0:
+                        caches.append(cache)
+                if not caches:
+                    return
+                # 收集成功才缓存
+                self._dsa_state_caches_for_zero = caches
+            for cache in caches:
+                cache[0].zero_()
+        except Exception:
+            pass
 
     def _prepare_multimodal_fields(self):
         """
