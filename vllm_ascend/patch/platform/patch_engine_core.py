@@ -479,6 +479,17 @@ def _patched_step_with_batch_queue(self):
                 model_executed = (
                     scheduler_output.total_num_scheduled_tokens > 0
                 )
+            logger.info(
+                "[BATCH_QUEUE] batch_type=%s total_tokens=%d "
+                "is_ec_consumer=%s model_executed=%s "
+                "needs_sample=%s",
+                scheduler_output.batch_type.value
+                if scheduler_output.batch_type else "N/A",
+                scheduler_output.total_num_scheduled_tokens,
+                self.is_ec_consumer,
+                model_executed,
+                self._needs_sample_tokens(scheduler_output),
+            )
 
             if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
@@ -518,6 +529,13 @@ def _patched_step_with_batch_queue(self):
                     and len(batch_queue) < self.batch_queue_size
                     and not batch_queue[-1][0].done()
                 ):
+                    logger.info(
+                        "[BATCH_QUEUE] early-return: queue_len=%d queue_size=%d "
+                        "future_done=%s",
+                        len(batch_queue),
+                        self.batch_queue_size,
+                        batch_queue[-1][0].done(),
+                    )
                     return None, True
 
     elif not batch_queue:
@@ -529,6 +547,14 @@ def _patched_step_with_batch_queue(self):
     # eventually becomes batch_queue[-1] before pop().
     self._publish_pre_out_when_ready()
     future, scheduler_output, exec_model_fut = batch_queue.pop()
+    logger.info(
+        "[BATCH_QUEUE] pop and wait: batch_type=%s queue_len=%d "
+        "future_type=%s",
+        scheduler_output.batch_type.value
+        if scheduler_output.batch_type else "N/A",
+        len(batch_queue),
+        type(future).__name__,
+    )
     # [ascend insert] Clean up PRE_OUT tracking for completed batch.
     self._clear_published_pre_out_token(scheduler_output)
     with (
