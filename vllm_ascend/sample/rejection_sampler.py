@@ -423,14 +423,27 @@ def rejection_sample(
     # past the real batch still TOUCHES DDR -- and a masked cu load even returns
     # garbage that drives an out-of-bounds inner loop. We therefore launch with
     # NO masked lanes: pad every offset-indexed buffer up to grid*block_size and
+    # pass vec_len = grid*block_size, so every lane is a valid, in-bounds access.
+    # Padded lanes get num_draft_tokens == 0 (cu repeats its last value) and only
+    # write a bonus token into padded output rows, which are sliced off before
+    # returning. This is what makes edge-cloud match the non-edge-cloud path
+    # (whose batch is already graph-padded, so these buffers already have slack).
+    #
+    # NOTE: Output buffer uses pad_len (padded) to prevent Triton kernel OOB
+    # writes from corrupting adjacent GPU memory. Input tensors
+    # (cu_num_draft_tokens, bonus_token_ids, is_greedy) use the unpadded
+    # batch_size to avoid stale-data leakage between requests.
+    if HAS_TRITON:
+        grid, block_size = cal_grid_and_block_size(batch_size)
+        pad_len = grid * block_size
+    else:
+        grid, block_size = None, None
+        pad_len = batch_size
+
     if sampling_metadata.all_greedy:
         is_greedy = None
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
-    if HAS_TRITON:
-        grid, block_size = cal_grid_and_block_size(batch_size)
-    else:
-        grid, block_size = None, None
 
     if using_block_verify or using_entropy_verify:
         logger.info_once(
@@ -447,10 +460,10 @@ def rejection_sample(
             sampling_metadata.all_random,
         )
 
-    # Create output buffer sized for batch_size (no padding — padding leaked
-    # stale token data between requests in edge-cloud mode).
+    # Create output buffer (padded rows for the kernels; sliced to batch_size at
+    # return).
     output_token_ids = torch.empty(
-        (batch_size, max_spec_len + 1),
+        (pad_len, max_spec_len + 1),
         dtype=torch.int32,  # Consistent with SamplerOutput.sampled_token_ids.
         device=device,
     )
@@ -497,7 +510,7 @@ def rejection_sample(
                     is_greedy,
                 )
         if sampling_metadata.all_greedy:
-            return output_token_ids
+            return output_token_ids[:batch_size]
 
     # For random sampling with selected logits
     # target_logits is [num_tokens, top_k*tp_size] with indices [num_tokens, top_k*tp_size]
@@ -778,7 +791,7 @@ def rejection_sample(
                     ori_target_probs=ori_target_probs,
                 )
 
-    return output_token_ids
+    return output_token_ids[:batch_size]
 
 
 def expand_batch_to_tokens(
