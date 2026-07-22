@@ -129,14 +129,18 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # vLLM's fused GPU postprocess Triton kernel (introduced in vLLM #40172),
     # which the Ascend Triton backend cannot compile. Leave the mode as vLLM
     # derived it (e.g. "none" when prefix caching is off) for this case.
+    #
+    # For all other cases, force "align" because upstream _get_mamba_bufs
+    # (gpu_model_runner.py) asserts ``mamba_cache_mode == "align"``, and the
+    # Ascend preprocess_mamba path expects block-aligned buffers.
     spec_config = vllm_config.speculative_config
     is_extract_hidden_states = (
         spec_config is not None and getattr(spec_config, "method", None) == "extract_hidden_states"
     )
-    if using_kv_store_with_hybrid and not is_extract_hidden_states:
+    if not is_extract_hidden_states:
         if cache_config.mamba_cache_mode == "none":
             cache_config.mamba_cache_mode = "align"
-        else:
+        elif using_kv_store_with_hybrid:
             assert cache_config.mamba_cache_mode == "align", (
                 "mamba_cache_mode only support 'align' when kv_transfer enabled now!"
             )
