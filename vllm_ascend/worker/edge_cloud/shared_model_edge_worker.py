@@ -714,7 +714,9 @@ class SharedModelEdgeWorker(NPUWorker):
 
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
-            from torch_npu.profiler import dynamic_profile as dp
+            from vllm_ascend.profiler.torch_npu_profiler import (
+                dynamic_profile as dp,
+            )
             dp.step()
 
         if self._pp_send_work:
@@ -830,7 +832,9 @@ class SharedModelEdgeWorker(NPUWorker):
         from vllm_ascend import envs as envs_ascend
 
         if envs_ascend.MSMONITOR_USE_DAEMON:
-            from torch_npu.profiler import dynamic_profile as dp
+            from vllm_ascend.profiler.torch_npu_profiler import (
+                dynamic_profile as dp,
+            )
             dp.step()
         if self._pp_send_work:
             for handle in self._pp_send_work:
