@@ -2965,6 +2965,10 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        # num_scheduled_tokens_compressed_list is set inside the slow path by
+        # _prepare_inputs; for fast-path flows it stays None and
+        # _run_input_preparation will recompute internally.
+        num_scheduled_tokens_compressed_list = None
 
         # ---- segment_e fast path: reuse segment_a's cached prepare results ----
         # NOTE: if an intervening EMPTY batch cleared input_batch, we must
