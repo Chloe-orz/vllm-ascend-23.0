@@ -21,6 +21,30 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.utils import vllm_version_is
 
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_project_kv_cache_groups_to_worker = (
+    vllm.v1.core.kv_cache_utils._project_kv_cache_groups_to_worker
+)
+
+
+def _ascend_project_kv_cache_groups_to_worker(
+    global_kv_cache_groups: list[KVCacheGroupSpec],
+    worker_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    """Ascend-compatible projection that drops empty groups per worker.
+
+    In edge-cloud / pipeline-parallel setups a worker may own no layers from
+    some global KV cache group.  Upstream keeps those empty groups, and the
+    downstream ``get_kv_cache_config_from_groups`` later computes
+    ``group_size = max(len(g.layer_names))`` which becomes 0 and triggers
+    ``AssertionError: group_size must be greater than 0``.
+
+    Filter out projected groups with no local layers so each worker only gets
+    groups it actually participates in.
+    """
+    projected = _orig_project_kv_cache_groups_to_worker(
+        global_kv_cache_groups, worker_spec
+    )
+    return [group for group in projected if group.layer_names]
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -314,3 +338,57 @@ def _ascend_unify_kv_cache_spec_page_size(kv_cache_spec):
 vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size = (
     _ascend_unify_kv_cache_spec_page_size
 )
+vllm.v1.core.kv_cache_utils._project_kv_cache_groups_to_worker = (
+    _ascend_project_kv_cache_groups_to_worker
+)
+
+# -------- edge-cloud: skip cross-worker min-clamping of num_blocks ----------
+# In edge-cloud mode each worker has its own device and memory budget.  The
+# upstream get_kv_cache_configs computes per-worker num_blocks from per-worker
+# available_memory *before* taking min across all workers.  That min-clamping
+# is wrong here because the edge worker's available memory may be dominated by
+# embedding / output weights, while the cloud has most of the KV-cache layers
+# and a far larger budget.  Clamping the cloud to the edge's tiny num_blocks
+# leads to "available Mamba cache blocks (1)" at cudagraph resolution time.
+_orig_get_kv_cache_configs = vllm.v1.core.kv_cache_utils.get_kv_cache_configs
+
+
+def _ascend_get_kv_cache_configs(vllm_config, kv_cache_specs, available_memory):
+    kv_cache_configs = _orig_get_kv_cache_configs(
+        vllm_config, kv_cache_specs, available_memory
+    )
+
+    if not getattr(vllm_config.parallel_config, "enable_edge_cloud", False):
+        return kv_cache_configs
+
+    # Per-worker restoration: the original function already computed correct
+    # num_blocks per worker from each worker's available_memory, then clamped
+    # all to the minimum.  Re-derive each worker's own num_blocks by applying
+    # the same divisor (_pool_bytes_per_block) to its available_memory.
+    for cfg, avail in zip(kv_cache_configs, available_memory):
+        if not cfg.kv_cache_groups:
+            continue
+        bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block(
+            cfg.kv_cache_groups
+        )
+        if bytes_per_block <= 0:
+            continue
+        new_num_blocks = max(avail // bytes_per_block, 0)
+        new_num_blocks = may_override_num_blocks(vllm_config, new_num_blocks)
+
+        old_num_blocks = cfg.num_blocks
+        if old_num_blocks > 0 and new_num_blocks != old_num_blocks:
+            for tensor in cfg.kv_cache_tensors:
+                assert tensor.size % old_num_blocks == 0, (
+                    "Tensor size not divisible by old num_blocks"
+                )
+                tensor.size = tensor.size // old_num_blocks * new_num_blocks
+        cfg.num_blocks = new_num_blocks
+
+    return kv_cache_configs
+
+
+vllm.v1.core.kv_cache_utils.get_kv_cache_configs = _ascend_get_kv_cache_configs
+# ``core.py`` does ``from ... import get_kv_cache_configs``, which copies the
+# name into its own namespace — patch the engine-core reference as well.
+vllm.v1.engine.core.get_kv_cache_configs = _ascend_get_kv_cache_configs
