@@ -672,9 +672,24 @@ class PassiveEngineCoreProc:
 
         # Mark this process as a non-leader PP rank running with passive
         # EngineCore, so that AscendMultiprocExecutor and AscendWorkerProc
-        # set up dual message queues (local + cross-node).
-        os.environ["VLLM_PP_NON_LEADER_ENGINE_CORE"] = "1"
-        envs.disable_envs_cache()
+        # set up dual message queues (local + cross-node). Only do this
+        # when PD separation is actually enabled: with
+        # pd_separation.enabled=false (legacy PDmix mode) there is no
+        # ZMQ-driven passive scheduling — cloud workers must consume the
+        # cross-node execute_model broadcast directly (v0.20.2 behavior),
+        # which the dual-queue worker loop would otherwise skip.
+        from vllm_ascend.ascend_config import init_ascend_config
+        _ascend_config = init_ascend_config(vllm_config)
+        _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
+        _pd_enabled_for_queues = bool(
+            _edge_cloud is not None
+            and getattr(_edge_cloud, "enabled", False)
+            and getattr(_edge_cloud, "pd_separation", None) is not None
+            and _edge_cloud.pd_separation.enabled
+        )
+        if _pd_enabled_for_queues:
+            os.environ["VLLM_PP_NON_LEADER_ENGINE_CORE"] = "1"
+            envs.disable_envs_cache()
 
         set_process_title("PassiveEngineCore")
         maybe_init_worker_tracer(

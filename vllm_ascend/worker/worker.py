@@ -64,6 +64,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
+    edge_cloud_isend_tensor_dict,
     edge_cloud_send_tensor_dict,
     get_edge_cloud_tensor_meta,
     init_ascend_model_parallel,
@@ -913,7 +914,17 @@ class NPUWorker(WorkerBase):
                 self.model_runner.edge_cloud_cfg.mode != "embedding_only"
                 or not self.model_runner.supports_mm_inputs)
             merge_payload = get_edge_cloud_tensor_meta().merge_payload
-            channel = self._hidden_channel_for(scheduler_output)
+            # PD-separation head batches (PF/DF) carry a hidden channel;
+            # legacy PDmix batches (PD_MIX etc.) use the default channel
+            # (PREFILL_1 == the PP device group), matching the edge's
+            # channel-less edge_cloud_isend_tensor_dict send.
+            channel = (
+                self._hidden_channel_for(scheduler_output)
+                if scheduler_output.batch_type in (
+                    BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST,
+                )
+                else None
+            )
             # In the shared-model edge-cloud topology the edge
             # has a single distributed rank at in-group rank 0;
             # the cloud first-worker of each dp_rank must
@@ -923,13 +934,14 @@ class NPUWorker(WorkerBase):
             # rather than the implicit "previous PP rank"
             # (which would not point at the edge for cloud
             # first-workers past the first one).
+            recv_kwargs = {"channel": channel} if channel is not None else {}
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=scheduler_output.total_num_scheduled_tokens,
-                channel=channel,
                 sp_chunk=do_sp_chunk and merge_payload,
                 src=0,
+                **recv_kwargs,
             )
-            logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
+            logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value if channel is not None else 'default'}")
 
             self.model_runner.cloud_prepare_early(scheduler_output)
             if do_sp_chunk and not merge_payload:
@@ -979,14 +991,29 @@ class NPUWorker(WorkerBase):
         # rank" routing because the edge sits at in-group rank
         # 0, not the slot after the cloud.
         if get_pp_group().world_size > 1:
-            channel = self._hidden_channel_for(scheduler_output)
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                                            num_tokens=scheduler_output.total_num_scheduled_tokens,
-                                            dst=0),
-                channel=channel,
-            )
-            logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")
+            # PD-separation head batches send back on their hidden channel;
+            # legacy PDmix batches use the channel-less default PP device
+            # group, matching the edge's default-channel recv.
+            if scheduler_output.batch_type in (
+                BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST,
+            ):
+                channel = self._hidden_channel_for(scheduler_output)
+                self._record_pp_send_work(
+                    edge_cloud_send_tensor_dict(_gathered, channel=channel,
+                                                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                                                dst=0),
+                    channel=channel,
+                )
+                logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")
+            else:
+                self._record_pp_send_work(
+                    edge_cloud_isend_tensor_dict(
+                        _gathered,
+                        dst=0,
+                        num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    )
+                )
+                logger.info("Send intermediate tensors to edge, hidden_channel=default")
         return output
 
     def _execute_model_legacy(
@@ -1041,6 +1068,77 @@ class NPUWorker(WorkerBase):
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
+
+        # Edge-cloud PDmix (pd_separation.enabled=false): the edge drives
+        # the whole round trip synchronously inside this single
+        # execute_model call — segment_a (above) -> send embeddings to the
+        # cloud -> block on the cloud's middle-segment result -> segment_e.
+        # This mirrors v0.20.2 (lwd) NPUWorker.execute_model's
+        # ``if is_edge_device():`` branch and is what makes the runner's
+        # "execute_model is called twice for the same scheduler_output"
+        # contract work: both calls are issued here, back to back.
+        if (getattr(self.model_runner, '_edge_cloud_enabled', False)
+                and is_edge_device()):
+            _pd_sep = getattr(
+                self.model_runner.edge_cloud_cfg, 'pd_separation', None)
+            if _pd_sep is not None and getattr(_pd_sep, 'enabled', False):
+                # With PD separation enabled, the PDSeparatedScheduler tags
+                # every edge batch PREFILL_FIRST/DECODE_FIRST/PREFILL_LAST/
+                # DECODE_LAST/EMPTY and those are dispatched before this
+                # legacy path. Reaching here means the PD scheduler never
+                # took effect (base Scheduler emitted PD_MIX/PURE_*). Fail
+                # loudly instead of silently corrupting the request.
+                raise RuntimeError(
+                    "edge_cloud pd_separation.enabled=true but the edge "
+                    f"received batch_type={scheduler_output.batch_type} on "
+                    "the legacy path — PDSeparatedScheduler is not in "
+                    "effect (scheduler_cls did not apply). See the "
+                    "EngineCore startup log for the pd_separation "
+                    "consistency check."
+                )
+            # Edge-cloud with heterogeneous SP: aggregate SP shards to full
+            # sequence before cross-PP send so cloud can re-chunk by its SP.
+            if enable_sp() and (self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+                or not self.model_runner.supports_mm_inputs):
+                _gathered = self._all_gather_tensor_dict(output.tensors)
+            else:
+                _gathered = output.tensors
+            if get_pp_group().world_size == 2:
+                # Pass scheduler total so the sender slices off any
+                # cudagraph / SP / DP padding, letting the cloud receiver
+                # allocate buffers from SchedulerOutput.total_num_scheduled_tokens
+                # without an inter-node metadata exchange.
+                self._record_pp_send_work(
+                    edge_cloud_isend_tensor_dict(
+                        _gathered,
+                        num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    )
+                )
+            edge_sp = enable_sp()
+            edge_merge = get_edge_cloud_tensor_meta().merge_payload
+            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                sp_chunk=edge_sp and edge_merge,
+            )
+            if edge_sp and not edge_merge:
+                tensor_dict = {
+                    k: sequence_parallel_chunk(v)
+                    for k, v in tensor_dict.items()
+                }
+            tail_intermediate_tensors = AsyncIntermediateTensors(
+                tensor_dict,
+                comm_handles=comm_handles,
+                comm_postprocess=comm_postprocess,
+            )
+            # Second (tail-segment) call: segment_e consumes the cloud's
+            # intermediate tensors and produces the final output
+            # (pooled ModelRunnerOutput for embedding models, or None with
+            # execute_model_state set for generative models to be sampled
+            # by a follow-up sample_tokens call).
+            return self.model_runner.execute_model(
+                scheduler_output, tail_intermediate_tensors
+            )
+
         # 边云 PP 模式下 edge 侧的 is_last_rank 为 True（edge 同时是首尾段），
         # 其 output 为 IntermediateTensors 属正常，legacy PP 发送需跳过——
         # 恢复源分支的 if 守卫形式而非合并 assert。
@@ -1060,21 +1158,6 @@ class NPUWorker(WorkerBase):
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
-            # Edge-cloud: on the edge device the legacy PP send above is
-            # skipped (edge is both first and last stage), so an
-            # IntermediateTensors here is a head-segment product (e.g. an
-            # embedding_only PD_MIX batch whose tail segment arrives
-            # separately). Returning None breaks the EngineCore batch-queue
-            # contract ("unexpected error" on future.result()); return the
-            # same req_ids placeholder used by _execute_model_edge_head so
-            # the scheduler can correlate the batch without sampled tokens.
-            if (getattr(self.model_runner, '_edge_cloud_enabled', False)
-                    and is_edge_device()):
-                req_ids = list(scheduler_output.num_scheduled_tokens.keys())
-                return ModelRunnerOutput(
-                    req_ids=req_ids,
-                    req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
-                )
             return None
 
         # In case of PP with kv transfer, we need to pass through the

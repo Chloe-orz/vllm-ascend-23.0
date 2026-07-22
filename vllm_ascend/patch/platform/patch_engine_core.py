@@ -121,6 +121,23 @@ def _patched_engine_core_init(self, *args, **kwargs):
             "Edge-cloud mode enabled (pd_separation=%s)",
             pd_enabled,
         )
+        if pd_enabled and not (
+            hasattr(self.scheduler, "prefills_last_ready")
+            and hasattr(self.scheduler, "decodes_last_ready")
+        ):
+            # PDSeparatedScheduler should have been installed via
+            # ``scheduler_cls`` when pd_separation.enabled=true. If it is
+            # missing, the base Scheduler will emit PD_MIX batches that the
+            # edge-cloud worker dispatch cannot handle (they fall into the
+            # legacy path and used to crash with "unexpected error").
+            logger.error(
+                "pd_separation.enabled=true but the active scheduler is "
+                "%s, not PDSeparatedScheduler — scheduler_cls did not take "
+                "effect. Prefill/decode batches will be tagged PD_MIX "
+                "instead of PREFILL_FIRST/DECODE_FIRST. Check that "
+                "NPUPlatform.check_and_update_config ran on this config.",
+                type(self.scheduler).__name__,
+            )
 
     # Load PD-separation configuration from environment variables
     from vllm_ascend.pd_separation_config import PDSeparationConfig
