@@ -2982,11 +2982,16 @@ class NPUModelRunner(GPUModelRunner):
             == tuple(scheduler_output.num_scheduled_tokens)
         )
         # ---- cloud fast path: reuse pre-computed prepare results ----
+        # The cache is only valid for the exact batch it was computed from
+        # (see cloud_prepare_early's req_ids_key tag); a stale cache from an
+        # early-returned batch must not be consumed by a different batch.
         _cloud_fast_path = (
             self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "cloud"
             and intermediate_tensors is not None
             and self._cloud_prepare_cache is not None
+            and self._cloud_prepare_cache.get("req_ids_key")
+            == tuple(scheduler_output.num_scheduled_tokens.keys())
         )
         # mamba preprocess bufs are only set up on the slow path; the fast
         # paths reuse the head segment's copy and must not re-run it.
@@ -4690,6 +4695,13 @@ class NPUModelRunner(GPUModelRunner):
         update_cos_sin(self.positions[:num_input_tokens])
 
         # --- Cache all results ---
+        # Tag the cache with the batch identity so execute_model's
+        # _cloud_fast_path can verify it belongs to the batch being
+        # executed (mirrors the req-ids check of the edge-side _fast_path).
+        # Without this, a stale cache left behind by an early-returned
+        # batch would be consumed by the next batch, pairing it with the
+        # wrong attention metadata and corrupting its output.
+        cache["req_ids_key"] = tuple(scheduler_output.num_scheduled_tokens.keys())
         self._cloud_prepare_cache = cache
 
     def _edge_cloud_forward(
