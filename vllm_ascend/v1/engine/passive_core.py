@@ -514,9 +514,7 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
-                if result.get("batch_type") not in (
-                    BatchType.PREFILL_FIRST, BatchType.PD_MIX
-                ):
+                if result.get("batch_type") != BatchType.PREFILL_FIRST:
                     continue
                 head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
@@ -601,8 +599,7 @@ class PassiveEngineCoreProc:
             if batch.scheduler_output.batch_type == BatchType.DECODE_FIRST:
                 self._maybe_publish_post_out(batch.scheduler_output)
             elif (
-                batch.scheduler_output.batch_type
-                in (BatchType.PREFILL_FIRST, BatchType.PD_MIX)
+                batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
                 and (slice_info is None or slice_info.is_last_slice)
             ):
                 head_token = getattr(batch.scheduler_output, "head_token", None)
@@ -638,10 +635,6 @@ class PassiveEngineCoreProc:
         elif bt == BatchType.DECODE_FIRST:
             tail = replace(
                 scheduler_output, batch_type=BatchType.DECODE_LAST
-            )
-        elif bt == BatchType.PD_MIX:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.PREFILL_LAST
             )
         else:
             return

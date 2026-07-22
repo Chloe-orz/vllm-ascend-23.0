@@ -781,7 +781,7 @@ class NPUWorker(WorkerBase):
                 return self._execute_model_cloud(
                     scheduler_output, layer_slice_info
                 )
-            if bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST, BatchType.PD_MIX):
+            if bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST):
                 return self._execute_model_edge_head(
                     scheduler_output, layer_slice_info
                 )
