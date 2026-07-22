@@ -778,15 +778,14 @@ class PDSeparatedScheduler(Scheduler):
         return result
 
 
-class AsyncPDSeparatedScheduler(AsyncScheduler, PDSeparatedScheduler):
+class AsyncPDSeparatedScheduler(PDSeparatedScheduler, AsyncScheduler):
     """Async scheduler with PD separation.
 
-    Must explicitly override ``schedule()`` because ``AsyncScheduler``
-    appears first in the MRO and its base implementation returns
-    ``batch_type=PD_MIX``, preventing ``PDSeparatedScheduler.schedule()``
-    (which produces ``PREFILL_FIRST`` / ``PREFILL_LAST`` / etc.) from ever
-    being reached.
+    ``PDSeparatedScheduler`` must appear *before* ``AsyncScheduler`` in the
+    base list so that its ``schedule()`` (which delegates to
+    ``_schedule_pd_separated()`` → correct ``PREFILL_FIRST`` / ``PREFILL_LAST``
+    types) is found first in the MRO.  ``AsyncScheduler.schedule()`` returns
+    the base ``batch_type=PD_MIX`` and is only reached via ``super()`` inside
+    ``_pick_prefill_first_batch`` where the PD override is then applied.
     """
-
-    def schedule(self) -> SchedulerOutput:
-        return self._schedule_pd_separated()
+    pass
