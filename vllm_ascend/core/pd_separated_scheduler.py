@@ -778,6 +778,10 @@ class PDSeparatedScheduler(Scheduler):
         return result
 
 
-class AsyncPDSeparatedScheduler(AsyncScheduler, PDSeparatedScheduler):
+# 继承顺序有意让 PDSeparatedScheduler 在前：v0.23 的 AsyncScheduler 未覆写
+# schedule()，两种顺序在本仓库功能等价；但若运行环境的 AsyncScheduler 版本
+# 覆写了 schedule()（非协作式），此前置顺序可保证 PD 打标（PREFILL_FIRST/
+# DECODE_FIRST 等）始终生效，避免批次退化为 PD_MIX。
+class AsyncPDSeparatedScheduler(PDSeparatedScheduler, AsyncScheduler):
     """Async scheduler with PD separation."""
     pass
