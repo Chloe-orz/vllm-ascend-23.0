@@ -987,34 +987,19 @@ class NPUWorker(WorkerBase):
                     or not self.model_runner.supports_mm_inputs)
                 merge_payload = get_edge_cloud_tensor_meta().merge_payload
                 channel = self._hidden_channel_for(scheduler_output)
-                # In the shared-model edge-cloud topology the edge
-                # has a single distributed rank at in-group rank 0;
-                # the cloud first-worker of each dp_rank must
-                # receive the head-layer intermediate tensors from
-                # that single edge rank. Pass the explicit
-                # src=0 so the receive is routed to the edge
-                # rather than the implicit "previous PP rank"
-                # (which would not point at the edge for cloud
-                # first-workers past the first one).
+                # In the shared-model edge-cloud topology the edge has a single
+                # distributed rank at in-group rank 0; the cloud first-worker of
+                # each dp_rank must receive from that rank (src=0).  In the
+                # standard (non-shared-model) topology src=None suffices: it
+                # resolves to the implicit "previous PP rank" which IS the edge.
+                _recv_src = 0 if self.parallel_config.is_shared_model_edge else None
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     channel=channel,
                     sp_chunk=do_sp_chunk and merge_payload,
-                    src=0,
+                    src=_recv_src,
                 )
                 logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
-
-                self.model_runner.cloud_prepare_early(scheduler_output)
-                if do_sp_chunk and not merge_payload:
-                    tensor_dict = {
-                        k: sequence_parallel_chunk(v)
-                        for k, v in tensor_dict.items()
-                    }
-                intermediate_tensors = AsyncIntermediateTensors(
-                    tensor_dict,
-                    comm_handles=comm_handles,
-                    comm_postprocess=comm_postprocess,
-                )
 
                 self.model_runner.cloud_prepare_early(scheduler_output)
                 if do_sp_chunk and not merge_payload:
@@ -1058,16 +1043,16 @@ class NPUWorker(WorkerBase):
         # with the edge and must send its middle-layer output
         # back to the edge (in-group rank 0). Other cloud
         # workers (TP non-first) are in singleton PP groups
-        # and don't communicate with the edge. We use an
-        # explicit ``dst=0`` rather than the default "next PP
-        # rank" routing because the edge sits at in-group rank
-        # 0, not the slot after the cloud.
+        # Send intermediate tensors to edge.  In the shared-model topology the
+        # edge sits at in-group rank 0, so dst=0 is needed.  Otherwise dst=None
+        # resolves to the implicit "next PP rank" which IS the edge.
         if get_pp_group().world_size > 1:
             channel = self._hidden_channel_for(scheduler_output)
+            _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
             self._record_pp_send_work(
                 edge_cloud_send_tensor_dict(_gathered, channel=channel,
                                             num_tokens=scheduler_output.total_num_scheduled_tokens,
-                                            dst=0),
+                                            dst=_send_dst),
                 channel=channel,
             )
             logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")
