@@ -30,12 +30,13 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self.failure_callback: FailureCallback | None = None
 
         tensor_parallel_size, pp_parallel_size, pcp_parallel_size = self._get_parallel_sizes()
-        assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
-            f"world_size ({self.world_size}) must be equal to the "
-            f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f"_parallel_size ({pp_parallel_size}) x prefill_context"
-            f"_parallel_size ({pcp_parallel_size}). "
-        )
+        if not self.parallel_config.enable_edge_cloud:
+            assert self.world_size == tensor_parallel_size * pp_parallel_size * pcp_parallel_size, (
+                f"world_size ({self.world_size}) must be equal to the "
+                f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
+                f"_parallel_size ({pp_parallel_size}) x prefill_context"
+                f"_parallel_size ({pcp_parallel_size}). "
+            )
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
@@ -59,13 +60,33 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 connect_ip=self.parallel_config.master_addr,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
+        elif envs.VLLM_PP_NON_LEADER_ENGINE_CORE:
+            # For non-leader PP rank running with a passive EngineCore,
+            # create a local rpc_broadcast_mq to broadcast SchedulerOutput
+            # to local workers. Workers will use this MQ instead of
+            # inner_dp_world_group to receive scheduler_output.
+            max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+            self.rpc_broadcast_mq = MessageQueue(
+                self.local_world_size,
+                self.local_world_size,
+                max_chunk_bytes=max_chunk_bytes,
+                connect_ip=get_loopback_ip(),
+            )
+            scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         # Create workers
         context = get_mp_context()
         shared_worker_lock = context.Lock()
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
-            global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
+            if self.parallel_config.enable_edge_cloud:
+                global_start_rank = (
+                    0
+                    if self.parallel_config.is_edge_node
+                    else self.parallel_config.edge_npu_count
+                )
+            else:
+                global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
 
             # When using fork, keep track of socket file descriptors that are
             # inherited by the worker, so that we can close them in subsequent
@@ -102,16 +123,27 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
             self.response_mqs = []
             # Only leader node have remote response mqs
-            if self.parallel_config.node_rank_within_dp == 0:
+            if self.parallel_config.node_rank_within_dp == 0 and (
+                not self.parallel_config.enable_edge_cloud
+                or self.parallel_config.is_edge_node
+            ):
                 for rank in range(self.world_size):
-                    if rank < self.local_world_size:
-                        local_message_queue = self.workers[rank].worker_response_mq
+                    local_idx = rank - global_start_rank
+                    if 0 <= local_idx < self.local_world_size:
+                        local_message_queue = self.workers[local_idx].worker_response_mq
                         assert local_message_queue is not None
                         self.response_mqs.append(local_message_queue)
                     else:
                         remote_message_queue = self.workers[0].peer_worker_response_mqs[rank]
                         assert remote_message_queue is not None
                         self.response_mqs.append(remote_message_queue)
+            elif envs.VLLM_PP_NON_LEADER_ENGINE_CORE:
+                # For non-leader PP rank with passive EngineCore,
+                # collect local worker response mqs only.
+                for rank in range(self.local_world_size):
+                    local_message_queue = self.workers[rank].worker_response_mq
+                    assert local_message_queue is not None
+                    self.response_mqs.append(local_message_queue)
 
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
@@ -140,11 +172,12 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.world_size
-        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
-            f"global world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by nnodes_within_dp "
-            f"({self.parallel_config.nnodes_within_dp}). "
-        )
+        if not self.parallel_config.enable_edge_cloud:
+            assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
+                f"global world_size ({self.parallel_config.world_size}) must be "
+                f"divisible by nnodes_within_dp "
+                f"({self.parallel_config.nnodes_within_dp}). "
+            )
         self.local_world_size = self.parallel_config.local_world_size
         tp_size = self.parallel_config.tensor_parallel_size
         pp_size = self.parallel_config.pipeline_parallel_size
@@ -155,10 +188,58 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         pass
 
     def _is_driver_worker(self, rank: int) -> bool:
+        if self.parallel_config.enable_edge_cloud:
+            return rank == (
+                0
+                if self.parallel_config.is_edge_node
+                else self.parallel_config.edge_npu_count
+            )
         return rank % self.parallel_config.tensor_parallel_size == 0
+
+    def _get_output_rank(self) -> int:
+        if self.parallel_config.enable_edge_cloud:
+            return 0
+        return super()._get_output_rank()
 
 
 class AscendWorkerProc(WorkerProc):
+    def _init_message_queues(
+        self, input_shm_handle: Handle, vllm_config: VllmConfig
+    ) -> None:
+        if vllm_config.parallel_config.nnodes_within_dp == 1:
+            # Single-node: use local MQ
+            self.rpc_broadcast_mq = MessageQueue.create_from_handle(
+                input_shm_handle, self.worker.rank
+            )
+            self.worker_response_mq = MessageQueue(1, 1)
+            self.peer_response_handles = []
+            self.local_rpc_broadcast_mq = None
+            self.local_worker_response_mq = None
+        elif envs.VLLM_PP_NON_LEADER_ENGINE_CORE:
+            # Non-leader PP rank with passive EngineCore:
+            # Dual MQ — local MQ for passive enginecore handshake +
+            # cross-node MQ for actual communication with pp rank0.
+            from vllm.distributed.parallel_state import get_inner_dp_world_group
+            # Local MQs (for passive enginecore handshake only)
+            self.local_rpc_broadcast_mq = MessageQueue.create_from_handle(
+                input_shm_handle, self.local_rank
+            )
+            self.local_worker_response_mq = MessageQueue(1, 1)
+            self.local_peer_response_handles: list = []
+            # Cross-node MQs (for actual work with pp rank0)
+            self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
+                external_writer_handle=None,
+                blocking=False,
+            )
+            self.worker_response_mq, self.peer_response_handles = (
+                get_inner_dp_world_group().create_single_reader_mq_broadcasters(
+                    reader_rank_in_group=0
+                )
+            )
+        else:
+            # Delegate to parent class for the inner_dp_world_group path
+            super()._init_message_queues(input_shm_handle, vllm_config)
+
     @staticmethod
     def make_worker_process(
         vllm_config: VllmConfig,

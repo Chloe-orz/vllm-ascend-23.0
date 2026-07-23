@@ -27,7 +27,8 @@ from vllm.model_executor.models.minimax_m2 import (
 )
 from vllm.platforms import current_platform
 
-from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice
+from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice, update_cos_sin
+from vllm_ascend.utils import enable_sp
 
 FP8_DTYPES = tuple(
     getattr(torch, dtype_name)
@@ -70,6 +71,7 @@ def _patch_forward(
     hidden_states: torch.Tensor,
 ) -> torch.Tensor:
     qkv, _ = self.qkv_proj(hidden_states)
+    update_cos_sin(positions)
     cos, sin = get_cos_and_sin_slice()
     q, k, v = torch.ops.vllm.split_qkv_tp_rmsnorm_rope(
         input=qkv,
@@ -179,3 +181,119 @@ def _patched_load_weights(
 
 
 MiniMaxM2Model.load_weights = _patched_load_weights
+
+
+# ---------------------------------------------------------------------------
+# MiniMaxM2Model / MiniMaxM2ForCausalLM: Eagle3 aux hidden states support
+# ---------------------------------------------------------------------------
+_original_minimax_m2_forward = MiniMaxM2Model.forward
+
+
+def _patched_minimax_m2_forward(
+    self: "MiniMaxM2Model",
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None,
+    inputs_embeds: torch.Tensor | None = None,
+) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+    aux_layers: tuple[int, ...] = getattr(self, "aux_hidden_state_layers", ()) or ()
+    if not aux_layers:
+        return _original_minimax_m2_forward(self, input_ids, positions, intermediate_tensors, inputs_embeds)
+
+    if get_pp_group().is_first_rank:
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.embed_input_ids(input_ids)
+        residual = None
+    else:
+        assert intermediate_tensors is not None
+        hidden_states = intermediate_tensors["hidden_states"]
+        residual = intermediate_tensors["residual"]
+
+    aux_hidden_states: list[torch.Tensor] = []
+    for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+        layer_idx = self.start_layer + idx
+        if layer_idx in aux_layers:
+            aux_hidden_states.append(hidden_states + residual if residual is not None else hidden_states)
+        hidden_states, residual = layer(positions, hidden_states, residual)
+
+    if not get_pp_group().is_last_rank:
+        return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+
+    hidden_states, _ = self.norm(hidden_states, residual)
+    if aux_hidden_states:
+        return hidden_states, aux_hidden_states
+    return hidden_states
+
+
+if not getattr(_original_minimax_m2_forward, "_vllm_ascend_minimax_eagle3_patched", False):
+    MiniMaxM2Model.forward = _patched_minimax_m2_forward  # type: ignore[assignment]
+    MiniMaxM2Model.forward._vllm_ascend_minimax_eagle3_patched = True  # type: ignore[attr-defined]
+
+
+def _set_aux_hidden_state_layers(self: "MiniMaxM2ForCausalLM", layers: tuple[int, ...]) -> None:
+    self.model.aux_hidden_state_layers = tuple(int(x) for x in layers)
+
+
+def _get_eagle3_default_aux_hidden_state_layers(self: "MiniMaxM2ForCausalLM") -> tuple[int, ...]:
+    num_layers = len(self.model.layers)
+    return (2, num_layers // 2, num_layers - 3)
+
+
+def _get_eagle3_aux_hidden_state_layers(self: "MiniMaxM2ForCausalLM") -> tuple[int, ...]:
+    return _get_eagle3_default_aux_hidden_state_layers(self)
+
+
+# vLLM 0.18+: `supports_eagle3(model)` is `isinstance(model, SupportsEagle3)` (see
+# `vllm.model_executor.models.interfaces`). `SupportsEagle3` extends `SupportsEagleBase`;
+# runtime protocol checks require class attributes below (not only Eagle3 methods), or
+# isinstance fails and model_runner_v1 raises:
+# "Model does not support EAGLE3 interface but aux_hidden_state_outputs was requested".
+MiniMaxM2ForCausalLM.has_own_lm_head = False  # type: ignore[misc]
+MiniMaxM2ForCausalLM.has_own_embed_tokens = False  # type: ignore[misc]
+MiniMaxM2ForCausalLM.supports_eagle3 = True  # type: ignore[misc]
+
+MiniMaxM2ForCausalLM.set_aux_hidden_state_layers = _set_aux_hidden_state_layers  # type: ignore[attr-defined]
+MiniMaxM2ForCausalLM.get_eagle3_default_aux_hidden_state_layers = (  # type: ignore[attr-defined]
+    _get_eagle3_default_aux_hidden_state_layers
+)
+MiniMaxM2ForCausalLM.get_eagle3_aux_hidden_state_layers = _get_eagle3_aux_hidden_state_layers  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# MiniMaxM2MoE.__init__: inject is_sequence_parallel into FusedMoE
+# ---------------------------------------------------------------------------
+_original_moe_init = MiniMaxM2MoE.__init__
+_original_fusedmoe_init = None
+
+
+def _patched_moe_init(self, config, quant_config=None, prefix=""):
+    """Patch to inject is_sequence_parallel into FusedMoE without modifying upstream.
+
+    This temporarily replaces FusedMoE.__init__ so that any FusedMoE created
+    inside the original MiniMaxM2MoE.__init__ automatically receives the correct
+    is_sequence_parallel value from global vLLM config.
+    """
+    from vllm.model_executor.layers.fused_moe import FusedMoE
+
+    global _original_fusedmoe_init
+    if _original_fusedmoe_init is None:
+        _original_fusedmoe_init = FusedMoE.__init__
+
+    is_sequence_parallel = enable_sp()
+
+    def _inject_sp_init(fm_self, *args, **kwargs):
+        if "is_sequence_parallel" not in kwargs:
+            kwargs["is_sequence_parallel"] = is_sequence_parallel
+        return _original_fusedmoe_init(fm_self, *args, **kwargs)
+
+    # Temporarily patch FusedMoE.__init__
+    FusedMoE.__init__ = _inject_sp_init
+    try:
+        _original_moe_init(self, config, quant_config, prefix)
+    finally:
+        FusedMoE.__init__ = _original_fusedmoe_init
+
+
+MiniMaxM2MoE.__init__ = _patched_moe_init  # type: ignore[misc]

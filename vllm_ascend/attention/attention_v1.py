@@ -646,7 +646,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     global _ATTN_KEYS_BUFFER
                     if attn_keys_length == 0:
                         return
-                    if not _ATTN_KEYS_BUFFER or len(_ATTN_KEYS_BUFFER) != attn_keys_length:
+                    current_keys = attn_keys[:attn_keys_length]
+                    if not _ATTN_KEYS_BUFFER or len(_ATTN_KEYS_BUFFER) != current_keys:
                         import regex as re
 
                         def extract_layer_index(key: str) -> int:
@@ -662,7 +663,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                 is not None
                             )
 
-                        attn_keys_to_order = attn_keys[:attn_keys_length]
+                        attn_keys_to_order = current_keys[:]
                         if getattr(speculative_config, "method", None) == "mtp":
                             # Step3.5 MTP can expose draft KV-cache groups in the
                             # target runtime metadata.  The target FULL graph only

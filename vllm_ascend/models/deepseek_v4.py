@@ -1050,22 +1050,25 @@ class DeepseekV4Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        def make_empty_intermediate_tensors(
+        def _make_empty_intermediate_tensors(
             batch_size: int,
             dtype: torch.dtype,
             device: torch.device,
         ) -> IntermediateTensors:
-            return IntermediateTensors(
-                {
-                    "hidden_states": torch.zeros(
-                        (batch_size, self.hc_mult, config.hidden_size),
-                        dtype=dtype,
-                        device=device,
-                    ),
-                }
-            )
+            return IntermediateTensors({
+                "hidden_states": torch.zeros(
+                    (batch_size, hc_mult, config.hidden_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+                "residual": torch.zeros(
+                    (batch_size, hc_mult, config.hidden_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+            })
 
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors
+        self.make_empty_intermediate_tensors = _make_empty_intermediate_tensors
 
         self.norm_eps = config.rms_norm_eps
         self.hc_eps = config.hc_eps

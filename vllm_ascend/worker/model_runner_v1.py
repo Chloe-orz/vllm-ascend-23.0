@@ -19,6 +19,7 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -36,16 +37,25 @@ import torch.distributed as dist
 import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.cuda_graph import CUDAGraphStat
+import vllm.compilation.monitor as _monitor
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.parallel_state import get_dcp_group, get_dp_group, get_pcp_group, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import (
+    get_dcp_group,
+    get_dp_group,
+    get_pcp_group,
+    get_pp_group,
+    get_tp_group,
+)
 from vllm.forward_context import BatchDescriptor, ForwardContext, get_forward_context
+from vllm.distributed.parallel_state import is_edge_device, is_edge_cloud_pp_mode
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import LazyLoader
@@ -60,7 +70,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -122,6 +132,13 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.compilation.acl_graph_edge_cloud import (
+    EdgeCloudACLGraphWrapper,
+    make_graph_params,
+)
+from vllm_ascend.compilation.edge_cloud_compiler import (
+    EdgeCloudCompiledSegment,
+)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -170,6 +187,8 @@ from vllm_ascend.utils import (
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.pcp_utils import PCPAsyncSpecDecodeRebuildResult, PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, copy_snapshot_to_gpu
+
+
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -263,6 +282,159 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+
+
+class EdgeCloudSegment(torch.nn.Module):
+    """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
+
+    将基础模型的 ``forward_edge_cloud_segment``（模型加载阶段通过
+    monkey-patch 注入）包装为标准 nn.Module，使 ACLGraphWrapper 可以像
+    标准流程包裹完整模型一样包裹 segment：:
+
+        ACLGraphWrapper(EdgeCloudSegment(model, N-1, N), ...)
+
+    使用 nn.Module 而非函数闭包，确保 ``torch.npu.graph`` 的参数追踪、
+    缓冲区管理、模块分发与标准（非边云）流程完全一致。
+
+    注意：model 作为 nn.Module 属性注册为子模块，torch.npu.graph 捕获时
+    通过模块层级静态识别参数张量，确保图回放时参数正确处理。
+    模型在传入前已完成 PPMissingLayer 裁剪，子模块注册不会引入额外显存。
+    """
+
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        start_layer: int,
+        end_layer: int,
+        is_first_segment: bool | None = None,
+        is_last_segment: bool | None = None,
+    ):
+        super().__init__()
+        self._edge_model = model
+        self._start_layer = start_layer
+        self._end_layer = end_layer
+        self._is_first_segment = is_first_segment
+        self._is_last_segment = is_last_segment
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **extra_layer_kwargs: Any,
+    ) -> torch.Tensor | IntermediateTensors:
+        # Layer-sliced execution (non-ACLGraph mode): allow dynamic override
+        # of the layer range via kwargs from PassiveScheduler slice dispatch.
+        start_layer = extra_layer_kwargs.pop(
+            "layer_slice_start", self._start_layer
+        )
+        end_layer = extra_layer_kwargs.pop(
+            "layer_slice_end", self._end_layer
+        )
+        return self._edge_model.forward_edge_cloud_segment(
+            start_layer,
+            end_layer,
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds,
+            is_first_segment=self._is_first_segment,
+            is_last_segment=self._is_last_segment,
+            **extra_layer_kwargs,
+        )
+
+@dataclass
+class HeadState:
+    """Minimal suspended state for an edge-cloud head-segment batch.
+
+    The heavy intermediate tensors (hidden states) are sent to the cloud
+    immediately; we only keep enough metadata to correlate the tail-segment
+    batch with its head segment via ``head_token``.
+    """
+    head_token: str
+    scheduler_output: "SchedulerOutput"
+    req_ids: tuple[str, ...]
+
+
+def _clone_gdn_attn_metadata(meta):
+    """Deep-clone device tensors inside GDNAttentionMetadata.
+
+    GDN metadata holds device tensors that are views into shared
+    ``common_attn_metadata`` buffers (e.g. ``query_start_loc``,
+    ``state_indices``).  These buffers are rebuilt on every batch, so a
+    decode batch interleaved between two prefill slices would silently
+    overwrite the data still referenced by the saved
+    ``_layerwise_attn_metadata``.  Cloning at **save time** preserves
+    the correct prefill-length values.
+    """
+    import copy
+    from dataclasses import fields
+
+    # Use dataclass replacement to create a shallow copy first,
+    # then deep-clone the device tensor fields.
+    cloned = copy.copy(meta)
+
+    # Device tensor fields that must be cloned to decouple from
+    # shared common_attn_metadata buffers.
+    _DEVICE_TENSOR_FIELDS = (
+        "has_initial_state",
+        "spec_query_start_loc",
+        "non_spec_query_start_loc",
+        "spec_state_indices_tensor",
+        "non_spec_state_indices_tensor",
+        "spec_sequence_masks",
+        "spec_token_indx",
+        "non_spec_token_indx",
+        "num_accepted_tokens",
+        "chunk_indices",
+        "chunk_offsets",
+    )
+    for field_name in _DEVICE_TENSOR_FIELDS:
+        tensor = getattr(cloned, field_name, None)
+        if tensor is not None and isinstance(tensor, torch.Tensor) and tensor.device.type != "cpu":
+            setattr(cloned, field_name, tensor.clone())
+
+    # The non_spec_prefill_fallback_meta contains pooled device tensors
+    # for causal_conv1d host args and chunked prefill metadata.
+    fallback_meta = getattr(cloned, "non_spec_prefill_fallback_meta", None)
+    if fallback_meta is not None:
+        cloned_fallback = copy.copy(fallback_meta)
+
+        # Clone causal_conv1d host metadata (CPU pinned tensors)
+        causal_conv1d = getattr(cloned_fallback, "causal_conv1d", None)
+        if causal_conv1d is not None:
+            cloned_causal = copy.copy(causal_conv1d)
+            for attr in ("query_start_loc_cpu", "cache_indices_cpu", "has_initial_state_cpu"):
+                t = getattr(cloned_causal, attr, None)
+                if t is not None and isinstance(t, torch.Tensor):
+                    setattr(cloned_causal, attr, t.clone())
+            cloned_fallback.causal_conv1d = cloned_causal
+
+        # Clone chunked prefill metadata (device tensors from 2-slot pool)
+        chunk_meta = getattr(cloned_fallback, "chunk", None)
+        if chunk_meta is not None:
+            cloned_chunk = copy.copy(chunk_meta)
+            for attr in (
+                "chunk_indices_chunk64",
+                "chunk_offsets_chunk64",
+                "update_chunk_offsets_chunk64",
+                "final_chunk_indices_chunk64",
+                "chunk_indices_large_block",
+                "block_indices_cumsum",
+            ):
+                t = getattr(cloned_chunk, attr, None)
+                if t is not None and isinstance(t, torch.Tensor) and t.device.type != "cpu":
+                    setattr(cloned_chunk, attr, t.clone())
+            # Decouple from pool so the pool slot can be reused safely
+            cloned_chunk._buffer_slot = None
+            cloned_fallback.chunk = cloned_chunk
+
+        cloned.non_spec_prefill_fallback_meta = cloned_fallback
+
+    return cloned
+
+
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
@@ -330,6 +502,28 @@ class NPUModelRunner(GPUModelRunner):
 
         self.sampler = AscendSampler()
         self.attn_state: AscendAttentionState | None = None
+
+        # Layerwise chunking: state saved by chunk 0 and consumed by
+        # continuation chunks (1..N-1).
+        self._layerwise_intermediate: IntermediateTensors | None = None
+        self._layerwise_positions: torch.Tensor | None = None
+        self._layerwise_attn_metadata: Any = None
+        self._layerwise_num_tokens_padded: int = 0
+        self._layerwise_num_tokens_across_dp: int | None = None
+        self._layerwise_batch_desc: Any = None
+        self._layerwise_scheduler_output: Any = None
+        # Additional state needed by the last chunk on the last PP rank
+        # for logits computation and execute_model_state setup.
+        self._layerwise_logits_indices: torch.Tensor | None = None
+        self._layerwise_spec_decode_metadata: Any = None
+        self._layerwise_spec_decode_common_attn_metadata: Any = None
+        self._layerwise_ec_connector_output: Any = None
+        self._layerwise_cudagraph_stats: Any = None
+
+        # Edge-cloud PD-separation: suspended head-segment states keyed by
+        # head_token.  Each entry holds the minimal context needed to verify
+        # that a later tail-segment batch matches its head segment.
+        self._pending_head_states: dict[str, "HeadState"] = {}
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -576,6 +770,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         # for cleancode , actually the three attrs is defined in gpu_model_runner
         self.execute_model_state: ExecuteModelState | None = None
+        # [PD-FIX] Set by execute_model when a stale tail segment (PL/DL) is
+        # discarded (all reqs already popped from self.requests). sample_tokens
+        # checks this to return EMPTY instead of None (which would trigger
+        # "unexpected error" in _patched_step_with_batch_queue).
+        self._tail_segment_discarded: bool = False
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: IntermediateTensors | None = None
         self.reorder_batch_threshold: int | None = None
@@ -602,6 +801,68 @@ class NPUModelRunner(GPUModelRunner):
             self.kvcomp_meta_data = initialize_kvcomp_metadata(max_num_reqs=self.max_num_reqs,
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
+
+        self.edge_cloud_cfg = self.ascend_config.edge_cloud_config
+        self._edge_cloud_enabled = self.edge_cloud_cfg.enabled
+        if self._edge_cloud_enabled:
+            if not self.parallel_config.enable_edge_cloud:
+                raise ValueError(
+                    "additional_config.edge_cloud_config.enabled requires "
+                    "--enable-edge-cloud."
+                )
+            expected_role = "edge" if self.parallel_config.is_edge_node else "cloud"
+            if self.edge_cloud_cfg.role != expected_role:
+                raise ValueError(
+                    "additional_config.edge_cloud_config.role must match the "
+                    f"process role inferred from --headless. Expected "
+                    f"{expected_role!r}, got {self.edge_cloud_cfg.role!r}."
+                )
+            self.head_k, self.tail_k = self.edge_cloud_cfg.head_tail_k
+            if self.edge_cloud_cfg.mode == "embedding_only":
+                self.head_k = 0
+                self.tail_k = 0
+                logger.info(
+                    "Edge-cloud mode is 'embedding_only', forcing head_k=0, tail_k=0"
+                )
+            hf_config = getattr(self.model_config, "hf_text_config", None)
+            model_type = getattr(hf_config, "model_type", "")
+            outer_model_type = getattr(
+                getattr(self.model_config, "hf_config", None), "model_type", ""
+            )
+            self._is_deepseek_v4 = (
+                    model_type == "deepseek_v4" or hasattr(hf_config, "hc_mult")
+                )
+            self._is_qwen3_5 = "qwen3_5" in model_type
+            self._is_deepseek_v2 = "deepseek" in model_type
+            self._is_kimi_k25 = "kimi_k25" in outer_model_type or "kimi_k25" in model_type
+            self._is_glm4_moe = "glm4_moe" in model_type or "glm_moe_dsa" in model_type
+            self._is_minimax_m2 = "minimax_m2" in model_type
+            self.num_layers = 0
+            self.segment_a: Any = None
+            self.segment_e: Any = None
+            self.segment_c: Any = None
+            self.segment_c_raw: Any = None
+            self.segment_a_wrapper: Any = None
+            self.segment_e_wrapper: Any = None
+            self.segment_c_wrapper: Any = None
+            # Cache segment_a prepare results for segment_e reuse (edge-cloud only)
+            self._edge_prepare_cache: dict | None = None
+            # Cache cloud-side prepare results to overlap with edge segment_a
+            self._cloud_prepare_cache: dict | None = None
+        else:
+            self.head_k = 0
+            self.tail_k = 0
+            self._is_deepseek_v4  = False
+            self._is_qwen3_5 = False
+            self._is_deepseek_v2 = False
+            self._is_kimi_k25 = False
+            self._is_glm4_moe = False
+            self._is_minimax_m2 = False
+            if self.parallel_config.enable_edge_cloud:
+                raise ValueError(
+                    "--enable-edge-cloud requires "
+                    "additional_config.edge_cloud_config.enabled=true."
+                )
 
     @property
     def use_cp(self) -> bool:
@@ -666,6 +927,222 @@ class NPUModelRunner(GPUModelRunner):
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and not self.model_config.enforce_eager
+        )
+
+    def _is_dummy_or_profile_run(self) -> bool:
+        try:
+            forward_context = get_forward_context()
+        except AssertionError:
+            return False
+        return bool(getattr(forward_context, "in_profile_run", False))
+
+    def _create_raw_segment_callable(
+        self,
+        model: torch.nn.Module,
+        start_layer: int,
+        end_layer: int,
+        is_first_segment: bool | None = None,
+        is_last_segment: bool | None = None,
+    ) -> EdgeCloudSegment:
+        return EdgeCloudSegment(
+            model, start_layer, end_layer, is_first_segment, is_last_segment
+        )
+
+    def _maybe_compile_segment_callable(
+        self,
+        segment: Any,
+        start_layer: int,
+        end_layer: int,
+    ) -> Any:
+        # 若全局 enable_npugraph_ex 开启且当前处于全图模式，
+        # 对 segment 应用 npugraph_ex 编译时优化（第1层）。
+        # 第2层（ACLGraphWrapper 运行时捕获）由 _wrap_segment_if_needed 负责。
+        ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        if (
+            ascend_compilation_config.enable_npugraph_ex
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            logger.info(
+                "EdgeCloudCompiledSegment wrapping segment [%d, %d) "
+                "with npugraph_ex compile-time optimization.",
+                start_layer,
+                end_layer,
+            )
+            return EdgeCloudCompiledSegment(
+                segment,
+                self.vllm_config,
+                ascend_compilation_config,
+            )
+
+        return segment
+
+    def _create_segment_callable(
+        self,
+        model: torch.nn.Module,
+        start_layer: int,
+        end_layer: int,
+        is_first_segment: bool | None = None,
+        is_last_segment: bool | None = None,
+    ) -> Any:
+        """创建一个仅执行指定层区间 [start_layer, end_layer) 的 nn.Module。
+
+        返回 EdgeCloudSegment（nn.Module 子类）而非函数闭包，
+        确保 ACLGraphWrapper 包裹的是标准 nn.Module，与标准流程的
+        图捕获方式对齐（torch.npu.graph 捕获 nn.Module.forward()）。
+
+        当 enable_npugraph_ex 开启且 cudagraph_mode 支持全图编译时，
+        额外包裹 EdgeCloudCompiledSegment，使 segment 先经过
+        torch.compile → npugraph_ex_compile 编译时优化，
+        再由 ACLGraphWrapper 进行运行时图捕获，对齐标准流程的两层图优化。
+
+        边云场景下所有模型均已在加载阶段通过对应 patch 文件注入
+        forward_edge_cloud_segment，因此直接委托即可，无需额外 fallback。
+        """
+        segment = self._create_raw_segment_callable(
+            model, start_layer, end_layer, is_first_segment, is_last_segment
+        )
+        return self._maybe_compile_segment_callable(segment, start_layer, end_layer)
+
+    def _wrap_segment_if_needed(
+        self,
+        segment: Any,
+        runtime_mode: CUDAGraphMode = CUDAGraphMode.FULL,
+    ) -> Any:
+        if not self.edge_cloud_cfg.enable_decode_graph:
+            return segment
+        if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            return segment
+        if self._is_dummy_or_profile_run():
+            return segment
+        return EdgeCloudACLGraphWrapper(
+            segment,
+            self.vllm_config,
+            runtime_mode=runtime_mode,
+            cudagraph_options=None,
+        )
+
+    def _load_model_edge_cloud(self) -> None:
+        """边云场景的模型加载流程（复用 vLLM 标准 PP 初始化，直接加载到 NPU）。
+
+        核心思路：
+          通过 set_edge_cloud_layer_range() 存储 head_k/tail_k 到全局变量，
+          在模型 __init__ 阶段 make_layers() → get_edge_cloud_layer_range()
+          读取后直接按边云非连续层范围创建 PPMissingLayer 占位，
+          使非本地层在初始化时就是占位层，权重加载阶段自动跳过。
+
+        流程：
+          1. set_edge_cloud_layer_range(head_k, tail_k) 存储层范围
+          2. get_model → BaseModelLoader.load_model（标准 NPU 上初始化+加载）
+          3. 创建分段 callable 并按需包装 ACLGraphWrapper
+        """
+        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25 
+                or self._is_glm4_moe or self._is_minimax_m2):
+            raise NotImplementedError(
+                "edge-cloud mode currently supports Qwen3.5, DeepseekV2/V3, "
+                "Kimi-K2.5/K2.6, GLM-4/GLM-5 models, and MiniMax-M2 models."
+            )
+
+        logger.info(
+            "Starting to load model in edge-cloud mode: role=%s, mode=%s, head_k=%d, tail_k=%d",
+            self.edge_cloud_cfg.role,
+            self.edge_cloud_cfg.mode,
+            self.head_k,
+            self.tail_k,
+        )
+        if self._is_deepseek_v4:
+            import vllm_ascend.patch.models.deepseek_v4_edge_cloud
+        if self._is_qwen3_5:
+            import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
+        if self._is_deepseek_v2:
+            import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
+        if self._is_kimi_k25:
+            import vllm_ascend.patch.models.kimi_k25_edge_cloud  # noqa: F401
+        if self._is_glm4_moe:
+            hf_text_config = getattr(self.model_config, "hf_text_config", None)
+            text_model_type = getattr(hf_text_config, "model_type", "")
+            if "glm_moe_dsa" in text_model_type:
+                import vllm_ascend.patch.models.deepseek_v2_edge_cloud  # noqa: F401
+        if self._is_minimax_m2:
+            import vllm_ascend.patch.models.minimax_m2_edge_cloud  # noqa: F401
+
+        # 1. 存储 head_k / tail_k 到 parallel_state 全局变量，
+        #    使 make_layers() 在模型 __init__ 中能直接读取并创建正确的
+        #    PPMissingLayer 占位（非本地层）和真实层（本地层）。
+        from vllm.distributed.parallel_state import set_edge_cloud_layer_range
+        set_edge_cloud_layer_range(self.head_k, self.tail_k)
+
+        # 2. 复用标准 vLLM 加载流程：init on device + load_weights on device
+        #    BaseModelLoader.load_model 内部：
+        #      with target_device: initialize_model()  → 模型创建在 NPU
+        #      load_weights()                          → 权重直接到 NPU（跳过占位层）
+        #      process_weights_after_loading()        → 量化/格式调整在 NPU
+        #      return model.eval()
+        #
+        #    make_layers() → _get_edge_cloud_local_indices()
+        #    → get_edge_cloud_layer_range() 读取 head_k/tail_k
+        #    → 根据 is_edge_device() 计算本侧本地层索引
+        #    → 非本地层初始化为 PPMissingLayer（无参数，不占显存）。
+        self.model = get_model(vllm_config=self.vllm_config)
+
+        # Locate the transformer layers — the model may be wrapped in a
+        # multimodal ConditionalGeneration (language_model.model.layers)
+        # or be a plain CausalLM (model.layers).
+        if hasattr(self.model, "model") and hasattr(self.model.model, "layers"):
+            transformer_layers = self.model.model.layers
+        else:
+            transformer_layers = self.model.language_model.model.layers
+        self.num_layers = len(transformer_layers)
+
+        # set_moe_parameters() 在 __init__ 中只遍历到本地层，因此不存在
+        # 非本地层 stale 引用问题。但为确保 moe_layers/moe_mlp_layers
+        # 引用正确，重新收集一次（与标准 PP 行为对齐）。
+        if hasattr(self.model, 'set_moe_parameters'):
+            self.model.set_moe_parameters()
+
+        # 打印每层最终状态（诊断用）
+        layer_states = []
+        for idx, layer in enumerate(transformer_layers):
+            layer_states.append(
+                f"{idx}:{'REAL' if not isinstance(layer, PPMissingLayer) else 'SKIP'}"
+            )
+        logger.info("[EdgeCloud] Final layer states: %s", ", ".join(layer_states))
+
+        # 3. 创建分段 callable 并按需包装 ACLGraphWrapper
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
+
+        if self.edge_cloud_cfg.role == "edge":
+            self.segment_a = self._create_segment_callable(
+                self.model, 0, self.head_k, is_first_segment=True, is_last_segment=False
+            )
+            self.segment_e = self._create_segment_callable(
+                self.model,
+                self.num_layers - self.tail_k,
+                self.num_layers,
+                is_first_segment=False,
+                is_last_segment=True,
+            )
+            self.segment_a_wrapper = self._wrap_segment_if_needed(self.segment_a)
+            self.segment_e_wrapper = self._wrap_segment_if_needed(self.segment_e)
+        else:
+            self.segment_c_raw = self._create_raw_segment_callable(
+                self.model,
+                self.head_k,
+                self.num_layers - self.tail_k,
+                is_first_segment=False,
+                is_last_segment=False,
+            )
+            self.segment_c = self._maybe_compile_segment_callable(
+                self.segment_c_raw,
+                self.head_k,
+                self.num_layers - self.tail_k,
+            )
+            self.segment_c_wrapper = self._wrap_segment_if_needed(self.segment_c)
+
+        logger.info(
+            "[EdgeCloud] Model loaded. num_layers=%d role=%s",
+            self.num_layers,
+            self.edge_cloud_cfg.role,
         )
 
     def _sync_metadata_across_dp(
@@ -1897,6 +2374,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
+        layer_slice_info: Any = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.vllm_config.model_config.enable_return_routed_experts:
             if self.routed_experts_initialized:
@@ -1914,7 +2392,78 @@ class NPUModelRunner(GPUModelRunner):
                 self._execution_start_time = time.perf_counter()
         if self.execute_model_state is not None:
             raise RuntimeError("State error: sample_tokens() must be called after execute_model() returns None.")
-       
+
+        # --- Layer slice: non-first slice fast path ---
+        # For slices 1..N-1, the batch state (requests, attention metadata,
+        # positions, etc.) was already set up by slice 0.  We only need to
+        # load the saved intermediate state and run the model forward for
+        # the current slice's layer range.
+        if (
+            layer_slice_info is not None
+            and not layer_slice_info.is_first_slice
+        ):
+            # Slice 0 may have returned early (e.g. 0 scheduled tokens)
+            # without saving intermediate state.  In that case all
+            # subsequent slices should also return early.
+            if self._layerwise_intermediate is None:
+                return EMPTY_MODEL_RUNNER_OUTPUT
+            return self._execute_layerwise_continuation(
+                layer_slice_info
+            )
+        # --- End layer slice fast path ---
+
+        # Edge-cloud tail-segment validation: use the control-plane
+        # head_token to resume the suspended HeadState. The scheduler and
+        # hidden channel selection guarantee data-plane alignment.
+        if (
+            self._edge_cloud_enabled
+            and is_edge_device()
+            and scheduler_output.batch_type in (
+                BatchType.PREFILL_LAST, BatchType.DECODE_LAST
+            )
+            and intermediate_tensors is not None
+        ):
+            self._resume_and_validate_head_state(scheduler_output)
+
+            # [PD-FIX] Stale tail segment (PL/DL): cloud shipped a tail batch
+            # whose reqs already finished on the edge and were popped from
+            # self.requests during the head->tail window. Discard segment_e to
+            # avoid _update_states crashing on self.requests[req_id]. HeadState
+            # already popped above; hidden already received by
+            # _execute_model_edge_tail (data-plane contract preserved).
+            # update_from_output's `request is None or is_finished()` guard
+            # skips these reqs before req_id_to_index[req_id], so returning
+            # EMPTY is safe.
+            tail_req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+            if tail_req_ids:
+                stale = [r for r in tail_req_ids if r not in self.requests]
+                if len(stale) == len(tail_req_ids):
+                    logger.error(
+                        "[EDGE-TAIL-STALE-DISCARD] batch_type=%s "
+                        "head_token=%s req_ids=%s all popped from "
+                        "self.requests; skip segment_e.",
+                        scheduler_output.batch_type,
+                        scheduler_output.head_token,
+                        tail_req_ids,
+                    )
+                    # Signal sample_tokens to also skip (return EMPTY, not None).
+                    self._tail_segment_discarded = True
+                    return EMPTY_MODEL_RUNNER_OUTPUT
+                if stale:
+                    # Partial-stale: alive reqs need the step, stale reqs would
+                    # crash. Cannot safely discard nor proceed. Full fix needs
+                    # per-req hidden slicing -- not yet implemented.
+                    logger.error(
+                        "[EDGE-TAIL-PARTIAL-STALE] batch_type=%s "
+                        "head_token=%s req_ids=%s stale=%s alive=%s; "
+                        "NOT handled, will crash.",
+                        scheduler_output.batch_type,
+                        scheduler_output.head_token,
+                        tail_req_ids,
+                        stale,
+                        [r for r in tail_req_ids if r in self.requests],
+                    )
+
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
         # The replace is much faster than deepcopy.
@@ -1968,234 +2517,254 @@ class NPUModelRunner(GPUModelRunner):
             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # ---- segment_e fast path: reuse segment_a's cached prepare results ----
+        # NOTE: if an intervening EMPTY batch cleared input_batch, we must
+        # fall through to the normal path so _update_states can re-add the
+        # requests before sampling.
+        _fast_path = (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and intermediate_tensors is not None
+            and self._edge_prepare_cache is not None
+            and self.input_batch.num_reqs > 0
+            and tuple(self.input_batch.req_ids)
+            == tuple(scheduler_output.num_scheduled_tokens)
+        )
+        # ---- cloud fast path: reuse pre-computed prepare results ----
+        _cloud_fast_path = (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "cloud"
+            and intermediate_tensors is not None
+            and self._cloud_prepare_cache is not None
+        )
+        if _fast_path:
+            cache = self._edge_prepare_cache
+            self._edge_prepare_cache = None  # consumed, clear for next iteration
+            total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
+            num_tokens_padded = cache["num_tokens_padded"]
+            num_tokens_across_dp = cache["num_tokens_across_dp"]
+            attn_metadata = cache["attn_metadata"]
+            logits_indices = cache["logits_indices"]
+            spec_decode_metadata = cache["spec_decode_metadata"]
+            spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
+            cudagraph_mode = cache["cudagraph_mode"]
+            batch_desc = cache["batch_desc"]
+            cudagraph_stats = cache["cudagraph_stats"]
+            # Re-sync num_computed_tokens from CPU: segment_a forward or
+            # async state update may have modified the GPU buffer.
+            num_reqs = self.input_batch.num_reqs
+            self.num_computed_tokens[:num_reqs].copy_(
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
+                non_blocking=True,
+            )
+            # Fast path skips _update_states, so no deferred corrections.
+            deferred_state_corrections_fn = None
+        elif _cloud_fast_path:
+            cache = self._cloud_prepare_cache
+            self._cloud_prepare_cache = None  # consumed, clear for next iteration
+            total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
+            num_tokens_padded = cache["num_tokens_padded"]
+            num_tokens_across_dp = cache["num_tokens_across_dp"]
+            attn_metadata = cache["attn_metadata"]
+            logits_indices = cache["logits_indices"]
+            spec_decode_metadata = cache["spec_decode_metadata"]
+            spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
+            cudagraph_mode = cache["cudagraph_mode"]
+            batch_desc = cache["batch_desc"]
+            cudagraph_stats = cache["cudagraph_stats"]
+            deferred_state_corrections_fn = None
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
-                # Fix up prev_req_id_to_index for requests that were discarded
-                # in the previous sample_tokens step. If a request has
-                # prev_num_draft_len > 0 but is missing from
-                # prev_req_id_to_index, the parent _update_states would
-                # hit a KeyError. Reset prev_num_draft_len to 0 for such
-                # requests so they fall through safely.
-                if (
-                    self.use_async_scheduling
-                    and self.num_spec_tokens
-                    and self.input_batch.prev_req_id_to_index is not None
-                ):
-                    for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                        if (
-                            req_id not in self.input_batch.prev_req_id_to_index
-                            and (req_state := self.requests.get(req_id)) is not None
-                            and req_state.prev_num_draft_len
-                        ):
-                            req_state.prev_num_draft_len = 0
-
-                # Update persistent batch states.
-                deferred_state_corrections_fn = self._update_states(
-                    scheduler_output
-                )
-
-                if has_ec_transfer() and get_ec_transfer().is_producer:
-                    with self.maybe_get_ec_connector_output(
-                        scheduler_output,
-                        encoder_cache=self.encoder_cache,
-                    ) as ec_connector_output:
-                        self._execute_mm_encoder(scheduler_output)
-                        self._finalize_dump_data()
-                        return make_empty_encoder_model_runner_output(scheduler_output)
-
-                if not num_scheduled_tokens:
+                if not _fast_path and not _cloud_fast_path:
+                    # Fix up prev_req_id_to_index for requests that were discarded
+                    # in the previous sample_tokens step. If a request has
+                    # prev_num_draft_len > 0 but is missing from
+                    # prev_req_id_to_index, the parent _update_states would
+                    # hit a KeyError. Reset prev_num_draft_len to 0 for such
+                    # requests so they fall through safely.
                     if (
-                        self.parallel_config.distributed_executor_backend == "external_launcher"
-                        and self.parallel_config.data_parallel_size > 1
+                        self.use_async_scheduling
+                        and self.num_spec_tokens
+                        and self.input_batch.prev_req_id_to_index is not None
                     ):
-                        # this is a corner case when both external launcher
-                        # and DP are enabled, num_scheduled_tokens could be
-                        # 0, and has_unfinished_requests in the outer loop
-                        # returns True. before returning early here we call
-                        # dummy run to ensure coordinate_batch_across_dp
-                        # is called into to avoid out of sync issues.
-                        self._dummy_run(1)
-                    if not has_kv_transfer_group():
-                        # Return empty ModelRunnerOutput if no work to do.
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-                if self.cache_config.kv_sharing_fast_prefill:
-                    assert not self.num_prompt_logprobs, (
-                        "--kv-sharing-fast-prefill produces incorrect "
-                        "logprobs for prompt tokens, tokens, please disable "
-                        "it when the requests need prompt logprobs"
-                    )
+                        for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                            if (
+                                req_id not in self.input_batch.prev_req_id_to_index
+                                and (req_state := self.requests.get(req_id)) is not None
+                                and req_state.prev_num_draft_len
+                            ):
+                                req_state.prev_num_draft_len = 0
 
-                num_reqs = self.input_batch.num_reqs
-                req_ids = self.input_batch.req_ids
-                tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-                if (scheduler_output.total_num_scheduled_tokens <= 0
-                        or not tokens or sum(tokens) == 0):
-                    if not has_kv_transfer_group():
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
-                num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
-                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
-                (
-                    logits_indices,
-                    spec_decode_metadata,
-                    total_num_scheduled_tokens,
-                ) = self._prepare_inputs(
-                    scheduler_output,
-                    num_scheduled_tokens_np,
-                )
-
-                num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-                if self.pcp_size > 1:
-                    num_tokens_unpadded = self.pcp_manager.total_num_sampled_tokens_pcp
-                cascade_attn_prefix_lens = None
-                # Disable cascade attention when using microbatching (DBO)
-                if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
-                    # Pre-compute cascade attention prefix lengths
-                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
-                        num_scheduled_tokens_np,
-                        self.input_batch.num_computed_tokens_cpu[:num_reqs],
-                        scheduler_output.num_common_prefix_blocks,
-                    )
-
-                (
-                    cudagraph_mode,
-                    batch_desc,
-                    should_ubatch,
-                    num_tokens_across_dp,
-                    cudagraph_stats,
-                ) = self._determine_batch_execution_and_padding(
-                    num_tokens=num_tokens_unpadded,
-                    num_reqs=num_reqs,
-                    num_scheduled_tokens_np=num_scheduled_tokens_np,
-                    max_num_scheduled_tokens=max_num_scheduled_tokens,
-                    use_cascade_attn=cascade_attn_prefix_lens is not None,
-                    force_eager=self.model_config.enforce_eager,
-                    num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
-                )
-
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
-                        "should_ubatch: %s, num_tokens_across_dp: %s",
-                        cudagraph_mode,
-                        batch_desc,
-                        should_ubatch,
-                        num_tokens_across_dp,
-                    )
-
-                num_tokens_padded = batch_desc.num_tokens
-                num_reqs_padded = batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
-                ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
-                    should_ubatch,
-                    num_scheduled_tokens_np,
-                    num_tokens_padded,
-                    num_reqs_padded,
-                    self.parallel_config.num_ubatches,
-                )
-
-                if self.dynamic_eplb:
-                    self.update_eplb_heat_collection_status(num_tokens_padded)
-
-                pad_attn = cudagraph_mode == CUDAGraphMode.FULL
-
-                # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
-                # there should be a corresponding 'postprocess_mamba'. However, it is called inside
-                # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
-                # We simply utilize the implementation in vLLM.
-                if self.cache_config.mamba_cache_mode == "align":
-                    # preprocess_mamba reads req_state.num_computed_tokens (CPU)
-                    # to decide copy operations, so we must apply deferred
-                    # corrections before it runs.
-                    if deferred_state_corrections_fn:
-                        deferred_state_corrections_fn()
-                        deferred_state_corrections_fn = None
-                    mamba_bufs = self._get_mamba_bufs()
-                    preprocess_bufs = mamba_bufs.preprocess
-                    mamba_utils.preprocess_mamba(
-                        scheduler_output,
-                        self.kv_cache_config,
-                        self.cache_config,
-                        self.mamba_state_idx,
-                        self.input_batch,
-                        self.requests,
-                        self.compilation_config.static_forward_context,
-                        self.model.get_mamba_state_copy_func(),
-                        preprocess_bufs,
-                    )
-                    # preprocess_mamba resets num_accepted_tokens_cpu to 1
-                    # for requests whose state was copied to a new block.
-                    # Re-sync to GPU so the mamba kernel reads from the
-                    # correct initial state slot (init_token_idx = 0).
-                    self.num_accepted_tokens.np[:num_reqs] = (
-                        self.input_batch.num_accepted_tokens_cpu[:num_reqs]
-                    )
-                    self.num_accepted_tokens.copy_to_gpu(num_reqs)
-
-                    if mamba_bufs.postprocess_align is not None:
-                        mamba_utils.stage_postprocess_inputs_to_gpu(
-                            mamba_bufs.postprocess_align,
-                            scheduler_output,
-                            self.input_batch.req_ids,
-                            num_reqs,
-                            self.requests,
-                            self.mamba_state_idx,
+                    # Edge-cloud tail segments (PL/DL) reuse the batch state
+                    # established by their head segment (PF/DF).  Skipping
+                    # _update_states prevents interleaving bugs when multiple
+                    # prefills are in flight (2P1D) and avoids double-counting.
+                    is_edge_tail_segment = (
+                        self._edge_cloud_enabled
+                        and is_edge_device()
+                        and scheduler_output.batch_type in (
+                            BatchType.PREFILL_LAST,
+                            BatchType.DECODE_LAST,
                         )
-                if self.use_compress:
-                    if deferred_state_corrections_fn:
-                        deferred_state_corrections_fn()
+                    )
+                    scheduled_req_ids = tuple(scheduler_output.num_scheduled_tokens)
+                    skip_update_states = (
+                        is_edge_tail_segment
+                        and self.input_batch.num_reqs > 0
+                        and tuple(self.input_batch.req_ids) == scheduled_req_ids
+                    )
+                    if skip_update_states:
                         deferred_state_corrections_fn = None
+                    else:
+                        deferred_state_corrections_fn = self._update_states(
+                            scheduler_output
+                        )
+
+                    if has_ec_transfer() and get_ec_transfer().is_producer:
+                        with self.maybe_get_ec_connector_output(
+                            scheduler_output,
+                            encoder_cache=self.encoder_cache,
+                        ) as ec_connector_output:
+                            self._execute_mm_encoder(scheduler_output)
+                            self._finalize_dump_data()
+                            return make_empty_encoder_model_runner_output(scheduler_output)
+
                     num_reqs = self.input_batch.num_reqs
-                    req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
-                    dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
-                    np.add(
-                        self.input_batch.num_computed_tokens_cpu[req_indices],
-                        self.query_pos.np[:total_num_scheduled_tokens],
-                        out=dsa_positions_np,
+                    if num_reqs == 0:
+                        # No active requests remaining (e.g. all were completed
+                        # or removed by a prior _update_states call in
+                        # cloud_prepare_early).  Return empty output consistent
+                        # with the num_scheduled_tokens == 0 path.
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+                    req_ids = self.input_batch.req_ids
+                    tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                    num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+                    max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+
+                    (
+                        logits_indices,
+                        spec_decode_metadata,
+                        total_num_scheduled_tokens,
+                    ) = self._prepare_inputs(
+                        scheduler_output,
+                        num_scheduled_tokens_np,
                     )
 
-                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+                    if not num_scheduled_tokens:
+                        if (
+                            self.parallel_config.distributed_executor_backend == "external_launcher"
+                            and self.parallel_config.data_parallel_size > 1
+                        ):
+                            # this is a corner case when both external launcher
+                            # and DP are enabled, num_scheduled_tokens could be
+                            # 0, and has_unfinished_requests in the outer loop
+                            # returns True. before returning early here we call
+                            # dummy run to ensure coordinate_batch_across_dp
+                            # is called into to avoid out of sync issues.
+                            self._dummy_run(1)
+                        if not has_kv_transfer_group():
+                            # Return empty ModelRunnerOutput if no work to do.
+                            return EMPTY_MODEL_RUNNER_OUTPUT
+                        return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                    if self.cache_config.kv_sharing_fast_prefill:
+                        assert not self.num_prompt_logprobs, (
+                            "--kv-sharing-fast-prefill produces incorrect "
+                            "logprobs for prompt tokens, tokens, please disable "
+                            "it when the requests need prompt logprobs"
+                        )
 
+                    if self.dynamic_eplb:
+                        self.update_eplb_heat_collection_status(num_tokens_padded)
+
+                    pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+
+                    # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
+                    # there should be a corresponding 'postprocess_mamba'. However, it is called inside
+                    # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
+                    # We simply utilize the implementation in vLLM.
+                    if self.cache_config.mamba_cache_mode == "align":
+                        # preprocess_mamba reads req_state.num_computed_tokens (CPU)
+                        # to decide copy operations, so we must apply deferred
+                        # corrections before it runs.
+                        if deferred_state_corrections_fn:
+                            deferred_state_corrections_fn()
+                            deferred_state_corrections_fn = None
+                        mamba_bufs = self._get_mamba_bufs()
+                        preprocess_bufs = mamba_bufs.preprocess
+                        mamba_utils.preprocess_mamba(
+                            scheduler_output,
+                            self.kv_cache_config,
+                            self.cache_config,
+                            self.mamba_state_idx,
+                            self.input_batch,
+                            self.requests,
+                            self.compilation_config.static_forward_context,
+                            self.model.get_mamba_state_copy_func(),
+                            preprocess_bufs,
+                        )
+                        # preprocess_mamba resets num_accepted_tokens_cpu to 1
+                        # for requests whose state was copied to a new block.
+                        # Re-sync to GPU so the mamba kernel reads from the
+                        # correct initial state slot (init_token_idx = 0).
+                        self.num_accepted_tokens.np[:num_reqs] = (
+                            self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                        )
+                        self.num_accepted_tokens.copy_to_gpu(num_reqs)
+
+                        if mamba_bufs.postprocess_align is not None:
+                            mamba_utils.stage_postprocess_inputs_to_gpu(
+                                mamba_bufs.postprocess_align,
+                                scheduler_output,
+                                self.input_batch.req_ids,
+                                num_reqs,
+                                self.requests,
+                                self.mamba_state_idx,
+                            )
+                    if self.use_compress:
+                        if deferred_state_corrections_fn:
+                            deferred_state_corrections_fn()
+                            deferred_state_corrections_fn = None
+                        num_reqs = self.input_batch.num_reqs
+                        req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens_np)
+                        dsa_positions_np = self._dsa_positions_np_buf[:total_num_scheduled_tokens]
+                        np.add(
+                            self.input_batch.num_computed_tokens_cpu[req_indices],
+                            self.query_pos.np[:total_num_scheduled_tokens],
+                            out=dsa_positions_np,
+                        )
+
+                    # Run core input preparation.
+                    cache = self._run_input_preparation(
+                        scheduler_output,
+                        precomputed=(
+                            logits_indices,
+                            spec_decode_metadata,
+                            total_num_scheduled_tokens,
+                        ),
+                    )
+                    total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
+                    num_tokens_padded = cache["num_tokens_padded"]
+                    num_tokens_across_dp = cache["num_tokens_across_dp"]
+                    attn_metadata = cache["attn_metadata"]
+                    logits_indices = cache["logits_indices"]
+                    spec_decode_metadata = cache["spec_decode_metadata"]
+                    spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
+                    cudagraph_mode = cache["cudagraph_mode"]
+                    batch_desc = cache["batch_desc"]
+                    cudagraph_stats = cache["cudagraph_stats"]
+                # Save spec_decode_common_attn_metadata for cloud-side
+                # MTP draft proposal.  On the cloud side,
+                # execute_model_state is None (cloud is not the last PP
+                # rank), so the metadata would otherwise be lost.
+                num_reqs = self.input_batch.num_reqs
                 if (
-                    cudagraph_mode == CUDAGraphMode.FULL
-                    or (enable_sp() and not self.model_config.use_mla)
-                    and self.pcp_size * self.dcp_size == 1
+                    self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "cloud"
+                    and spec_decode_common_attn_metadata is not None
                 ):
-                    # Currently, Graph Mode and SP will both pad num_tokens,
-                    # Another possible condition is num_tokens_padded != num_tokens_unpadded
-                    # but this scope is way too big and the consequences are unpredictable
-                    num_reqs_padded = self._pad_query_start_loc_for_fia(
-                        self.query_start_loc,
-                        num_tokens_padded,
-                        num_reqs_padded,
-                        num_reqs,
-                        cudagraph_mode,
-                        batch_desc.num_reqs,
-                    )
-
-                (attn_metadata, spec_decode_common_attn_metadata) = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded
-                    if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
-                    else total_num_scheduled_tokens,
-                    num_tokens_padded=num_tokens_padded,
-                    num_reqs=num_reqs,
-                    num_reqs_padded=num_reqs_padded,
-                    max_query_len=max_num_scheduled_tokens,
-                    ubatch_slices=ubatch_slices_attn,
-                    logits_indices=logits_indices,
-                    use_spec_decode=use_spec_decode,
-                    num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
-                    num_scheduled_tokens_np=num_scheduled_tokens_np,
-                    cascade_attn_prefix_lens=cascade_attn_prefix_lens,
-                )
-
-                self._sanitize_placeholder_input_ids_for_forward(
-                    scheduler_output,
-                    num_tokens_padded
-                    if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
-                    else total_num_scheduled_tokens,
-                )
+                    self._cloud_spec_decode_common_attn_metadata = spec_decode_common_attn_metadata
+                    self._cloud_spec_decode_num_reqs = num_reqs
 
             (
                 input_ids,
@@ -2210,8 +2779,9 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors,
             )
 
-            # update global cos, sin
-            update_cos_sin(positions)
+            if not self.edge_cloud_cfg.role == "edge":
+                # update global cos, sin
+                update_cos_sin(positions)
 
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -2230,6 +2800,27 @@ class NPUModelRunner(GPUModelRunner):
                 generators=self.input_batch.sampling_metadata.generators,
             )
 
+        # Cache segment_a prepare results so segment_e can skip redundant work.
+        # Placed AFTER KV scales / async_exponential checks so cached cudagraph_mode
+        # reflects the actual value used by the forward pass.
+        # intermediate_tensors is None only for the first call (segment_a);
+        # segment_e always receives cloud data via intermediate_tensors.
+        if (self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and intermediate_tensors is None):
+            self._edge_prepare_cache = {
+                "num_tokens_padded": num_tokens_padded,
+                "num_tokens_across_dp": num_tokens_across_dp,
+                "attn_metadata": attn_metadata,
+                "logits_indices": logits_indices,
+                "spec_decode_metadata": spec_decode_metadata,
+                "spec_decode_common_attn_metadata": spec_decode_common_attn_metadata,
+                "cudagraph_mode": cudagraph_mode,
+                "batch_desc": batch_desc,
+                "cudagraph_stats": cudagraph_stats,
+                "total_num_scheduled_tokens": total_num_scheduled_tokens,
+            }
+
         # Encoder-decoder models can only compile the pure decode steps where no
         # encoder inputs are present. Use eager for the first pass.
         num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
@@ -2237,6 +2828,36 @@ class NPUModelRunner(GPUModelRunner):
 
         # Run forward pass
         clear_kv_metadata = self.speculative_config is None
+
+        # Save per-step state for layer slice continuation.
+        if layer_slice_info is not None and not layer_slice_info.is_last_slice:
+            self._layerwise_positions = positions
+            # Deep-clone device tensors inside attn_metadata to prevent
+            # corruption by subsequent decode batches.  The metadata's
+            # device tensors (query_start_loc, state_indices, etc.) are
+            # views into shared common_attn_metadata buffers that get
+            # rebuilt on every batch.  If a decode batch runs between
+            # two prefill slices, it overwrites these buffers in-place,
+            # corrupting the saved metadata.  Cloning at save time
+            # preserves the correct prefill values.
+            if isinstance(attn_metadata, dict):
+                self._layerwise_attn_metadata = {
+                    k: _clone_gdn_attn_metadata(v) for k, v in attn_metadata.items()
+                }
+            elif attn_metadata is not None:
+                self._layerwise_attn_metadata = _clone_gdn_attn_metadata(attn_metadata)
+            else:
+                self._layerwise_attn_metadata = attn_metadata
+            self._layerwise_num_tokens_padded = num_tokens_padded
+            self._layerwise_num_tokens_across_dp = num_tokens_across_dp
+            self._layerwise_batch_desc = batch_desc
+            self._layerwise_scheduler_output = scheduler_output
+            self._layerwise_logits_indices = logits_indices
+            self._layerwise_spec_decode_metadata = spec_decode_metadata
+            self._layerwise_spec_decode_common_attn_metadata = spec_decode_common_attn_metadata
+            self._layerwise_ec_connector_output = ec_connector_output
+            self._layerwise_cudagraph_stats = cudagraph_stats
+
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2264,7 +2885,9 @@ class NPUModelRunner(GPUModelRunner):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
             hidden_states = self._model_forward(
-                num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds, **model_kwargs
+                num_tokens_padded, input_ids, positions, intermediate_tensors,
+                inputs_embeds, layer_slice_info=layer_slice_info,
+                **model_kwargs
             )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
@@ -2279,9 +2902,56 @@ class NPUModelRunner(GPUModelRunner):
                         self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
+            
+            # --- Layer slice: save intermediate state for non-last ---
+            # Must happen BEFORE the edge-cloud early return below;
+            # otherwise cloud non-last slices would return IntermediateTensors
+            # to the worker immediately without saving continuation state,
+            # causing all subsequent slices to see _layerwise_intermediate=None.
+            if (
+                layer_slice_info is not None
+                and not layer_slice_info.is_last_slice
+            ):
+                # The model returns IntermediateTensors for non-last PP
+                # ranks.  Detach the hidden/residual so they serve as
+                # fresh inputs for the next slice's forward pass.
+                assert isinstance(hidden_states, IntermediateTensors)
+                self._layerwise_intermediate = hidden_states
+                if self.debugger is not None:
+                    self.debugger.stop()
+                    self.debugger.step()
+                return None
+            # --- End layerwise chunk save ---
+
+            # 边云场景：当 hidden_states 为 IntermediateTensors 时，说明当前段计算已完成，
+            # 需要把结果返回给 NPUWorker 进行跨节点通信（isend_tensor_dict）。
+            # 此处提前 return，跳过标准 PP 的 logits/sampling 流程。
+
+            if is_edge_cloud_pp_mode() and isinstance(hidden_states, IntermediateTensors) and not is_edge_device():
+                hidden_states.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+                if self.debugger is not None:
+                    self.debugger.stop()
+                    self.debugger.step()
+                return hidden_states
 
             if not self.broadcast_pp_output:
                 # Common case.
+                if self._edge_cloud_enabled and isinstance(
+                    hidden_states, IntermediateTensors
+                ):
+                    # Edge-cloud head segment always returns IntermediateTensors,
+                    # regardless of is_last_rank, so the worker can send them to
+                    # the cloud side and receive results back for the tail segment.
+                    # For embedding_only edge, the output tensors have actual
+                    # batch size (no cudagraph padding on edge), but cloud's
+                    # pre-allocated buffer is sized to max_num_tokens. Pad here
+                    # so that cloud's sync_and_slice copy_ succeeds.
+                    hidden_states.kv_connector_output = kv_connector_output
+                    self.kv_connector_output = kv_connector_output
+                    self._finalize_dump_data()
+                    self.suspend_head_state(scheduler_output)
+                    return hidden_states
                 if not get_pp_group().is_last_rank:
                     # Return the intermediate tensors.
                     assert isinstance(hidden_states, IntermediateTensors)
@@ -2350,6 +3020,28 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        if self._edge_cloud_enabled and not self.parallel_config.is_edge_node:
+            # Cloud workers do not own segment_e / LM head / sampler in the
+            # edge-cloud PD-separation topology. When the edge EngineCore
+            # issues sample_tokens via collective_rpc, every worker dequeues
+            # the request, but only the edge (rank 0) actually samples and
+            # writes back to the executor's reply mq. Cloud workers must
+            # return a no-op output immediately so the broadcast protocol
+            # converges and no PP/HCCL primitive is touched here.
+            self.execute_model_state = None
+            self.kv_connector_output = None
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        # [PD-FIX] execute_model discarded a stale tail segment (all reqs
+        # already popped). Skip sampling and return EMPTY so update_from_output's
+        # is_finished()/None guard skips those reqs (returning None here would
+        # trigger "unexpected error" in _patched_step_with_batch_queue).
+        if self._tail_segment_discarded:
+            self._tail_segment_discarded = False
+            self.execute_model_state = None
+            self.kv_connector_output = None
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
         pp = get_pp_group()
@@ -2360,7 +3052,7 @@ class NPUModelRunner(GPUModelRunner):
             # receive sampled token ids from the last PP rank when using
             # async scheduling + pipeline parallelism so downstream code
             # (e.g., PCP input preparation) can access them.
-            if self.use_async_scheduling and pp.world_size > 1 and not skip_pp_pd_broadcast:
+            if self.use_async_scheduling and pp.world_size > 1 and not skip_pp_pd_broadcast and not self._edge_cloud_enabled:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             if not kv_connector_output:
                 return None  # noqa
@@ -2506,7 +3198,7 @@ class NPUModelRunner(GPUModelRunner):
         # last PP rank so other PP ranks can receive them without going
         # through the scheduler/engine IPC path.
         if self.use_async_scheduling:
-            if pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
+            if not self._edge_cloud_enabled and pp.world_size > 1 and pp.is_last_rank and not skip_pp_pd_broadcast:
                 self._pp_broadcast_prev_sampled_token_ids(sampler_output.sampled_token_ids)
 
         if not self.use_async_scheduling:
@@ -2757,10 +3449,90 @@ class NPUModelRunner(GPUModelRunner):
         forward_context: ForwardContext,
         num_tokens_padded: int,
         positions: torch.Tensor | None,
+        layer_indices: list[int] | None = None,
+        graph_wrapper: ACLGraphWrapper | None = None,
     ) -> None:
+        """更新 ACL 全图参数（仅在 FULL 图模式下生效）。
+
+        边云模式下每个 segment wrapper 持有独立 GraphParams，避免不同
+        segment 的 attention task handle / event / params 共用同一全局列表。
+        """
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        if hasattr(cudagraph_runtime_mode, "decode_mode"):
+            cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
+        if (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and not forward_context.capturing
+            and not _monitor.cudagraph_capturing_enabled
+            and not self.use_sparse
+        ):
+            assert positions is not None
+            if graph_wrapper is not None:
+                assert graph_wrapper.graph_params is not None
+            # Edge-cloud segments may contain mixed DSA+FIA layers.
+            # DSA layers do not append entries to graph_params during capture,
+            # so update_graph_params' zip over attn_keys vs attn_params would
+            # misalign if DSA keys are present. Filter them out temporarily.
+            # 使用显式字段 skip_graph_params_update 替代 hasattr 属性嗅探，
+            # 避免后端字段命名变化导致误判
+            original_attn_metadata = forward_context.attn_metadata
+            if original_attn_metadata:
+                filtered_metadata = {
+                    k: v for k, v in original_attn_metadata.items()
+                    if not getattr(v, 'skip_graph_params_update', False)
+                }
+                if len(filtered_metadata) != len(original_attn_metadata):
+                    forward_context.attn_metadata = filtered_metadata
+            try:
+                update_full_graph_params(
+                    self.attn_backend,
+                    self.update_stream,
+                    forward_context,
+                    num_tokens_padded,
+                    self.vllm_config,
+                    self.speculative_config,
+                    positions.shape[0],
+                    layer_indices=layer_indices,
+                    graph_params=graph_wrapper.graph_params if graph_wrapper is not None else None,
+                    draft_graph_params=(
+                        graph_wrapper.draft_graph_params if graph_wrapper is not None else None
+                    ),
+                    unfiltered_attn_metadata=original_attn_metadata,
+                )
+            finally:
+                forward_context.attn_metadata = original_attn_metadata
+
+    def _model_forward(
+        self,
+        num_tokens_padded: int,
+        input_ids: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **model_kwargs: dict[str, Any],
+    ):
+        """模型前向入口。标准路径与边云路径完全分离，职责单一。"""
+        if self._edge_cloud_enabled:
+            return self._edge_cloud_forward(
+                num_tokens_padded, input_ids, positions, intermediate_tensors,
+                inputs_embeds, **model_kwargs,
+            )
+
+        # ==================== 标准非边云路径（原逻辑完全保留，不做任何修改） ====================
+        assert self.model is not None
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            **model_kwargs,
+        )
+        forward_context = get_forward_context()
+        assert forward_context is not None
         if (
             forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
             and not forward_context.capturing
+            and not _monitor.cudagraph_capturing_enabled
             and not self.use_sparse and not self.use_compress
         ):
             if self.enable_enpu:
@@ -2776,19 +3548,288 @@ class NPUModelRunner(GPUModelRunner):
                 self.speculative_config,
                 positions.shape[0],
             )
+        if get_forward_context().flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
+            hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
+        return hidden_states
 
-    def _model_forward(
+    def _run_input_preparation(
+        self,
+        scheduler_output: "SchedulerOutput",
+        precomputed: tuple | None = None,
+    ) -> dict[str, Any]:
+        """Run input preparation pipeline after _update_states.
+
+        Executes _prepare_inputs, _determine_batch_execution_and_padding,
+        and _build_attention_metadata. Returns all results as a dict that
+        can be passed to the forward pass or cached for fast-path reuse.
+        """
+        num_reqs = self.input_batch.num_reqs
+        # Guard against empty batch after _update_states
+        # (e.g. cloud_prepare_early may have cleared all requests).
+        if num_reqs == 0:
+            return {
+                "total_num_scheduled_tokens": 0,
+                "num_tokens_padded": 0,
+                "num_tokens_across_dp": None,
+                "attn_metadata": None,
+                "logits_indices": None,
+                "spec_decode_metadata": None,
+                "spec_decode_common_attn_metadata": None,
+                "cudagraph_mode": CUDAGraphMode.NONE,
+                "batch_desc": None,
+                "cudagraph_stats": None,
+            }
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+        max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+
+        if precomputed is not None:
+            (
+                logits_indices,
+                spec_decode_metadata,
+                total_num_scheduled_tokens,
+            ) = precomputed
+        else:
+            (
+                logits_indices,
+                spec_decode_metadata,
+                total_num_scheduled_tokens,
+            ) = self._prepare_inputs(
+                scheduler_output,
+                num_scheduled_tokens_np,
+            )
+
+        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
+        if self.pcp_size > 1:
+            num_tokens_unpadded = self.pcp_manager.total_num_sampled_tokens_pcp
+
+        cascade_attn_prefix_lens = None
+        if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
+            cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                num_scheduled_tokens_np,
+                self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                scheduler_output.num_common_prefix_blocks,
+            )
+
+        (
+            cudagraph_mode,
+            batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            cudagraph_stats,
+        ) = self._determine_batch_execution_and_padding(
+            num_tokens=num_tokens_unpadded,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            use_cascade_attn=cascade_attn_prefix_lens is not None,
+            force_eager=self.model_config.enforce_eager,
+            num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+        )
+        
+        num_tokens_padded = batch_desc.num_tokens
+        num_reqs_padded = (
+            batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
+        )
+
+        ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
+            should_ubatch,
+            num_scheduled_tokens_np,
+            num_tokens_padded,
+            num_reqs_padded,
+            self.parallel_config.num_ubatches,
+        )
+
+        if self.dynamic_eplb:
+            self.update_eplb_heat_collection_status(num_tokens_padded)
+
+        pad_attn = cudagraph_mode == CUDAGraphMode.FULL
+        use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+        ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
+
+        if (
+            cudagraph_mode == CUDAGraphMode.FULL
+            or (enable_sp() and not self.model_config.use_mla)
+            and self.pcp_size * self.dcp_size == 1
+        ):
+            num_reqs_padded = self._pad_query_start_loc_for_fia(
+                num_tokens_padded,
+                num_reqs_padded,
+                num_reqs,
+                cudagraph_mode,
+                batch_desc.num_reqs,
+            )
+
+        (attn_metadata, spec_decode_common_attn_metadata) = (
+            self._build_attention_metadata(
+                num_tokens=(
+                    num_tokens_unpadded
+                    if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
+                    else total_num_scheduled_tokens
+                ),
+                num_tokens_padded=num_tokens_padded,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded,
+                max_query_len=max_num_scheduled_tokens,
+                ubatch_slices=ubatch_slices_attn,
+                logits_indices=logits_indices,
+                use_spec_decode=use_spec_decode,
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                num_scheduled_tokens_np=num_scheduled_tokens_np,
+                cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+            )
+        )
+
+        self._sanitize_placeholder_input_ids_for_forward(
+            scheduler_output,
+            num_tokens_padded
+            if not (self.use_cp and self.pcp_manager.pcp_use_hybrid_attn)
+            else total_num_scheduled_tokens,
+        )
+
+        return {
+            "total_num_scheduled_tokens": total_num_scheduled_tokens,
+            "num_tokens_padded": num_tokens_padded,
+            "num_tokens_across_dp": num_tokens_across_dp,
+            "attn_metadata": attn_metadata,
+            "logits_indices": logits_indices,
+            "spec_decode_metadata": spec_decode_metadata,
+            "spec_decode_common_attn_metadata": spec_decode_common_attn_metadata,
+            "cudagraph_mode": cudagraph_mode,
+            "batch_desc": batch_desc,
+            "cudagraph_stats": cudagraph_stats,
+        }
+
+    def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
+        """Pre-compute input preparation on cloud while edge runs segment_a.
+
+        Caches results in self._cloud_prepare_cache so that when edge data
+        arrives, execute_model can skip _update_states, _prepare_inputs,
+        _determine_batch_execution_and_padding, and _build_attention_metadata,
+        going directly to _preprocess (sync_and_gather) + _model_forward.
+        """
+        assert self._edge_cloud_enabled, (
+            "cloud_prepare_early should only be called in edge-cloud mode"
+        )
+        assert self.edge_cloud_cfg.role == "cloud", (
+            "cloud_prepare_early should only be called on cloud side"
+        )
+
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if not num_scheduled_tokens:
+            self._cloud_prepare_cache = None
+            return
+
+        # Replicate scheduler_output handling from execute_model
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        ):
+            num_scheduled_tokens_copy = (
+                scheduler_output.num_scheduled_tokens.copy()
+            )
+            spec_decode_tokens_copy = (
+                scheduler_output.scheduled_spec_decode_tokens.copy()
+            )
+            scheduler_output = replace(
+                scheduler_output,
+                num_scheduled_tokens=num_scheduled_tokens_copy,
+                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
+            )
+
+        if (
+            (
+                self.use_async_scheduling
+                and self.num_spec_tokens
+                and self._draft_token_ids is None
+            )
+            or (
+                self.pcp_size > 1
+                and self.supports_mm_inputs
+                and get_pp_group().is_first_rank
+                and not self.model_config.is_encoder_decoder
+            )
+        ):
+            scheduler_output = deepcopy(scheduler_output)
+
+        # Fix up prev_req_id_to_index (same as execute_model)
+        if (
+            self.use_async_scheduling
+            and self.num_spec_tokens
+            and self.input_batch.prev_req_id_to_index is not None
+        ):
+            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                if (
+                    req_id not in self.input_batch.prev_req_id_to_index
+                    and (req_state := self.requests.get(req_id)) is not None
+                    and req_state.prev_num_draft_len
+                ):
+                    req_state.prev_num_draft_len = 0
+
+        # --- _update_states ---
+        self._update_states(scheduler_output)
+
+        # --- Run core input preparation ---
+        # cloud_prepare_early runs BEFORE the forward pass (outside
+        # torch.inference_mode), but GDN attention builder does in-place
+        # tensor copies that require inference mode.  Wrap the whole
+        # preparation inside inference_mode to stay compatible with
+        # PyTorch >= 2.0 inference tensor protection.
+        with torch.inference_mode():
+            cache = self._run_input_preparation(scheduler_output)
+
+        # If the batch became empty after _update_states (num_reqs == 0),
+        # _run_input_preparation returns a zeroed placeholder.  Don't cache
+        # it — let execute_model fall through to the normal slow path which
+        # will return EMPTY_MODEL_RUNNER_OUTPUT.
+        if cache["total_num_scheduled_tokens"] == 0:
+            self._cloud_prepare_cache = None
+            return
+
+        # --- update_cos_sin ---
+        num_input_tokens = cache["num_tokens_padded"]
+        if self.use_cp and self.pcp_manager.pcp_use_hybrid_attn:
+            num_input_tokens = cache["total_num_scheduled_tokens"]
+        update_cos_sin(self.positions[:num_input_tokens])
+
+        # --- Cache all results ---
+        self._cloud_prepare_cache = cache
+
+    def _edge_cloud_forward(
         self,
         num_tokens_padded: int,
         input_ids: torch.Tensor | None = None,
         positions: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        layer_slice_info: Any = None,
         **model_kwargs: dict[str, Any],
     ):
+        """边云场景的分段前向执行。
+
+        核心设计：每个 segment 由标准 ACLGraphWrapper 包裹（runtime_mode=FULL），
+        capture/replay 机制与标准流程完全一致，仅被包裹对象从完整 model 变为
+        EdgeCloudSegment（局部层范围）。
+
+        分段路由逻辑：
+          - Edge 角色：
+              • intermediate_tensors is None  → 执行 segment_a（首段，输出 IntermediateTensors）
+              • intermediate_tensors is not None → 执行 segment_e（尾段，输出 hidden_states）
+          - Cloud 角色：始终执行 segment_c（中段，输出 IntermediateTensors）
+        """
         assert self.model is not None
         forward_context = get_forward_context()
         assert forward_context is not None
+        
+        # 判断当前是否应使用 ACL Graph（Decode 阶段且配置允许时）
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        if hasattr(cudagraph_runtime_mode, "decode_mode"):
+            cudagraph_runtime_mode = cudagraph_runtime_mode.decode_mode()
+        use_graph = (
+            cudagraph_runtime_mode == CUDAGraphMode.FULL
+            and self.edge_cloud_cfg.enable_decode_graph
+        )
 
         model_inputs: dict[str, Any] = {
             "input_ids": input_ids,
@@ -2797,29 +3838,533 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        run_model = partial(self.model, **model_inputs)
 
-        if self.enable_enpu:
-            # The soft segmentation scenario requires event.record first, then event.wait
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
-            )
-            hidden_states = run_model()
+        # Layer-sliced execution: inject the layer range for the current
+        # slice so the model forward only runs those layers.
+        if layer_slice_info is not None:
+            slice_start = layer_slice_info.start_layer
+            slice_end = layer_slice_info.end_layer
+            # Edge-cloud cloud: the slice indices from PassiveScheduler are
+            # relative to the cloud's local middle layers (0..num_local_layers).
+            # forward_edge_cloud_segment operates on the *global* layer list
+            # (0..num_hidden_layers) because the model keeps all layers
+            # (non-local ones are PPMissingLayer).  Add head_k offset so the
+            # slice covers the correct global range.
+            if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+                slice_start += self.head_k
+                slice_end += self.head_k
+            model_inputs["layer_slice_start"] = slice_start
+            model_inputs["layer_slice_end"] = slice_end
+            # Non-last slices, and the last slice on a non-final PP rank,
+            # must return IntermediateTensors.  The last slice on the last
+            # PP rank should run norm + lm_head and return logits.
+            if not layer_slice_info.is_last_slice or not get_pp_group().is_last_rank:
+                model_inputs["layer_slice_return_intermediate"] = True
+
+        if self._edge_cloud_enabled:
+            if self.edge_cloud_cfg.role == "edge":
+                segment = (
+                    self.segment_a_wrapper
+                    if intermediate_tensors is None
+                    else self.segment_e_wrapper
+                )
+            else:
+                segment = self.segment_c_wrapper
+            run_model = partial(segment, **model_inputs)
         else:
-            hidden_states = run_model()
-            self._update_full_graph_params_if_needed(
-                forward_context, num_tokens_padded, positions
+            run_model = partial(self.model, **model_inputs)
+
+        if self.edge_cloud_cfg.role == "edge":
+            return self._edge_cloud_forward_edge(
+                num_tokens_padded, input_ids, positions, intermediate_tensors,
+                inputs_embeds, use_graph, forward_context, **model_kwargs,
             )
+        else:
+            return self._edge_cloud_forward_cloud(
+                num_tokens_padded, positions, intermediate_tensors,
+                use_graph, forward_context, layer_slice_info=layer_slice_info,
+                **model_kwargs,
+            )
+
+    def _edge_cloud_forward_edge(
+        self,
+        num_tokens_padded: int,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+        use_graph: bool,
+        forward_context,
+        **model_kwargs: dict[str, Any],
+    ):
+        """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
+        seg_a = self.segment_a_wrapper if use_graph else self.segment_a
+        seg_e = self.segment_e_wrapper if use_graph else self.segment_e
+        seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
+        seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
+
+        if intermediate_tensors is None:
+            # Step 1：执行 Segment A（embedding + 首 head_k 层）
+            # 此时 input_ids 有效，输出 IntermediateTensors 供跨节点传输
+            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+            old_layer_idx = _EXTRA_CTX.layer_idx
+            if _EXTRA_CTX.layer_idx is not None:
+                _EXTRA_CTX.layer_idx = 0
+            try:
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
+                hidden_states = seg_a(
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
+            finally:
+                if old_layer_idx is not None:
+                    _EXTRA_CTX.layer_idx = old_layer_idx
+
+            assert isinstance(hidden_states, IntermediateTensors)
+            return hidden_states
+
+        # Step 2：执行 Segment E（尾 tail_k 层 + norm）
+        # intermediate_tensors 已由 NPUWorker 从 Cloud 侧接收
+        #
+        # 注意：segment_e 与 segment_a 共用同一个 scheduler_output，num_tokens
+        # 保持不变（scheduler_output 在同一迭代内不变化）。若两者 num_tokens
+        # 出现不一致，会导致 cudagraph shape 不匹配，引发图执行错误。
+        # 关键：重置 layer_idx，使 weight_prefetch / EPLB 定位到尾段起始层，
+        # 执行完毕后恢复原值，避免影响后续非边云路径
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+        old_layer_idx = _EXTRA_CTX.layer_idx
+        if _EXTRA_CTX.layer_idx is not None:
+            _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
+
+        try:
+            tail_layer_indices = list(range(
+                self.num_layers - self.tail_k,
+                self.num_layers,
+            ))
+            if seg_e_graph and not forward_context.capturing:
+                self._update_full_graph_params_if_needed(
+                    forward_context, num_tokens_padded, positions,
+                    layer_indices=tail_layer_indices,
+                    graph_wrapper=seg_e,
+                )
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
+        finally:
+            # segment_e 执行完毕后恢复原始 layer_idx
+            if old_layer_idx is not None:
+                _EXTRA_CTX.layer_idx = old_layer_idx
+
+    def _edge_cloud_forward_edge(
+        self,
+        num_tokens_padded: int,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor | None,
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+        use_graph: bool,
+        forward_context,
+        **model_kwargs: dict[str, Any],
+    ):
+        """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
+        seg_a = self.segment_a_wrapper if use_graph else self.segment_a
+        seg_e = self.segment_e_wrapper if use_graph else self.segment_e
+        #seg_e = self.segment_e
+        seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
+        seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
+
+        if intermediate_tensors is None:
+            # Step 1：执行 Segment A（embedding + 首 head_k 层）
+            # 此时 input_ids 有效，输出 IntermediateTensors 供跨节点传输
+            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+            old_layer_idx = _EXTRA_CTX.layer_idx
+            if _EXTRA_CTX.layer_idx is not None:
+                _EXTRA_CTX.layer_idx = 0
+            try:
+                hidden_states = seg_a(
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
+                if seg_a_graph and not forward_context.capturing:
+                    self._update_full_graph_params_if_needed(
+                        forward_context, num_tokens_padded, positions,
+                        layer_indices=list(range(0, self.head_k)),
+                        graph_wrapper=seg_a,
+                    )
+            finally:
+                if old_layer_idx is not None:
+                    _EXTRA_CTX.layer_idx = old_layer_idx
+
+            assert isinstance(hidden_states, IntermediateTensors)
+            return hidden_states
+
+        # Step 2：执行 Segment E（尾 tail_k 层 + norm）
+        # intermediate_tensors 已由 NPUWorker 从 Cloud 侧接收
+        #
+        # 注意：segment_e 与 segment_a 共用同一个 scheduler_output，num_tokens
+        # 保持不变（scheduler_output 在同一迭代内不变化）。若两者 num_tokens
+        # 出现不一致，会导致 cudagraph shape 不匹配，引发图执行错误。
+        # 关键：重置 layer_idx，使 weight_prefetch / EPLB 定位到尾段起始层，
+        # 执行完毕后恢复原值，避免影响后续非边云路径
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+        old_layer_idx = _EXTRA_CTX.layer_idx
+        if _EXTRA_CTX.layer_idx is not None:
+            _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
+
+        try:
+            tail_layer_indices = list(range(
+                self.num_layers - self.tail_k,
+                self.num_layers,
+            ))
+            hidden_states = seg_e(
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                **model_kwargs,
+            )
+            if seg_e_graph and not forward_context.capturing:
+                self._update_full_graph_params_if_needed(
+                    forward_context, num_tokens_padded, positions,
+                    layer_indices=tail_layer_indices,
+                    graph_wrapper=seg_e,
+                )
+        finally:
+            # segment_e 执行完毕后恢复原始 layer_idx
+            if old_layer_idx is not None:
+                _EXTRA_CTX.layer_idx = old_layer_idx
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
-    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
+    def _execute_layerwise_continuation(
+        self,
+        layer_slice_info: Any,
+    ) -> IntermediateTensors | None:
+        """Run model forward for a non-first layer slice.
+
+        On the first slice, execute_model set up all the batch state
+        (requests, attention metadata, positions, etc.) and saved the
+        intermediate hidden_states/residual in
+        ``self._layerwise_intermediate``.  Subsequent slices only need to
+        feed that intermediate state back into the model for the current
+        slice's layer range.
+        """
+        assert self._layerwise_intermediate is not None, (
+            "Layer slice continuation requires saved intermediate state from "
+            "the previous slice.  Was slice 0 executed first?"
+        )
+
+        intermediate_tensors = self._layerwise_intermediate
+        self._layerwise_intermediate = None
+
+        # Re-use the positions and attention metadata that slice 0 prepared.
+        positions = self._layerwise_positions
+        attn_metadata = self._layerwise_attn_metadata
+
+        # Mark the attention metadata as a layer-slice continuation so that
+        # GDN's causal_conv1d prefill path knows conv_state may have been
+        # polluted by an interleaved decode batch.  See
+        # vllm_ascend.ops.gdn._maybe_reset_initial_state_for_layer_slice.
+        if isinstance(attn_metadata, dict):
+            for per_layer_meta in attn_metadata.values():
+                per_layer_meta._is_layer_slice_continuation = True
+        elif attn_metadata is not None:
+            attn_metadata._is_layer_slice_continuation = True
+
+        num_tokens_padded = self._layerwise_num_tokens_padded
+        num_tokens_across_dp = self._layerwise_num_tokens_across_dp
+        batch_desc = self._layerwise_batch_desc
+
+        has_encoder_input = False
+        clear_kv_metadata = self.speculative_config is None
+
+        with (
+            record_function_or_nullcontext("layerwise forward"),
+            set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens_padded,
+                num_tokens_across_dp=num_tokens_across_dp,
+                aclgraph_runtime_mode=CUDAGraphMode.NONE,
+                batch_descriptor=batch_desc,
+                num_actual_tokens=num_tokens_padded,
+                model_instance=self.model,
+                max_tokens_across_pcp=0,
+                skip_compiled=has_encoder_input,
+            ),
+            self.maybe_get_kv_connector_output(
+                self._layerwise_scheduler_output,
+                **({"defer_finalize": not clear_kv_metadata}),
+            ) as kv_connector_output,
+        ):
+            hidden_states = self._model_forward(
+                num_tokens_padded,
+                None,               # input_ids
+                positions,
+                intermediate_tensors,
+                None,               # inputs_embeds
+                layer_slice_info=layer_slice_info,
+            )
+
+        with record_function_or_nullcontext("layerwise post process"):
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, _ = hidden_states
+            if self.pcp_size > 1:
+                hidden_states = self.pcp_manager.get_restore_hidden_states(
+                    hidden_states
+                )
+
+            # Non-last slice: save intermediate and return None.
+            if not layer_slice_info.is_last_slice:
+                assert isinstance(hidden_states, IntermediateTensors)
+                self._layerwise_intermediate = hidden_states
+                return None
+
+            # Edge-cloud cloud segment: always returns IntermediateTensors
+            # regardless of PP rank, because logits are computed on the edge
+            # side (segment_e) not on the cloud side (segment_c).
+            if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+                assert isinstance(hidden_states, IntermediateTensors)
+                hidden_states.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+                return hidden_states
+
+            # Last slice on a non-final PP rank: return IntermediateTensors
+            # so NPUWorker performs the PP send.
+            if not get_pp_group().is_last_rank:
+                assert isinstance(hidden_states, IntermediateTensors)
+                hidden_states.kv_connector_output = kv_connector_output
+                self.kv_connector_output = kv_connector_output
+                return hidden_states
+
+            # Last slice on the last PP rank: the model returned logits
+            # (after norm + lm_head).  Replicate the post-processing from
+            # execute_model() so that sample_tokens() can produce the
+            # final ModelRunnerOutput.
+            assert not isinstance(hidden_states, IntermediateTensors)
+            assert not self.broadcast_pp_output, (
+                "Layerwise chunking with broadcast_pp_output is not yet "
+                "supported on the last PP rank."
+            )
+            assert not self.is_pooling_model, (
+                "Layerwise chunking with pooling models is not yet "
+                "supported on the last PP rank."
+            )
+            logits_indices = self._layerwise_logits_indices
+            sample_hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states)
+            self.execute_model_state = ExecuteModelState(
+                self._layerwise_scheduler_output,
+                logits,
+                self._layerwise_spec_decode_metadata,
+                self._layerwise_spec_decode_common_attn_metadata,
+                hidden_states,
+                sample_hidden_states,
+                None,   # aux_hidden_states
+                self._layerwise_attn_metadata,
+                self._layerwise_positions,
+                self._layerwise_ec_connector_output,
+                self._layerwise_cudagraph_stats,
+                self._layerwise_batch_desc,
+            )
+            self.kv_connector_output = kv_connector_output
+            return None
+
+    def suspend_head_state(self, scheduler_output: SchedulerOutput) -> None:
+        """Suspend the minimal head-segment context for later tail-segment pairing.
+
+        Called just before the edge head-segment returns IntermediateTensors
+        to the worker for cross-node transmission.
+        """
+        token = scheduler_output.head_token
+        if not token:
+            return
+        if token in self._pending_head_states:
+            raise RuntimeError(
+                f"head_token={token} already suspended; "
+                "previous tail did not consume it"
+            )
+        self._pending_head_states[token] = HeadState(
+            head_token=token,
+            scheduler_output=scheduler_output,
+            req_ids=tuple(self.input_batch.req_ids),
+        )
+
+    def _resume_and_validate_head_state(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Resume and validate the suspended HeadState for a tail segment.
+
+        The control-plane head_token identifies the HeadState saved by the
+        matching edge head segment. Data-plane hidden tensors are aligned by
+        scheduler-selected hidden channels, so no data-plane token tensor is
+        required in IntermediateTensors.
+        """
+        token_ctrl = scheduler_output.head_token
+        if not token_ctrl:
+            raise RuntimeError(
+                "PL/DL scheduler_output must carry head_token from cloud"
+            )
+
+        head_state = self._pending_head_states.pop(token_ctrl, None)
+        if head_state is None:
+            raise RuntimeError(
+                f"No suspended HeadState for head_token={token_ctrl}; "
+                f"tail dispatched without matching head or already consumed"
+            )
+
+        expected = self._expected_tail_batch_type(
+            head_state.scheduler_output.batch_type
+        )
+        if scheduler_output.batch_type != expected:
+            raise RuntimeError(
+                f"HeadState batch_type mismatch: head was "
+                f"{head_state.scheduler_output.batch_type}, "
+                f"tail is {scheduler_output.batch_type}"
+            )
+
+        tail_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
+        head_req_ids = set(head_state.req_ids)
+        if tail_req_ids != head_req_ids:
+            raise RuntimeError(
+                f"HeadState req_ids mismatch: head had "
+                f"{head_req_ids}, tail scheduler_output has "
+                f"{tail_req_ids}"
+            )
+
+    @staticmethod
+    def _expected_tail_batch_type(head_bt: BatchType) -> BatchType:
+        return {
+            BatchType.PREFILL_FIRST: BatchType.PREFILL_LAST,
+            BatchType.DECODE_FIRST: BatchType.DECODE_LAST,
+        }[head_bt]
+
+    def _edge_cloud_forward_cloud(
+        self,
+        num_tokens_padded: int,
+        positions: torch.Tensor | None,
+        intermediate_tensors: IntermediateTensors | None,
+        use_graph: bool,
+        forward_context,
+        layer_slice_info: Any = None,
+        **model_kwargs: dict[str, Any],
+    ):
+        """Cloud 侧分段执行：segment_c（中段）。"""
+        assert self.edge_cloud_cfg.role == "cloud", (
+            "Cloud segment_c should only be executed when role == 'cloud'"
+        )
+        # Warmup（profile_run）期间，Cloud 通过 PP non-first rank 路径自行构造
+        # minimal intermediate_tensors（仅含 shape 信息）用于图捕获，此时 intermediate_tensors
+        # 不为 None 但也是 dummy。运行时 real inference 时，intermediate_tensors 由
+        # Worker 层从 Edge 侧接收，为真实的 HiddenStates。区分方式：检查 in_profile_run。
+        in_warmup = getattr(forward_context, "in_profile_run", False)
+        assert intermediate_tensors is not None or in_warmup, (
+            "Cloud segment_c requires intermediate_tensors from Edge side"
+        )
+
+        if layer_slice_info is not None:
+            # Cloud prefill layer slicing changes layer_slice_start/end per
+            # slice. EdgeCloudCompiledSegment/npugraph_ex may specialize those
+            # Python int ranges from the first slice and reuse them for later
+            # slices, causing wrong-layer execution. Use the raw segment for
+            # sliced prefill while keeping graph/compile for decode and
+            # non-sliced prefill.
+            seg_c = self.segment_c_raw
+            logger.debug(
+                "[EdgeCloud] Cloud sliced prefill uses raw segment: "
+                "slice=%d/%d local=[%d,%d) global=[%d,%d)",
+                layer_slice_info.slice_index + 1,
+                layer_slice_info.total_slices,
+                layer_slice_info.start_layer,
+                layer_slice_info.end_layer,
+                layer_slice_info.start_layer + self.head_k,
+                layer_slice_info.end_layer + self.head_k,
+            )
+        else:
+            seg_c = self.segment_c_wrapper if use_graph else self.segment_c
+        seg_c_graph = isinstance(seg_c, ACLGraphWrapper)
+
+        if seg_c_graph:
+            if layer_slice_info is not None:
+                cloud_layer_indices = list(range(
+                    layer_slice_info.start_layer + self.head_k,
+                    layer_slice_info.end_layer + self.head_k,
+                ))
+            else:
+                cloud_layer_indices = list(range(
+                    self.head_k,
+                    self.num_layers - self.tail_k,
+                ))
+        # intermediate_tensors 已由 NPUWorker 从 Edge 侧接收
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+        old_layer_idx = _EXTRA_CTX.layer_idx
+        if _EXTRA_CTX.layer_idx is not None:
+            if layer_slice_info is not None:
+                # Layer-sliced execution: each slice starts at a different
+                # local layer.  Add head_k offset to get the global layer
+                # index so that weight_prefetch / EPLB route to the correct
+                # layer weights for this slice.
+                _EXTRA_CTX.layer_idx = (
+                    layer_slice_info.start_layer + self.head_k
+                )
+            else:
+                _EXTRA_CTX.layer_idx = self.head_k
+
+        if layer_slice_info is not None:
+            model_kwargs = dict(model_kwargs)
+            model_kwargs["layer_slice_start"] = (
+                layer_slice_info.start_layer + self.head_k
+            )
+            model_kwargs["layer_slice_end"] = (
+                layer_slice_info.end_layer + self.head_k
+            )
+            if not layer_slice_info.is_last_slice:
+                model_kwargs["layer_slice_return_intermediate"] = True
+        hidden_states = seg_c(
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            **model_kwargs,
+        )
+        if seg_c_graph and not forward_context.capturing:
+            self._update_full_graph_params_if_needed(
+                forward_context, num_tokens_padded, positions,
+                layer_indices=cloud_layer_indices,
+                graph_wrapper=seg_c,
+            )
+        
+        if old_layer_idx is not None:
+            _EXTRA_CTX.layer_idx = old_layer_idx
+
+        # Cloud 必须返回 IntermediateTensors，供 Worker 层发回 Edge 并最终由 Edge 计算 logits
+        assert isinstance(hidden_states, IntermediateTensors)
+        return hidden_states
+
+    def _pad_for_sequence_parallelism(
+        self, num_scheduled_tokens: int, for_cudagraph_capture: bool = False
+    ) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if enable_sp(self.vllm_config) or enable_sp_by_pass():
+        if enable_sp(self.vllm_config) or enable_sp_by_pass() or self.edge_cloud_cfg.cloud_enable_sp:
+            pc = self.vllm_config.parallel_config
+            # Edge-cloud mode: edge node should pad to cloud's tp_size so that
+            # the full sequence after all_gather is directly chunkable by cloud SP.
+            # During cudagraph/ACL graph capture, skip this extra padding so that
+            # graph keys match the normal SP-aligned capture sizes.
+            if pc.enable_edge_cloud and pc.is_edge_node and not for_cudagraph_capture:
+                tp_size = max(tp_size, pc.cloud_npu_count)
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -2838,17 +4383,46 @@ class NPUModelRunner(GPUModelRunner):
         tp = self.vllm_config.parallel_config.tensor_parallel_size
 
         if sync_self:
-            assert intermediate_tensors is not None
-            for k, v in intermediate_tensors.items():
-                copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
-                if k not in self.intermediate_tensors.tensors:
-                    base_tensor = self.intermediate_tensors["hidden_states"]
-                    self.intermediate_tensors[k] = v.new_empty(
-                        (base_tensor.shape[0], *v.shape[1:])
+            assert intermediate_tensors is not None, (
+                "sync_and_slice_intermediate_tensors received None; "
+                "check PP/TP tensor delivery."
+            )
+            if (self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "cloud"
+                    and self.edge_cloud_cfg.mode == "embedding_only"
+                    and self.supports_mm_inputs):
+                # In edge-cloud embedding-only multimodal mode the edge sends
+                # the full sequence (it does not SP-chunk, see worker.py).
+                # The Cloud's first transformer layer expects full
+                # hidden_states/residual and handles TP/SP internally (e.g. VL
+                # first-layer special branch). Return all keys from the local
+                # buffer so residual is always present.
+                for k, v in intermediate_tensors.items():
+                    copy_len = num_tokens
+                    if k not in self.intermediate_tensors.tensors:
+                        base_tensor = self.intermediate_tensors["hidden_states"]
+                        self.intermediate_tensors[k] = v.new_empty(
+                            (base_tensor.shape[0], *v.shape[1:])
+                        )
+                    self.intermediate_tensors[k][:copy_len].copy_(
+                        v[:copy_len], non_blocking=True
                     )
-                self.intermediate_tensors[k][:copy_len].copy_(
-                    v[:copy_len], non_blocking=True
+                return IntermediateTensors(
+                    {
+                        k: v[:num_tokens]
+                        for k, v in self.intermediate_tensors.items()
+                    }
                 )
+            else:
+                for k, v in intermediate_tensors.items():
+                    copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
+                    dst = self.intermediate_tensors[k][:copy_len]
+                    # Senders may transmit only real tokens; fill graph padding locally.
+                    recv_len = min(v.shape[0], copy_len)
+                    if recv_len:
+                        dst[:recv_len].copy_(v[:recv_len], non_blocking=True)
+                    if recv_len < copy_len:
+                        dst[recv_len:].zero_()
 
         return IntermediateTensors(
             {
@@ -2887,10 +4461,11 @@ class NPUModelRunner(GPUModelRunner):
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
+        for_cudagraph_capture: bool = False,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        # A one-token chunk can still be a prefill, notably at a PD handoff.
-        # Dispatch a decode graph only after every prompt is fully computed.
+        num_tokens_padded = self._pad_for_sequence_parallelism(
+            num_tokens, for_cudagraph_capture=for_cudagraph_capture
+        )
         is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
@@ -3227,7 +4802,7 @@ class NPUModelRunner(GPUModelRunner):
             # But gdn needs an unpadded one.
             # gdn_query_start_loc is an unpadded version of query_start_loc.
             # TODO delete it if fia's check is removed.
-            if self._has_gdn:
+            if self._has_gdn and self.attn_groups[kv_cache_gid]:
                 attn_group = self.attn_groups[kv_cache_gid][0]
                 builder = attn_group.get_metadata_builder(0)
                 if isinstance(builder, GDNAttentionMetadataBuilder):
@@ -3387,6 +4962,7 @@ class NPUModelRunner(GPUModelRunner):
             # LoRA state when determining the batch descriptor for capture
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
+            for_cudagraph_capture=is_graph_capturing,
         )
         if self.use_cp:
             self.pcp_manager.init_batch_info(
@@ -3411,6 +4987,18 @@ class NPUModelRunner(GPUModelRunner):
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
             num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
+
+        # SP padding or cudagraph dispatcher may increase num_reqs_padded
+        # beyond the length of num_scheduled_tokens. Ensure they match.
+        if len(num_scheduled_tokens) < num_reqs_padded:
+            if num_tokens_padded == num_reqs_padded * max_query_len:
+                # Uniform decode: each request (including padded) has max_query_len tokens
+                num_scheduled_tokens = np.full(num_reqs_padded, max_query_len, dtype=num_scheduled_tokens.dtype)
+            else:
+                # Mixed batch: padded requests have 0 scheduled tokens
+                extended = np.zeros(num_reqs_padded, dtype=num_scheduled_tokens.dtype)
+                extended[:len(num_scheduled_tokens)] = num_scheduled_tokens
+                num_scheduled_tokens = extended
         
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded)
@@ -3521,7 +5109,43 @@ class NPUModelRunner(GPUModelRunner):
             # update global cos, sin
             update_cos_sin(positions)
 
-            if get_pp_group().is_first_rank:
+            # ========== 边云模式（Edge-Cloud Mode）中间张量处理 ==========
+            # 边云模式下根据 role 判断是否需要 intermediate_tensors，
+            # 替代标准 PP（Pipeline Parallelism）的 is_first_rank 判断（pp_size=1 时所有 rank 都是 first）。
+            if self._edge_cloud_enabled:
+                if self.edge_cloud_cfg.role == "edge":
+                    # Edge 端：不需要中间张量（第一阶段）
+                    intermediate_tensors = None
+                else:
+                    # Cloud 端：需要中间张量
+                    intermediate_tokens = num_tokens_padded
+                    # embedding-only 模式下 Cloud 从首层开始执行，输入来自 Edge 的
+                    # embedding 输出，应为完整序列长度（运行时
+                    # sync_and_slice_intermediate_tensors 亦使用完整 num_tokens）。
+                    if enable_sp() and (self.edge_cloud_cfg.mode != "embedding_only"
+                        or not self.supports_mm_inputs):
+                        tp_size = get_tensor_model_parallel_world_size()
+                        intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
+                    if self.intermediate_tensors is None:
+                        # 首次创建 intermediate_tensors，使用最大可能 token 数
+                        max_actual_tokens = self.max_num_tokens
+                        if enable_sp() and (self.edge_cloud_cfg.mode != "embedding_only"
+                            or not self.supports_mm_inputs):
+                            max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+                        # 调用模型方法创建空的中间张量
+                        self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                            batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
+                        )
+                        logger.info(
+                            "[Cloud _dummy_run] Created intermediate_tensors "
+                            "hidden_states shape=%s via make_empty_intermediate_tensors",
+                            list(self.intermediate_tensors["hidden_states"].shape),
+                        )
+                    # 切片到实际需要的 token 数
+                    intermediate_tensors = IntermediateTensors(
+                        {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
+                    )
+            elif get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
                 # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by
@@ -3576,6 +5200,8 @@ class NPUModelRunner(GPUModelRunner):
                 )
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
+            elif isinstance(outputs, IntermediateTensors):
+                hidden_states = outputs["hidden_states"]
             else:
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
@@ -3593,14 +5219,88 @@ class NPUModelRunner(GPUModelRunner):
                     is_profile=is_profile,
                 )
             if is_profile and self.dynamic_eplb:
-                self.eplb_updator.adaptor.clear_all_moe_loads()
-            if not is_profile and self.dynamic_eplb:
-                self.eplb_updator.forward_end(self.eplb_heat_collection_status)
+                target = self.model.language_model if hasattr(self.model, "language_model") else self.model
+                target.clear_all_moe_loads()
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_end()
             self._finalize_dump_data(dump=False)
             if self.use_compress and force_attention:
                 self.positions.fill_(0)
                 self._dsa_positions_cpu_buf.fill_(0)
+
+            # ========== Edge 设备特殊处理：Edge 首阶段需要执行最后一层 ==========
+            if is_edge_device():
+                # 断言：边设备输出必须是 IntermediateTensors 类型
+                assert isinstance(outputs, IntermediateTensors)
+
+                # 重新准备 intermediate_tensors（与上文逻辑相同）
+                intermediate_tokens = num_tokens_padded
+                if enable_sp():
+                    tp_size = get_tensor_model_parallel_world_size()
+                    intermediate_tokens = (num_tokens_padded + tp_size - 1) // tp_size
+                if self.intermediate_tensors is None:  # 增加deepseek-v4判断
+                    max_actual_tokens = self.max_num_tokens
+                    if enable_sp():
+                        max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+                        # 调用模型方法创建空的中间张量
+                    self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                        batch_size=max_actual_tokens, dtype=self.dtype, device=self.device
+                    )
+                # 切片
+                intermediate_tensors = IntermediateTensors(
+                    {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
+                )
+
+                need_dummy_logits = not is_profile and lmhead_tp_enable()
+                max_num_reqs_across_dp = max_num_reqs * self.uniform_decode_query_len
+                dummy_indices = torch.zeros(max_num_reqs_across_dp, dtype=torch.int32)
+
+                with set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens_padded,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    in_profile_run=is_profile,
+                    num_actual_tokens=num_tokens_padded,
+                    aclgraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_desc,
+                    model_instance=self.model,
+                ):
+                    outputs = self._model_forward(
+                        num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
+                    )
+                if self.use_aux_hidden_state_outputs:
+                    hidden_states, _ = outputs
+                elif isinstance(outputs, IntermediateTensors):
+                    hidden_states = outputs["hidden_states"]
+                else:
+                    hidden_states = outputs
+                dummy_compute_logits(hidden_states)
+
+                if self.drafter:
+                    self.drafter.dummy_run(
+                        num_tokens=num_tokens_padded,
+                        with_prefill=with_prefill,
+                        num_reqs=num_reqs_padded,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        aclgraph_runtime_mode=cudagraph_runtime_mode,
+                        batch_descriptor=batch_desc,
+                        dummy_compute_logits=dummy_drafter_compute_logits,
+                        in_graph_capturing=not force_attention,
+                        is_profile=is_profile,
+                    )
+                if is_profile and self.dynamic_eplb:
+                    target = self.model.language_model if hasattr(self.model, "language_model") else self.model
+                    target.clear_all_moe_loads()
+                if self.dynamic_eplb:
+                    self.eplb_updator.forward_end()
+
+                self._finalize_dump_data(dump=False)
+                if self.use_compress and force_attention:
+                    self.positions.fill_(0)
+                    self._dsa_positions_cpu_buf.fill_(0)
             return hidden_states, hidden_states
+
 
     @torch.inference_mode()
     def _dummy_sampler_run(
@@ -3633,8 +5333,19 @@ class NPUModelRunner(GPUModelRunner):
         # TODO: after the vllm pcp function is launched, this logic needs to be brought up to the community
         if self.pcp_size > 1:
             self.max_num_tokens = math.ceil(self.max_num_tokens / (self.pcp_size * 2)) * 2
-        super().profile_run()
-        self.max_num_tokens = origin_max_num_tokens
+        skip_mm_profile = (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "cloud"
+            and self.supports_mm_inputs
+        )
+        original_supports_mm_inputs = self.supports_mm_inputs
+        if skip_mm_profile:
+            self.supports_mm_inputs = False
+        try:
+            super().profile_run()
+        finally:
+            self.supports_mm_inputs = original_supports_mm_inputs
+            self.max_num_tokens = origin_max_num_tokens
 
     def eplb_warmup(self):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
@@ -3656,6 +5367,24 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_heat_collection_status =  True
 
     def load_model(self) -> None:
+        # When the layer-slice runtime is enabled, install the qwen
+        # forward-method patches before the model is constructed so the
+        # rebound forward is what the loaded modules actually expose.
+        # Loaded on demand to keep upstream vLLM unmodified for users that
+        # don't enable this feature.
+        self._layer_slice_enabled = os.path.exists(
+            os.environ.get("VLLM_LAYER_SLICE_CONFIG", "layer_slice_config.yaml")
+        )
+        if self._layer_slice_enabled:
+            import vllm_ascend.patch.models.qwen_layer_slice  # noqa: F401
+
+        if self._edge_cloud_enabled:
+            with DeviceMemoryProfiler() as m:
+                self._load_model_edge_cloud()
+            self.model_memory_usage = m.consumed_memory
+            logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
+            return
+
         load_model_start_time = time.perf_counter()
         logger.info("Starting to load model %s...", self.model_config.model)
 
@@ -3791,6 +5520,34 @@ class NPUModelRunner(GPUModelRunner):
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
         self._mamba_copy_bufs = None
+
+        # For embedding_only edge, skip KV cache tensor allocation and
+        # attention backend initialization. The edge does not execute any
+        # attention layers; keeping a full kv_cache_config is only for the
+        # scheduler to correctly schedule requests.
+        if (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.mode == "embedding_only"
+            and self.edge_cloud_cfg.role == "edge"
+        ):
+            # Edge does not execute any attention layers, but downstream code
+            # (e.g. execute_model) still iterates over attn_groups using
+            # kv_cache_groups as the outer loop.  Keep a list of empty lists
+            # so that len(attn_groups) == len(kv_cache_groups) and inner
+            # loops simply execute zero times.
+            self.attn_groups = [
+                [] for _ in range(len(kv_cache_config.kv_cache_groups))
+            ]
+            self.use_hybrid_blocks = False
+            self.need_accepted_tokens = False
+            self.may_reinitialize_input_batch(kv_cache_config)
+            self.kv_cache = {}
+            logger.info(
+                "[EdgeCloud] embedding_only edge skipped KV cache tensor "
+                "allocation and attention backend initialization."
+            )
+            return
+
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
@@ -3929,6 +5686,16 @@ class NPUModelRunner(GPUModelRunner):
                 return attn_layer.kv_lora_rank, attn_layer.qk_rope_head_dim
             # CacheOnlyAttentionLayer uses AscendMLAAttentionSpec but isn't MLAAttention
             if isinstance(attn_layer, CacheOnlyAttentionLayer):
+                return kv_cache_spec.head_size, kv_cache_spec.head_size
+            # DeepseekV4IndexerCache (and its ascend subclass) is also cache-only
+            # but does not inherit CacheOnlyAttentionLayer.
+            if type(attn_layer).__name__ in (
+                "DeepseekV4IndexerCache",
+                "AscendDeepseekV4IndexerCache",
+            ):
+                return kv_cache_spec.head_size, kv_cache_spec.head_size
+            # DSAAttention uses MLAAttentionSpec with unified head_size for K and V.
+            if type(attn_layer).__name__ == "DSAAttention":
                 return kv_cache_spec.head_size, kv_cache_spec.head_size
             raise TypeError(
                 f"Expected MLAAttention layer for {layer_name}, got {type(attn_layer).__name__}."
@@ -4072,11 +5839,10 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache for all shared layers
                         kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
+                elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors.keys(
+                ):
                     if self.vllm_config.kv_transfer_config is None:
-                        tensor = torch.zeros(kv_cache_tensor.size,
-                                                dtype=torch.int8,
-                                                device=self.device)
+                        tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
                     else:
                         cache_size_aligned = kv_cache_tensor.size + alignment
                         tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
@@ -4673,10 +6439,17 @@ class NPUModelRunner(GPUModelRunner):
                 continue
             max_num_blocks_per_req = cdiv(max_model_len, block_sizes[i] * get_total_cp_world_size())
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
-                mamba_blocks_per_req = (
-                    max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
-                )
-
+                if self.cache_config.enable_prefix_caching:
+                    mamba_blocks_per_req = (
+                        max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
+                        )
+                else:
+                    max_chunks = cdiv(
+                        max_model_len,
+                        self.cache_config.block_size * get_total_cp_world_size(),
+                    )
+                    mamba_blocks_per_req = max(max_num_blocks_per_req, max_chunks)
+                mamba_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
                 max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
                 max_num_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
             max_num_blocks.append(max_num_blocks_per_req)
@@ -4812,8 +6585,23 @@ class NPUModelRunner(GPUModelRunner):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
+        # embedding_only: edge has no local attention layers, so its
+        # static_forward_context is empty and the normal path returns {}.
+        # Returning {} here lets the cloud's fresh spec (after weights
+        # processing) drive the merged spec, avoiding stale dimensions
+        # (e.g. head_size changed by quantization).
+        if (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.mode == "embedding_only"
+            and self.edge_cloud_cfg.role == "edge"
+        ):
+            return {}
 
-        if has_ec_transfer() and get_ec_transfer().is_producer:
+        if (
+            has_ec_transfer()
+            and get_ec_transfer().is_producer
+            and not self._edge_cloud_enabled
+        ):
             return {}
 
         kv_cache_spec: dict[str, list[KVCacheSpec]] = defaultdict(list)
@@ -4936,6 +6724,13 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
+        # embedding_only edge has no local attention layers; the spec
+        # is already empty (returned early above).  Cloud side keeps
+        # With the PP-reuse init path make_layers directly creates
+        # PPMissingLayer for non-local indices — no stale entries
+        # ever register in static_forward_context, so no filtering
+        # is needed.
+
         return kv_cache_spec
 
     def _check_and_update_cudagraph_mode(
@@ -4998,10 +6793,48 @@ class NPUModelRunner(GPUModelRunner):
             set_graph_params(capture_sizes)
             if self.speculative_config:
                 set_draft_graph_params(capture_sizes)
+            if self._edge_cloud_enabled:
+                wrappers = []
+                if self.edge_cloud_cfg.role == "edge":
+                    wrappers = [self.segment_a_wrapper, self.segment_e_wrapper]
+                elif self.edge_cloud_cfg.role == "cloud":
+                    wrappers = [self.segment_c_wrapper]
+                for wrapper in wrappers:
+                    if isinstance(wrapper, ACLGraphWrapper):
+                        wrapper.graph_params = make_graph_params(self.cudagraph_batch_sizes)
+                        if self.speculative_config:
+                            wrapper.draft_graph_params = make_graph_params(self.cudagraph_batch_sizes)
+
+    def _get_aclgraph_wrappers(self) -> list[ACLGraphWrapper]:
+        """返回所有可能残留 profile 阶段图捕获结果的 ACLGraphWrapper。"""
+        wrappers: list[ACLGraphWrapper] = []
+        if isinstance(self.model, ACLGraphWrapper):
+            wrappers.append(self.model)
+        for attr in ("segment_a_wrapper", "segment_e_wrapper", "segment_c_wrapper"):
+            wrapper = getattr(self, attr, None)
+            if isinstance(wrapper, ACLGraphWrapper):
+                wrappers.append(wrapper)
+        return wrappers
 
     def capture_model(self) -> int:
-        """Capture NPU graphs and return actual graph pool memory bytes consumed."""
-        parent_module_name = _get_gpu_model_runner_module_name(self)
+        # 边云模式的 ACL Graph 仍依赖父类 capture 循环触发 _dummy_run。
+        # 实际捕获发生在 segment 级 ACLGraphWrapper 内，通信保持在图外。
+        if self._edge_cloud_enabled and not self.edge_cloud_cfg.enable_decode_graph:
+            return 0
+
+        gpu_model_runner_cls = next((cls for cls in self.__class__.__mro__ if cls.__name__ == "GPUModelRunner"), None)
+        if gpu_model_runner_cls is None:
+            raise TypeError("Could not find GPUModelRunner in the MRO. The class hierarchy may have changed.")
+        parent_module_name = gpu_model_runner_cls.__module__
+        # profile_cudagraph_memory 阶段 ACLGraphWrapper 已捕获过图，
+        # 但 CUDAGraphWrapper.clear_all_graphs() 不清除 ACLGraphWrapper
+        # 的 concrete_aclgraph_entries。保留的 entry 会导致 capture_model
+        # 中 _warmup_and_capture 走 REPLAY 而非 CAPTURE 路径，
+        # REPLAY 时 forward_context.capturing 保持 False，
+        # 使得 _update_full_graph_params_if_needed 错误执行 → 挂死。
+        # 因此这里手动清空，强制重新 capture。
+        for wrapper in self._get_aclgraph_wrappers():
+            wrapper.concrete_aclgraph_entries.clear()
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)
 
