@@ -615,8 +615,20 @@ def _build_non_spec_causal_conv1d_host_meta(
         None if slot is None else slot.has_initial_state_cpu,
     )
 
+    # Clone query_start_loc_cpu to decouple it from the shared
+    # common_attn_metadata.query_start_loc_cpu buffer.  In edge-cloud
+    # layer-sliced inference, a decode batch can be interleaved between
+    # two prefill slices; the decode rebuilds common_attn_metadata and
+    # overwrites the shared buffer in-place.  Without cloning, the
+    # cached _layerwise_attn_metadata would see the decode's values
+    # (e.g. queryStartLoc[last]=2 for 2 decode tokens) instead of the
+    # original prefill values (e.g. 2048 prefill tokens), causing
+    # aclnnCausalConv1d tiling validation failure (EZ9999:
+    # "queryStartLoc[last] must equal cuSeqlen").
+    query_start_loc_cpu = non_spec_query_start_loc_cpu.clone()
+
     return GDNCausalConv1dHostMetadata(
-        query_start_loc_cpu=non_spec_query_start_loc_cpu,
+        query_start_loc_cpu=query_start_loc_cpu,
         cache_indices_cpu=cache_indices_cpu,
         has_initial_state_cpu=has_initial_state_cpu,
         _buffer_slot=slot,
@@ -722,6 +734,12 @@ def _patched_build(
         num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         fast_build=fast_build,
     )
+    # GDN 层不参与 update_full_graph_params（没有 attn_params/handles/events),
+    # 设置 skip_graph_params_update 标记让 _update_full_graph_params_if_needed
+    # 中的外层 filter（model_runner_v1.py:2708-2710) 跳过此 metadata，
+    # 避免 update_graph_params 中对 GDNAttentionMetadata 访问 seq_lens_list 等
+    # FlashAttention 专有属性时报 AttributeError。
+    attn_metadata.skip_graph_params_update = True
     attn_metadata.non_spec_prefill_fallback_meta = None
     attn_metadata.non_spec_decode_fallback_meta = None
     attn_metadata.spec_decode_fallback_meta = None

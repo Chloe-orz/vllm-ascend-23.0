@@ -270,6 +270,8 @@ class AscendConfig:
 
         # Enable optimized reduce sampling scheme
         self.enable_reduce_sample = additional_config.get("enable_reduce_sample", False)
+        edge_cloud_config = additional_config.get("edge_cloud_config", {})
+        self.edge_cloud_config = EdgeCloudConfig(edge_cloud_config, vllm_config)
 
         self.mix_placement = additional_config.get("mix_placement", False)
         self._check_mix_placement()
@@ -687,6 +689,164 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+# Mapping table for ``PDSeparationConfig.next_prefill_prior_enable``.
+# When True, the edge scheduler is allowed to launch a second PREFILL_FIRST
+# batch while the previous one is still in flight (2P1D); otherwise the
+# scheduler stays at 1P1D. Kept as named constants so the mapping is easy to
+# grep and adjust if the channel pool grows in the future.
+_PD_PREFILL_INFLIGHT_WHEN_NEXT_PRIOR = 2  # 2P1D
+_PD_PREFILL_INFLIGHT_DEFAULT = 1          # 1P1D
+
+
+class PDSeparationConfig:
+    """PD-separation sub-config under ``edge_cloud_config``.
+
+    Configured via::
+
+        additional_config = {
+            "edge_cloud_config": {
+                "pd_separation": {
+                    "enabled": true,
+                    "next_prefill_prior_enable": true,
+                }
+            }
+        }
+    """
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        self.enabled: bool = user_config.get("enabled", False)
+        self.next_prefill_prior_enable: bool = user_config.get(
+            "next_prefill_prior_enable", False
+        )
+
+    @property
+    def prefill_inflight_limit(self) -> int:
+        """Integer limit consumed by ``PDSeparatedScheduler``."""
+        return (
+            _PD_PREFILL_INFLIGHT_WHEN_NEXT_PRIOR
+            if self.next_prefill_prior_enable
+            else _PD_PREFILL_INFLIGHT_DEFAULT
+        )
+
+    def __repr__(self) -> str:
+        return (
+            f"PDSeparationConfig(enabled={self.enabled}, "
+            f"next_prefill_prior_enable={self.next_prefill_prior_enable})"
+        )
+
+
+class EdgeCloudConfig:
+    """Configuration for edge-cloud collaborative inference."""
+
+    def __init__(self, user_config: dict | None = None, vllm_config: "VllmConfig | None" = None,):
+        if user_config is None:
+            user_config = {}
+        self.enabled: bool = user_config.get("enabled", False)
+        self.role: str = user_config.get("role", "edge")
+        self.mode: str = user_config.get("mode", "head_tail")
+        self.edge_head_tail_layers = user_config.get("edge_head_tail_layers", 1)
+        self.enable_decode_graph: bool = user_config.get("enable_decode_graph", False)
+        self.decode_graph_min_tokens: int = user_config.get("decode_graph_min_tokens", 1)
+        self.transfer_config: dict = user_config.get("transfer_config", {})
+        self.hidden_dtype: str = user_config.get("hidden_dtype", "bf16")
+        self.cloud_enable_sp: bool = user_config.get("cloud_enable_sp", False)
+        self.pd_separation = PDSeparationConfig(
+            user_config.get("pd_separation", {}) or {}
+        )
+
+        # Keep a handle to vllm_config so _validate() can inspect orthogonal
+        # parallel features (PCP/DCP) that are incompatible with edge-cloud's
+        # metadata-free PP transfer. Optional to preserve direct-construction
+        # call sites (mainly tests) that don't have a vllm_config handy.
+        self._vllm_config = vllm_config
+
+        if self.enabled:
+            self._validate()
+
+    def _validate(self):
+        if self.role not in ("edge", "cloud"):
+            raise ValueError(
+                f"edge_cloud_config.role must be 'edge' or 'cloud', got {self.role}"
+            )
+        if self.mode not in ("head_tail", "embedding_only"):
+            raise ValueError(
+                f"edge_cloud_config.mode must be 'head_tail' or 'embedding_only', "
+                f"got {self.mode}"
+            )
+        if self.mode == "embedding_only":
+            if self.edge_head_tail_layers != 0:
+                logger.warning(
+                    "edge_cloud_config.mode is 'embedding_only', ignoring "
+                    "edge_head_tail_layers=%s and forcing it to 0.",
+                    self.edge_head_tail_layers,
+                )
+                self.edge_head_tail_layers = 0
+        head_k, tail_k = self.head_tail_k
+        if head_k < 0 or tail_k < 0:
+            raise ValueError(
+                "edge_cloud_config.edge_head_tail_layers must be non-negative, "
+                f"got head_k={head_k}, tail_k={tail_k}"
+            )
+        if self.mode == "head_tail" and (head_k <= 0 or tail_k <= 0):
+            raise ValueError(
+                "edge_cloud_config.edge_head_tail_layers must be positive in "
+                f"'head_tail' mode, got head_k={head_k}, tail_k={tail_k}"
+            )
+
+        self._validate_incompatible_parallel_features()
+
+    def _validate_incompatible_parallel_features(self):
+        """Reject parallel features that break the metadata-free PP path.
+
+        Context Parallelism (PCP/DCP) rewrites ``total_num_scheduled_tokens``
+        inside ``_prepare_inputs`` and runs an all-gather/index-select on
+        hidden states via ``PCPManager.get_restore_hidden_states``. The
+        edge-cloud receiver allocates PP buffers from the *original*
+        ``SchedulerOutput.total_num_scheduled_tokens``, and the PCP restore
+        path does not understand ``IntermediateTensors``. Mixing them
+        silently produces wrong shapes or crashes deep in HCCL, so fail
+        fast here instead of at runtime.
+        """
+        if self._vllm_config is None:
+            # No vllm_config available (e.g. direct unit-test construction):
+            # skip cross-feature checks, the runtime will surface any issue.
+            return
+        parallel_cfg = self._vllm_config.parallel_config
+        pcp = getattr(parallel_cfg, "prefill_context_parallel_size", 1)
+        dcp = getattr(parallel_cfg, "decode_context_parallel_size", 1)
+        if pcp > 1 or dcp > 1:
+            raise ValueError(
+                "edge_cloud_config.enabled=True is incompatible with "
+                "context parallelism. Got "
+                f"prefill_context_parallel_size={pcp}, "
+                f"decode_context_parallel_size={dcp}. "
+                "PCP/DCP rewrite total_num_scheduled_tokens and run an "
+                "all-gather/index-select on hidden states that the "
+                "edge-cloud metadata-free PP path cannot represent. "
+                "Set both to 1, or disable edge_cloud_config."
+            )
+
+    @property
+    def head_tail_k(self) -> tuple[int, int]:
+        if self.mode == "embedding_only":
+            return 0, 0
+        cfg = self.edge_head_tail_layers
+        if isinstance(cfg, (list, tuple)) and len(cfg) == 2:
+            return int(cfg[0]), int(cfg[1])
+        k = int(cfg)
+        return k, k
+
+    def __repr__(self) -> str:
+        return (
+            f"EdgeCloudConfig(enabled={self.enabled}, role={self.role}, "
+            f"mode={self.mode}, edge_head_tail_layers={self.edge_head_tail_layers}, "
+            f"enable_decode_graph={self.enable_decode_graph}, "
+            f"pd_separation={self.pd_separation})"
+        )
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

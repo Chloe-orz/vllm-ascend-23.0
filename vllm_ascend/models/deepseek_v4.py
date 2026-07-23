@@ -908,9 +908,26 @@ class DeepseekV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
+
+        def _make_empty_intermediate_tensors(
+            batch_size: int,
+            dtype: torch.dtype,
+            device: torch.device,
+        ) -> IntermediateTensors:
+            return IntermediateTensors({
+                "hidden_states": torch.zeros(
+                    (batch_size, hc_mult, config.hidden_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+                "residual": torch.zeros(
+                    (batch_size, hc_mult, config.hidden_size),
+                    dtype=dtype,
+                    device=device,
+                ),
+            })
+
+        self.make_empty_intermediate_tensors = _make_empty_intermediate_tensors
 
         self.norm_eps = config.rms_norm_eps
         self.hc_eps = config.hc_eps
@@ -1202,6 +1219,8 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 if enable_dsa_cp():
                     param.data.copy_(loaded_weight)
