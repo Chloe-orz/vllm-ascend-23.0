@@ -2681,6 +2681,9 @@ class NPUModelRunner(GPUModelRunner):
                     # is NOT idempotent (rewrites num_accepted_tokens_cpu in
                     # place under async spec decode), so reuse its results here
                     # instead of letting _run_input_preparation call it again.
+
+                    # skip_dsa_fill: already filled above between first
+                    # _prepare_inputs and here, using the first call's values.
                     cache = self._run_input_preparation(
                         scheduler_output,
                         precomputed=(
@@ -2689,6 +2692,7 @@ class NPUModelRunner(GPUModelRunner):
                             total_num_scheduled_tokens,
                             num_scheduled_tokens_compressed_list,
                         ),
+                        skip_dsa_fill=True
                     )
                     total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
                     num_tokens_padded = cache["num_tokens_padded"]
@@ -3824,6 +3828,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         precomputed: tuple | None = None,
+        skip_dsa_fill: bool = False,
     ) -> dict[str, Any]:
         """Run input preparation pipeline after _update_states.
 
@@ -3840,6 +3845,10 @@ class NPUModelRunner(GPUModelRunner):
         results via ``precomputed`` so we reuse them instead of re-running.
         ``cloud_prepare_early`` has no prior inline call and passes
         ``precomputed=None`` so we run it here exactly once.
+        Args:
+            skip_dsa_fill: If True, skip filling _dsa_positions_cpu_buf
+                (caller already filled it, e.g. slow path between first
+                _prepare_inputs and _run_input_preparation).
         """
         num_reqs = self.input_batch.num_reqs
         # Guard against empty batch after _update_states
@@ -3879,6 +3888,24 @@ class NPUModelRunner(GPUModelRunner):
             ) = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
+            )
+
+        # Fill _dsa_positions_cpu_buf for DSA compression.
+        # cloud_prepare_early calls _run_input_preparation directly and
+        # relies on this fill.  The slow path passes skip_dsa_fill=True
+        # because it already filled above (between the first _prepare_inputs
+        # and _run_input_preparation, to use the first call's values).
+        if self.use_compress and not skip_dsa_fill:
+            req_indices = np.repeat(
+                self.arange_np[:num_reqs], num_scheduled_tokens_np
+            )
+            dsa_positions_np = self._dsa_positions_np_buf[
+                :total_num_scheduled_tokens
+            ]
+            np.add(
+                self.input_batch.num_computed_tokens_cpu[req_indices],
+                self.query_pos.np[:total_num_scheduled_tokens],
+                out=dsa_positions_np,
             )
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
@@ -5503,11 +5530,13 @@ class NPUModelRunner(GPUModelRunner):
             from vllm_ascend.utils import extract_dsv4_layer_index
 
             assert len(self.kv_caches) == 0
+            self.kv_cache_names: list[str] = []
             for layer_name in sorted(
                     kv_caches,
                     key=lambda name: (extract_dsv4_layer_index(
                         self.model_config.hf_text_config, name), name)):
                 self.kv_caches.append(kv_caches[layer_name])
+                self.kv_cache_names.append(layer_name)
             for layer_name, kv_cache in kv_caches.items():
                 self.compilation_config.static_forward_context[
                     layer_name].kv_cache = [kv_cache]
@@ -6425,7 +6454,51 @@ class NPUModelRunner(GPUModelRunner):
             wrapper.concrete_aclgraph_entries.clear()
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             result = GPUModelRunner.capture_model(self)
+        self._zero_dsa_state_block0()
         return result
+
+    def _zero_dsa_state_block0(self) -> None:
+        """Zero physical block 0 (null/dummy block) of every DSA compressor
+        state cache. Always-on; called once at the end of capture_model.
+
+        The compressor kernel indexes state_cache in raw-position space
+        (block_table[req][pos // 8]), but the decode-time state block table
+        carries only one valid block; positions >= 8 hit zero-padding
+        entries. Kernel writes to entry 0 are silently dropped, while reads
+        are NOT guarded and land on physical block 0, whose content is
+        capture-order-dependent residue (NaN when the size-1 capture runs
+        last -> accuracy corruption at the first decode compression
+        boundary). Zeroing block 0 makes the phantom read deterministic and
+        restores eager parity.
+
+        Once after capture is sufficient: real inference never writes state
+        block 0 (kernel writes to entry 0 are dropped; decode padding slots
+        are -1, not 0), so the zeroed content persists for the process
+        lifetime. Verified: b0nan stays constant across prefill+decode.
+        """
+        try:
+            caches = getattr(self, "_dsa_state_caches_for_zero", None)
+            if not caches:
+                # （重）收集。profile/dummy 阶段 KV cache 尚未初始化，此时
+                # 收集到 0 个属正常——不能缓存空列表，否则后续永远不再重试。
+                caches = []
+                names = getattr(self, "kv_cache_names", None) or []
+                runner_caches = getattr(self, "kv_caches", None) or []
+                for i, name in enumerate(names):
+                    if "compressor.state_cache" not in name or i >= len(runner_caches):
+                        continue
+                    entry = runner_caches[i]
+                    cache = entry[0] if isinstance(entry, (list, tuple)) else entry
+                    if isinstance(cache, torch.Tensor) and cache.numel() > 0:
+                        caches.append(cache)
+                if not caches:
+                    return
+                # 收集成功才缓存
+                self._dsa_state_caches_for_zero = caches
+            for cache in caches:
+                cache[0].zero_()
+        except Exception:
+            pass
 
     def _prepare_multimodal_fields(self):
         """
