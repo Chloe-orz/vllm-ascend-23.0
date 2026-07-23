@@ -3055,10 +3055,17 @@ class NPUModelRunner(GPUModelRunner):
                             ):
                                 req_state.prev_num_draft_len = 0
 
-                    # Edge-cloud tail segments (PL/DL) reuse the batch state
-                    # established by their head segment (PF/DF).  Skipping
-                    # _update_states prevents interleaving bugs when multiple
-                    # prefills are in flight (2P1D) and avoids double-counting.
+                    # Edge-cloud tail segments (PL/DL) must unconditionally
+                    # reuse the batch state established by their head segment
+                    # (PF/DF).  Skipping _update_states prevents:
+                    #   (1) req removal via stale finished_req_ids merged from
+                    #       deferred EMPTY batches (→ EDGE-TAIL-STALE-DISCARD);
+                    #   (2) num_computed_tokens double-update that shifts KV
+                    #       cache write positions (→ progressive garbled output);
+                    #   (3) interleaving bugs with multiple prefills (2P1D).
+                    # The head→tail stale check above (tail_req_ids vs
+                    # self.requests) is the correct gate for request lifecycle
+                    # changes — not _update_states.
                     is_edge_tail_segment = (
                         self._edge_cloud_enabled
                         and is_edge_device()
@@ -3067,12 +3074,7 @@ class NPUModelRunner(GPUModelRunner):
                             BatchType.DECODE_LAST,
                         )
                     )
-                    scheduled_req_ids = tuple(scheduler_output.num_scheduled_tokens)
-                    skip_update_states = (
-                        is_edge_tail_segment
-                        and self.input_batch.num_reqs > 0
-                        and tuple(self.input_batch.req_ids) == scheduled_req_ids
-                    )
+                    skip_update_states = is_edge_tail_segment
                     if skip_update_states:
                         deferred_state_corrections_fn = None
                     else:
