@@ -284,6 +284,42 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
+_EC_DBG_MAX_CALLS = int(os.environ.get("VLLM_EC_DEBUG_FIRST_CALLS", "12"))
+_ec_dbg_counter: dict[str, int] = {}
+
+
+def _ec_debug_tensor_stats(tag: str, tensors: Any) -> None:
+    """First-N-calls diagnostic for edge-cloud hidden tensors.
+
+    Logs per-key shape/mean/std/absmax so first-batch corruption can be
+    localized to edge-head-send / cloud-mid-send / edge-tail-out. Configure
+    the number of logged calls per tag with VLLM_EC_DEBUG_FIRST_CALLS
+    (default 12; 0 disables).
+    """
+    if _EC_DBG_MAX_CALLS <= 0:
+        return
+    n = _ec_dbg_counter.get(tag, 0)
+    if n >= _EC_DBG_MAX_CALLS:
+        return
+    _ec_dbg_counter[tag] = n + 1
+    try:
+        if isinstance(tensors, torch.Tensor):
+            items = [("tensor", tensors)]
+        else:
+            items = list(tensors.items())
+        parts = []
+        for k, v in items:
+            if isinstance(v, torch.Tensor) and v.numel() > 0:
+                fv = v.float()
+                parts.append(
+                    f"{k}:shape={tuple(v.shape)},mean={fv.mean().item():.6f},"
+                    f"std={fv.std().item():.6f},absmax={fv.abs().max().item():.6f}"
+                )
+        logger.info("[EC-DBG][%s][%d] %s", tag, n, "; ".join(parts))
+    except Exception:
+        logger.exception("[EC-DBG][%s] failed to compute stats", tag)
+
+
 class EdgeCloudSegment(torch.nn.Module):
     """执行指定层区间 [start_layer, end_layer) 的轻量 nn.Module。
 
@@ -3425,6 +3461,7 @@ class NPUModelRunner(GPUModelRunner):
                 if self.debugger is not None:
                     self.debugger.stop()
                     self.debugger.step()
+                _ec_debug_tensor_stats("cloud-mid-send", hidden_states.tensors)
                 return hidden_states
 
             if not self.broadcast_pp_output:
@@ -3444,6 +3481,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.kv_connector_output = kv_connector_output
                     self._finalize_dump_data()
                     self.suspend_head_state(scheduler_output)
+                    _ec_debug_tensor_stats("edge-head-send", hidden_states.tensors)
                     return hidden_states
                 if not get_pp_group().is_last_rank:
                     # Return the intermediate tensors.
@@ -4831,6 +4869,12 @@ class NPUModelRunner(GPUModelRunner):
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
+        _ec_debug_tensor_stats(
+            "edge-tail-out",
+            hidden_states.tensors
+            if isinstance(hidden_states, IntermediateTensors)
+            else hidden_states,
+        )
         return hidden_states
 
     def _edge_cloud_forward_cloud(

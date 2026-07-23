@@ -15,11 +15,14 @@
 # limitations under the License.
 #
 
+import os
+
 import torch
 import torch_npu
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.fla.ops.l2norm import l2norm_fwd
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
@@ -49,6 +52,11 @@ def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
 # task update 阶段创建的设备张量保活表：graph task 以指针引用这些张量，
 # 局部临时变量被回收会导致 replay 读到已释放内存。按 handle id 覆盖式保存。
 _CONV1D_UPDATE_KEEPALIVE: dict[int, tuple] = {}
+
+# First-N diagnostics for conv1d graph task updates (first-batch debugging).
+# VLLM_EC_DEBUG_FIRST_CALLS (default 12; 0 disables).
+_CONV1D_UPDATE_DBG_MAX = int(os.environ.get("VLLM_EC_DEBUG_FIRST_CALLS", "12"))
+_conv1d_update_dbg_count = 0
 
 
 def _check_and_get_host_args(attn_metadata, field_name: str, sub_field_name: str):
@@ -133,6 +141,7 @@ def update_conv1d_graph_params(
     draft_attn_metadatas=None,
 ):
     """Update host-side parameters for conv1d."""
+    global _conv1d_update_dbg_count
     from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params
 
     graph_params = get_draft_graph_params() if is_draft_model else get_graph_params()
@@ -142,11 +151,27 @@ def update_conv1d_graph_params(
         or num_tokens not in graph_params.conv1d_params
         or len(graph_params.conv1d_params[num_tokens]) == 0
     ):
+        if _conv1d_update_dbg_count < _CONV1D_UPDATE_DBG_MAX:
+            _conv1d_update_dbg_count += 1
+            _registered = (
+                sorted(graph_params.conv1d_params.keys())
+                if graph_params is not None
+                else None
+            )
+            logger.info(
+                "[EC-DBG][conv1d-update][skip] num_tokens=%d registered_sizes=%s",
+                num_tokens, _registered,
+            )
         return
 
     attn_metadata = forward_context.attn_metadata
     if is_draft_model and draft_attn_metadatas is not None:
         attn_metadata = draft_attn_metadatas
+
+    _dbg_this_call = _conv1d_update_dbg_count < _CONV1D_UPDATE_DBG_MAX
+    if _dbg_this_call:
+        _conv1d_update_dbg_count += 1
+    _dbg_samples: list[str] = []
 
     with torch.npu.stream(update_stream):
         for param, handle, event in zip(
@@ -257,6 +282,21 @@ def update_conv1d_graph_params(
             )
             torch.npu.graph_task_update_end(update_stream)
             event.record(update_stream)
+            if _dbg_this_call and len(_dbg_samples) < 4:
+                _dbg_samples.append(
+                    f"{branch}/{layer_prefix}:qsl={list(new_query_start_loc)},"
+                    f"ci={list(new_cache_indices)},"
+                    f"nat={list(new_num_accepted)},"
+                    f"captured_fallback={use_captured_fallback}"
+                )
+
+    if _dbg_this_call:
+        logger.info(
+            "[EC-DBG][conv1d-update] num_tokens=%d params=%d samples=%s",
+            num_tokens,
+            len(graph_params.conv1d_params[num_tokens]),
+            " | ".join(_dbg_samples),
+        )
 
 
 def _maybe_reset_initial_state_for_layer_slice(
