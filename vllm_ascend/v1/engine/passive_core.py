@@ -42,7 +42,6 @@ import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
-import numpy as np
 import zmq
 from vllm import envs
 from vllm.logger import logger
@@ -360,6 +359,12 @@ def _trim_scheduler_output_for_worker_enqueue(
     tokens.  The best local approximation is the previous cloud dispatch batch:
     continuously dispatched requests can drop ``all_token_ids`` while newly
     appearing / resumed requests keep it.
+
+    Entries that are kept MUST remain the complete token history
+    (prompt + output): the worker recovery path slices
+    ``all_token_ids[-num_output_tokens:]`` and assumes the prompt is
+    included. Truncating entries corrupts the recovered output history and
+    causes garbled decode output (see [EDGE-CLOUD-RECOVER]).
     """
     cached = scheduler_output.scheduled_cached_reqs
     if cached is None:
@@ -378,28 +383,35 @@ def _trim_scheduler_output_for_worker_enqueue(
             getattr(cached, "num_output_tokens", ()),
         )
     }
+    # Keep every entry the cloud worker may need for the resume/recovery
+    # path in _update_states. The recovery trigger on the worker is the
+    # wire ``num_output_tokens`` (which INCLUDES async/spec placeholders),
+    # so the keep condition must use the same placeholder-inclusive count.
+    # NOTE: filtering by prev_dispatch_req_ids proved unsafe — interleaved
+    # prefill layer-slices and placeholder accounting can evict a request
+    # from the worker's persistent batch even when it appeared in the
+    # previous dispatch, and a missing entry crashes the worker with a
+    # KeyError. Prefer bandwidth over that risk.
     keep_req_ids = {
         req_id
         for req_id in all_token_ids
         if req_id in resumed_req_ids
-        or (
-            req_id not in prev_dispatch_req_ids
-            and num_output_tokens_by_req.get(req_id, 0) > 0
-        )
+        or num_output_tokens_by_req.get(req_id, 0) > 0
     }
-    trimmed_all_token_ids = {}
-    for req_id, token_ids in all_token_ids.items():
-        if req_id not in keep_req_ids:
-            continue
-        num_output_tokens = num_output_tokens_by_req.get(req_id, 0)
-        if num_output_tokens <= 0:
-            continue
-        keep_len = min(num_output_tokens, len(token_ids))
-        if keep_len <= 0:
-            continue
-        trimmed_all_token_ids[req_id] = np.ascontiguousarray(
-            token_ids[-keep_len:]
-        )
+    # NOTE: entries that are kept must carry the FULL token list
+    # (prompt + outputs). The worker-side recovery path
+    # (gpu_model_runner._update_states) reconstructs output_token_ids by
+    # slicing ``all_token_ids[-num_output_tokens:]`` and therefore assumes
+    # the array is the complete token history. Truncating the arrays here
+    # (e.g. to the last num_output_tokens) silently drops the prompt, makes
+    # the recovered output history empty or polluted with prompt tokens on
+    # the cloud side, and shows up as garbled decode / repeated tokens once
+    # a second request triggers a persistent-batch rebuild.
+    trimmed_all_token_ids = {
+        req_id: token_ids
+        for req_id, token_ids in all_token_ids.items()
+        if req_id in keep_req_ids
+    }
     if len(trimmed_all_token_ids) == len(all_token_ids) and all(
         len(trimmed_all_token_ids[req_id]) == len(token_ids)
         for req_id, token_ids in all_token_ids.items()
@@ -578,7 +590,7 @@ class PassiveEngineCoreProc:
                 else (worker_scheduler_output,)
             )
             bt = batch.scheduler_output.batch_type.value
-            logger.info("[CLOUD-MQ] About to enqueue batch_type=%s", bt)
+            # logger.info("[CLOUD-MQ] About to enqueue batch_type=%s", bt)
             _t0 = time.monotonic()
             self.executor.rpc_broadcast_mq.enqueue(
                 (b"pp_scheduler_output", payload, {}, None)
@@ -587,11 +599,11 @@ class PassiveEngineCoreProc:
                 batch.scheduler_output.num_scheduled_tokens.keys()
             )
             _dt_ms = (time.monotonic() - _t0) * 1000
-            logger.info(
-                "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
-                bt,
-                _dt_ms,
-            )
+            # logger.info(
+            #     "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
+            #     bt,
+            #     _dt_ms,
+            # )
             # For PREFILL_FIRST, POST_OUT must mean the cloud middle segment
             # has completed and started sending hidden states back.  Store the
             # original SchedulerOutput here and publish it from

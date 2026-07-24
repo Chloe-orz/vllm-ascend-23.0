@@ -20,12 +20,17 @@
 from collections.abc import Iterable
 
 import torch
+from vllm.distributed import (
+    get_pp_group
+)
 from vllm.model_executor.models.minimax_m2 import (
     MiniMaxM2Attention,
+    MiniMaxM2ForCausalLM,
     MiniMaxM2Model,
     MiniMaxM2MoE,
 )
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_slice, update_cos_sin
 from vllm_ascend.utils import enable_sp
