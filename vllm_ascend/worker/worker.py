@@ -741,26 +741,24 @@ class NPUWorker(WorkerBase):
         Used in edge-cloud mode when edge and cloud have different SP sizes.
         Before cross-PP send, each side must aggregate its SP shards back to
         the full sequence so the remote side can re-chunk with its own SP size.
+
+        Only the all-gather happens here; the gathered tensor is *not* padded
+        to the remote TP size.  The sender transmits only the real
+        ``num_tokens`` rows (sliced in edge_cloud_isend_tensor_dict via the
+        ``num_tokens`` argument), and the receiver zero-pads its buffer up to
+        its own local TP size (see ``_pad_num_tokens_to_tp_multiple``).  So a
+        send-side pad to the remote TP size is redundant — its dim-0 rows are
+        sliced off before send — and for 3D ``(num_tokens, hc_mult, hidden)``
+        tensors (DeepSeek V4) it is actively harmful: ``F.pad(t, (0, 0, 0,
+        pad_len))`` pads the hc_mult axis (second-to-last), not the sequence
+        axis, corrupting the tensor and tripping the isend non-dim-0 shape
+        check.
         """
         tp_group = get_tp_group()
-        pc = self.vllm_config.parallel_config
-        # In edge-cloud mode, ensure the all-gathered length is also padded to
-        # the remote side's TP size so no extra padding is needed after recv.
-        target_tp_size = None
-        if pc.enable_edge_cloud:
-            target_tp_size = pc.cloud_npu_count if pc.is_edge_node else pc.edge_npu_count
-
         result = {}
         for key, tensor in tensor_dict.items():
             if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
                 gathered = tp_group.all_gather(tensor, dim=0)
-                # Pad sequence to target_tp_size if heterogeneous SP is used
-                if target_tp_size is not None and target_tp_size > 1:
-                    seq_len = gathered.size(0)
-                    remainder = seq_len % target_tp_size
-                    if remainder != 0:
-                        pad_len = target_tp_size - remainder
-                        gathered = torch.nn.functional.pad(gathered, (0, 0, 0, pad_len))
                 result[key] = gathered
             else:
                 result[key] = tensor
@@ -941,18 +939,14 @@ class NPUWorker(WorkerBase):
             # [CHER] Atomically reuse the guard thread's early-recv entry, or
             # post the irecv ourselves.  get_or_post_early_recv guarantees at
             # most one irecv per head_token even when the guard thread's hint
-            # dequeue races this dequeue -- the old pop-then-fallback path
-            # posted a second irecv when the guard had not posted yet, and both
-            # irecvs raced the sender's single isend, deadlocking.  Returns
-            # None only when CHER is off or posting failed (then sync recv).
-            #
-            # PREFILL_FIRST only: CHER must NOT touch DECODE_FIRST.  The guard
-            # thread would wait() a decode irecv on the DECODE channel while
-            # busy_loop issues isend on that same single decode channel ->
-            # HCCL cross-thread send/recv deadlock that stalls the whole decode
-            # pipeline (and with it the prefill POST_OUT ack path, so the edge
-            # never gets P-tail).  Decode hidden is tiny (batch x 1) anyway, so
-            # early-recv brings no benefit there.
+            # dequeue races this dequeue.  Applies to PREFILL_FIRST only:
+            # DECODE_FIRST must NOT use early-recv because DECODE is a single
+            # channel/stream -- a guard-thread irecv post on the DECODE stream
+            # races busy_loop's isend on that same stream (cross-thread FIFO
+            # ordering is non-deterministic -> deadlock).  PREFILL has two
+            # channels (PREFILL_1/2) so irecv and isend land on different
+            # streams.  The guard thread ONLY posts (never wait()s); wait is
+            # done by execute_model's wait_for_comm() on the busy_loop thread.
             _ht = getattr(scheduler_output, "head_token", None)
             entry = None
             if (self._cloud_hidden_early_recv_enabled and _ht
@@ -993,10 +987,17 @@ class NPUWorker(WorkerBase):
                     or not self.model_runner.supports_mm_inputs)
                 merge_payload = get_edge_cloud_tensor_meta().merge_payload
                 channel = self._hidden_channel_for(scheduler_output)
+                # In the shared-model edge-cloud topology the edge has a single
+                # distributed rank at in-group rank 0; the cloud first-worker of
+                # each dp_rank must receive from that rank (src=0).  In the
+                # standard (non-shared-model) topology src=None suffices: it
+                # resolves to the implicit "previous PP rank" which IS the edge.
+                _recv_src = 0 if self.parallel_config.is_shared_model_edge else None
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     channel=channel,
                     sp_chunk=do_sp_chunk and merge_payload,
+                    src=_recv_src,
                 )
                 logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
 
@@ -1036,11 +1037,22 @@ class NPUWorker(WorkerBase):
             _gathered = self._all_gather_tensor_dict(output.tensors)
         else:
             _gathered = output.tensors
-        if get_pp_group().world_size == 2:
+
+        # In the shared-model edge-cloud topology the cloud
+        # first-worker of each dp_rank is in the shared PP group
+        # with the edge and must send its middle-layer output
+        # back to the edge (in-group rank 0). Other cloud
+        # workers (TP non-first) are in singleton PP groups
+        # Send intermediate tensors to edge.  In the shared-model topology the
+        # edge sits at in-group rank 0, so dst=0 is needed.  Otherwise dst=None
+        # resolves to the implicit "next PP rank" which IS the edge.
+        if get_pp_group().world_size > 1:
             channel = self._hidden_channel_for(scheduler_output)
+            _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
             self._record_pp_send_work(
                 edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                                            num_tokens=scheduler_output.total_num_scheduled_tokens),
+                                            num_tokens=scheduler_output.total_num_scheduled_tokens,
+                                            dst=_send_dst),
                 channel=channel,
             )
             logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")
@@ -1394,8 +1406,29 @@ class NPUWorker(WorkerBase):
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         init_batch_invariance()
+        # NOTE: `self.local_rank` is also consumed by `bind_cpus` for CPU
+        # binding, so it must stay as the original TP local rank. Compute the
+        # adjusted local rank locally and pass it to `init_distributed_environment`.
+        local_rank = self.local_rank
+        parallel_config = self.parallel_config
+        if (
+            parallel_config.distributed_executor_backend
+            not in ("ray", "external_launcher")
+            and parallel_config.data_parallel_backend != "ray"
+            and parallel_config.data_parallel_size > 1
+        ):
+            # Use local DP rank if available, otherwise use global DP rank.
+            dp_local_rank = parallel_config.data_parallel_rank_local
+            if dp_local_rank is None:
+                dp_local_rank = parallel_config.data_parallel_index
+
+            # In edge-cloud mode, local_world_size = edge_npu_count or cloud_npu_count
+            # Use local_world_size as the stride per DP instance
+            local_world_size = parallel_config.local_world_size
+            # DP_LOCAL_RANK * LOCAL_WORLD_SIZE + TP_LOCAL_RANK
+            local_rank += dp_local_rank * local_world_size
         init_distributed_environment(
-            self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
+            self.parallel_config.world_size, self.rank, self.distributed_init_method, local_rank, "hccl"
         )
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
