@@ -5987,12 +5987,27 @@ class NPUModelRunner(GPUModelRunner):
             self.need_accepted_tokens = False
             self.may_reinitialize_input_batch(kv_cache_config)
             self.kv_cache = {}
-            # Still initialize cudagraph dispatcher keys and ACL graph params,
-            # otherwise edge segments (and edge-cloud MTP segments) have no
-            # graph params and ACL graph capture/replay can hang.
-            self._check_and_update_cudagraph_mode(
-                [], kv_cache_config.kv_cache_groups
-            )
+            # Initialize cudagraph dispatcher keys + ACL graph params ONLY for the
+            # MTP edge-cloud path. The MTP drafter segments (_edge_cloud_mtp_segments)
+            # rely on graph_params being set here; without it ACL graph capture/replay
+            # hangs. (Mirrors the `method == "mtp"` guard in _check_and_update_cudagraph_mode.)
+            #
+            # DO NOT run this for the non-MTP embedding_only edge. Passing empty
+            # attention backends leaves min_cg_support at ALWAYS, which initializes
+            # the dispatcher keys (keys_initialized=True) and makes dispatch() return
+            # FULL instead of NONE. That flips the edge decode tail (segment_e) from
+            # eager into ACL-graph capture/replay and adds a per-step
+            # update_full_graph_params sync, costing ~2% throughput (94 -> 92 token/s)
+            # and hurting the edge/cloud overlap under --async-scheduling. The edge
+            # tail has no attention layers, so eager is both correct and faster here
+            # -- this is exactly the pre-MTP behavior.
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "mtp"
+            ):
+                self._check_and_update_cudagraph_mode(
+                    [], kv_cache_config.kv_cache_groups
+                )
             logger.info(
                 "[EdgeCloud] embedding_only edge skipped KV cache tensor "
                 "allocation and attention backend initialization."
