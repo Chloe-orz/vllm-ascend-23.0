@@ -269,11 +269,11 @@ class PassiveScheduler:
                 break
             self._remember_arrival_seq(scheduler_output, seq)
             bt = scheduler_output.batch_type
-            logger.info(
-                "Received scheduler_output from edge, seq=%d, batch_type: %s",
-                seq,
-                bt,
-            )
+            # logger.info(
+            #     "Received scheduler_output from edge, seq=%d, batch_type: %s",
+            #     seq,
+            #     bt,
+            # )
             if bt == BatchType.EMPTY:
                 continue
             elif bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
@@ -287,10 +287,10 @@ class PassiveScheduler:
                 now = time.monotonic()
                 if self._last_decode_first_arrival_ts is not None:
                     interval_ms = (now - self._last_decode_first_arrival_ts) * 1000
-                    logger.info(
-                        "DECODE_FIRST arrival interval: %.2f ms",
-                        interval_ms,
-                    )
+                    # logger.info(
+                    #     "DECODE_FIRST arrival interval: %.2f ms",
+                    #     interval_ms,
+                    # )
                 self._last_decode_first_arrival_ts = now
                 self.ready_decodes.append(scheduler_output)
             elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):

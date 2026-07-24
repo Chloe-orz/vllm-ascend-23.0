@@ -393,6 +393,16 @@ def _clone_gdn_attn_metadata(meta):
         "num_accepted_tokens",
         "chunk_indices",
         "chunk_offsets",
+        # Chunk-kernel prefill inputs (gdn.py recurrent path reads these:
+        # ssm_state[prefill_state_indices] scatter read/write). If left as
+        # shared-buffer views, an interleaved decode overwrites them and the
+        # continuation's ssm_state scatter hits WRONG slots — corrupting the
+        # decode request's GDN state as well.
+        "prefill_query_start_loc",
+        "prefill_state_indices",
+        "prefill_has_initial_state",
+        "batch_ptr",
+        "token_chunk_offset_ptr",
         # Full-attention backend (AscendMetadata) fields: these are views
         # into the persistent per-batch buffers (block table / slot_mapping
         # / positions) that an interleaved decode batch rewrites in-place.
@@ -449,6 +459,84 @@ def _clone_gdn_attn_metadata(meta):
             cloned_fallback.chunk = cloned_chunk
 
         cloned.non_spec_prefill_fallback_meta = cloned_fallback
+
+    # Nested per-phase metadata objects are attached BY REFERENCE from the
+    # top-level fields (see _attach_non_spec_prefill_metadata in
+    # gdn_attn_builder). Cloning only the top-level fields therefore leaves
+    # the nested references pointing at the ORIGINAL shared buffers, which
+    # an interleaved decode batch overwrites in-place — the GDN forward
+    # reads exactly these nested tensors
+    # (non_spec_prefill_metadata.causal_conv1d.query_start_loc etc.), so a
+    # sliced prefill continuation would run its convolution with the decode
+    # batch's sequence boundaries. Deep-clone the nested objects too.
+    def _clone_dev_tensor(t):
+        if isinstance(t, torch.Tensor) and t.device.type != "cpu":
+            return t.clone()
+        return t
+
+    prefill_meta = getattr(cloned, "non_spec_prefill_metadata", None)
+    if prefill_meta is not None:
+        cloned_prefill = copy.copy(prefill_meta)
+        causal = getattr(cloned_prefill, "causal_conv1d", None)
+        if causal is not None:
+            cloned_causal = copy.copy(causal)
+            for attr in ("query_start_loc", "cache_indices",
+                         "initial_state_mode"):
+                t = getattr(cloned_causal, attr, None)
+                if t is not None:
+                    setattr(cloned_causal, attr, _clone_dev_tensor(t))
+            cloned_prefill.causal_conv1d = cloned_causal
+        chunk = getattr(cloned_prefill, "chunk", None)
+        if chunk is not None:
+            cloned_chunk = copy.copy(chunk)
+            for attr in (
+                "chunk_indices_chunk64",
+                "chunk_offsets_chunk64",
+                "update_chunk_offsets_chunk64",
+                "final_chunk_indices_chunk64",
+                "chunk_indices_large_block",
+                "block_indices_cumsum",
+                "keep_meta",
+            ):
+                t = getattr(cloned_chunk, attr, None)
+                if t is not None:
+                    setattr(cloned_chunk, attr, _clone_dev_tensor(t))
+            cloned_prefill.chunk = cloned_chunk
+        cloned.non_spec_prefill_metadata = cloned_prefill
+
+    decode_meta = getattr(cloned, "non_spec_decode_metadata", None)
+    if decode_meta is not None:
+        cloned_decode = copy.copy(decode_meta)
+        causal = getattr(cloned_decode, "causal_conv1d", None)
+        if causal is not None:
+            cloned_causal = copy.copy(causal)
+            for attr in ("query_start_loc", "cache_indices",
+                         "initial_state_mode"):
+                t = getattr(cloned_causal, attr, None)
+                if t is not None:
+                    setattr(cloned_causal, attr, _clone_dev_tensor(t))
+            cloned_decode.causal_conv1d = cloned_causal
+        t = getattr(cloned_decode, "actual_seq_lengths", None)
+        if t is not None:
+            cloned_decode.actual_seq_lengths = _clone_dev_tensor(t)
+        cloned.non_spec_decode_metadata = cloned_decode
+
+    spec_meta = getattr(cloned, "spec_decode_metadata", None)
+    if spec_meta is not None:
+        cloned_spec = copy.copy(spec_meta)
+        spec_causal = getattr(cloned_spec, "spec_causal_conv1d", None)
+        if spec_causal is not None:
+            cloned_sc = copy.copy(spec_causal)
+            for attr in ("query_start_loc", "cache_indices",
+                         "num_accepted_tokens"):
+                t = getattr(cloned_sc, attr, None)
+                if t is not None:
+                    setattr(cloned_sc, attr, _clone_dev_tensor(t))
+            cloned_spec.spec_causal_conv1d = cloned_sc
+        t = getattr(cloned_spec, "actual_seq_lengths", None)
+        if t is not None:
+            cloned_spec.actual_seq_lengths = _clone_dev_tensor(t)
+        cloned.spec_decode_metadata = cloned_spec
 
     return cloned
 

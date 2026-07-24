@@ -218,17 +218,17 @@ class PPSchedulerZmqSubscriber:
                     continue
                 with self._lock:
                     self._received_outputs.append((seq, scheduler_output))
-                logger.info(
-                    "PP rank1 received SchedulerOutput seq=%d, "
-                    "total_scheduled_tokens=%d, "
-                    "new_reqs=%d, cached_reqs=%d, "
-                    "finished_req_ids=%s",
-                    seq,
-                    scheduler_output.total_num_scheduled_tokens,
-                    len(scheduler_output.scheduled_new_reqs),
-                    scheduler_output.scheduled_cached_reqs.num_reqs,
-                    scheduler_output.finished_req_ids,
-                )
+                # logger.info(
+                #     "PP rank1 received SchedulerOutput seq=%d, "
+                #     "total_scheduled_tokens=%d, "
+                #     "new_reqs=%d, cached_reqs=%d, "
+                #     "finished_req_ids=%s",
+                #     seq,
+                #     scheduler_output.total_num_scheduled_tokens,
+                #     len(scheduler_output.scheduled_new_reqs),
+                #     scheduler_output.scheduled_cached_reqs.num_reqs,
+                #     scheduler_output.finished_req_ids,
+                # )
             except zmq.ZMQError:
                 if self._running:
                     logger.exception("ZMQ error in PP scheduler subscriber")
@@ -328,10 +328,10 @@ class PPSchedulerZmqChannel:
 
     def publish(self, scheduler_output: SchedulerOutput) -> None:
         """Queue a SchedulerOutput for the peer. Non-blocking."""
-        logger.info(
-            f"Send scheduler_output to edge, batch_type: "
-            f"{scheduler_output.batch_type}",
-        )
+        # logger.info(
+        #     f"Send scheduler_output to edge, batch_type: "
+        #     f"{scheduler_output.batch_type}",
+        # )
         self._publisher.publish(scheduler_output)
 
     def consume_new_outputs(self) -> list[tuple[int, SchedulerOutput]]:
@@ -572,12 +572,12 @@ class PassiveEngineCoreProc:
             else:
                 _slice_info_str += "None;"
         _slice_info_str += "]"
-        logger.info(
-            f"\r\n[Cloud] Step dispatched batch_type: "
-            f"{batch.scheduler_output.batch_type}, "
-            f"slices_count={len(batch.slices)}, "
-            f"slice_info={_slice_info_str}",
-        )
+        # logger.info(
+        #     f"\r\n[Cloud] Step dispatched batch_type: "
+        #     f"{batch.scheduler_output.batch_type}, "
+        #     f"slices_count={len(batch.slices)}, "
+        #     f"slice_info={_slice_info_str}",
+        # )
 
         for slice_info in batch.slices:
             worker_scheduler_output = _trim_scheduler_output_for_worker_enqueue(
