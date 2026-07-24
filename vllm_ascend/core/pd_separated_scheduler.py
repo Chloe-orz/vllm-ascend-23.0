@@ -930,7 +930,7 @@ class PDSeparatedScheduler(Scheduler):
                     suggest = len(self.running) > 0
                     scheduler_output.cloud_suggest_slicing = suggest
                     if not suggest:
-                        logger.error(
+                        logger.info(
                             "[PD-EDGE-NO-SLICE] PREFILL_FIRST "
                             "cloud_suggest_slicing=False, running=%d, "
                             "chunk_prefill_first=%d, total_tokens=%d",
