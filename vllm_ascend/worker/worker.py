@@ -981,6 +981,12 @@ class NPUWorker(WorkerBase):
             )
             # logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
 
+            # Overlap cloud-side input preparation with the edge's
+            # segment_a forward / cross-node transfer: run _update_states
+            # and input preparation now so execute_model can take the
+            # cloud fast path once the hidden data is ready.
+            self.model_runner.cloud_prepare_early(scheduler_output)
+
             if do_sp_chunk and not merge_payload:
                 tensor_dict = {
                     k: sequence_parallel_chunk(v)

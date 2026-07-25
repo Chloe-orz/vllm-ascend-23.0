@@ -956,6 +956,8 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_c_wrapper: Any = None
             # Cache segment_a prepare results for segment_e reuse (edge-cloud only)
             self._edge_prepare_cache: dict | None = None
+            # Cache cloud-side prepare results to overlap with edge segment_a
+            self._cloud_prepare_cache: dict | None = None
         else:
             self.head_k = 0
             self.tail_k = 0
@@ -2663,6 +2665,13 @@ class NPUModelRunner(GPUModelRunner):
             and tuple(self.input_batch.req_ids)
             == tuple(scheduler_output.num_scheduled_tokens)
         )
+        # ---- cloud fast path: reuse pre-computed prepare results ----
+        _cloud_fast_path = (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "cloud"
+            and intermediate_tensors is not None
+            and self._cloud_prepare_cache is not None
+        )
         if _fast_path:
             cache = self._edge_prepare_cache
             self._edge_prepare_cache = None  # consumed, clear for next iteration
@@ -2685,9 +2694,35 @@ class NPUModelRunner(GPUModelRunner):
             )
             # Fast path skips _update_states, so no deferred corrections.
             deferred_state_corrections_fn = None
+        elif _cloud_fast_path:
+            cache = self._cloud_prepare_cache
+            self._cloud_prepare_cache = None  # consumed, clear for next iteration
+            total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
+            num_tokens_padded = cache["num_tokens_padded"]
+            num_tokens_across_dp = cache["num_tokens_across_dp"]
+            attn_metadata = cache["attn_metadata"]
+            logits_indices = cache["logits_indices"]
+            spec_decode_metadata = cache["spec_decode_metadata"]
+            spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
+            cudagraph_mode = cache["cudagraph_mode"]
+            batch_desc = cache["batch_desc"]
+            cudagraph_stats = cache["cudagraph_stats"]
+            # Apply leftover deferred corrections at the same post-launch
+            # point as the slow path (see the end of execute_model).
+            deferred_state_corrections_fn = cache.get(
+                "deferred_state_corrections_fn"
+            )
+            # Mirror the slow path: keep the cloud-side spec decode common
+            # attention metadata for MTP draft proposal.
+            num_reqs = self.input_batch.num_reqs
+            if spec_decode_common_attn_metadata is not None:
+                self._cloud_spec_decode_common_attn_metadata = (
+                    spec_decode_common_attn_metadata
+                )
+                self._cloud_spec_decode_num_reqs = num_reqs
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
-                if not _fast_path:
+                if not _fast_path and not _cloud_fast_path:
                     # Fix up prev_req_id_to_index for requests that were discarded
                     # in the previous sample_tokens step. If a request has
                     # prev_num_draft_len > 0 but is missing from
@@ -3855,6 +3890,193 @@ class NPUModelRunner(GPUModelRunner):
             "batch_desc": batch_desc,
             "cudagraph_stats": cudagraph_stats,
         }
+
+    def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
+        """Pre-compute input preparation on cloud while edge runs segment_a.
+
+        Caches results in self._cloud_prepare_cache so that when edge data
+        arrives, execute_model can skip _update_states, _prepare_inputs,
+        _determine_batch_execution_and_padding, and _build_attention_metadata,
+        going directly to _preprocess (sync_and_gather) + _model_forward.
+
+        This method mirrors the normal execute_model slow path STEP BY STEP
+        (same order, same side effects) so that the cloud fast path is
+        observationally identical to not having run early preparation.
+        """
+        assert self._edge_cloud_enabled, (
+            "cloud_prepare_early should only be called in edge-cloud mode"
+        )
+        assert self.edge_cloud_cfg.role == "cloud", (
+            "cloud_prepare_early should only be called on cloud side"
+        )
+
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if not num_scheduled_tokens:
+            self._cloud_prepare_cache = None
+            return
+
+        # Replicate scheduler_output handling from execute_model
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        ):
+            num_scheduled_tokens_copy = (
+                scheduler_output.num_scheduled_tokens.copy()
+            )
+            spec_decode_tokens_copy = (
+                scheduler_output.scheduled_spec_decode_tokens.copy()
+            )
+            scheduler_output = replace(
+                scheduler_output,
+                num_scheduled_tokens=num_scheduled_tokens_copy,
+                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
+            )
+
+        if (
+            (
+                self.use_async_scheduling
+                and self.num_spec_tokens
+                and self._draft_token_ids is None
+            )
+            or (
+                self.pcp_size > 1
+                and self.supports_mm_inputs
+                and get_pp_group().is_first_rank
+                and not self.model_config.is_encoder_decoder
+            )
+        ):
+            scheduler_output = deepcopy(scheduler_output)
+
+        # cloud_prepare_early runs BEFORE the forward pass (outside
+        # torch.inference_mode), but GDN attention builder does in-place
+        # tensor copies that require inference mode.  Wrap the whole
+        # preparation inside inference_mode to match execute_model's
+        # inference-mode context.
+        with torch.inference_mode():
+            # Fix up prev_req_id_to_index (same as execute_model)
+            if (
+                self.use_async_scheduling
+                and self.num_spec_tokens
+                and self.input_batch.prev_req_id_to_index is not None
+            ):
+                for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+                    if (
+                        req_id not in self.input_batch.prev_req_id_to_index
+                        and (req_state := self.requests.get(req_id)) is not None
+                        and req_state.prev_num_draft_len
+                    ):
+                        req_state.prev_num_draft_len = 0
+
+            # --- _update_states (same as slow path) ---
+            deferred_state_corrections_fn = self._update_states(
+                scheduler_output
+            )
+
+            # Same empty-batch guard as the slow path (returns EMPTY there).
+            num_reqs = self.input_batch.num_reqs
+            if num_reqs == 0:
+                self._cloud_prepare_cache = None
+                return
+
+            # --- _prepare_inputs (first explicit call, same as slow path) ---
+            req_ids = self.input_batch.req_ids
+            tokens = [
+                scheduler_output.num_scheduled_tokens[i] for i in req_ids
+            ]
+            num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+            (
+                logits_indices,
+                spec_decode_metadata,
+                total_num_scheduled_tokens,
+            ) = self._prepare_inputs(
+                scheduler_output,
+                num_scheduled_tokens_np,
+            )
+
+            # --- mamba align preprocess (same as slow path) ---
+            if self.cache_config.mamba_cache_mode == "align":
+                # preprocess_mamba reads req_state.num_computed_tokens (CPU)
+                # to decide copy operations, so we must apply deferred
+                # corrections before it runs.
+                if deferred_state_corrections_fn:
+                    deferred_state_corrections_fn()
+                    deferred_state_corrections_fn = None
+                mamba_bufs = self._get_mamba_bufs()
+                preprocess_bufs = mamba_bufs.preprocess
+                mamba_utils.preprocess_mamba(
+                    scheduler_output,
+                    self.kv_cache_config,
+                    self.cache_config,
+                    self.mamba_state_idx,
+                    self.input_batch,
+                    self.requests,
+                    self.compilation_config.static_forward_context,
+                    self.model.get_mamba_state_copy_func(),
+                    preprocess_bufs,
+                )
+                # preprocess_mamba resets num_accepted_tokens_cpu to 1
+                # for requests whose state was copied to a new block.
+                # Re-sync to GPU so the mamba kernel reads from the
+                # correct initial state slot (init_token_idx = 0).
+                self.num_accepted_tokens.np[:num_reqs] = (
+                    self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+                )
+                self.num_accepted_tokens.copy_to_gpu(num_reqs)
+
+                if mamba_bufs.postprocess_align is not None:
+                    mamba_utils.stage_postprocess_inputs_to_gpu(
+                        mamba_bufs.postprocess_align,
+                        scheduler_output,
+                        self.input_batch.req_ids,
+                        num_reqs,
+                        self.requests,
+                        self.mamba_state_idx,
+                    )
+
+            # --- compress deferred corrections + DSA fill (slow path) ---
+            if self.use_compress:
+                if deferred_state_corrections_fn:
+                    deferred_state_corrections_fn()
+                    deferred_state_corrections_fn = None
+                req_indices = np.repeat(
+                    self.arange_np[:num_reqs], num_scheduled_tokens_np
+                )
+                dsa_positions_np = self._dsa_positions_np_buf[
+                    :total_num_scheduled_tokens
+                ]
+                np.add(
+                    self.input_batch.num_computed_tokens_cpu[req_indices],
+                    self.query_pos.np[:total_num_scheduled_tokens],
+                    out=dsa_positions_np,
+                )
+
+            # --- Core input preparation (skip _prepare_inputs and the DSA
+            # fill already done above, exactly like the slow path) ---
+            cache = self._run_input_preparation(
+                scheduler_output,
+                precomputed=(
+                    logits_indices,
+                    spec_decode_metadata,
+                    total_num_scheduled_tokens,
+                ),
+                skip_dsa_fill=True,
+            )
+
+        # If the batch became empty after _update_states (num_reqs == 0),
+        # _run_input_preparation returns a zeroed placeholder.  Don't cache
+        # it — let execute_model fall through to the normal slow path which
+        # will return EMPTY_MODEL_RUNNER_OUTPUT.
+        if cache["total_num_scheduled_tokens"] == 0:
+            self._cloud_prepare_cache = None
+            return
+
+        # Carry any leftover deferred corrections in the cache so the cloud
+        # fast path can apply them at the same post-launch point as the
+        # slow path (execute_model applies it after the batch is launched).
+        cache["deferred_state_corrections_fn"] = deferred_state_corrections_fn
+
+        # --- Cache all results ---
+        self._cloud_prepare_cache = cache
 
     def _edge_cloud_forward(
         self,
