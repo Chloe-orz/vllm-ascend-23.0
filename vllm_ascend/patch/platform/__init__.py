@@ -14,8 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
-
 import vllm_ascend.patch.platform.patch_camem_allocator  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_interface  # noqa
@@ -44,12 +42,11 @@ import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 
-if (
-    os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
-    or os.getenv("EXPERT_MAP_RECORD", "false") == "true"
-    or os.getenv("VLLM_PP_NON_LEADER_ENGINE_CORE", "0") in ("1", "true", "True")
-):
-    import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
+# EngineCore's edge-cloud control RPCs are provided by
+# AscendMultiprocExecutor. The edge-cloud role is only available through
+# VllmConfig later in startup, so environment-based import gating leaves the
+# edge leader on the upstream executor without those RPCs.
+import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
 
