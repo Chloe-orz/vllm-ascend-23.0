@@ -4246,6 +4246,30 @@ class NPUModelRunner(GPUModelRunner):
                         num_reqs,
                     )
 
+            # Edge-cloud cloud side: reuse the M-RoPE positions edge computed
+            # and pushed via intermediate_tensors (cloud skipped
+            # _init/_calc_mrope_positions). The wire tensor is [N, 3]
+            # (dim-0 = sequence). Materialize it into
+            # self.mrope_positions.gpu[:, :num_tokens_padded] ([3, N]) BEFORE
+            # _preprocess, which reads `positions` as a view over this buffer
+            # and runs update_cos_sin on it. Capture the received reference now:
+            # _preprocess -> sync_and_slice_intermediate_tensors reassigns
+            # `intermediate_tensors` to a local-buffer copy that omits
+            # mrope_positions (the sync loop skips it). Gate on the tensor's
+            # presence so this never KeyErrors regardless of whether the
+            # edge/cloud include_mrope decision (CHER hint vs sync) agreed.
+            recv_intermediate_tensors = intermediate_tensors
+            if (self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "cloud"
+                    and self.uses_mrope
+                    and recv_intermediate_tensors is not None
+                    and "mrope_positions" in recv_intermediate_tensors.tensors):
+                recv_intermediate_tensors.wait_for_comm()
+                recv_mrope = recv_intermediate_tensors.tensors["mrope_positions"]
+                self.mrope_positions.gpu[:, :num_tokens_padded].copy_(
+                    recv_mrope[:num_tokens_padded].t().contiguous()
+                )
+
             (
                 input_ids,
                 inputs_embeds,
@@ -5962,6 +5986,53 @@ class NPUModelRunner(GPUModelRunner):
             "cudagraph_stats": cudagraph_stats,
         }
 
+    def step_has_multimodal_req(self, scheduler_output) -> bool:
+        """Whether the current step's batch contains any multimodal request.
+
+        Used to decide whether mrope_positions must be transferred edge->cloud
+        (only multimodal requests need it; text-only batches can be computed
+        locally on the cloud because empty mm_features degrades M-RoPE to 1D
+        without hitting the missing image_grid_thw). Must return the SAME value
+        on edge and cloud (they share the scheduler_output and build req_state
+        from the same NewRequestData.mm_features).
+        """
+        # cached/running reqs: covers decode of multimodal requests (whose
+        # mm_features stay non-empty after prefill).
+        if any(rs.mm_features for rs in self.requests.values()):
+            return True
+        # new reqs this step: cloud recv runs BEFORE cloud_prepare_early builds
+        # req_state, so on the cloud side self.requests does not yet contain
+        # this step's new reqs; check scheduler_output directly.
+        for nr in scheduler_output.scheduled_new_reqs:
+            if getattr(nr, "mm_features", None):
+                return True
+        return False
+
+    def _init_mrope_positions(self, req_state) -> None:
+        # In edge-cloud cloud mode: skip M-RoPE init only for multimodal
+        # requests (their image_grid_thw / video_grid_thw did not cross the
+        # edge->cloud mm_features boundary, so local init would KeyError).
+        # Text-only requests (empty mm_features) init locally: _iter_mm_grid_hw
+        # does not enter its loop, M-RoPE degrades to 1D, no crash. This lets
+        # text-only batches skip the mrope transfer entirely.
+        # profile_run / _dummy_run do not call this, so the role guard does not
+        # affect profiling.
+        if (self._edge_cloud_enabled
+                and self.edge_cloud_cfg.role == "cloud"
+                and req_state.mm_features):
+            return
+        super()._init_mrope_positions(req_state)
+
+    def _calc_mrope_positions(self, scheduler_output) -> None:
+        # In edge-cloud cloud mode: skip local calc only when the batch contains
+        # a multimodal request (edge transfers the whole-batch mrope buffer and
+        # execute_model injects it). Text-only batches compute locally.
+        if (self._edge_cloud_enabled
+                and self.edge_cloud_cfg.role == "cloud"
+                and self.step_has_multimodal_req(scheduler_output)):
+            return
+        super()._calc_mrope_positions(scheduler_output)
+
     def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
         """Pre-compute input preparation on cloud while edge runs segment_a.
 
@@ -6951,7 +7022,7 @@ class NPUModelRunner(GPUModelRunner):
                 # the received prefix and zero-fill the padding locally to avoid
                 # a shape-mismatch copy_ error on NPUs (e.g. 60 vs 64).
                 for k, v in intermediate_tensors.items():
-                    if not isinstance(v, torch.Tensor):
+                    if not isinstance(v, torch.Tensor) or k == "mrope_positions":
                         continue
                     copy_len = num_tokens
                     if k not in self.intermediate_tensors.tensors:
@@ -6980,6 +7051,15 @@ class NPUModelRunner(GPUModelRunner):
                 )
             else:
                 for k, v in intermediate_tensors.items():
+                    # mrope_positions is an edge-cloud side-channel tensor that
+                    # lives outside the model's layer-to-layer intermediate
+                    # buffer (self.intermediate_tensors, declared by
+                    # make_empty_intermediate_tensors as hidden/residual only).
+                    # It is materialized into self.mrope_positions.gpu directly
+                    # in execute_model before _preprocess; skip it here so the
+                    # copy-into-local-buffer loop does not KeyError on it.
+                    if k == "mrope_positions":
+                        continue
                     copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                     dst = self.intermediate_tensors[k][:copy_len]
                     # Senders may transmit only real tokens; fill graph padding locally.
@@ -9279,6 +9359,44 @@ class NPUModelRunner(GPUModelRunner):
                             )
                     else:
                         self.reorder_batch_threshold = reorder_batch_threshold_i  # noqa
+
+    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
+        """Edge-cloud embedding_only: keep the edge's ``input_batch`` order in
+        sync with the cloud's so the metadata-free e2c tensor transfer stays
+        layout-aligned.
+
+        In embedding_only the edge runs NO attention layers (head_k=tail_k=0),
+        so ``kv_cache_groups`` is empty and the base ``_may_reorder_batch``
+        returns early WITHOUT reordering. The cloud, however, runs the full
+        transformer and its attention backend sets ``reorder_batch_threshold``
+        (=1, or 1 + num_speculative_tokens), so the cloud DOES reorder
+        (``reorder_batch_to_split_decodes_and_prefills`` moves prefills to the
+        end of ``input_batch``). The e2c transfer sends tensors in the edge's
+        order and the cloud reads them in the cloud's order; if only the cloud
+        reorders, the two orders diverge and the cloud reads each request's
+        mrope/hidden from the wrong buffer offset (dec_off mismatch -> wrong
+        RoPE position -> token divergence). Apply the SAME reorder on the
+        edge, using the cloud's threshold, so both sides share an identical
+        ``input_batch`` order.
+        """
+        if (self._edge_cloud_enabled
+                and self.edge_cloud_cfg.mode == "embedding_only"
+                and self.edge_cloud_cfg.role == "edge"):
+            if self.reorder_batch_threshold is not None:
+                threshold = self.reorder_batch_threshold
+            else:
+                # Match the ascend attention backend's decode_threshold
+                # (=1, or 1 + num_speculative_tokens under spec decode).
+                threshold = 1
+                if self.speculative_config is not None:
+                    threshold = 1 + self.speculative_config.num_speculative_tokens
+            reorder_batch_to_split_decodes_and_prefills(
+                self.input_batch,
+                scheduler_output,
+                decode_threshold=threshold,
+            )
+            return
+        super()._may_reorder_batch(scheduler_output)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

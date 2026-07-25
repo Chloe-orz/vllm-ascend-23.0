@@ -467,6 +467,25 @@ class PDSeparatedScheduler(Scheduler):
         )
         if has_work or is_tail:
             self._log_scheduler_state(state, scheduler_output.batch_type)
+        # Stamp whether this batch carries any multimodal request so the
+        # cloud's CHER early-recv hint (built in PassiveEC.step from this SO)
+        # can decide whether to irecv mrope_positions. The passive cloud has
+        # NO request registry (mm_features do not cross the edge->cloud SO
+        # boundary for cached reqs - scheduled_cached_reqs carries only
+        # req_ids), so the edge scheduler - which owns self.requests - is the
+        # only place this can be computed. The expression mirrors
+        # NPUModelRunner.step_has_multimodal_req exactly; self.requests here
+        # (at scheduling time) == model_runner.requests at execute time (both
+        # reflect this step), so the cloud hint's has_mrope matches the edge
+        # sender's include_mrope bit-for-bit (eliminates the mixed-batch
+        # mismatch). Dynamic attr; survives the edge->cloud SO pickle
+        # (SchedulerOutput has no __slots__ - PassiveScheduler already relies
+        # on this for _ARRIVAL_SEQ_ATTR).
+        scheduler_output.has_mrope = (
+            any(req.mm_features for req in self.requests.values())
+            or any(getattr(nr, "mm_features", None)
+                   for nr in scheduler_output.scheduled_new_reqs)
+        )
         return scheduler_output
 
     def _decode_first_only_active(self) -> bool:
