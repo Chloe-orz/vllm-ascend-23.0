@@ -350,6 +350,11 @@ def init_ascend_model_parallel(
             pp_group.create_alternate_groups(backend)
             if hasattr(pp_group, "create_hidden_channel_groups"):
                 pp_group.create_hidden_channel_groups(backend)
+            # Eagerly establish all hidden-channel HCCL communicators while
+            # the c10d store connection is fresh; a channel lazily
+            # initialized long after startup can fail its rendezvous
+            # (idle-killed store connection) and hang the engine.
+            warmup_edge_cloud_channels()
 
         # Ascend-specific groups that are currently disabled by default
         # in edge-cloud mode. If enabled in the future, they must follow
@@ -567,6 +572,7 @@ def init_ascend_model_parallel(
         pp_group.create_alternate_groups(backend)
         if hasattr(pp_group, "create_hidden_channel_groups"):
             pp_group.create_hidden_channel_groups(backend)
+        warmup_edge_cloud_channels()
 
 
 def model_parallel_initialized():
@@ -745,6 +751,65 @@ def _get_edge_cloud_hidden_channel_device_group(
         )
         return pp_group.alt_device_group
     return pp_group.device_group
+
+
+def warmup_edge_cloud_channels() -> None:
+    """Eagerly establish every edge-cloud hidden-channel HCCL communicator.
+
+    torch_npu creates HCCL point-to-point communicators LAZILY on first use
+    and the rendezvous exchanges the HCCL unique id through the c10d
+    TCPStore connection that was established at startup.  When a channel's
+    first use happens long after startup (e.g. PREFILL_2 is only exercised
+    once two prefills are concurrently in flight), the store connection may
+    already be dead (idle TCP timeout between the edge and cloud hosts) or
+    the peer may not be ready yet; the rendezvous then fails mid-run
+    (store->get "connection closed" / EI0015 Ranktable_Detect) and the
+    engine hangs.  Do a tiny blocking round-trip on every channel at
+    startup while the store connection is fresh, and fail fast (loudly) if
+    the rendezvous is broken instead of hanging 30 minutes into serving.
+    """
+    pp_group = get_pp_group()
+    if pp_group.world_size <= 1:
+        return
+    if getattr(pp_group, "_edge_cloud_channels_warmed", False):
+        return
+    device = torch.device("npu", torch.npu.current_device())
+    tiny_send = torch.zeros(8, dtype=torch.bfloat16, device=device)
+    channels = (
+        HiddenChannelType.PREFILL_1,
+        HiddenChannelType.PREFILL_2,
+        HiddenChannelType.DECODE,
+    )
+    for channel in channels:
+        try:
+            group = _get_edge_cloud_hidden_channel_device_group(
+                pp_group, channel=channel
+            )
+        except RuntimeError:
+            # Channel group not supported by this torch_npu version;
+            # matches the runtime fallback behavior, nothing to warm up.
+            continue
+        tiny_recv = torch.empty_like(tiny_send)
+        if is_edge_device():
+            peer = pp_group.ranks[1]
+            torch.distributed.isend(tiny_send, dst=peer, group=group).wait()
+            torch.distributed.irecv(tiny_recv, src=peer, group=group).wait()
+        else:
+            peer = pp_group.ranks[0]
+            torch.distributed.irecv(tiny_recv, src=peer, group=group).wait()
+            torch.distributed.isend(tiny_send, dst=peer, group=group).wait()
+    # Also warm the TP-internal broadcast communicators used by
+    # edge_cloud_broadcast_recv on both sides.
+    tp_group = get_tp_group()
+    if tp_group.world_size > 1:
+        buf = torch.zeros(8, dtype=torch.bfloat16, device=device)
+        torch.distributed.broadcast(buf, src=tp_group.ranks[0],
+                                    group=tp_group.device_group)
+    logger.info(
+        "[EDGE-CLOUD] hidden channel warmup completed (role=%s)",
+        "edge" if is_edge_device() else "cloud",
+    )
+    pp_group._edge_cloud_channels_warmed = True
 
 
 def edge_cloud_isend_tensor_dict(
