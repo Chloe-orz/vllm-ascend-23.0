@@ -68,7 +68,10 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (
+    CommonAttentionMetadata,
+    reorder_batch_to_split_decodes_and_prefills,
+)
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
 from vllm.v1.core.sched.output import (
     BatchType,
@@ -2838,6 +2841,9 @@ class NPUModelRunner(GPUModelRunner):
                         )
 
                     # Run core input preparation.
+
+                    # skip_dsa_fill: already filled above between first
+                    # _prepare_inputs and here, using the first call's values.
                     cache = self._run_input_preparation(
                         scheduler_output,
                         precomputed=(
@@ -2845,6 +2851,7 @@ class NPUModelRunner(GPUModelRunner):
                             spec_decode_metadata,
                             total_num_scheduled_tokens,
                         ),
+                        skip_dsa_fill=True
                     )
                     total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
                     num_tokens_padded = cache["num_tokens_padded"]
@@ -3680,12 +3687,17 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         precomputed: tuple | None = None,
+        skip_dsa_fill: bool = False,
     ) -> dict[str, Any]:
         """Run input preparation pipeline after _update_states.
 
         Executes _prepare_inputs, _determine_batch_execution_and_padding,
         and _build_attention_metadata. Returns all results as a dict that
         can be passed to the forward pass or cached for fast-path reuse.
+        Args:
+            skip_dsa_fill: If True, skip filling _dsa_positions_cpu_buf
+                (caller already filled it, e.g. slow path between first
+                _prepare_inputs and _run_input_preparation).
         """
         num_reqs = self.input_batch.num_reqs
         # Guard against empty batch after _update_states
@@ -3722,6 +3734,24 @@ class NPUModelRunner(GPUModelRunner):
             ) = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
+            )
+
+        # Fill _dsa_positions_cpu_buf for DSA compression.
+        # cloud_prepare_early calls _run_input_preparation directly and
+        # relies on this fill.  The slow path passes skip_dsa_fill=True
+        # because it already filled above (between the first _prepare_inputs
+        # and _run_input_preparation, to use the first call's values).
+        if self.use_compress and not skip_dsa_fill:
+            req_indices = np.repeat(
+                self.arange_np[:num_reqs], num_scheduled_tokens_np
+            )
+            dsa_positions_np = self._dsa_positions_np_buf[
+                :total_num_scheduled_tokens
+            ]
+            np.add(
+                self.input_batch.num_computed_tokens_cpu[req_indices],
+                self.query_pos.np[:total_num_scheduled_tokens],
+                out=dsa_positions_np,
             )
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
@@ -4542,13 +4572,6 @@ class NPUModelRunner(GPUModelRunner):
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         if enable_sp(self.vllm_config) or enable_sp_by_pass() or self.edge_cloud_cfg.cloud_enable_sp:
-            pc = self.vllm_config.parallel_config
-            # Edge-cloud mode: edge node should pad to cloud's tp_size so that
-            # the full sequence after all_gather is directly chunkable by cloud SP.
-            # During cudagraph/ACL graph capture, skip this extra padding so that
-            # graph keys match the normal SP-aligned capture sizes.
-            if pc.enable_edge_cloud and pc.is_edge_node and not for_cudagraph_capture:
-                tp_size = max(tp_size, pc.cloud_npu_count)
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -4731,6 +4754,9 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens_across_dp,
             cudagraph_stats,
         )
+    
+    def _should_save_for_attn_metadata(self) -> bool:
+        return False
 
     def _build_attention_metadata(
         self,
@@ -4895,6 +4921,9 @@ class NPUModelRunner(GPUModelRunner):
             cm_base.num_logits_indices = logits_indices.size(0)
             cm_base.logits_indices_padded = self._prepare_kv_sharing_fast_prefill(logits_indices)
 
+        if self._should_save_for_attn_metadata():
+            self.cm_base = cm_base
+        
         def _build_attn_group_metadata(
             kv_cache_gid: int,
             attn_gid: int,
@@ -4930,6 +4959,9 @@ class NPUModelRunner(GPUModelRunner):
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     block_size=attn_group.kv_cache_spec.block_size,
                 )
+            if self._should_save_for_attn_metadata():
+                self.per_gid_extra[(kv_cache_gid, attn_gid)] = (
+                    cascade_attn_prefix_len, extra_attn_metadata_args)
 
             # add kvcomp_metadata into common_attn_metadata
             if (for_cudagraph_capture
@@ -4972,6 +5004,15 @@ class NPUModelRunner(GPUModelRunner):
         decode_ratio_to_sas_metadata: dict[Any, Any] = {}
         common_ratio_to_sas_metadata: dict[Any, Any] = {}
         spec_decode_common_attn_metadata = None
+        
+        if self._should_save_for_attn_metadata():
+            self.per_gid_cm = [{} for _ in self.kv_cache_config.kv_cache_groups]
+            self.per_gid_extra = {}
+
+        def _save(name: str):
+            if self._should_save_for_attn_metadata():
+                self.per_gid_cm[kv_cache_gid][name] = getattr(cm, name)
+        
         for kv_cache_gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
             cm = copy(cm_base)  # shallow copy
             # Basically only the encoder seq_lens, block_table and slot_mapping change
@@ -4981,6 +5022,9 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_group.kv_cache_spec,
                 num_reqs_padded,
             )
+
+            _save('encoder_seq_lens')
+            _save('encoder_seq_lens_cpu')
 
             # Now, query_start_loc is padded.
             # But gdn needs an unpadded one.
@@ -4992,11 +5036,15 @@ class NPUModelRunner(GPUModelRunner):
                 if isinstance(builder, GDNAttentionMetadataBuilder):
                     cm.query_start_loc_cpu = self.gdn_query_start_loc.cpu[: num_reqs_padded + 1]
                     cm.query_start_loc = self.gdn_query_start_loc.gpu[: num_reqs_padded + 1]
+                    _save('query_start_loc_cpu')
+                    _save('query_start_loc')
 
             if kv_cache_gid > 0:
                 cm.block_table_tensor, cm.slot_mapping = _get_block_table_and_slot_mapping(
                     kv_cache_gid
                 )
+                _save('block_table_tensor')
+                _save('slot_mapping')
             if self.speculative_config and isinstance(self.drafter, AscendStep3p5MTPProposer):
                 # step3p5 MTP draft layers span multiple KV cache groups; capture
                 # each group's block table / slot mapping so the proposer can
@@ -5826,11 +5874,13 @@ class NPUModelRunner(GPUModelRunner):
             from vllm_ascend.utils import extract_dsv4_layer_index
 
             assert len(self.kv_caches) == 0
+            self.kv_cache_names: list[str] = []
             for layer_name in sorted(
                     kv_caches,
                     key=lambda name: (extract_dsv4_layer_index(
                         self.model_config.hf_text_config, name), name)):
                 self.kv_caches.append(kv_caches[layer_name])
+                self.kv_cache_names.append(layer_name)
             for layer_name, kv_cache in kv_caches.items():
                 self.compilation_config.static_forward_context[
                     layer_name].kv_cache = [kv_cache]
@@ -6754,6 +6804,44 @@ class NPUModelRunner(GPUModelRunner):
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
+    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
+        """Edge-cloud embedding_only: keep the edge's ``input_batch`` order in
+        sync with the cloud's so the metadata-free e2c tensor transfer stays
+        layout-aligned.
+
+        In embedding_only the edge runs NO attention layers (head_k=tail_k=0),
+        so ``kv_cache_groups`` is empty and the base ``_may_reorder_batch``
+        returns early WITHOUT reordering. The cloud, however, runs the full
+        transformer and its attention backend sets ``reorder_batch_threshold``
+        (=1, or 1 + num_speculative_tokens), so the cloud DOES reorder
+        (``reorder_batch_to_split_decodes_and_prefills`` moves prefills to the
+        end of ``input_batch``). The e2c transfer sends tensors in the edge's
+        order and the cloud reads them in the cloud's order; if only the cloud
+        reorders, the two orders diverge and the cloud reads each request's
+        mrope/hidden from the wrong buffer offset (dec_off mismatch -> wrong
+        RoPE position -> token divergence). Apply the SAME reorder on the
+        edge, using the cloud's threshold, so both sides share an identical
+        ``input_batch`` order.
+        """
+        if (self._edge_cloud_enabled
+                and self.edge_cloud_cfg.mode == "embedding_only"
+                and self.edge_cloud_cfg.role == "edge"):
+            if self.reorder_batch_threshold is not None:
+                threshold = self.reorder_batch_threshold
+            else:
+                # Match the ascend attention backend's decode_threshold
+                # (=1, or 1 + num_speculative_tokens under spec decode).
+                threshold = 1
+                if self.speculative_config is not None:
+                    threshold = 1 + self.speculative_config.num_speculative_tokens
+            reorder_batch_to_split_decodes_and_prefills(
+                self.input_batch,
+                scheduler_output,
+                decode_threshold=threshold,
+            )
+            return
+        super()._may_reorder_batch(scheduler_output)
+
     def calculate_reorder_batch_threshold(self) -> None:
         """
         Check that if any backends reorder batches; that the reordering
@@ -7042,7 +7130,51 @@ class NPUModelRunner(GPUModelRunner):
         if mgr is not None and hasattr(self, "update_stream"):
             mgr.update_stream = self.update_stream
 
+        self._zero_dsa_state_block0()
         return cuda_graph_size
+
+    def _zero_dsa_state_block0(self) -> None:
+        """Zero physical block 0 (null/dummy block) of every DSA compressor
+        state cache. Always-on; called once at the end of capture_model.
+
+        The compressor kernel indexes state_cache in raw-position space
+        (block_table[req][pos // 8]), but the decode-time state block table
+        carries only one valid block; positions >= 8 hit zero-padding
+        entries. Kernel writes to entry 0 are silently dropped, while reads
+        are NOT guarded and land on physical block 0, whose content is
+        capture-order-dependent residue (NaN when the size-1 capture runs
+        last -> accuracy corruption at the first decode compression
+        boundary). Zeroing block 0 makes the phantom read deterministic and
+        restores eager parity.
+
+        Once after capture is sufficient: real inference never writes state
+        block 0 (kernel writes to entry 0 are dropped; decode padding slots
+        are -1, not 0), so the zeroed content persists for the process
+        lifetime. Verified: b0nan stays constant across prefill+decode.
+        """
+        try:
+            caches = getattr(self, "_dsa_state_caches_for_zero", None)
+            if not caches:
+                # （重）收集。profile/dummy 阶段 KV cache 尚未初始化，此时
+                # 收集到 0 个属正常——不能缓存空列表，否则后续永远不再重试。
+                caches = []
+                names = getattr(self, "kv_cache_names", None) or []
+                runner_caches = getattr(self, "kv_caches", None) or []
+                for i, name in enumerate(names):
+                    if "compressor.state_cache" not in name or i >= len(runner_caches):
+                        continue
+                    entry = runner_caches[i]
+                    cache = entry[0] if isinstance(entry, (list, tuple)) else entry
+                    if isinstance(cache, torch.Tensor) and cache.numel() > 0:
+                        caches.append(cache)
+                if not caches:
+                    return
+                # 收集成功才缓存
+                self._dsa_state_caches_for_zero = caches
+            for cache in caches:
+                cache[0].zero_()
+        except Exception:
+            pass
 
     def _prepare_multimodal_fields(self):
         """

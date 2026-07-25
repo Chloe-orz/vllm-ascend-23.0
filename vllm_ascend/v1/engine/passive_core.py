@@ -759,34 +759,48 @@ class PassiveEngineCoreProc:
                 # Report this node's reachable IP to the edge so the
                 # edge can construct POST_OUT's connect endpoint
                 # without a CLI flag. Uses a one-shot TCPStore (edge
-                # = master, cloud = client) on ``master_port + 1``
-                # to avoid colliding with the NCCL rendezvous store
-                # on ``master_port``.
+                # = master, cloud = client) on ``master_port + 1 +
+                # dp_rank`` to avoid colliding with the NCCL
+                # rendezvous store on ``master_port``. The cloud
+                # connects only to the edge DP rank it is paired
+                # with.
                 import torch.distributed as dist
                 from datetime import timedelta
                 from vllm.utils.network_utils import get_ip
+                _cloud_ip = get_ip()
+                _dp_rank = getattr(
+                    vllm_config.parallel_config, "data_parallel_rank", 0
+                )
                 _addr_store = dist.TCPStore(
                     host_name=master_addr,
-                    port=master_port + 1,
+                    port=master_port + 1 + _dp_rank,
                     world_size=2,
                     is_master=False,
                     timeout=timedelta(seconds=300),
                 )
-                _addr_store.set("cloud_ip", get_ip())
+                _addr_store.set("cloud_ip", _cloud_ip)
                 del _addr_store
 
-                post_out_bind = pd_config.get_post_out_bind_addr()
-                pre_out_connect = pd_config.get_pre_out_connect_addr(master_addr)
+                # ZMQ ports are offset per DP rank on the edge side
+                # (dp_rank * 2). The cloud mirrors this offsetting.
+                # NOTE: the cloud currently creates a single
+                # PPSchedulerZmqChannel (per dp_rank=0). True
+                # multi-DP cloud support requires N channels inside
+                # PassiveEngineCoreProc.
+                _pre_out_port = pd_config.pre_out_port + _dp_rank * 2
+                _post_out_port = pd_config.post_out_port + _dp_rank * 2
+                post_out_bind = f"tcp://*:{_post_out_port}"
+                pre_out_connect = f"tcp://{master_addr}:{_pre_out_port}"
                 pp_pd_channel = PPSchedulerZmqChannel(
                     send_endpoint=post_out_bind,
                     recv_endpoint=pre_out_connect,
-                    name="pd-cloud",
+                    name=f"pd-cloud-dp{_dp_rank}",
                 )
                 scheduler_input = pp_pd_channel
                 logger.info(
                     "PD-separation cloud channel: POST_OUT=%s, "
-                    "PRE_OUT=%s",
-                    post_out_bind, pre_out_connect,
+                    "PRE_OUT=%s (dp_rank=%d)",
+                    post_out_bind, pre_out_connect, _dp_rank,
                 )
 
             if scheduler_input is not None:
