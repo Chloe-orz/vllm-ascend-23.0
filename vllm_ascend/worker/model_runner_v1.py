@@ -2775,10 +2775,27 @@ class NPUModelRunner(GPUModelRunner):
                 next_token_list, dtype=torch.long
             )
         self._draft_token_ids = None
+        logger.info(
+            "[MTP-DEBUG] pending draft context stashed: task_id=%s, "
+            "req_ids=%s, draft_step_idx=%s, pending_tasks=%d, "
+            "pending_contexts=%d",
+            task_id,
+            req_ids,
+            context["draft_step_idx"],
+            len(self._pending_edge_cloud_draft_task_ids),
+            len(self._pending_edge_cloud_draft_contexts),
+        )
 
     def take_pending_edge_cloud_draft_scheduler_output(
         self,
     ) -> "SchedulerOutput | None":
+        if self._pending_edge_cloud_draft_task_ids:
+            logger.info(
+                "[MTP-DEBUG] taking pending draft task: pending_tasks=%d, "
+                "pending_contexts=%d",
+                len(self._pending_edge_cloud_draft_task_ids),
+                len(self._pending_edge_cloud_draft_contexts),
+            )
         context = None
         task_id = None
         while self._pending_edge_cloud_draft_task_ids:
@@ -2806,6 +2823,16 @@ class NPUModelRunner(GPUModelRunner):
             return None
         draft_step_idx = int(context.get("draft_step_idx", 0) or 0)
         context["enqueued"] = True
+        logger.info(
+            "[MTP-DEBUG] pending draft converted to SchedulerOutput: "
+            "task_id=%s, parent_req_id=%s, draft_step_idx=%d, "
+            "batch_type=%s, remaining_pending_tasks=%d",
+            task_id,
+            req_ids[0],
+            draft_step_idx,
+            BatchType.DRAFT_FIRST,
+            len(self._pending_edge_cloud_draft_task_ids),
+        )
         return replace(
             context["scheduler_output"],
             batch_type=BatchType.DRAFT_FIRST,
@@ -4132,6 +4159,24 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 defer_edge_cloud_draft = (
                     self._should_defer_edge_cloud_draft(scheduler_output)
+                )
+                hf_config = getattr(
+                    self.vllm_config.model_config, "hf_config", None
+                )
+                logger.info(
+                    "[MTP-DEBUG] draft defer decision: method=%s, "
+                    "model_type=%s, batch_type=%s, scheduled_draft=%s, "
+                    "edge_cloud_enabled=%s, is_edge_device=%s, "
+                    "has_drafter=%s, defer=%s, head_token=%s",
+                    getattr(self.speculative_config, "method", None),
+                    getattr(hf_config, "model_type", None),
+                    scheduler_output.batch_type,
+                    self._uses_scheduled_edge_cloud_draft(),
+                    self._edge_cloud_enabled,
+                    is_edge_device(),
+                    self.drafter is not None,
+                    defer_edge_cloud_draft,
+                    scheduler_output.head_token,
                 )
                 if defer_edge_cloud_draft:
                     sampled_token_ids = (

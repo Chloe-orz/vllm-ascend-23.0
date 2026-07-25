@@ -425,7 +425,17 @@ def _enqueue_pending_edge_cloud_draft_if_ready(self) -> None:
             "Pending edge-cloud draft must be DRAFT_FIRST, got "
             f"{scheduler_output.batch_type}"
         )
+    queue_size_before = len(ready_queue)
     ready_queue.append(scheduler_output)
+    logger.info(
+        "[MTP-DEBUG] EngineCore enqueued DRAFT_FIRST: task_id=%s, "
+        "parent_req_id=%s, draft_step_idx=%s, queue_size=%d->%d",
+        scheduler_output.draft_task_id,
+        scheduler_output.parent_req_id,
+        scheduler_output.draft_step_idx,
+        queue_size_before,
+        len(ready_queue),
+    )
 
 
 def _clear_pending_edge_cloud_draft_for_finished_requests(self) -> None:

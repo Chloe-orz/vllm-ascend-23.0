@@ -567,6 +567,18 @@ class PDSeparatedScheduler(Scheduler):
         scheduler_output.hidden_channel = HiddenChannelType.DECODE
         self.draft_inflight_count += 1
         self.draft_remote_pending_count += 1
+        logger.info(
+            "[MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=%s, "
+            "parent_req_id=%s, draft_step_idx=%s, head_token=%s, "
+            "remaining_ready=%d, draft_inflight=%d, draft_remote_pending=%d",
+            scheduler_output.draft_task_id,
+            scheduler_output.parent_req_id,
+            scheduler_output.draft_step_idx,
+            scheduler_output.head_token,
+            len(self.drafts_first_ready),
+            self.draft_inflight_count,
+            self.draft_remote_pending_count,
+        )
         return scheduler_output
 
     def _pick_draft_last_batch(self) -> SchedulerOutput:
