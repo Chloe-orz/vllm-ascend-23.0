@@ -350,11 +350,13 @@ def init_ascend_model_parallel(
             pp_group.create_alternate_groups(backend)
             if hasattr(pp_group, "create_hidden_channel_groups"):
                 pp_group.create_hidden_channel_groups(backend)
-            # Eagerly establish all hidden-channel HCCL communicators while
-            # the c10d store connection is fresh; a channel lazily
-            # initialized long after startup can fail its rendezvous
-            # (idle-killed store connection) and hang the engine.
-            warmup_edge_cloud_channels()
+            # Pre-establish the HCCL/gloo links of every hidden channel so
+            # the first-use rendezvous never happens mid-pipeline, where a
+            # DRAFT_FIRST batch overtaking a PREFILL_FIRST batch on the
+            # cloud side would make the two sides rendezvous on different
+            # channels and deadlock.
+            if envs.VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP:
+                warmup_edge_cloud_hidden_channels()
 
         # Ascend-specific groups that are currently disabled by default
         # in edge-cloud mode. If enabled in the future, they must follow
@@ -572,7 +574,6 @@ def init_ascend_model_parallel(
         pp_group.create_alternate_groups(backend)
         if hasattr(pp_group, "create_hidden_channel_groups"):
             pp_group.create_hidden_channel_groups(backend)
-        warmup_edge_cloud_channels()
 
 
 def model_parallel_initialized():
@@ -752,64 +753,80 @@ def _get_edge_cloud_hidden_channel_device_group(
         return pp_group.alt_device_group
     return pp_group.device_group
 
+def warmup_edge_cloud_hidden_channels() -> None:
+    """Pre-establish every edge-cloud hidden-channel P2P link at startup.
 
-def warmup_edge_cloud_channels() -> None:
-    """Eagerly establish every edge-cloud hidden-channel HCCL communicator.
-
-    torch_npu creates HCCL point-to-point communicators LAZILY on first use
-    and the rendezvous exchanges the HCCL unique id through the c10d
-    TCPStore connection that was established at startup.  When a channel's
-    first use happens long after startup (e.g. PREFILL_2 is only exercised
-    once two prefills are concurrently in flight), the store connection may
-    already be dead (idle TCP timeout between the edge and cloud hosts) or
-    the peer may not be ready yet; the rendezvous then fails mid-run
-    (store->get "connection closed" / EI0015 Ranktable_Detect) and the
-    engine hangs.  Do a tiny blocking round-trip on every channel at
-    startup while the store connection is fresh, and fail fast (loudly) if
-    the rendezvous is broken instead of hanging 30 minutes into serving.
+    The first isend/irecv on a hidden channel rendezvous the two sides
+    (gloo metadata exchange + HCCL link setup) and blocks the host until
+    the peer posts the matching op.  DRAFT_FIRST is published to the cloud
+    at schedule time while PREFILL_FIRST is published only when it is
+    about to execute, so a draft batch can overtake a prefill batch on the
+    cloud side.  If both batches happen to be the first use of their
+    channels, the two sides rendezvous on *different* channels and
+    deadlock: edge TP0 blocks in the PREFILL_2 send rendezvous while the
+    cloud workers block in the DECODE draft recv.  Exchanging a tiny
+    tensor-dict on every channel in both directions here -- in a fixed
+    global order -- moves that first-use rendezvous to init time, where
+    both sides are guaranteed to arrive in the same order.
     """
     pp_group = get_pp_group()
-    if pp_group.world_size <= 1:
+    if pp_group.world_size != 2:
         return
-    if getattr(pp_group, "_edge_cloud_channels_warmed", False):
+    if not hasattr(pp_group, "isend_tensor_dict_on_hidden_channel"):
+        logger.warning(
+            "[edge-cloud] hidden-channel warmup skipped: pp group lacks "
+            "isend_tensor_dict_on_hidden_channel"
+        )
         return
-    device = torch.device("npu", torch.npu.current_device())
-    tiny_send = torch.zeros(8, dtype=torch.bfloat16, device=device)
-    channels = (
-        HiddenChannelType.PREFILL_1,
-        HiddenChannelType.PREFILL_2,
-        HiddenChannelType.DECODE,
-    )
+    # Only warm channels whose groups were actually created (PREFILL_2
+    # requires create_hidden_channel_groups(), DECODE requires
+    # create_alternate_groups()).  Both sides run the same patched code,
+    # so they derive the same channel list and the fixed order below is
+    # consistent across the pair.
+    channels = [HiddenChannelType.PREFILL_1]
+    if getattr(pp_group, "prefill2_device_group", None) is not None:
+        channels.append(HiddenChannelType.PREFILL_2)
+    if getattr(pp_group, "alt_device_group", None) is not None:
+        channels.append(HiddenChannelType.DECODE)
+    rank = pp_group.rank_in_group
     for channel in channels:
-        try:
-            group = _get_edge_cloud_hidden_channel_device_group(
-                pp_group, channel=channel
-            )
-        except RuntimeError:
-            # Channel group not supported by this torch_npu version;
-            # matches the runtime fallback behavior, nothing to warm up.
-            continue
-        tiny_recv = torch.empty_like(tiny_send)
-        if is_edge_device():
-            peer = pp_group.ranks[1]
-            torch.distributed.isend(tiny_send, dst=peer, group=group).wait()
-            torch.distributed.irecv(tiny_recv, src=peer, group=group).wait()
-        else:
-            peer = pp_group.ranks[0]
-            torch.distributed.irecv(tiny_recv, src=peer, group=group).wait()
-            torch.distributed.isend(tiny_send, dst=peer, group=group).wait()
-    # Also warm the TP-internal broadcast communicators used by
-    # edge_cloud_broadcast_recv on both sides.
-    tp_group = get_tp_group()
-    if tp_group.world_size > 1:
-        buf = torch.zeros(8, dtype=torch.bfloat16, device=device)
-        torch.distributed.broadcast(buf, src=tp_group.ranks[0],
-                                    group=tp_group.device_group)
+        # Warm both directions in a fixed global order (rank0 -> rank1,
+        # then rank1 -> rank0) so the two sides can never rendezvous on
+        # different channels or directions and deadlock inside the warmup
+        # itself.  The tensor-dict exchange covers both the HCCL device
+        # group (hidden tensors) and the gloo cpu group (the metadata
+        # path used by scheduled-draft payloads).
+        for sender_rank in (0, 1):
+            if rank == sender_rank:
+                payload = {
+                    "channel_warmup": torch.zeros(
+                        8, dtype=torch.bfloat16, device="npu"
+                    ),
+                    "warmup_channel": channel.value,
+                }
+                handles = pp_group.isend_tensor_dict_on_hidden_channel(
+                    payload, channel=channel
+                )
+            else:
+                tensor_dict, handles, _ = (
+                    pp_group.irecv_tensor_dict_on_hidden_channel(
+                        channel=channel
+                    )
+                )
+                assert tensor_dict is not None and tensor_dict.get(
+                    "warmup_channel"
+                ) == channel.value, (
+                    "[edge-cloud] hidden-channel warmup received "
+                    f"unexpected payload on channel {channel.value}: "
+                    f"{tensor_dict!r}"
+                )
+            for handle in handles:
+                handle.wait()
     logger.info(
-        "[EDGE-CLOUD] hidden channel warmup completed (role=%s)",
-        "edge" if is_edge_device() else "cloud",
+        "[edge-cloud] warmed up hidden channels %s (both directions)",
+        [c.value for c in channels],
     )
-    pp_group._edge_cloud_channels_warmed = True
+
 
 
 def edge_cloud_isend_tensor_dict(

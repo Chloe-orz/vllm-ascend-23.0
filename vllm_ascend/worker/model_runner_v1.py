@@ -5738,8 +5738,15 @@ class NPUModelRunner(GPUModelRunner):
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
+        # In edge-cloud head_tail mode (首一尾一), a kv cache group whose
+        # layers all live on the cloud produces an EMPTY attn_group on the
+        # edge (and vice versa); skip empty groups instead of indexing [0].
         self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+            [
+                isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+                for attn_group in self.attn_groups
+                if attn_group
+            ]
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
@@ -6602,6 +6609,15 @@ class NPUModelRunner(GPUModelRunner):
                 # block splitting. Get the supported block sizes from
                 # the backend.
                 attn_groups = self.attn_groups[kv_cache_group_id]
+                if not attn_groups:
+                    # Edge-cloud head_tail (首一尾一): this kv cache group's
+                    # layers all live on the peer side, so there is no local
+                    # backend to query. The value is unused for an empty
+                    # group; keep list alignment with the group index.
+                    self.kernel_block_sizes.append(
+                        [kv_cache_group.kv_cache_spec.block_size]
+                    )
+                    continue
                 backends = [attn_group.backend for attn_group in attn_groups]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
                 selected_kernel_size = select_common_block_size(
