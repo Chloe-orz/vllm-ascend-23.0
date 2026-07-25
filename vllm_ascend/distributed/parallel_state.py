@@ -2,6 +2,7 @@ from typing import Any, Callable
 from dataclasses import dataclass
 
 import torch
+import vllm_ascend.envs as envs
 from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.v1.core.sched.output import HiddenChannelType
 from vllm.distributed.parallel_state import (
