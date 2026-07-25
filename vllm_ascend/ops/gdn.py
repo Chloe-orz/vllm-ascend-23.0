@@ -140,6 +140,7 @@ def update_conv1d_graph_params(
 
     if (
         graph_params is None
+        or not hasattr(graph_params, "conv1d_params")
         or num_tokens not in graph_params.conv1d_params
         or len(graph_params.conv1d_params[num_tokens]) == 0
     ):
@@ -240,8 +241,8 @@ def update_conv1d_graph_params(
 
 def _maybe_reset_initial_state_for_layer_slice(
     attn_metadata: GDNAttentionMetadata,
-    initial_state_mode_opt: tuple[int, ...],
-) -> tuple[int, ...]:
+    initial_state_mode_opt: torch.Tensor,
+) -> torch.Tensor:
     """Reset initial_state_mode to all-zeros when conv_state may be polluted.
 
     In edge-cloud layer-sliced inference, a decode batch can be interleaved
@@ -271,7 +272,7 @@ def _maybe_reset_initial_state_for_layer_slice(
     # Force all entries to 0: no sequence should read initial state from
     # conv_state in a layer-slice continuation, because this layer has
     # never seen this request before.
-    return tuple(0 for _ in initial_state_mode_opt)
+    return torch.zeros_like(initial_state_mode_opt)
 
 
 def get_non_spec_chunked_prefill_meta(attn_metadata):
@@ -522,11 +523,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 else:
                     conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
-                    (
-                        query_start_loc_opt,
-                        cache_indices_opt,
-                        initial_state_mode_opt,
-                    ) = get_non_spec_causal_conv1d_host_args(attn_metadata)
+                    # Non-PCP single-rank path: use 1D state_indices (not 2D
+                    # block_table) as cache_indices.  The PCP path uses the
+                    # full block_table from non_spec_prefill_metadata, but
+                    # the kernel on a single rank interprets the extra columns
+                    # as extra slot indices (e.g. 166 zeros → slot 0), which
+                    # pollutes conv_state for other requests.  Fallback_meta
+                    # originally provided state_indices (block_table[:, 0])
+                    # via get_non_spec_causal_conv1d_host_args; use the same
+                    # data in device-tensor form.
+                    cache_indices_opt = attn_metadata.non_spec_state_indices_tensor
 
                     # Edge-cloud layer-sliced inference: when a decode batch is
                     # interleaved between two prefill slices, the decode path

@@ -269,11 +269,11 @@ class PassiveScheduler:
                 break
             self._remember_arrival_seq(scheduler_output, seq)
             bt = scheduler_output.batch_type
-            logger.info(
-                "Received scheduler_output from edge, seq=%d, batch_type: %s",
-                seq,
-                bt,
-            )
+            # logger.info(
+            #     "Received scheduler_output from edge, seq=%d, batch_type: %s",
+            #     seq,
+            #     bt,
+            # )
             if bt == BatchType.EMPTY:
                 continue
             elif bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
@@ -287,10 +287,10 @@ class PassiveScheduler:
                 now = time.monotonic()
                 if self._last_decode_first_arrival_ts is not None:
                     interval_ms = (now - self._last_decode_first_arrival_ts) * 1000
-                    logger.info(
-                        "DECODE_FIRST arrival interval: %.2f ms",
-                        interval_ms,
-                    )
+                    # logger.info(
+                    #     "DECODE_FIRST arrival interval: %.2f ms",
+                    #     interval_ms,
+                    # )
                 self._last_decode_first_arrival_ts = now
                 self.ready_decodes.append(scheduler_output)
             elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
@@ -509,19 +509,19 @@ class PassiveScheduler:
 
     def _start_prefill_middle_throttle(self) -> None:
         self._prefill_middle_throttle_started_at = time.monotonic()
-        logger.info(
-            f"[PD-PASSIVE] Prefill throttle started: waiting up to "
-            f"{self._prefill_middle_throttle_seconds * 1000:.0f}ms for decode",
-        )
+        # logger.info(
+        #     f"[PD-PASSIVE] Prefill throttle started: waiting up to "
+        #     f"{self._prefill_middle_throttle_seconds * 1000:.0f}ms for decode",
+        # )
 
     def _clear_prefill_middle_throttle(self) -> None:
         started_at = self._prefill_middle_throttle_started_at
         if started_at is not None:
             elapsed_ms = (time.monotonic() - started_at) * 1000
-            logger.info(
-                f"[PD-PASSIVE] Prefill throttle cleared after "
-                f"{elapsed_ms:.1f}ms",
-            )
+            # logger.info(
+            #     f"[PD-PASSIVE] Prefill throttle cleared after "
+            #     f"{elapsed_ms:.1f}ms",
+            # )
         self._prefill_middle_throttle_started_at = None
 
     def _can_fallback_to_prefill_in_decode_state(self) -> bool:
@@ -531,16 +531,16 @@ class PassiveScheduler:
         elapsed_ms = (time.monotonic() - started_at) * 1000
         limit_ms = self._prefill_middle_throttle_seconds * 1000
         if elapsed_ms >= limit_ms:
-            logger.info(
-                f"[PD-PASSIVE] Throttle timeout: waited {elapsed_ms:.1f}ms, "
-                f"fallback to prefill",
-            )
+            # logger.info(
+            #     f"[PD-PASSIVE] Throttle timeout: waited {elapsed_ms:.1f}ms, "
+            #     f"fallback to prefill",
+            # )
             self._clear_prefill_middle_throttle()
             return True
-        logger.info(
-            f"[PD-PASSIVE] Throttle active: {elapsed_ms:.1f}ms / {limit_ms:.0f}ms, "
-            f"still waiting for decode",
-        )
+        # logger.info(
+        #     f"[PD-PASSIVE] Throttle active: {elapsed_ms:.1f}ms / {limit_ms:.0f}ms, "
+        #     f"still waiting for decode",
+        # )
         return False
 
     def schedule(self) -> ScheduledBatch:
@@ -599,20 +599,20 @@ class PassiveScheduler:
             self._start_prefill_middle_throttle()
             return self._build_batch(self.ready_prefills.popleft())
         if decode_seq < prefill_seq:
-            logger.info(
-                "[PD-PASSIVE] Decode arrived before prefill slice-0: "
-                "decode_seq=%d, prefill_seq=%d",
-                decode_seq,
-                prefill_seq,
-            )
+            # logger.info(
+            #     "[PD-PASSIVE] Decode arrived before prefill slice-0: "
+            #     "decode_seq=%d, prefill_seq=%d",
+            #     decode_seq,
+            #     prefill_seq,
+            # )
             self._clear_prefill_middle_throttle()
             return self._build_batch(self.ready_decodes.popleft())
-        logger.info(
-            "[PD-PASSIVE] Prefill slice-0 arrived before decode: "
-            "prefill_seq=%d, decode_seq=%d",
-            prefill_seq,
-            decode_seq,
-        )
+        # logger.info(
+        #     "[PD-PASSIVE] Prefill slice-0 arrived before decode: "
+        #     "prefill_seq=%d, decode_seq=%d",
+        #     prefill_seq,
+        #     decode_seq,
+        # )
         self.cloud_scheduling_state = CloudSchedulingState.EXPECT_EXECUTE_DECODE
         self._start_prefill_middle_throttle()
         return self._build_batch(self.ready_prefills.popleft())

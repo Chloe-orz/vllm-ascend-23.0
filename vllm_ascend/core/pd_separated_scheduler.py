@@ -279,17 +279,17 @@ class PDSeparatedScheduler(Scheduler):
 
     def _log_scheduler_state(self, state: PrefillState, batch_type: BatchType) -> None:
         self._step_counter += 1
-        logger.info(
-            f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
-            f"waiting[]: {len(self.waiting)}, "
-            f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
-            f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
-            f"running[]: {len(self.running)}, "
-            f"prefills_last_ready[]: {len(self.prefills_last_ready)}, "
-            f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
-            f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
-            f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
-        )
+        # logger.info(
+        #     f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
+        #     f"waiting[]: {len(self.waiting)}, "
+        #     f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
+        #     f"prefill_last_pending[]: {len(self.prefill_last_pending)}, "
+        #     f"running[]: {len(self.running)}, "
+        #     f"prefills_last_ready[]: {len(self.prefills_last_ready)}, "
+        #     f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
+        #     f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
+        #     f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
+        # )
 
     # ------------------------------------------------------------------ #
     # Layer-slice config loading (Edge side)                             #
@@ -369,10 +369,10 @@ class PDSeparatedScheduler(Scheduler):
         if elapsed_ms >= self._decode_last_delay_schedule_ms:
             self._decode_last_delay_start_ts = None
             return True
-        logger.info(
-            "[PD] DECODE_LAST delayed: elapsed=%.1f ms < limit=%d ms",
-            elapsed_ms, self._decode_last_delay_schedule_ms,
-        )
+        # logger.info(
+        #     "[PD] DECODE_LAST delayed: elapsed=%.1f ms < limit=%d ms",
+        #     elapsed_ms, self._decode_last_delay_schedule_ms,
+        # )
         return False
 
     def _pick_prefill_first_batch(self) -> SchedulerOutput:
@@ -663,30 +663,30 @@ class PDSeparatedScheduler(Scheduler):
             self.prefill_last_pending = remaining_pending
             # ================
 
-            logger.info(
-                f"[PD] update_from_output PREFILL_LAST done, "
-                f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
-                f"moved {len(newly_running)} reqs to running[], "
-                f"moved {len(newly_chunked)} reqs to chunk_prefill_first[], "
-                f"running[]: {len(self.running)}, "
-                f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
-            )
+            # logger.info(
+            #     f"[PD] update_from_output PREFILL_LAST done, "
+            #     f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
+            #     f"moved {len(newly_running)} reqs to running[], "
+            #     f"moved {len(newly_chunked)} reqs to chunk_prefill_first[], "
+            #     f"running[]: {len(self.running)}, "
+            #     f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
+            # )
         if scheduler_output.batch_type == BatchType.DECODE_FIRST:
             # D首完成后立即释放 inflight 计数，使下一个 D首可以
             # 在 D尾仍在 batch_queue 中时就被调度，消除 Cloud idle gap。
             if self.decode_inflight_count > 0:
                 self.decode_inflight_count -= 1
-            logger.info(
-                f"[PD] update_from_output DECODE_FIRST done, "
-                f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
-            )
-        if scheduler_output.batch_type == BatchType.DECODE_LAST:
-            # decode_inflight_count 已在 DECODE_FIRST 的 update_from_output
-            # 中释放，此处不再重复减 1。
-            logger.info(
-                f"[PD] update_from_output DECODE_LAST done, "
-                f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
-            )
+            # logger.info(
+            #     f"[PD] update_from_output DECODE_FIRST done, "
+            #     f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
+            # )
+        # if scheduler_output.batch_type == BatchType.DECODE_LAST:
+        #     # decode_inflight_count 已在 DECODE_FIRST 的 update_from_output
+        #     # 中释放，此处不再重复减 1。
+        #     logger.info(
+        #         f"[PD] update_from_output DECODE_LAST done, "
+        #         f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
+        #     )
         outputs = super().update_from_output(scheduler_output, model_runner_output)
         self.chunk_prefill_first = [
             req for req in self.chunk_prefill_first if not req.is_finished()

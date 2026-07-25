@@ -496,12 +496,12 @@ def _patched_step_with_batch_queue(self):
                     so.batch_type.value
                     for _, so, _ in batch_queue
                 ]
-                vllm_logger.info(
-                    "[BATCH_QUEUE] Enqueued %s, queue_len=%d, types=%s",
-                    scheduler_output.batch_type.value,
-                    len(batch_queue),
-                    queue_types,
-                )
+                # vllm_logger.info(
+                #     "[BATCH_QUEUE] Enqueued %s, queue_len=%d, types=%s",
+                #     scheduler_output.batch_type.value,
+                #     len(batch_queue),
+                #     queue_types,
+                # )
                 if (
                     model_executed
                     and len(batch_queue) < self.batch_queue_size

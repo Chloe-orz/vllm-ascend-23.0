@@ -24,6 +24,7 @@ from vllm_ascend.ops.triton.gdn_chunk_meta import (
     _validate_cu_seqlens,
     build_chunk_meta_device,
 )
+from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionMetadataBuilder
 from vllm_ascend.utils import is_310p
 
 _GDN_CHUNK_SIZE = 64
@@ -32,7 +33,12 @@ _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
 _GDN_CUMSUM_WORKING_SET = 2**18
 
 _IS_PATCHED = False
-_ORIGINAL_BUILD = gdn_attn.GDNAttentionMetadataBuilder.build
+# AscendGDNAttentionMetadataBuilder is the actual builder used at runtime;
+# capture its build before the monkey-patch so _patched_build delegates to
+# the real original implementation.
+# NOTE: _ORIGINAL_INIT_THRESHOLD must stay on the base class — patching
+# the Ascend subclass creates a super()→patched→super() cycle otherwise.
+_ORIGINAL_BUILD = AscendGDNAttentionMetadataBuilder.build
 _ORIGINAL_INIT_THRESHOLD = gdn_attn.GDNAttentionMetadataBuilder._init_reorder_batch_threshold
 
 
@@ -884,4 +890,8 @@ if not _IS_PATCHED and not is_310p():
     gdn_attn.GDNPrefillFallbackMeta = GDNPrefillFallbackMeta
     gdn_attn.GDNAttentionMetadataBuilder.build = _patched_build
     gdn_attn.GDNAttentionMetadataBuilder._init_reorder_batch_threshold = _init_reorder_batch_threshold
+    # AscendGDNAttentionMetadataBuilder overrides build, so the base-class
+    # patch above is shadowed; patch the subclass explicitly.
+    AscendGDNAttentionMetadataBuilder.build = _patched_build
+    AscendGDNAttentionMetadataBuilder._init_reorder_batch_threshold = _init_reorder_batch_threshold
     _IS_PATCHED = True

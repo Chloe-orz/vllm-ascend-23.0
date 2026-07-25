@@ -70,7 +70,11 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.attention.selector import get_attn_backend  # type: ignore
-from vllm.v1.core.sched.output import BatchType, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    BatchType,
+    CachedRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -389,6 +393,30 @@ def _clone_gdn_attn_metadata(meta):
         "num_accepted_tokens",
         "chunk_indices",
         "chunk_offsets",
+        # Chunk-kernel prefill inputs (gdn.py recurrent path reads these:
+        # ssm_state[prefill_state_indices] scatter read/write). If left as
+        # shared-buffer views, an interleaved decode overwrites them and the
+        # continuation's ssm_state scatter hits WRONG slots — corrupting the
+        # decode request's GDN state as well.
+        "prefill_query_start_loc",
+        "prefill_state_indices",
+        "prefill_has_initial_state",
+        "batch_ptr",
+        "token_chunk_offset_ptr",
+        # Full-attention backend (AscendMetadata) fields: these are views
+        # into the persistent per-batch buffers (block table / slot_mapping
+        # / positions) that an interleaved decode batch rewrites in-place.
+        # Without cloning, a sliced prefill continuation writes/reads KV
+        # through the DECODE request's block table, corrupting both
+        # requests' KV caches (garbled decode on the running request,
+        # repeated tokens on the prefilling one).
+        "block_tables",
+        "slot_mapping",
+        "seq_lens",
+        "query_start_loc",
+        "attn_mask",
+        "actual_seq_lengths_q",
+        "actual_seq_lengths_kv",
     )
     for field_name in _DEVICE_TENSOR_FIELDS:
         tensor = getattr(cloned, field_name, None)
@@ -431,6 +459,84 @@ def _clone_gdn_attn_metadata(meta):
             cloned_fallback.chunk = cloned_chunk
 
         cloned.non_spec_prefill_fallback_meta = cloned_fallback
+
+    # Nested per-phase metadata objects are attached BY REFERENCE from the
+    # top-level fields (see _attach_non_spec_prefill_metadata in
+    # gdn_attn_builder). Cloning only the top-level fields therefore leaves
+    # the nested references pointing at the ORIGINAL shared buffers, which
+    # an interleaved decode batch overwrites in-place — the GDN forward
+    # reads exactly these nested tensors
+    # (non_spec_prefill_metadata.causal_conv1d.query_start_loc etc.), so a
+    # sliced prefill continuation would run its convolution with the decode
+    # batch's sequence boundaries. Deep-clone the nested objects too.
+    def _clone_dev_tensor(t):
+        if isinstance(t, torch.Tensor) and t.device.type != "cpu":
+            return t.clone()
+        return t
+
+    prefill_meta = getattr(cloned, "non_spec_prefill_metadata", None)
+    if prefill_meta is not None:
+        cloned_prefill = copy.copy(prefill_meta)
+        causal = getattr(cloned_prefill, "causal_conv1d", None)
+        if causal is not None:
+            cloned_causal = copy.copy(causal)
+            for attr in ("query_start_loc", "cache_indices",
+                         "initial_state_mode"):
+                t = getattr(cloned_causal, attr, None)
+                if t is not None:
+                    setattr(cloned_causal, attr, _clone_dev_tensor(t))
+            cloned_prefill.causal_conv1d = cloned_causal
+        chunk = getattr(cloned_prefill, "chunk", None)
+        if chunk is not None:
+            cloned_chunk = copy.copy(chunk)
+            for attr in (
+                "chunk_indices_chunk64",
+                "chunk_offsets_chunk64",
+                "update_chunk_offsets_chunk64",
+                "final_chunk_indices_chunk64",
+                "chunk_indices_large_block",
+                "block_indices_cumsum",
+                "keep_meta",
+            ):
+                t = getattr(cloned_chunk, attr, None)
+                if t is not None:
+                    setattr(cloned_chunk, attr, _clone_dev_tensor(t))
+            cloned_prefill.chunk = cloned_chunk
+        cloned.non_spec_prefill_metadata = cloned_prefill
+
+    decode_meta = getattr(cloned, "non_spec_decode_metadata", None)
+    if decode_meta is not None:
+        cloned_decode = copy.copy(decode_meta)
+        causal = getattr(cloned_decode, "causal_conv1d", None)
+        if causal is not None:
+            cloned_causal = copy.copy(causal)
+            for attr in ("query_start_loc", "cache_indices",
+                         "initial_state_mode"):
+                t = getattr(cloned_causal, attr, None)
+                if t is not None:
+                    setattr(cloned_causal, attr, _clone_dev_tensor(t))
+            cloned_decode.causal_conv1d = cloned_causal
+        t = getattr(cloned_decode, "actual_seq_lengths", None)
+        if t is not None:
+            cloned_decode.actual_seq_lengths = _clone_dev_tensor(t)
+        cloned.non_spec_decode_metadata = cloned_decode
+
+    spec_meta = getattr(cloned, "spec_decode_metadata", None)
+    if spec_meta is not None:
+        cloned_spec = copy.copy(spec_meta)
+        spec_causal = getattr(cloned_spec, "spec_causal_conv1d", None)
+        if spec_causal is not None:
+            cloned_sc = copy.copy(spec_causal)
+            for attr in ("query_start_loc", "cache_indices",
+                         "num_accepted_tokens"):
+                t = getattr(cloned_sc, attr, None)
+                if t is not None:
+                    setattr(cloned_sc, attr, _clone_dev_tensor(t))
+            cloned_spec.spec_causal_conv1d = cloned_sc
+        t = getattr(cloned_spec, "actual_seq_lengths", None)
+        if t is not None:
+            cloned_spec.actual_seq_lengths = _clone_dev_tensor(t)
+        cloned.spec_decode_metadata = cloned_spec
 
     return cloned
 
@@ -847,8 +953,6 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_c_wrapper: Any = None
             # Cache segment_a prepare results for segment_e reuse (edge-cloud only)
             self._edge_prepare_cache: dict | None = None
-            # Cache cloud-side prepare results to overlap with edge segment_a
-            self._cloud_prepare_cache: dict | None = None
         else:
             self.head_k = 0
             self.tail_k = 0
@@ -2436,7 +2540,20 @@ class NPUModelRunner(GPUModelRunner):
             # EMPTY is safe.
             tail_req_ids = list(scheduler_output.num_scheduled_tokens.keys())
             if tail_req_ids:
-                stale = [r for r in tail_req_ids if r not in self.requests]
+                # A req is stale for this tail batch if it was already
+                # popped from self.requests (finished during the head->tail
+                # window) OR if THIS batch's finished_req_ids will pop it in
+                # _update_states before the cached-req loop reads
+                # self.requests[req_id] (KeyError). The latter happens when
+                # the scheduler finishes a request (max_tokens/stop/abort)
+                # while another in-flight tail for it is still queued —
+                # possible with batch_queue depth 4 and many concurrent reqs.
+                finished = scheduler_output.finished_req_ids or set()
+                stale = [
+                    r
+                    for r in tail_req_ids
+                    if r not in self.requests or r in finished
+                ]
                 if len(stale) == len(tail_req_ids):
                     logger.error(
                         "[EDGE-TAIL-STALE-DISCARD] batch_type=%s "
@@ -2450,19 +2567,31 @@ class NPUModelRunner(GPUModelRunner):
                     self._tail_segment_discarded = True
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 if stale:
-                    # Partial-stale: alive reqs need the step, stale reqs would
-                    # crash. Cannot safely discard nor proceed. Full fix needs
-                    # per-req hidden slicing -- not yet implemented.
-                    logger.error(
-                        "[EDGE-TAIL-PARTIAL-STALE] batch_type=%s "
-                        "head_token=%s req_ids=%s stale=%s alive=%s; "
-                        "NOT handled, will crash.",
-                        scheduler_output.batch_type,
-                        scheduler_output.head_token,
-                        tail_req_ids,
-                        stale,
-                        [r for r in tail_req_ids if r in self.requests],
+                    # Partial-stale: some reqs in this tail batch already
+                    # finished on the edge during the head->tail window, but
+                    # alive reqs still need this step. Filter the stale reqs
+                    # out of scheduler_output and slice the received hidden
+                    # tensors (per-req token ranges), then run segment_e for
+                    # the alive reqs only.
+                    # logger.warning(
+                    #     "[EDGE-TAIL-PARTIAL-STALE-FILTER] batch_type=%s "
+                    #     "head_token=%s stale=%s alive=%s; filtering stale "
+                    #     "reqs from tail segment.",
+                    #     scheduler_output.batch_type,
+                    #     scheduler_output.head_token,
+                    #     stale,
+                    #     [r for r in tail_req_ids if r in self.requests],
+                    # )
+                    scheduler_output, intermediate_tensors = (
+                        self._filter_stale_tail_batch(
+                            scheduler_output, intermediate_tensors, stale
+                        )
                     )
+                    # The segment_a prepare cache was built for the FULL
+                    # batch (attn_metadata / logits_indices / num_tokens all
+                    # include the stale reqs' tokens). The segment_e fast
+                    # path must not reuse it; force the normal prepare path.
+                    self._edge_prepare_cache = None
 
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
@@ -2531,13 +2660,6 @@ class NPUModelRunner(GPUModelRunner):
             and tuple(self.input_batch.req_ids)
             == tuple(scheduler_output.num_scheduled_tokens)
         )
-        # ---- cloud fast path: reuse pre-computed prepare results ----
-        _cloud_fast_path = (
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "cloud"
-            and intermediate_tensors is not None
-            and self._cloud_prepare_cache is not None
-        )
         if _fast_path:
             cache = self._edge_prepare_cache
             self._edge_prepare_cache = None  # consumed, clear for next iteration
@@ -2560,23 +2682,9 @@ class NPUModelRunner(GPUModelRunner):
             )
             # Fast path skips _update_states, so no deferred corrections.
             deferred_state_corrections_fn = None
-        elif _cloud_fast_path:
-            cache = self._cloud_prepare_cache
-            self._cloud_prepare_cache = None  # consumed, clear for next iteration
-            total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
-            num_tokens_padded = cache["num_tokens_padded"]
-            num_tokens_across_dp = cache["num_tokens_across_dp"]
-            attn_metadata = cache["attn_metadata"]
-            logits_indices = cache["logits_indices"]
-            spec_decode_metadata = cache["spec_decode_metadata"]
-            spec_decode_common_attn_metadata = cache["spec_decode_common_attn_metadata"]
-            cudagraph_mode = cache["cudagraph_mode"]
-            batch_desc = cache["batch_desc"]
-            cudagraph_stats = cache["cudagraph_stats"]
-            deferred_state_corrections_fn = None
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
-                if not _fast_path and not _cloud_fast_path:
+                if not _fast_path:
                     # Fix up prev_req_id_to_index for requests that were discarded
                     # in the previous sample_tokens step. If a request has
                     # prev_num_draft_len > 0 but is missing from
@@ -2673,11 +2781,6 @@ class NPUModelRunner(GPUModelRunner):
                             "logprobs for prompt tokens, tokens, please disable "
                             "it when the requests need prompt logprobs"
                         )
-
-                    if self.dynamic_eplb:
-                        self.update_eplb_heat_collection_status(num_tokens_padded)
-
-                    pad_attn = cudagraph_mode == CUDAGraphMode.FULL
 
                     # NOTE(Angazenn): According to https://github.com/vllm-project/vllm/pull/30877,
                     # there should be a corresponding 'postprocess_mamba'. However, it is called inside
@@ -2831,7 +2934,13 @@ class NPUModelRunner(GPUModelRunner):
 
         # Save per-step state for layer slice continuation.
         if layer_slice_info is not None and not layer_slice_info.is_last_slice:
-            self._layerwise_positions = positions
+            # positions / logits_indices are views into persistent per-batch
+            # buffers that an interleaved decode batch rewrites in-place;
+            # clone them (and attn metadata, below) so the continuation
+            # slices still see THIS prefill's values.
+            self._layerwise_positions = (
+                positions.clone() if isinstance(positions, torch.Tensor) else positions
+            )
             # Deep-clone device tensors inside attn_metadata to prevent
             # corruption by subsequent decode batches.  The metadata's
             # device tensors (query_start_loc, state_indices, etc.) are
@@ -2852,7 +2961,11 @@ class NPUModelRunner(GPUModelRunner):
             self._layerwise_num_tokens_across_dp = num_tokens_across_dp
             self._layerwise_batch_desc = batch_desc
             self._layerwise_scheduler_output = scheduler_output
-            self._layerwise_logits_indices = logits_indices
+            self._layerwise_logits_indices = (
+                logits_indices.clone()
+                if isinstance(logits_indices, torch.Tensor)
+                else logits_indices
+            )
             self._layerwise_spec_decode_metadata = spec_decode_metadata
             self._layerwise_spec_decode_common_attn_metadata = spec_decode_common_attn_metadata
             self._layerwise_ec_connector_output = ec_connector_output
@@ -3359,11 +3472,22 @@ class NPUModelRunner(GPUModelRunner):
                 # Cache the sampled tokens on the NPU and avoid CPU sync.
                 # These will be copied into input_ids in the next step
                 # when preparing inputs.
+                new_prev_map = {
+                    req_id: i
+                    for i, req_id in enumerate(self.input_batch.req_ids)
+                    if i not in invalid_req_indices_set
+                }
+                sampled_token_ids, new_prev_map = (
+                    self._merge_pending_prev_sampled(
+                        sampled_token_ids, new_prev_map
+                    )
+                )
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
-
-            self.input_batch.prev_req_id_to_index = {
-                req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
-            }
+                self.input_batch.prev_req_id_to_index = new_prev_map
+            else:
+                self.input_batch.prev_req_id_to_index = {
+                    req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
+                }
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
@@ -3654,6 +3778,7 @@ class NPUModelRunner(GPUModelRunner):
             and self.pcp_size * self.dcp_size == 1
         ):
             num_reqs_padded = self._pad_query_start_loc_for_fia(
+                self.query_start_loc,
                 num_tokens_padded,
                 num_reqs_padded,
                 num_reqs,
@@ -3700,101 +3825,6 @@ class NPUModelRunner(GPUModelRunner):
             "batch_desc": batch_desc,
             "cudagraph_stats": cudagraph_stats,
         }
-
-    def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
-        """Pre-compute input preparation on cloud while edge runs segment_a.
-
-        Caches results in self._cloud_prepare_cache so that when edge data
-        arrives, execute_model can skip _update_states, _prepare_inputs,
-        _determine_batch_execution_and_padding, and _build_attention_metadata,
-        going directly to _preprocess (sync_and_gather) + _model_forward.
-        """
-        assert self._edge_cloud_enabled, (
-            "cloud_prepare_early should only be called in edge-cloud mode"
-        )
-        assert self.edge_cloud_cfg.role == "cloud", (
-            "cloud_prepare_early should only be called on cloud side"
-        )
-
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if not num_scheduled_tokens:
-            self._cloud_prepare_cache = None
-            return
-
-        # Replicate scheduler_output handling from execute_model
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.use_ngram_gpu()
-        ):
-            num_scheduled_tokens_copy = (
-                scheduler_output.num_scheduled_tokens.copy()
-            )
-            spec_decode_tokens_copy = (
-                scheduler_output.scheduled_spec_decode_tokens.copy()
-            )
-            scheduler_output = replace(
-                scheduler_output,
-                num_scheduled_tokens=num_scheduled_tokens_copy,
-                scheduled_spec_decode_tokens=spec_decode_tokens_copy,
-            )
-
-        if (
-            (
-                self.use_async_scheduling
-                and self.num_spec_tokens
-                and self._draft_token_ids is None
-            )
-            or (
-                self.pcp_size > 1
-                and self.supports_mm_inputs
-                and get_pp_group().is_first_rank
-                and not self.model_config.is_encoder_decoder
-            )
-        ):
-            scheduler_output = deepcopy(scheduler_output)
-
-        # Fix up prev_req_id_to_index (same as execute_model)
-        if (
-            self.use_async_scheduling
-            and self.num_spec_tokens
-            and self.input_batch.prev_req_id_to_index is not None
-        ):
-            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                if (
-                    req_id not in self.input_batch.prev_req_id_to_index
-                    and (req_state := self.requests.get(req_id)) is not None
-                    and req_state.prev_num_draft_len
-                ):
-                    req_state.prev_num_draft_len = 0
-
-        # --- _update_states ---
-        self._update_states(scheduler_output)
-
-        # --- Run core input preparation ---
-        # cloud_prepare_early runs BEFORE the forward pass (outside
-        # torch.inference_mode), but GDN attention builder does in-place
-        # tensor copies that require inference mode.  Wrap the whole
-        # preparation inside inference_mode to stay compatible with
-        # PyTorch >= 2.0 inference tensor protection.
-        with torch.inference_mode():
-            cache = self._run_input_preparation(scheduler_output)
-
-        # If the batch became empty after _update_states (num_reqs == 0),
-        # _run_input_preparation returns a zeroed placeholder.  Don't cache
-        # it — let execute_model fall through to the normal slow path which
-        # will return EMPTY_MODEL_RUNNER_OUTPUT.
-        if cache["total_num_scheduled_tokens"] == 0:
-            self._cloud_prepare_cache = None
-            return
-
-        # --- update_cos_sin ---
-        num_input_tokens = cache["num_tokens_padded"]
-        if self.use_cp and self.pcp_manager.pcp_use_hybrid_attn:
-            num_input_tokens = cache["total_num_scheduled_tokens"]
-        update_cos_sin(self.positions[:num_input_tokens])
-
-        # --- Cache all results ---
-        self._cloud_prepare_cache = cache
 
     def _edge_cloud_forward(
         self,
@@ -4244,12 +4274,166 @@ class NPUModelRunner(GPUModelRunner):
                 f"{tail_req_ids}"
             )
 
+    def _merge_pending_prev_sampled(
+        self,
+        sampled_token_ids: torch.Tensor,
+        new_map: dict[str, int],
+    ) -> tuple[torch.Tensor, dict[str, int]]:
+        """Preserve pending sampled tokens from a previous, different batch.
+
+        Upstream, every async sampling step covers the full running batch, so
+        replacing ``prev_sampled_token_ids`` / ``prev_req_id_to_index``
+        wholesale is safe. In edge-cloud PD separation, sampling only happens
+        in tail segments (PL/DL) whose batch is a SUBSET of the running
+        requests: a PL for request B can run between the DL that sampled
+        request A's token and the DF that must consume it. A wholesale
+        replace drops A's pending token; A's placeholder input (-1) is then
+        never filled, and A decodes garbage from that step on. Merge instead:
+        keep rows for requests that are absent from the current sampling
+        batch but still alive.
+        """
+        prev_buf = self.input_batch.prev_sampled_token_ids
+        prev_map = self.input_batch.prev_req_id_to_index
+        if prev_buf is None or not prev_map:
+            return sampled_token_ids, new_map
+        stale = [
+            (req_id, idx)
+            for req_id, idx in prev_map.items()
+            if req_id not in new_map and req_id in self.requests
+        ]
+        if not stale:
+            return sampled_token_ids, new_map
+        offset = sampled_token_ids.shape[0]
+        combined = sampled_token_ids.new_empty(
+            (offset + len(stale), *sampled_token_ids.shape[1:])
+        )
+        combined[:offset] = sampled_token_ids
+        merged_map = dict(new_map)
+        for j, (req_id, old_idx) in enumerate(stale):
+            combined[offset + j] = prev_buf[old_idx]
+            merged_map[req_id] = offset + j
+        # logger.warning(
+        #     "[EDGE-CLOUD-STASH] preserved %d pending sampled token(s) for "
+        #     "reqs %s not in the current sampling batch (batch=%s)",
+        #     len(stale),
+        #     [r for r, _ in stale],
+        #     list(new_map.keys()),
+        # )
+        return combined, merged_map
+
     @staticmethod
     def _expected_tail_batch_type(head_bt: BatchType) -> BatchType:
         return {
             BatchType.PREFILL_FIRST: BatchType.PREFILL_LAST,
             BatchType.DECODE_FIRST: BatchType.DECODE_LAST,
         }[head_bt]
+
+    def _filter_stale_tail_batch(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: "IntermediateTensors | None",
+        stale_req_ids: list[str],
+    ) -> tuple[SchedulerOutput, "IntermediateTensors | None"]:
+        """Remove stale (already-finished) requests from a PL/DL tail batch.
+
+        The cloud shipped hidden tensors for the FULL head batch, but the
+        stale reqs were popped from ``self.requests`` on the edge during the
+        head->tail window. Rewrite ``scheduler_output`` to the alive subset
+        and slice every token-major tensor in ``intermediate_tensors`` by the
+        per-req token ranges, so segment_e only runs for alive reqs.
+
+        Token layout assumption (verified against the data-plane contract):
+        hidden tensors are [total_tokens, ...] with each req contributing
+        ``num_scheduled_tokens[req_id]`` tokens in ``scheduler_output`` order.
+        """
+        stale = set(stale_req_ids)
+        num_scheduled = scheduler_output.num_scheduled_tokens
+        alive_req_ids = [r for r in num_scheduled if r not in stale]
+
+        # ---- Slice token-major hidden tensors ----
+        if intermediate_tensors is not None:
+            total_tokens = sum(num_scheduled.values())
+            keep_indices: list[int] = []
+            offset = 0
+            for req_id, n in num_scheduled.items():
+                if req_id not in stale:
+                    keep_indices.extend(range(offset, offset + n))
+                offset += n
+            new_tensors: dict[str, torch.Tensor] = {}
+            for key, tensor in intermediate_tensors.tensors.items():
+                if (isinstance(tensor, torch.Tensor)
+                        and tensor.dim() > 0
+                        and tensor.shape[0] == total_tokens):
+                    index = torch.tensor(
+                        keep_indices, dtype=torch.long, device=tensor.device
+                    )
+                    new_tensors[key] = tensor.index_select(0, index)
+                else:
+                    # Not token-major (e.g. scalar metadata): keep as-is.
+                    new_tensors[key] = tensor
+            new_intermediate = IntermediateTensors(new_tensors)
+            # AsyncIntermediateTensors.__getattribute__ raises AttributeError
+            # for attributes that were never set (kv_connector_output is only
+            # attached on non-tail PP paths), so use getattr with a default.
+            new_intermediate.kv_connector_output = getattr(
+                intermediate_tensors, "kv_connector_output", None
+            )
+            intermediate_tensors = new_intermediate
+
+        # ---- Rewrite per-req scheduling fields ----
+        scheduler_output.num_scheduled_tokens = {
+            r: num_scheduled[r] for r in alive_req_ids
+        }
+        scheduler_output.total_num_scheduled_tokens = sum(
+            scheduler_output.num_scheduled_tokens.values()
+        )
+        if scheduler_output.scheduled_spec_decode_tokens:
+            scheduler_output.scheduled_spec_decode_tokens = {
+                r: t
+                for r, t in scheduler_output.scheduled_spec_decode_tokens.items()
+                if r not in stale
+            }
+        if scheduler_output.scheduled_new_reqs:
+            scheduler_output.scheduled_new_reqs = [
+                r for r in scheduler_output.scheduled_new_reqs
+                if r.req_id not in stale
+            ]
+        cached = scheduler_output.scheduled_cached_reqs
+        if cached is not None and cached.req_ids:
+            keep = [
+                i for i, r in enumerate(cached.req_ids) if r not in stale
+            ]
+            if len(keep) != len(cached.req_ids):
+                # NOTE: new_token_ids is only populated in non-async PP mode
+                # (it is empty under async scheduling), so it is NOT always
+                # parallel to req_ids. Filter it by index only when the
+                # lengths match; otherwise keep it as-is.
+                if len(cached.new_token_ids) == len(cached.req_ids):
+                    filtered_new_token_ids = [
+                        cached.new_token_ids[i] for i in keep
+                    ]
+                else:
+                    filtered_new_token_ids = cached.new_token_ids
+                scheduler_output.scheduled_cached_reqs = CachedRequestData(
+                    req_ids=[cached.req_ids[i] for i in keep],
+                    resumed_req_ids={
+                        r for r in cached.resumed_req_ids if r not in stale
+                    },
+                    new_token_ids=filtered_new_token_ids,
+                    all_token_ids={
+                        r: t
+                        for r, t in cached.all_token_ids.items()
+                        if r not in stale
+                    },
+                    new_block_ids=[cached.new_block_ids[i] for i in keep],
+                    num_computed_tokens=[
+                        cached.num_computed_tokens[i] for i in keep
+                    ],
+                    num_output_tokens=[
+                        cached.num_output_tokens[i] for i in keep
+                    ],
+                )
+        return scheduler_output, intermediate_tensors
 
     def _edge_cloud_forward_cloud(
         self,
@@ -5554,8 +5738,15 @@ class NPUModelRunner(GPUModelRunner):
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
+        # In edge-cloud head_tail mode (首一尾一), a kv cache group whose
+        # layers all live on the cloud produces an EMPTY attn_group on the
+        # edge (and vice versa); skip empty groups instead of indexing [0].
         self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
+            [
+                isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+                for attn_group in self.attn_groups
+                if attn_group
+            ]
         )
 
         self.may_reinitialize_input_batch(kv_cache_config)
@@ -6418,6 +6609,15 @@ class NPUModelRunner(GPUModelRunner):
                 # block splitting. Get the supported block sizes from
                 # the backend.
                 attn_groups = self.attn_groups[kv_cache_group_id]
+                if not attn_groups:
+                    # Edge-cloud head_tail (首一尾一): this kv cache group's
+                    # layers all live on the peer side, so there is no local
+                    # backend to query. The value is unused for an empty
+                    # group; keep list alignment with the group index.
+                    self.kernel_block_sizes.append(
+                        [kv_cache_group.kv_cache_spec.block_size]
+                    )
+                    continue
                 backends = [attn_group.backend for attn_group in attn_groups]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
                 selected_kernel_size = select_common_block_size(
