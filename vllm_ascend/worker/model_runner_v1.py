@@ -4372,8 +4372,11 @@ class NPUModelRunner(GPUModelRunner):
                     # Not token-major (e.g. scalar metadata): keep as-is.
                     new_tensors[key] = tensor
             new_intermediate = IntermediateTensors(new_tensors)
-            new_intermediate.kv_connector_output = (
-                intermediate_tensors.kv_connector_output
+            # AsyncIntermediateTensors.__getattribute__ raises AttributeError
+            # for attributes that were never set (kv_connector_output is only
+            # attached on non-tail PP paths), so use getattr with a default.
+            new_intermediate.kv_connector_output = getattr(
+                intermediate_tensors, "kv_connector_output", None
             )
             intermediate_tensors = new_intermediate
 
