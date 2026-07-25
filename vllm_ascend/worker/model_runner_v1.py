@@ -4404,12 +4404,22 @@ class NPUModelRunner(GPUModelRunner):
                 i for i, r in enumerate(cached.req_ids) if r not in stale
             ]
             if len(keep) != len(cached.req_ids):
+                # NOTE: new_token_ids is only populated in non-async PP mode
+                # (it is empty under async scheduling), so it is NOT always
+                # parallel to req_ids. Filter it by index only when the
+                # lengths match; otherwise keep it as-is.
+                if len(cached.new_token_ids) == len(cached.req_ids):
+                    filtered_new_token_ids = [
+                        cached.new_token_ids[i] for i in keep
+                    ]
+                else:
+                    filtered_new_token_ids = cached.new_token_ids
                 scheduler_output.scheduled_cached_reqs = CachedRequestData(
                     req_ids=[cached.req_ids[i] for i in keep],
                     resumed_req_ids={
                         r for r in cached.resumed_req_ids if r not in stale
                     },
-                    new_token_ids=[cached.new_token_ids[i] for i in keep],
+                    new_token_ids=filtered_new_token_ids,
                     all_token_ids={
                         r: t
                         for r, t in cached.all_token_ids.items()
