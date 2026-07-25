@@ -2540,7 +2540,20 @@ class NPUModelRunner(GPUModelRunner):
             # EMPTY is safe.
             tail_req_ids = list(scheduler_output.num_scheduled_tokens.keys())
             if tail_req_ids:
-                stale = [r for r in tail_req_ids if r not in self.requests]
+                # A req is stale for this tail batch if it was already
+                # popped from self.requests (finished during the head->tail
+                # window) OR if THIS batch's finished_req_ids will pop it in
+                # _update_states before the cached-req loop reads
+                # self.requests[req_id] (KeyError). The latter happens when
+                # the scheduler finishes a request (max_tokens/stop/abort)
+                # while another in-flight tail for it is still queued —
+                # possible with batch_queue depth 4 and many concurrent reqs.
+                finished = scheduler_output.finished_req_ids or set()
+                stale = [
+                    r
+                    for r in tail_req_ids
+                    if r not in self.requests or r in finished
+                ]
                 if len(stale) == len(tail_req_ids):
                     logger.error(
                         "[EDGE-TAIL-STALE-DISCARD] batch_type=%s "
