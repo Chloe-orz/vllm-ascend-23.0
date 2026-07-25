@@ -536,7 +536,9 @@ class PassiveEngineCoreProc:
                 )
                 if scheduler_output is None:
                     continue
-                self._published_post_out_tokens.add(head_token)
+                # NOTE: do NOT add head_token to _published_post_out_tokens
+                # here — _maybe_publish_post_out records it after actually
+                # publishing (single idempotency point for both PL and DL).
                 logger.info(
                     "[CLOUD-POST-OUT] Publishing PREFILL_LAST after worker done, "
                     "head_token=%s",
@@ -650,6 +652,23 @@ class PassiveEngineCoreProc:
             )
         else:
             return
+        # Idempotency guard: publishing the same head_token twice would make
+        # the edge process the tail segment twice. A duplicated DECODE_LAST
+        # output subtracts num_output_placeholders a second time and drives
+        # it negative (fatal assert in AsyncScheduler._update_request_with_output).
+        # PREFILL_LAST is additionally gated by the worker-ack path; the
+        # guard is harmless there and essential for DL.
+        head_token = getattr(tail, "head_token", None)
+        if head_token:
+            if head_token in self._published_post_out_tokens:
+                logger.warning(
+                    "[CLOUD-POST-OUT] Suppressing duplicate %s publish for "
+                    "head_token=%s",
+                    tail.batch_type,
+                    head_token,
+                )
+                return
+            self._published_post_out_tokens.add(head_token)
         # Echo the head_token back so the edge can correlate the tail
         # segment with its suspended head state.
         self._pp_pd_channel.publish(tail)
