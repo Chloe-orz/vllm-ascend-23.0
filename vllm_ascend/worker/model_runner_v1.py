@@ -2924,7 +2924,7 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors,
             )
 
-            if not self.edge_cloud_cfg.role == "edge":
+            if not self.edge_cloud_cfg.role == "edge" and self.edge_cloud_cfg.mode == "embedding_only":
                 # update global cos, sin
                 update_cos_sin(positions)
 

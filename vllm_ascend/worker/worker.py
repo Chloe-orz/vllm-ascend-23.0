@@ -857,6 +857,29 @@ class NPUWorker(WorkerBase):
                                             num_tokens=scheduler_output.total_num_scheduled_tokens),
                 channel=channel,
             )
+            # [diagnosis] Summary of every PREFILL_FIRST hidden sent to the
+            # cloud: splits first-request corruption between edge segment_a
+            # (differs here) and cloud middle (matches here but PL differs).
+            if scheduler_output.batch_type == BatchType.PREFILL_FIRST:
+                try:
+                    logger.warning(
+                        "[EC-DIAG] PF hidden head_token=%s req_ids=%s: %s",
+                        scheduler_output.head_token,
+                        list(scheduler_output.num_scheduled_tokens.keys()),
+                        {
+                            k: (
+                                tuple(v.shape),
+                                float(v.detach().float().abs().max())
+                                if v.numel() else None,
+                                float(v.detach().float().sum())
+                                if v.numel() else None,
+                            )
+                            for k, v in _gathered.items()
+                            if isinstance(v, torch.Tensor)
+                        },
+                    )
+                except Exception:
+                    logger.exception("[EC-DIAG] failed to log PF hidden")
             # logger.info(
             #     "[EC-TRACE] edge->cloud send batch_type=%s head_token=%s "
             #     "channel=%s req_ids=%s num_tokens=%d fp: %s",
