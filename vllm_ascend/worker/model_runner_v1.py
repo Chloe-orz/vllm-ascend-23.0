@@ -4196,7 +4196,11 @@ class NPUModelRunner(GPUModelRunner):
             if intermediate_tensors is None
             else "_first_seg_tail_logged"
         )
-        if not getattr(self, _diag_key, False) and not self._is_dummy_or_profile_run():
+        if (
+            not getattr(self, _diag_key, False)
+            and not self._is_dummy_or_profile_run()
+            and len(self.requests) > 0
+        ):
             setattr(self, _diag_key, True)
             logger.warning(
                 "[EC-DIAG] first seg %s forward: use_graph=%s seg_a_graph=%s "
