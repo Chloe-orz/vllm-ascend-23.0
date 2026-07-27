@@ -919,6 +919,42 @@ class NPUWorker(WorkerBase):
         )
         #logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
 
+        # [diagnosis] One-shot dump of the FIRST PREFILL_LAST hidden tensors
+        # (after execute_model, so comm materialization already happened).
+        # Used to tell whether the first-request PL failure comes from a
+        # garbage c2e hidden (upstream) or from segment_e itself. Fires at
+        # most once per worker process; remove after root cause is found.
+        if (
+            scheduler_output.batch_type == BatchType.PREFILL_LAST
+            and not getattr(self, "_first_pl_hidden_dumped", False)
+        ):
+            self._first_pl_hidden_dumped = True
+            try:
+                _dump = {
+                    k: v.detach().float().cpu()
+                    for k, v in intermediate_tensors.tensors.items()
+                    if isinstance(v, torch.Tensor)
+                }
+                _path = (
+                    f"/tmp/first_pl_hidden_"
+                    f"{scheduler_output.head_token or 'unknown'}.pt"
+                )
+                torch.save(_dump, _path)
+                logger.warning(
+                    "[EC-DIAG] first PL hidden dumped to %s: %s",
+                    _path,
+                    {
+                        k: (
+                            tuple(v.shape),
+                            float(v.abs().max()) if v.numel() else None,
+                            float(v.sum()) if v.numel() else None,
+                        )
+                        for k, v in _dump.items()
+                    },
+                )
+            except Exception:
+                logger.exception("[EC-DIAG] failed to dump first PL hidden")
+
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
         )
