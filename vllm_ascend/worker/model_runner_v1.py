@@ -4220,6 +4220,31 @@ class NPUModelRunner(GPUModelRunner):
             if _EXTRA_CTX.layer_idx is not None:
                 _EXTRA_CTX.layer_idx = 0
             try:
+                # [diagnosis] Log the actual input_ids / positions fed into
+                # segment_a for the first real head batch. The failing
+                # first request shows residual≈0 (embedding output wrong),
+                # i.e. input_ids may not be the prompt tokens.
+                if not getattr(self, "_first_real_inputs_logged", False) \
+                        and len(self.requests) > 0:
+                    self._first_real_inputs_logged = True
+                    try:
+                        _ids = (
+                            input_ids[:20].detach().cpu().tolist()
+                            if isinstance(input_ids, torch.Tensor) else None
+                        )
+                        _pos = (
+                            positions[:20].detach().cpu().tolist()
+                            if isinstance(positions, torch.Tensor) else None
+                        )
+                        _cpu_ids = self.input_ids.cpu[:20].tolist()
+                        logger.warning(
+                            "[EC-DIAG] first real inputs: input_ids=%s "
+                            "positions=%s input_ids_cpu=%s "
+                            "num_tokens_padded=%d",
+                            _ids, _pos, _cpu_ids, num_tokens_padded,
+                        )
+                    except Exception:
+                        logger.exception("[EC-DIAG] failed to log inputs")
                 hidden_states = seg_a(
                     input_ids=input_ids,
                     positions=positions,
