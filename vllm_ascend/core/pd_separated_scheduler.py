@@ -688,6 +688,27 @@ class PDSeparatedScheduler(Scheduler):
         #         f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
         #     )
         outputs = super().update_from_output(scheduler_output, model_runner_output)
+        # [diagnosis] Per-token sampling trace for tail segments: shows the
+        # exact sampled token ids per request per PL/DL step, used to tell
+        # whether the first bad token comes from PL (prefill tail) or the
+        # first DL (decode graph replay). Safe: CPU-side, scheduler process.
+        if scheduler_output.batch_type in (
+            BatchType.PREFILL_LAST,
+            BatchType.DECODE_LAST,
+        ):
+            try:
+                sti = getattr(model_runner_output, "sampled_token_ids", None)
+                if sti is not None:
+                    logger.info(
+                        "[EC-SAMPLE] batch_type=%s head_token=%s req_ids=%s "
+                        "sampled=%s",
+                        scheduler_output.batch_type.value,
+                        scheduler_output.head_token,
+                        model_runner_output.req_ids,
+                        sti.tolist() if hasattr(sti, "tolist") else sti,
+                    )
+            except Exception:
+                logger.exception("[EC-SAMPLE] failed to log sampled tokens")
         self.chunk_prefill_first = [
             req for req in self.chunk_prefill_first if not req.is_finished()
         ]
