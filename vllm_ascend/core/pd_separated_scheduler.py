@@ -188,11 +188,11 @@ class PDSeparatedScheduler(Scheduler):
                 # P首 returned empty (e.g. KV cache exhausted). Preserve
                 # finished_req_ids and fall through to decode tasks to avoid
                 # a tight busy-loop where the edge spins on empty prefill.
-                logger.warning(
-                    "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
-                    "This usually means KV cache blocks are exhausted by running decode "
-                    "requests. Prefill work will be deferred until resources are freed."
-                )
+                # logger.warning(
+                #     "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
+                #     "This usually means KV cache blocks are exhausted by running decode "
+                #     "requests. Prefill work will be deferred until resources are freed."
+                # )
                 self.finished_req_ids.update(so.finished_req_ids)
             if self.decodes_last_ready and self._can_schedule_decode_last():
                 return self._pick_decode_last_batch()
@@ -206,11 +206,11 @@ class PDSeparatedScheduler(Scheduler):
                 so = self._pick_prefill_first_batch()
                 if so.total_num_scheduled_tokens > 0:
                     return so
-                logger.warning(
-                    "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
-                    "This usually means KV cache blocks are exhausted by running decode "
-                    "requests. Prefill work will be deferred until resources are freed."
-                )
+                # logger.warning(
+                #     "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
+                #     "This usually means KV cache blocks are exhausted by running decode "
+                #     "requests. Prefill work will be deferred until resources are freed."
+                # )
                 self.finished_req_ids.update(so.finished_req_ids)
             if self.decodes_last_ready and self._can_schedule_decode_last():
                 return self._pick_decode_last_batch()

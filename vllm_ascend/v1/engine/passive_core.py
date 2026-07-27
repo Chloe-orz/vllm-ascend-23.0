@@ -422,18 +422,18 @@ def _trim_scheduler_output_for_worker_enqueue(
     after_tokens = sum(
         len(token_ids) for token_ids in trimmed_all_token_ids.values()
     )
-    logger.info(
-        "[CLOUD-MQ-TRIM] batch_type=%s reqs=%d prev_dispatch_reqs=%d "
-        "resumed=%d all_token_ids entries %d->%d tokens %d->%d",
-        scheduler_output.batch_type.value,
-        len(getattr(cached, "req_ids", ())),
-        len(prev_dispatch_req_ids),
-        len(resumed_req_ids),
-        len(all_token_ids),
-        len(trimmed_all_token_ids),
-        before_tokens,
-        after_tokens,
-    )
+    # logger.info(
+    #     "[CLOUD-MQ-TRIM] batch_type=%s reqs=%d prev_dispatch_reqs=%d "
+    #     "resumed=%d all_token_ids entries %d->%d tokens %d->%d",
+    #     scheduler_output.batch_type.value,
+    #     len(getattr(cached, "req_ids", ())),
+    #     len(prev_dispatch_req_ids),
+    #     len(resumed_req_ids),
+    #     len(all_token_ids),
+    #     len(trimmed_all_token_ids),
+    #     before_tokens,
+    #     after_tokens,
+    # )
 
     so_copy = copy.copy(scheduler_output)
     cached_copy = copy.copy(cached)
@@ -539,11 +539,11 @@ class PassiveEngineCoreProc:
                 # NOTE: do NOT add head_token to _published_post_out_tokens
                 # here — _maybe_publish_post_out records it after actually
                 # publishing (single idempotency point for both PL and DL).
-                logger.info(
-                    "[CLOUD-POST-OUT] Publishing PREFILL_LAST after worker done, "
-                    "head_token=%s",
-                    head_token,
-                )
+                # logger.info(
+                #     "[CLOUD-POST-OUT] Publishing PREFILL_LAST after worker done, "
+                #     "head_token=%s",
+                #     head_token,
+                # )
                 self._maybe_publish_post_out(scheduler_output)
 
     def step(self) -> bool:
