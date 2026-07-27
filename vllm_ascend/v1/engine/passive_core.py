@@ -537,7 +537,10 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
-                if result.get("batch_type") != BatchType.PREFILL_FIRST:
+                if result.get("batch_type") not in (
+                    BatchType.PREFILL_FIRST,
+                    BatchType.DRAFT_FIRST,
+                ):
                     continue
                 head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
@@ -549,8 +552,9 @@ class PassiveEngineCoreProc:
                     continue
                 self._published_post_out_tokens.add(head_token)
                 logger.info(
-                    "[CLOUD-POST-OUT] Publishing PREFILL_LAST after worker done, "
-                    "head_token=%s",
+                    "[CLOUD-POST-OUT] Publishing tail for %s after worker "
+                    "done, head_token=%s",
+                    scheduler_output.batch_type.value,
                     head_token,
                 )
                 self._maybe_publish_post_out(scheduler_output)
@@ -710,12 +714,13 @@ class PassiveEngineCoreProc:
                     bt,
                     _dt_enqueue,
                 )
-            # For PREFILL_FIRST, POST_OUT must mean the cloud middle segment
-            # has completed and started sending hidden states back.  Store the
-            # original SchedulerOutput here and publish it from
-            # _drain_worker_completion_acks() after the worker reports done.
+            # For prefill and draft, POST_OUT must mean the cloud middle
+            # segment has completed. Store the original SchedulerOutput here
+            # and publish it from _drain_worker_completion_acks() after the
+            # worker reports done. Decode-last is prepared on the edge.
             if (
-                batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
+                batch.scheduler_output.batch_type
+                in (BatchType.PREFILL_FIRST, BatchType.DRAFT_FIRST)
                 and (slice_info is None or slice_info.is_last_slice)
             ):
                 head_token = getattr(batch.scheduler_output, "head_token", None)
@@ -733,7 +738,8 @@ class PassiveEngineCoreProc:
 
         Mapping (cloud-side):
             PREFILL_FIRST → PREFILL_LAST
-            DECODE_FIRST  → DECODE_LAST
+            DECODE_FIRST  → dropped (edge prepares DECODE_LAST)
+            DRAFT_FIRST   → DRAFT_LAST
             anything else → dropped (legacy PP batches don't trigger return)
 
         Uses a shallow copy via :py:func:`dataclasses.replace` so the original
@@ -749,17 +755,28 @@ class PassiveEngineCoreProc:
                 scheduler_output, batch_type=BatchType.PREFILL_LAST
             )
         elif bt == BatchType.DECODE_FIRST:
-            # === Decode-first self-posting optimization ===
-            # Edge always pre-generates DECODE_LAST locally and stores it
-            # in decodes_last_ready.  Cloud never needs to send DECODE_LAST
-            # back via POST_OUT, eliminating control-plane round-trip.
+            # The edge pre-generates DECODE_LAST, so the cloud does not
+            # publish another control-plane response for DECODE_FIRST.
             logger.debug(
                 "[Cloud] Skipping POST_OUT for DECODE_FIRST "
                 "head_token=%s (edge pre-generates DECODE_LAST)",
                 scheduler_output.head_token,
             )
             return
-            # ===============================================
+        elif bt == BatchType.DRAFT_FIRST:
+            tail = replace(
+                scheduler_output, batch_type=BatchType.DRAFT_LAST
+            )
+            if not tail.head_token:
+                raise RuntimeError("DRAFT_LAST POST_OUT missing head_token")
+            if not tail.draft_task_id:
+                raise RuntimeError(
+                    "DRAFT_LAST POST_OUT missing draft_task_id"
+                )
+            if tail.draft_step_idx is None:
+                raise RuntimeError(
+                    "DRAFT_LAST POST_OUT missing draft_step_idx"
+                )
         else:
             return
         # Echo the head_token back so the edge can correlate the tail

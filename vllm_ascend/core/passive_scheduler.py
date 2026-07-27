@@ -128,6 +128,7 @@ class PassiveScheduler:
 
         self.ready_prefills: deque[SchedulerOutput] = deque()
         self.ready_pdmixes: deque[SchedulerOutput] = deque()
+        self.ready_drafts: deque[SchedulerOutput] = deque()
         self.ready_decodes: deque[SchedulerOutput] = deque()
 
         # Active sliced prefill / PD-mix continuation.  Only one sliced
@@ -297,7 +298,13 @@ class PassiveScheduler:
                     )
                 self._last_decode_first_arrival_ts = now
                 self.ready_decodes.append(scheduler_output)
-            elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
+            elif bt == BatchType.DRAFT_FIRST:
+                self.ready_drafts.append(scheduler_output)
+            elif bt in (
+                BatchType.PREFILL_LAST,
+                BatchType.DECODE_LAST,
+                BatchType.DRAFT_LAST,
+            ):
                 # Tail-segment batches are edge-only and must never be
                 # dispatched on the cloud. If one shows up here it is a
                 # routing bug at the publisher side — drop with a loud log.
@@ -311,11 +318,12 @@ class PassiveScheduler:
                 self.ready_pdmixes.append(scheduler_output)
             logger.debug(
                 "PassiveScheduler classified seq=%s batch_type=%s "
-                "(prefills=%d, pdmixes=%d, decodes=%d)",
+                "(prefills=%d, pdmixes=%d, drafts=%d, decodes=%d)",
                 self._arrival_seq(scheduler_output),
                 bt.value if bt is not None else "<none>",
                 len(self.ready_prefills),
                 len(self.ready_pdmixes),
+                len(self.ready_drafts),
                 len(self.ready_decodes),
             )
 
@@ -491,6 +499,7 @@ class PassiveScheduler:
         if so.batch_type in (
             BatchType.PURE_DECODE,
             BatchType.DECODE_FIRST,
+            BatchType.DRAFT_FIRST,
         ):
             return [None]
 
@@ -579,6 +588,18 @@ class PassiveScheduler:
         machine.  Sliced prefill-like batches are dispatched one slice per call
         so decode batches can be interleaved between the remaining slices.
         """
+        # Finish an active sliced prefill before switching work, but do not
+        # let queued prefills starve a scheduled draft. It owns the shared
+        # bidirectional DECODE channel until its tail is consumed on edge;
+        # delaying it behind a continuous prefill stream can block all decode
+        # progress.
+        if (
+            self.ready_drafts
+            and not self._active_prefill_slices
+        ):
+            self._clear_prefill_middle_throttle()
+            return self._build_batch(self.ready_drafts.popleft())
+
         if self.dispatch_policy == DispatchPolicy.EXPECT_ALTERNATION:
             return self._schedule_expect_alternation()
 
@@ -761,13 +782,14 @@ class PassiveScheduler:
         logger.debug(
             "PassiveScheduler.schedule[%s] picked batch_type=%s slices=%d; "
             "pending=(prefills=%d, active_prefill_slices=%d, "
-            "pdmixes=%d, decodes=%d) seq=%s",
+            "pdmixes=%d, drafts=%d, decodes=%d) seq=%s",
             self.dispatch_policy.value,
             so.batch_type.value if so.batch_type is not None else "<none>",
             len(batch.slices),
             len(self.ready_prefills),
             len(self._active_prefill_slices),
             len(self.ready_pdmixes),
+            len(self.ready_drafts),
             len(self.ready_decodes),
             self._arrival_seq(so),
         )
@@ -780,6 +802,7 @@ class PassiveScheduler:
             self.ready_prefills
             or self._active_prefill_slices
             or self.ready_pdmixes
+            or self.ready_drafts
             or self.ready_decodes
         )
 
@@ -789,5 +812,6 @@ class PassiveScheduler:
             len(self.ready_prefills)
             + len(self._active_prefill_slices)
             + len(self.ready_pdmixes)
+            + len(self.ready_drafts)
             + len(self.ready_decodes)
         )
