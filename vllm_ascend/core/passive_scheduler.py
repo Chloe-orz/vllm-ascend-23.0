@@ -163,8 +163,12 @@ class PassiveScheduler:
         self._layer_slice_config: dict[int, int] | None = None
         self._layer_slice_config_mtime: float = 0.0
         self._layer_slice_config_path: str | None = None
+        # Use hf_text_config (not the root hf_config) so multimodal models
+        # whose layer count lives in a nested text sub-config (e.g. KimiK2.5
+        # -> DeepseekV3Config) resolve correctly. For plain-text models
+        # hf_text_config == hf_config, so this is a no-op there.
         num_hidden_layers = (
-            vllm_config.model_config.hf_config.num_hidden_layers
+            vllm_config.model_config.hf_text_config.num_hidden_layers
         )
         pp_size = vllm_config.parallel_config.pipeline_parallel_size
         if vllm_config.parallel_config.enable_edge_cloud:
@@ -469,6 +473,23 @@ class PassiveScheduler:
             is_last_slice=(slice_idx == total_slices - 1),
         )
 
+    def _do_slice(
+        self, so: SchedulerOutput
+    ) -> list["LayerSliceInfo | None"]:
+        """Compute layer slices for a prefill-like batch."""
+        total_slices = self._resolve_slice_count(
+            so.total_num_scheduled_tokens
+        )
+        if total_slices <= 1:
+            return [None]
+        boundaries = self._compute_slice_boundaries(
+            self._num_local_layers, total_slices
+        )
+        return [
+            self._make_slice_info(i, total_slices, boundaries)
+            for i in range(total_slices)
+        ]
+
     def _slice_for(
         self, so: SchedulerOutput
     ) -> list["LayerSliceInfo | None"]:
@@ -482,21 +503,18 @@ class PassiveScheduler:
         ):
             return [None]
 
-        total_slices = self._resolve_slice_count(
-            so.total_num_scheduled_tokens
-        )
-        # Slicing disabled or trivially 1 slice.
-        if total_slices <= 1:
-            return [None]
+        # [方案B] Cloud 侧决策：
+        # 1. 已有 decode 到达 Cloud → 强制切层（确定性收益）
+        if self.ready_decodes:
+            return self._do_slice(so)
 
-        boundaries = self._compute_slice_boundaries(
-            self._num_local_layers, total_slices
-        )
-        # PURE_PREFILL / PREFILL_FIRST / PD_MIX → expand into N slice payloads.
-        return [
-            self._make_slice_info(i, total_slices, boundaries)
-            for i in range(total_slices)
-        ]
+        # 2. Edge 建议切层（decode 正在路上）→ 切层
+        if getattr(so, "cloud_suggest_slicing", False):
+            return self._do_slice(so)
+
+        # 3. Edge 建议不切层 + Cloud 无 decode → 明确不切层（冷启动优化）
+        # 短 prefill（<8k）执行太快，decode 来不及穿插，同样不切层
+        return [None]
 
     # ------------------------------------------------------------------ #
     # Dispatch                                                           #
@@ -534,13 +552,24 @@ class PassiveScheduler:
         self._prefill_middle_throttle_started_at = None
 
     def _can_fallback_to_prefill_in_decode_state(self) -> bool:
+        # Optimization: when the next prefill to schedule has
+        # cloud_suggest_slicing=False, the edge signaled "no running decode
+        # in flight" -> decode is not about to arrive, so waiting (throttling)
+        # for it is pure idle.  Skip the throttle and fall back to prefill
+        # immediately.  This also means the P-middle is unsliced (see
+        # _slice_for), so there is no slice interleaving to protect either.
+        if self.ready_prefills and not getattr(
+            self.ready_prefills[0], "cloud_suggest_slicing", False
+        ):
+            self._clear_prefill_middle_throttle()
+            return True
         started_at = self._prefill_middle_throttle_started_at
         if started_at is None:
             return True
         elapsed_ms = (time.monotonic() - started_at) * 1000
         limit_ms = self._prefill_middle_throttle_seconds * 1000
         if elapsed_ms >= limit_ms:
-            logger.info(
+            logger.error(
                 f"[PD-PASSIVE] Throttle timeout: waited {elapsed_ms:.1f}ms, "
                 f"fallback to prefill",
             )
@@ -656,7 +685,15 @@ class PassiveScheduler:
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE
                 )
-                self._start_prefill_middle_throttle()
+                # Only throttle-for-decode when the prefill is sliced
+                # (cloud_suggest_slicing=True): slicing means a decode is in
+                # flight worth waiting for; an unsliced prefill signals no
+                # decode is coming, so skip the throttle (see
+                # _can_fallback_to_prefill_in_decode_state).
+                if getattr(
+                    self.ready_prefills[0], "cloud_suggest_slicing", False
+                ):
+                    self._start_prefill_middle_throttle()
                 return self._build_batch(self.ready_prefills.popleft())
             if self.ready_decodes:
                 self._clear_prefill_middle_throttle()
@@ -673,7 +710,16 @@ class PassiveScheduler:
                     self._start_prefill_middle_throttle()
                     return self._build_active_prefill_slice_batch()
                 if self.ready_prefills:
-                    self._start_prefill_middle_throttle()
+                    # Only start the post-prefill decode-wait throttle when the
+                    # prefill was sliced (cloud_suggest_slicing=True): slicing
+                    # means a decode is in flight and worth waiting for.  An
+                    # unsliced prefill (cloud_suggest_slicing=False) signals no
+                    # decode is coming, so throttle would be pure idle.
+                    if getattr(
+                        self.ready_prefills[0],
+                        "cloud_suggest_slicing", False
+                    ):
+                        self._start_prefill_middle_throttle()
                     return self._build_batch(self.ready_prefills.popleft())
             else:
                 return ScheduledBatch.empty()

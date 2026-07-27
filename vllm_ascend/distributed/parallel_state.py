@@ -1,5 +1,7 @@
 from typing import Any, Callable
 from dataclasses import dataclass
+import contextlib
+import threading
 
 import torch
 from vllm.config import ParallelConfig, get_current_vllm_config
@@ -33,6 +35,66 @@ _EMBED_TP: GroupCoordinator | None = None
 # flashcomm specific groups
 _FLASHCOMM2_OTP: GroupCoordinator | None = None
 _FLASHCOMM2_ODP: GroupCoordinator | None = None
+
+# ------------------------------------------------------------------ #
+# Per-channel dedicated streams for edge-cloud P2P (isend/irecv).     #
+# ------------------------------------------------------------------ #
+# Each hidden channel (PREFILL_1, PREFILL_2) gets its own NPU stream
+# so that isend/irecv on different channels don't serialize on the
+# default stream.  Without this, a guard-thread early-posted irecv on
+# prefill_2 can block a busy_loop isend on prefill_1 (both on the
+# default stream, FIFO), creating a circular deadlock at 2P request
+# boundaries:
+#   cloud  stream: [irecv hidden_P2 (prefill_2)] [isend result_P1 (prefill_1)]
+#   edge   stream: [irecv result_P1 (prefill_1)] [isend hidden_P2 (prefill_2)]
+# TP-broadcast (intra-node collective) stays on the default stream --
+# it runs inside execute_model's wait_for_comm() on all TP ranks
+# synchronized; only the cross-node P2P (isend/irecv) uses the
+# per-channel stream, and handle.wait() syncs back to the default
+# stream before the broadcast.
+_hidden_channel_streams: dict[Any, Any] = {}
+_hidden_channel_stream_lock = threading.Lock()
+
+
+def _get_hidden_channel_stream(channel: Any) -> Any:
+    """Return the dedicated NPU stream for *channel*, creating it lazily.
+    Thread-safe (double-checked locking)."""
+    stream = _hidden_channel_streams.get(channel)
+    if stream is not None:
+        return stream
+    with _hidden_channel_stream_lock:
+        stream = _hidden_channel_streams.get(channel)
+        if stream is None:
+            stream = torch.npu.Stream()
+            _hidden_channel_streams[channel] = stream
+            logger.info(
+                "[edge-cloud] created dedicated stream for hidden "
+                "channel %s", channel,
+            )
+        return stream
+
+
+@contextlib.contextmanager
+def _hidden_channel_stream_ctx(
+    channel: Any | None, *, wait_for_default: bool = True,
+):
+    """Switch to the channel's dedicated stream for P2P isend/irecv.
+
+    *wait_for_default* – True for the **send** path (the tensor being
+    sent was produced on the default/compute stream, so the channel
+    stream must wait for it).  False for the **recv** path (writing
+    into a freshly allocated buffer, no prior producer to wait for).
+    When *channel* is None (legacy non-hidden-channel path) this is a
+    no-op (stays on the current/default stream).
+    """
+    if channel is None:
+        yield
+        return
+    stream = _get_hidden_channel_stream(channel)
+    if wait_for_default:
+        stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        yield
 _FC3_QUANT_X: GroupCoordinator | None = None
 
 # shard_weight across rank groups
@@ -862,11 +924,14 @@ def edge_cloud_isend_tensor_dict(
             "was initialized with inconsistent per-tensor shapes; re-init "
             "it or unset VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD."
         )
-        handle = torch.distributed.isend(
-            merged, dst=pp_group.ranks[dst], group=group
-        )
-        if merged.is_cuda:
-            merged.record_stream(torch.cuda.current_stream(merged.device))
+        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+            handle = torch.distributed.isend(
+                merged, dst=pp_group.ranks[dst], group=group
+            )
+            if merged.is_cuda:
+                merged.record_stream(torch.cuda.current_stream(merged.device))
+            elif merged.device.type == "npu":
+                merged.record_stream(torch.npu.current_stream(merged.device))
         handles.append(handle)
         return handles
 
@@ -888,13 +953,14 @@ def edge_cloud_isend_tensor_dict(
             # only happens when upstream code returned a non-standard
             # layout, in which case we materialize once.
             value = value.contiguous()
-        handle = torch.distributed.isend(
-            value, dst=pp_group.ranks[dst], group=group
-        )
-        if value.is_cuda:
-            value.record_stream(torch.cuda.current_stream(value.device))
-        elif value.device.type == "npu":
-            value.record_stream(torch.npu.current_stream(value.device))
+        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+            handle = torch.distributed.isend(
+                value, dst=pp_group.ranks[dst], group=group
+            )
+            if value.is_cuda:
+                value.record_stream(torch.cuda.current_stream(value.device))
+            elif value.device.type == "npu":
+                value.record_stream(torch.npu.current_stream(value.device))
         handles.append(handle)
 
     return handles
@@ -1022,9 +1088,13 @@ def edge_cloud_irecv_tensor_dict(
         # the leading num_tokens rows (mirrors the non-merge SP path).  When
         # SP is off this view is the whole buffer, a no-op.
         recv_view = merged[:num_tokens]
-        handle = torch.distributed.irecv(
-            recv_view, src=pp_group.ranks[src], group=group
-        )
+        with _hidden_channel_stream_ctx(channel, wait_for_default=False):
+            handle = torch.distributed.irecv(
+                recv_view, src=pp_group.ranks[src], group=group
+            )
+            if recv_view.device.type == "npu":
+                recv_view.record_stream(torch.npu.current_stream(recv_view.device))
+
         # Zero-fill the SP padding tail (see the non-merge path for why).
         # The merged buffer is TP-broadcast and split into per-key tensors,
         # so the tail padding flows into every per-key tensor; it must be
@@ -1074,9 +1144,13 @@ def edge_cloud_irecv_tensor_dict(
 
             if key in send_keys:
                 recv_view = full_tensor[:num_tokens]
-                handle = torch.distributed.irecv(
-                    recv_view, src=pp_group.ranks[src], group=group
-                )
+                with _hidden_channel_stream_ctx(channel, wait_for_default=False):
+                    handle = torch.distributed.irecv(
+                        recv_view, src=pp_group.ranks[src], group=group
+                    )
+                    if recv_view.device.type == "npu":
+                        recv_view.record_stream(
+                            torch.npu.current_stream(recv_view.device))
                 handles.append(handle)
                 # Zero-fill the SP padding tail.  The sender only transmits
                 # the real num_tokens rows; the remaining

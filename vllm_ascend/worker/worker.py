@@ -22,6 +22,8 @@ from typing import Any
 import copy
 import gc
 import logging
+import threading
+import time
 from types import NoneType
 
 import torch
@@ -197,6 +199,27 @@ class NPUWorker(WorkerBase):
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
         self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
+
+        # [CHER/EHER] Cloud-side hidden early-receive (and its edge-side
+        # mirror) cache.  The guard thread posts irecv ahead of the batch's
+        # execute_model (keyed by head_token); execute_model pops the cached
+        # AsyncIntermediateTensors and runs wait_for_comm() (which both
+        # waits the HCCL handles and runs comm_postprocess, the latter being
+        # a TP collective that must run inside execute_model on all ranks).
+        # Shared by CHER (cloud) and EHER (edge) since the recv primitives
+        # are direction-agnostic (driven by hidden_channel + num_tokens).
+        self._early_recv_handles: dict[str, AsyncIntermediateTensors] = {}
+        self._early_recv_lock = threading.Lock()
+        # head_tokens already consumed by busy_loop (get_or_post_early_recv).
+        # Prevents the guard thread from posting a duplicate (orphan) irecv
+        # when its hint arrives after busy_loop already posted its own.
+        self._early_recv_consumed: set[str] = set()
+        # Whether cloud-side hidden early-receive (CHER) is active on this
+        # worker.  CHER is a built-in part of PD-separation masking, so on a
+        # PD-separated cloud worker (local_rank==0) this is always True; False
+        # (edge role, non-rank0, or PD off) => the legacy sync recv path is
+        # used.
+        self._cloud_hidden_early_recv_enabled: bool = False
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -402,6 +425,57 @@ class NPUWorker(WorkerBase):
                 mode=self.model_runner.edge_cloud_cfg.mode,
             )
 
+            # [CHER] Cloud-side hidden early-receive is a built-in part of
+            # PD-separation masking: always active on a PD-separated cloud
+            # worker (local_rank==0), so _execute_model_cloud consults the
+            # early-recv cache via get_or_post_early_recv.  Stays False on the
+            # edge role (EHER is separate) and when PD is off.
+            # Read from vllm_config (not ascend_config) for a uniform,
+            # init-order-independent source of truth.  PD-enabled comes from
+            # additional_config (a serialized dict field) rather than
+            # scheduler_config.pd_separation_enabled (a dynamic attribute that
+            # may not reach every process).
+            #
+            # Only local_rank==0 (PP-NPU0, the rank that issues the cross-node
+            # hidden irecv) needs early-recv; other cloud ranks receive hidden
+            # via TP-broadcast from rank0.
+            _pc = self.vllm_config.parallel_config
+            _ac = getattr(self.vllm_config, "additional_config", None) or {}
+            _ec = _ac.get("edge_cloud_config", {}) if isinstance(_ac, dict) else {}
+            _pd = _ec.get("pd_separation", {}) if isinstance(_ec, dict) else {}
+            self._cloud_hidden_early_recv_enabled = bool(
+                getattr(_pc, "enable_edge_cloud", False)
+                and not getattr(_pc, "is_edge_node", True)
+                and _pd.get("enabled", False)
+                and self.local_rank == 0
+            )
+            # Max in-flight prefill batches on the cloud = prefill_inflight_limit
+            # (2 when next_prefill_prior_enable, else 1).  At most that many
+            # early-recv entries are ever useful, so the guard thread caps the
+            # cache at this size (see start_early_irecv): it posts ahead-of-time
+            # for the P-middle batches that will actually run, and skips the rest
+            # (busy_loop posts those itself).  This keeps the cache bounded (no
+            # unbounded growth / OOM) and the guard draining fast (skipped hints
+            # cost no NPU alloc), so the small hint ring never fills.
+            if self._cloud_hidden_early_recv_enabled:
+                # CHER early-recv cache cap.  Empirically (see logs) the guard
+                # thread posts one entry at a time: each chunk's POST is
+                # followed by a busy_loop HIT before the next POST, so the
+                # cache never holds more than 1 entry even when
+                # next_prefill_prior_enable (2P) is on.  Capping at 1 keeps
+                # exactly one recv buffer (~80MB at 8192 tokens) resident
+                # instead of two, reducing caching-allocator fragmentation in
+                # the "64k then 4k" workload (different-sized buffers in the
+                # free list could not be reused).
+                self._early_recv_max_inflight = 1
+            else:
+                self._early_recv_max_inflight = 0
+            if self._cloud_hidden_early_recv_enabled:
+                logger.info(
+                    "[CHER] cloud hidden early-receive enabled on worker "
+                    "rank=%s", getattr(self, "rank", "?"),
+                )
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -516,6 +590,149 @@ class NPUWorker(WorkerBase):
         handles = self._pp_send_work_by_channel.pop(channel.value, [])
         for handle in handles:
             handle.wait()
+
+    # ------------------------------------------------------------------ #
+    # [CHER/EHER] Cloud/edge hidden early-receive primitives             #
+    # ------------------------------------------------------------------ #
+    # The guard thread calls start_early_irecv() to post an irecv ahead of
+    # the batch's execute_model (keyed by head_token); execute_model calls
+    # get_or_post_early_recv() to consume/reuse it.  These are direction-
+    # agnostic: the hidden_channel + num_tokens fully determine the recv, so
+    # the same
+    # primitives serve CHER (cloud, edge->cloud) and EHER (edge, cloud->edge).
+    def _post_early_irecv_locked(
+        self, ht: str, channel: "HiddenChannelType", num_tokens: int,
+    ) -> AsyncIntermediateTensors:
+        """Post an irecv and return the entry.  Caller MUST hold
+        ``_early_recv_lock``.  Does NOT cache in ``_early_recv_handles`` --
+        the caller decides whether to cache (guard thread) or consume
+        immediately (busy_loop).  This prevents the memory leak where
+        busy_loop's self-posted entries were left in the dict forever.
+        """
+        do_sp_chunk = enable_sp() and (
+            self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+            or not self.model_runner.supports_mm_inputs)
+        merge_payload = get_edge_cloud_tensor_meta().merge_payload
+        tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+            num_tokens=num_tokens,
+            channel=channel,
+            sp_chunk=do_sp_chunk and merge_payload,
+        )
+        if do_sp_chunk and not merge_payload:
+            tensor_dict = {
+                k: sequence_parallel_chunk(v)
+                for k, v in tensor_dict.items()
+            }
+        entry = AsyncIntermediateTensors(
+            tensor_dict,
+            comm_handles=comm_handles,
+            comm_postprocess=comm_postprocess,
+        )
+        return entry
+
+    def start_early_irecv(self, hint: dict) -> None:
+        """Post an irecv for the hinted hidden tensors and cache it.
+
+        Atomic check-or-post under ``_early_recv_lock``: a repeated hint for
+        the same head_token (or one that execute_model already posted via
+        get_or_post_early_recv) is a no-op -- exactly one irecv is ever posted
+        per head_token, avoiding the double-post deadlock where two irecvs on
+        the same channel would race for the sender's single isend.
+        """
+        ht = hint.get("head_token")
+        if not ht:
+            return
+        channel_str = hint.get("hidden_channel")
+        num_tokens = hint.get("num_tokens")
+        if channel_str is None or num_tokens is None:
+            logger.warning(
+                "[CHER] start_early_irecv: incomplete hint %s, skipping.",
+                {k: hint.get(k) for k in ("head_token", "hidden_channel",
+                                          "num_tokens")},
+            )
+            return
+        try:
+            channel = HiddenChannelType(channel_str)
+        except Exception:
+            logger.warning(
+                "[CHER] start_early_irecv: bad channel %r, skipping.",
+                channel_str,
+            )
+            return
+        with self._early_recv_lock:
+            if ht in self._early_recv_handles:
+                return  # idempotent: another thread already posted
+            if ht in self._early_recv_consumed:
+                return  # busy_loop already consumed (posted its own); skip
+            # Cap the cache at prefill_inflight_limit: only that many P-middle
+            # batches are in flight on the cloud at once, so only that many
+            # early-recv entries are ever useful.  Extra hints (e.g. far-ahead
+            # chunks whose P-middle won't run until current ones drain) are
+            # skipped here -- busy_loop posts them via get_or_post_early_recv
+            # when they actually run.  This bounds cache memory (no OOM) and
+            # keeps the guard draining fast (skip costs no NPU alloc), so the
+            # small hint ring never fills and hints are never dropped.
+            _max = getattr(self, "_early_recv_max_inflight", 2)
+            if len(self._early_recv_handles) >= _max:
+                return
+            try:
+                entry = self._post_early_irecv_locked(ht, channel, num_tokens)
+                self._early_recv_handles[ht] = entry  # cache for busy_loop
+            except Exception:
+                logger.exception(
+                    "[CHER] start_early_irecv failed head_token=%s channel=%s",
+                    ht, channel_str,
+                )
+                return
+        logger.debug(
+            "[CHER] early-recv posted head_token=%s channel=%s num_tokens=%d",
+            ht, channel_str, num_tokens,
+        )
+
+    def get_or_post_early_recv(
+        self, head_token: str | None, channel: "HiddenChannelType",
+        num_tokens: int,
+    ) -> AsyncIntermediateTensors | None:
+        """Atomically reuse the guard-thread's early-recv entry, or post one.
+
+        execute_model calls this instead of pop-then-fallback: under
+        ``_early_recv_lock`` it pops a cached entry if the guard thread
+        already posted one, otherwise it posts the irecv itself and returns
+        it.  This guarantees at most one irecv per head_token even when the
+        guard thread's hint dequeue races ahead of (or lags behind)
+        execute_model's pp_scheduler_output dequeue -- the original
+        pop-then-fallback path posted a second irecv when the guard had not
+        posted yet, and both irecvs then raced for the sender's single isend,
+        deadlocking (the losing irecv waits forever -> no ack -> no POST_OUT
+        -> edge has no P-tail -> full stall).
+        """
+        if not head_token:
+            return None
+        with self._early_recv_lock:
+            entry = self._early_recv_handles.pop(head_token, None)
+            self._early_recv_consumed.add(head_token)
+            if entry is not None:
+                return entry  # guard thread posted it, consumed
+            # Not posted by guard: post our own.  Do NOT cache in
+            # _early_recv_handles -- we consume it immediately.  Marking
+            # _early_recv_consumed above prevents the guard from posting a
+            # duplicate (orphan irecv) when its hint arrives later.
+            try:
+                return self._post_early_irecv_locked(
+                    head_token, channel, num_tokens)
+            except Exception:
+                logger.exception(
+                    "[CHER] get_or_post_early_recv failed head_token=%s",
+                    head_token,
+                )
+                return None
+
+
+    def cleanup_early_recv(self, head_token: str) -> None:
+        """Drop a leaked early-recv entry (e.g. request aborted mid-prefill)."""
+        with self._early_recv_lock:
+            self._early_recv_handles.pop(head_token, None)
+            self._early_recv_consumed.discard(head_token)
 
     def _all_gather_tensor_dict(
         self,
@@ -731,50 +948,82 @@ class NPUWorker(WorkerBase):
         )
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and is_first_slice:
-            # Pre-compute input preparation while edge runs segment_a.
-            # This overlaps cloud's _update_states, _prepare_inputs,
-            # _determine_batch_execution_and_padding, and
-            # _build_attention_metadata with edge's segment_a forward.
-            # On the merge_payload fast path the per-key tensors are
-            # materialized lazily inside comm_postprocess (after the
-            # merged buffer is split), so SP chunking must run there too
-            # — an eager chunk here would iterate an empty dict, rebind
-            # the variable, and sever the link to the postprocess that
-            # fills the original dict by reference (broken tokens).
-            do_sp_chunk = enable_sp() and (
-                self.model_runner.edge_cloud_cfg.mode != "embedding_only"
-                or not self.model_runner.supports_mm_inputs)
-            merge_payload = get_edge_cloud_tensor_meta().merge_payload
-            channel = self._hidden_channel_for(scheduler_output)
-            # In the shared-model edge-cloud topology the edge
-            # has a single distributed rank at in-group rank 0;
-            # the cloud first-worker of each dp_rank must
-            # receive the head-layer intermediate tensors from
-            # that single edge rank. Pass the explicit
-            # ``src=0`` so the receive is routed to the edge
-            # rather than the implicit "previous PP rank"
-            # (which would not point at the edge for cloud
-            # first-workers past the first one).
-            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-                num_tokens=scheduler_output.total_num_scheduled_tokens,
-                channel=channel,
-                sp_chunk=do_sp_chunk and merge_payload,
-                src=0,
-            )
-            logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
+            # [CHER] Atomically reuse the guard thread's early-recv entry, or
+            # post the irecv ourselves.  get_or_post_early_recv guarantees at
+            # most one irecv per head_token even when the guard thread's hint
+            # dequeue races this dequeue.  Applies to PREFILL_FIRST only:
+            # DECODE_FIRST must NOT use early-recv because DECODE is a single
+            # channel/stream -- a guard-thread irecv post on the DECODE stream
+            # races busy_loop's isend on that same stream (cross-thread FIFO
+            # ordering is non-deterministic -> deadlock).  PREFILL has two
+            # channels (PREFILL_1/2) so irecv and isend land on different
+            # streams.  The guard thread ONLY posts (never wait()s); wait is
+            # done by execute_model's wait_for_comm() on the busy_loop thread.
+            _ht = getattr(scheduler_output, "head_token", None)
+            entry = None
+            if (self._cloud_hidden_early_recv_enabled and _ht
+                    and scheduler_output.batch_type == BatchType.PREFILL_FIRST):
+                _channel = self._hidden_channel_for(scheduler_output)
+                entry = self.get_or_post_early_recv(
+                    _ht, _channel,
+                    scheduler_output.total_num_scheduled_tokens,
+                )
+            if entry is not None:
+                logger.debug("[CHER] consume early-recv head_token=%s", _ht)
+                # cloud_prepare_early overlaps input prep with the (already
+                # in-flight or done) recv; run it before execute_model uses
+                # the intermediate tensors.
+                self.model_runner.cloud_prepare_early(scheduler_output)
+                intermediate_tensors = entry
+                # wait_for_comm() runs implicitly on first .tensors access
+                # inside execute_model (AsyncIntermediateTensors.__getattr__),
+                # which both waits the HCCL handles and runs comm_postprocess
+                # (the TP collective) on all ranks synchronized.  Do NOT call
+                # it explicitly here: doing so blocks busy_loop on the recv
+                # wait BEFORE execute_model, defeating cloud_prepare_early's
+                # overlap and stalling the pipeline (TPOT regression).
+            else:
+                # Fallback: synchronous recv (CHER off, or get_or_post failed).
+                # Pre-compute input preparation while edge runs segment_a.
+                # This overlaps cloud's _update_states, _prepare_inputs,
+                # _determine_batch_execution_and_padding, and
+                # _build_attention_metadata with edge's segment_a forward.
+                # On the merge_payload fast path the per-key tensors are
+                # materialized lazily inside comm_postprocess (after the
+                # merged buffer is split), so SP chunking must run there too
+                # - an eager chunk here would iterate an empty dict, rebind
+                # the variable, and sever the link to the postprocess that
+                # fills the original dict by reference (broken tokens).
+                do_sp_chunk = enable_sp() and (
+                    self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+                    or not self.model_runner.supports_mm_inputs)
+                merge_payload = get_edge_cloud_tensor_meta().merge_payload
+                channel = self._hidden_channel_for(scheduler_output)
+                # In the shared-model edge-cloud topology the edge has a single
+                # distributed rank at in-group rank 0; the cloud first-worker of
+                # each dp_rank must receive from that rank (src=0).  In the
+                # standard (non-shared-model) topology src=None suffices: it
+                # resolves to the implicit "previous PP rank" which IS the edge.
+                _recv_src = 0 if self.parallel_config.is_shared_model_edge else None
+                tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    channel=channel,
+                    sp_chunk=do_sp_chunk and merge_payload,
+                    src=_recv_src,
+                )
+                logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
 
-            self.model_runner.cloud_prepare_early(scheduler_output)
-            if do_sp_chunk and not merge_payload:
-                tensor_dict = {
-                    k: sequence_parallel_chunk(v)
-                    for k, v in tensor_dict.items()
-                }
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
-
+                self.model_runner.cloud_prepare_early(scheduler_output)
+                if do_sp_chunk and not merge_payload:
+                    tensor_dict = {
+                        k: sequence_parallel_chunk(v)
+                        for k, v in tensor_dict.items()
+                    }
+                intermediate_tensors = AsyncIntermediateTensors(
+                    tensor_dict,
+                    comm_handles=comm_handles,
+                    comm_postprocess=comm_postprocess,
+                )
         if self.profiler is not None:
             self.profiler.step()
 
@@ -806,16 +1055,16 @@ class NPUWorker(WorkerBase):
         # with the edge and must send its middle-layer output
         # back to the edge (in-group rank 0). Other cloud
         # workers (TP non-first) are in singleton PP groups
-        # and don't communicate with the edge. We use an
-        # explicit ``dst=0`` rather than the default "next PP
-        # rank" routing because the edge sits at in-group rank
-        # 0, not the slot after the cloud.
+        # Send intermediate tensors to edge.  In the shared-model topology the
+        # edge sits at in-group rank 0, so dst=0 is needed.  Otherwise dst=None
+        # resolves to the implicit "next PP rank" which IS the edge.
         if get_pp_group().world_size > 1:
             channel = self._hidden_channel_for(scheduler_output)
+            _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
             self._record_pp_send_work(
                 edge_cloud_send_tensor_dict(_gathered, channel=channel,
                                             num_tokens=scheduler_output.total_num_scheduled_tokens,
-                                            dst=0),
+                                            dst=_send_dst),
                 channel=channel,
             )
             logger.info(f"Send intermediate tensors to edge, hidden_channel={channel.value}")

@@ -42,10 +42,16 @@ import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa
 import vllm_ascend.patch.platform.patch_torch_accelerator  # noqa
 import vllm_ascend.patch.platform.patch_tool_choice_none_content  # noqa
 
-# EngineCore's edge-cloud control RPCs are provided by
-# AscendMultiprocExecutor. The edge-cloud role is only available through
-# VllmConfig later in startup, so environment-based import gating leaves the
-# edge leader on the upstream executor without those RPCs.
+# Unconditional: AscendMultiprocExecutor/AscendWorkerProc must replace the
+# upstream classes in every process (edge leader, cloud PassiveEngineCore,
+# workers).  Gating on VLLM_PP_NON_LEADER_ENGINE_CORE breaks the cloud
+# PassiveEngineCore process: it imports vllm_ascend (triggering this patch)
+# during spawn bootstrap BEFORE run_passive_engine_core sets that env var, so
+# the cloud executor stayed the upstream MultiprocExecutor and never built
+# cloud_recv_hint_mq (CHER silently disabled, no [CHER] logs).  The patched
+# classes are no-op when edge-cloud / EPLB are off (they delegate to the
+# upstream path), so unconditional import is safe -- same rationale as
+# patch_engine_core below being unconditional.
 import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
 
 import vllm_ascend.patch.platform.patch_balance_schedule  # noqa
