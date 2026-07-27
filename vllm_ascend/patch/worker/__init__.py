@@ -89,3 +89,12 @@ if _V2_MODEL_RUNNER_SUPPORTED:
 # only patch routed experts capture in main2main.
 if _V2_MODEL_RUNNER_SUPPORTED:
     import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa
+# [CHER] Pull in the platform patch (patch_multiproc_executor) so the worker
+# process also gets WorkerProc -> AscendWorkerProc replacement.  adapt_patch()
+# defaults to is_global_patch=False, which only imports patch.worker (this
+# module) -- NOT patch.platform.  Without this, the worker process created a
+# plain WorkerProc whose _init_message_queues never rebuilt cloud_recv_hint_mq,
+# the guard thread never started, and every recv-hint was dropped (CHER silently
+# disabled).  patch_multiproc_executor is a no-op when edge-cloud / PD is off
+# (its classes delegate to the upstream path), so importing it here is safe.
+import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
