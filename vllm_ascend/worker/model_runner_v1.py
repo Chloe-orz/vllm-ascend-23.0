@@ -4237,11 +4237,18 @@ class NPUModelRunner(GPUModelRunner):
                             if isinstance(positions, torch.Tensor) else None
                         )
                         _cpu_ids = self.input_ids.cpu[:20].tolist()
+                        _gpu_ids = self.input_ids.gpu[:20].detach().cpu().tolist()
+                        _emb = self.inputs_embeds.gpu[:15]
+                        _emb_stats = (
+                            float(_emb.detach().float().abs().max()),
+                            float(_emb.detach().float().sum()),
+                        )
                         logger.warning(
                             "[EC-DIAG] first real inputs: input_ids=%s "
-                            "positions=%s input_ids_cpu=%s "
-                            "num_tokens_padded=%d",
-                            _ids, _pos, _cpu_ids, num_tokens_padded,
+                            "positions=%s input_ids_cpu=%s input_ids_gpu=%s "
+                            "inputs_embeds(absmax,sum)=%s num_tokens_padded=%d",
+                            _ids, _pos, _cpu_ids, _gpu_ids, _emb_stats,
+                            num_tokens_padded,
                         )
                     except Exception:
                         logger.exception("[EC-DIAG] failed to log inputs")
