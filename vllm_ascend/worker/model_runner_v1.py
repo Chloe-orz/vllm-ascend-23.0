@@ -4189,13 +4189,14 @@ class NPUModelRunner(GPUModelRunner):
         # [diagnosis] One-shot log: whether the first real segment forward
         # goes through the graph wrapper or eager, and with what runtime
         # mode. Distinguishes "lazy graph capture returned garbage" from
-        # "eager but polluted state".
+        # "eager but polluted state". Skips warmup/profile runs so the flag
+        # fires on the first REAL batch.
         _diag_key = (
             "_first_seg_head_logged"
             if intermediate_tensors is None
             else "_first_seg_tail_logged"
         )
-        if not getattr(self, _diag_key, False):
+        if not getattr(self, _diag_key, False) and not self._is_dummy_or_profile_run():
             setattr(self, _diag_key, True)
             logger.warning(
                 "[EC-DIAG] first seg %s forward: use_graph=%s seg_a_graph=%s "
