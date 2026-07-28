@@ -4268,8 +4268,25 @@ class NPUModelRunner(GPUModelRunner):
                 "total_num_scheduled_tokens": total_num_scheduled_tokens,
                 "positions": positions,
             }
+            # Clone attn_metadata with the dedicated GDN-aware deep clone
+            # (new-baseline structure) instead of the generic freeze: the
+            # generic _freeze_scheduled_state was written against the OLD
+            # GDN metadata layout and is not guaranteed to cover the
+            # device-tensor / pooled-buffer fields introduced by the new
+            # baseline (conv1d-on-device + prebuilt chunk metadata).  A
+            # missed field leaves segment_e reading buffers that the next
+            # batch's builder already overwrote, faulting the GDN chunk
+            # kernels (chunk_local_cumsum / chunk_scaled_dot_kkt) with
+            # out-of-bounds accesses.
+            cache_entry["attn_metadata"] = None
+            frozen_entry = _freeze_scheduled_state(cache_entry)
+            frozen_entry["attn_metadata"] = (
+                {k: _clone_gdn_attn_metadata(v) for k, v in attn_metadata.items()}
+                if isinstance(attn_metadata, dict)
+                else _clone_gdn_attn_metadata(attn_metadata)
+            )
             self._edge_prepare_cache_by_token[scheduler_output.head_token] = (
-                _freeze_scheduled_state(cache_entry)
+                frozen_entry
             )
 
         # Encoder-decoder models can only compile the pure decode steps where no
@@ -6110,6 +6127,26 @@ class NPUModelRunner(GPUModelRunner):
         cache["deferred_state_corrections_fn"] = deferred_state_corrections_fn
 
         # --- Cache all results ---
+        # Deep-clone the cache before stashing it: attn_metadata (GDN chunk
+        # metadata from a shared pool) and logits_indices are views into
+        # reusable input-prep buffers.  The forward launched by the upcoming
+        # execute_model may still be running asynchronously when the NEXT
+        # batch's cloud_prepare_early rebuilds those buffers, and the kernel
+        # stream (AIV, e.g. stream 46) is NOT ordered against the H2D/copy
+        # stream that rebuilds them -- a later build can overwrite this
+        # batch's chunk indices mid-forward and fault the chunk kernels
+        # (chunk_local_cumsum / chunk_scaled_dot_kkt, vector core exception).
+        cache["attn_metadata"] = (
+            {k: _clone_gdn_attn_metadata(v) for k, v in cache["attn_metadata"].items()}
+            if isinstance(cache["attn_metadata"], dict)
+            else cache["attn_metadata"]
+        )
+        if cache["logits_indices"] is not None:
+            cache["logits_indices"] = cache["logits_indices"].clone()
+        if cache["spec_decode_common_attn_metadata"] is not None:
+            cache["spec_decode_common_attn_metadata"] = _freeze_scheduled_state(
+                cache["spec_decode_common_attn_metadata"]
+            )
         self._cloud_prepare_cache = cache
 
     def _edge_cloud_forward(
