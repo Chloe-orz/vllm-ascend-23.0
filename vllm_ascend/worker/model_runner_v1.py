@@ -7334,6 +7334,13 @@ class NPUModelRunner(GPUModelRunner):
 
         self._zero_dsa_state_block0()
         self._zero_capture_residue_block0()
+        # Ensure every queued capture/warmup task (and the zeroing above) has
+        # fully completed before serving. Without this barrier the first real
+        # batch's metadata H2D copies can queue behind the capture workload,
+        # letting the first forward read stale capture-time attention
+        # metadata (wrong block table / seq lens -> near-zero attention
+        # output on the edge's real layers in head_tail mode).
+        self._sync_device()
         return cuda_graph_size
 
     def _zero_capture_residue_block0(self) -> None:
