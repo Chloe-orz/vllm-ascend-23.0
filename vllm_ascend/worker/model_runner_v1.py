@@ -7333,7 +7333,59 @@ class NPUModelRunner(GPUModelRunner):
             mgr.update_stream = self.update_stream
 
         self._zero_dsa_state_block0()
+        self._zero_capture_residue_block0()
         return cuda_graph_size
+
+    def _zero_capture_residue_block0(self) -> None:
+        """Zero physical block 0 (null/dummy block) of every KV / mamba
+        state cache after graph capture.
+
+        Capture and warmup dummy batches run with fabricated block tables
+        pointing at physical block 0, leaving capture-order-dependent
+        residue in it. The first real request's attention / GDN layers can
+        hit that residue through padded block-table entries or shared state
+        slots — the same failure class as the DSA compressor state (see
+        _zero_dsa_state_block0). In edge-cloud head_tail mode the edge's
+        first/last real layers read it and contribute ~nothing to the
+        residual stream, collapsing the first request's output into an
+        immediate stop token. Zeroing block 0 once after capture makes any
+        phantom read deterministic (zeros); real inference never uses block
+        0 (it is the reserved null block), so the zeroed content persists.
+        """
+        try:
+            caches: list[torch.Tensor] = []
+            seen: set[int] = set()
+
+            def _collect(entries) -> None:
+                for entry in entries:
+                    cache = (
+                        entry[0] if isinstance(entry, (list, tuple)) else entry
+                    )
+                    if (
+                        isinstance(cache, torch.Tensor)
+                        and cache.numel() > 0
+                        and cache.data_ptr() not in seen
+                    ):
+                        seen.add(cache.data_ptr())
+                        caches.append(cache)
+
+            _collect(getattr(self, "kv_caches", None) or [])
+            kv_cache_dict = getattr(self, "kv_cache", None)
+            if isinstance(kv_cache_dict, dict):
+                _collect(kv_cache_dict.values())
+
+            for cache in caches:
+                cache[0].zero_()
+            if caches:
+                logger.info(
+                    "[EdgeCloud] Zeroed block 0 of %d KV/state caches after "
+                    "capture (capture-residue guard).",
+                    len(caches),
+                )
+        except Exception:
+            logger.exception(
+                "Failed to zero block 0 of KV/state caches after capture"
+            )
 
     def _zero_dsa_state_block0(self) -> None:
         """Zero physical block 0 (null/dummy block) of every DSA compressor
