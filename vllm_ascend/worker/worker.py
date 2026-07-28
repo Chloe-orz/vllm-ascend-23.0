@@ -1172,13 +1172,21 @@ class NPUWorker(WorkerBase):
             # done by execute_model's wait_for_comm() on the busy_loop thread.
             _ht = getattr(scheduler_output, "head_token", None)
             entry = None
-            # Match the sender: only receive mrope when this batch has a
-            # multimodal request (text-only batches compute M-RoPE on
-            # cloud locally). Computed from the same scheduler_output the
-            # edge used, so both sides agree. (Used by both the CHER early-recv
-            # miss path here and the sync fallback below.)
-            _cloud_include_mrope = self.model_runner.step_has_multimodal_req(
-                scheduler_output)
+            # Match the sender. The edge scheduler stamps `has_mrope` on
+            # every SO from its authoritative request registry, and the edge
+            # sender's include_mrope always equals it. The cloud runner's own
+            # registry LAGS behind (finished_req_ids flushed via EMPTY batches
+            # are dropped before reaching the cloud, and DECODE_FIRST SOs are
+            # published before the pending-finish merge), so computing from
+            # the local registry can disagree with the edge sender after an
+            # mm->text traffic transition and deadlock the HCCL recv. Trust
+            # the stamp; fall back to the local computation only if the stamp
+            # is absent (older edge). (Used by both the CHER early-recv miss
+            # path here and the sync fallback below.)
+            _cloud_include_mrope = getattr(scheduler_output, "has_mrope", None)
+            if _cloud_include_mrope is None:
+                _cloud_include_mrope = self.model_runner.step_has_multimodal_req(
+                    scheduler_output)
             if (self._cloud_hidden_early_recv_enabled and _ht
                     and scheduler_output.batch_type == BatchType.PREFILL_FIRST):
                 _channel = self._hidden_channel_for(scheduler_output)

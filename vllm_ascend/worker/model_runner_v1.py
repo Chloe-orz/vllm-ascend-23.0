@@ -6024,13 +6024,20 @@ class NPUModelRunner(GPUModelRunner):
         super()._init_mrope_positions(req_state)
 
     def _calc_mrope_positions(self, scheduler_output) -> None:
-        # In edge-cloud cloud mode: skip local calc only when the batch contains
-        # a multimodal request (edge transfers the whole-batch mrope buffer and
+        # In edge-cloud cloud mode: skip local calc only when the batch carries
+        # wire mrope (edge transfers the whole-batch mrope buffer and
         # execute_model injects it). Text-only batches compute locally.
-        if (self._edge_cloud_enabled
-                and self.edge_cloud_cfg.role == "cloud"
-                and self.step_has_multimodal_req(scheduler_output)):
-            return
+        # Use the edge scheduler's `has_mrope` stamp (authoritative) rather
+        # than the cloud's own registry, which lags behind after an mm->text
+        # transition (finished_req_ids flushed via EMPTY batches never reach
+        # the cloud runner); a stale registry would skip local calc for a
+        # text batch that has no wire mrope either, yielding garbage RoPE.
+        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+            has_mrope = getattr(scheduler_output, "has_mrope", None)
+            if has_mrope is None:
+                has_mrope = self.step_has_multimodal_req(scheduler_output)
+            if has_mrope:
+                return
         super()._calc_mrope_positions(scheduler_output)
 
     def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
