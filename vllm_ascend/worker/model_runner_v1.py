@@ -4983,6 +4983,16 @@ class NPUModelRunner(GPUModelRunner):
             return {}, None
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
+        # [diagnosis] Label the first two real batches for per-group
+        # metadata logging (incremented once per batch here; the per-group
+        # probe below prints when label >= 0).
+        _diag_batch_label = -1
+        if not for_cudagraph_capture and len(self.requests) > 0:
+            _diag_batch_label = getattr(self, "_diag_meta_log_count", 0)
+            if _diag_batch_label < 2:
+                self._diag_meta_log_count = _diag_batch_label + 1
+            else:
+                _diag_batch_label = -1
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
@@ -5179,6 +5189,40 @@ class NPUModelRunner(GPUModelRunner):
                     common_attn_metadata=common_attn_metadata,
                     **extra_attn_metadata_args,
                 )
+                # [diagnosis] Log the built attention metadata for the first
+                # two real batches: verifies whether the first batch's
+                # metadata is misclassified (e.g. zero prefill tokens ->
+                # attention kernel skipped -> attn output exactly zero).
+                if _diag_batch_label >= 0:
+                    try:
+                        _fields = {}
+                        for _f in (
+                            "num_prefills", "num_decodes", "num_actual_tokens",
+                            "num_prefill_tokens", "num_decode_tokens",
+                            "num_spec_decodes",
+                        ):
+                            _v = getattr(attn_metadata_i, _f, None)
+                            if _v is not None:
+                                _fields[_f] = _v
+                        for _f in ("seq_lens", "has_initial_state",
+                                   "non_spec_state_indices_tensor"):
+                            _v = getattr(attn_metadata_i, _f, None)
+                            if isinstance(_v, torch.Tensor):
+                                _fields[_f] = _v.detach().cpu().tolist()[:8]
+                        _bt = getattr(attn_metadata_i, "block_tables", None)
+                        if isinstance(_bt, torch.Tensor) and _bt.numel():
+                            _fields["block_table_row0"] = (
+                                _bt[0].detach().cpu().tolist()[:8]
+                            )
+                        logger.warning(
+                            "[EC-DIAG] attn meta batch#%d gid=%d.%d "
+                            "builder=%s: %s",
+                            _diag_batch_label + 1,
+                            kv_cache_gid, attn_gid,
+                            type(builder).__name__, _fields,
+                        )
+                    except Exception:
+                        logger.exception("[EC-DIAG] failed to log attn meta")
                 # NOTE(zxr): Due to the Triton operator does not deal with -1 padding in FullGraph mode,
                 # the padding needs to be changed from -1 to 0 to avoid writing invalid mamba block.
                 if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() \
