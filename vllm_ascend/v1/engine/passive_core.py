@@ -502,6 +502,29 @@ class PassiveEngineCoreProc:
                 _pd_enabled,
                 "on" if pp_pd_channel is not None else "off",
             )
+            # [CHER] Cloud-side hidden early-receive: a built-in part of
+            # PD-separation masking -- always active on the cloud role when
+            # PD-separation is enabled (no separate flag).  step() fires a
+            # recv-hint to the cloud worker's sideband cloud_recv_hint_mq so
+            # the guard thread posts irecv ahead of execute_model.  Read from
+            # vllm_config (parallel_config + additional_config dict, both
+            # serialized fields) so the gate does not depend on ascend_config
+            # singleton init order or on dynamic scheduler_config attributes.
+            _pc = vllm_config.parallel_config
+            _ac = getattr(vllm_config, "additional_config", None) or {}
+            _ec = _ac.get("edge_cloud_config", {}) if isinstance(_ac, dict) else {}
+            _pd = _ec.get("pd_separation", {}) if isinstance(_ec, dict) else {}
+            self._cher_enabled = bool(
+                getattr(_pc, "enable_edge_cloud", False)
+                and not getattr(_pc, "is_edge_node", True)
+                and _pd.get("enabled", False)
+            )
+            # Track which head_tokens we have already sent a hint for, so
+            # layer-slicing's multiple first-slice steps fire it only once.
+            self._cher_hint_sent: set[str] = set()
+        else:
+            self._cher_enabled = False
+            self._cher_hint_sent = set()
         self._idle_sleep_seconds = 0.001
 
         self._prev_dispatch_req_ids: set[str] = set()
@@ -526,7 +549,10 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
-                if result.get("batch_type") != BatchType.PREFILL_FIRST:
+                if result.get("batch_type") not in (
+                    BatchType.PREFILL_FIRST,
+                    BatchType.DRAFT_FIRST,
+                ):
                     continue
                 head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
@@ -556,10 +582,25 @@ class PassiveEngineCoreProc:
             True if at least one payload was enqueued, False if the
             scheduler had nothing to dispatch.
         """
+        _t0 = time.monotonic()
         self._drain_worker_completion_acks()
+        _dt_drain = (time.monotonic() - _t0) * 1000
+
+        _t0 = time.monotonic()
         self.passive_scheduler.poll_and_classify()
+        _dt_poll = (time.monotonic() - _t0) * 1000
+
+        _t0 = time.monotonic()
         batch = self.passive_scheduler.schedule()
+        _dt_sched = (time.monotonic() - _t0) * 1000
+
         if batch.is_empty():
+            if _dt_drain > 1.0 or _dt_poll > 1.0 or _dt_sched > 1.0:
+                logger.info(
+                    "[CLOUD-STEP-EMPTY] drain_acks=%.3f ms, poll=%.3f ms, "
+                    "schedule=%.3f ms",
+                    _dt_drain, _dt_poll, _dt_sched,
+                )
             return False
 
         _slice_info_str = "["
@@ -581,11 +622,83 @@ class PassiveEngineCoreProc:
         #     f"slice_info={_slice_info_str}",
         # )
 
+        # [CHER] Fire a recv-hint so the cloud worker's guard thread posts
+        # the edge->cloud prefill hidden irecv ahead of this batch's
+        # execute_model.  Only for the first slice of a PREFILL_FIRST batch:
+        # the hidden transfer is initiated by the edge P-head and consumed
+        # by the cloud P-middle's first slice; later slices reuse the same
+        # intermediate tensors and must not re-post.  Sent BEFORE the
+        # pp_scheduler_output enqueue: the sideband MQ is independent of the
+        # (possibly back-pressured) rpc_broadcast_mq, so the hint is never
+        # delayed by pp_scheduler_output's enqueue even when busy_loop is
+        # blocked.  No gating: schedule() ran already and P-middle is being
+        # dispatched regardless; the hint only decides *when* the irecv is
+        # posted, not whether P-middle runs.
+        so = batch.scheduler_output
+        if (
+            self._cher_enabled
+            and so.batch_type == BatchType.PREFILL_FIRST
+            and getattr(so, "head_token", None)
+        ):
+            _is_first_slice = (
+                not batch.slices
+                or batch.slices[0] is None
+                or getattr(batch.slices[0], "is_first_slice", True)
+            )
+            _ht = so.head_token
+            if _is_first_slice and _ht not in self._cher_hint_sent:
+                _channel = getattr(so, "hidden_channel", None)
+                _hint = {
+                    "head_token": _ht,
+                    "hidden_channel": (
+                        _channel.value if _channel is not None else None
+                    ),
+                    "num_tokens": so.total_num_scheduled_tokens,
+                }
+                _hint_mq = getattr(self.executor, "cloud_recv_hint_mq", None)
+                if _hint_mq is not None:
+                    try:
+                        # Non-blocking (timeout=0): the hint is fire-and-forget.
+                        # If the guard thread hasn't drained the sideband MQ
+                        # (slow / contended on _early_recv_lock), we DROP the
+                        # hint rather than block PassiveEC.step() here -- a
+                        # blocked step can't drain acks, which fills
+                        # response_mq, which blocks the worker's ack enqueue,
+                        # which stops it from dequeuing rpc_broadcast_mq, which
+                        # blocks PassiveEC's dispatch -> circular deadlock.
+                        # When a hint is dropped, busy_loop's get_or_post_early
+                        # _recv posts the irecv itself (synchronous), so only
+                        # the early-post overlap is lost, never correctness.
+                        _hint_mq.enqueue(
+                            (b"pp_recv_hint", (_hint,), {}, None),
+                            timeout=0,
+                        )
+                        self._cher_hint_sent.add(_ht)
+                        logger.debug(
+                            "[CHER] send recv-hint head_token=%s channel=%s",
+                            _ht, _hint["hidden_channel"],
+                        )
+                    except TimeoutError:
+                        logger.warning(
+                            "[CHER] recv-hint dropped (ring full) "
+                            "head_token=%s; busy_loop will post irecv itself",
+                            _ht,
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            "[CHER] recv-hint dropped (error=%r) "
+                            "head_token=%s; busy_loop will post irecv itself",
+                            _e, _ht,
+                        )
+
         for slice_info in batch.slices:
+            _t0 = time.monotonic()
             worker_scheduler_output = _trim_scheduler_output_for_worker_enqueue(
                 batch.scheduler_output,
                 self._prev_dispatch_req_ids,
             )
+            _dt_trim = (time.monotonic() - _t0) * 1000
+
             payload = (
                 (worker_scheduler_output, slice_info)
                 if slice_info is not None
@@ -600,20 +713,27 @@ class PassiveEngineCoreProc:
             self._prev_dispatch_req_ids = set(
                 batch.scheduler_output.num_scheduled_tokens.keys()
             )
-            _dt_ms = (time.monotonic() - _t0) * 1000
-            # logger.info(
-            #     "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
-            #     bt,
-            #     _dt_ms,
-            # )
-            # For PREFILL_FIRST, POST_OUT must mean the cloud middle segment
-            # has completed and started sending hidden states back.  Store the
-            # original SchedulerOutput here and publish it from
-            # _drain_worker_completion_acks() after the worker reports done.
-            if batch.scheduler_output.batch_type == BatchType.DECODE_FIRST:
-                self._maybe_publish_post_out(batch.scheduler_output)
-            elif (
-                batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
+            _dt_enqueue = (time.monotonic() - _t0) * 1000
+            # if _dt_trim > 0.5 or _dt_enqueue > 0.5:
+            #     logger.info(
+            #         "[CLOUD-STEP] trim=%.3f ms, enqueue=%.3f ms, batch_type=%s, "
+            #         "drain=%.3f ms, poll=%.3f ms, schedule=%.3f ms",
+            #         _dt_trim, _dt_enqueue, bt,
+            #         _dt_drain, _dt_poll, _dt_sched,
+            #     )
+            # else:
+            #     logger.info(
+            #         "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
+            #         bt,
+            #         _dt_enqueue,
+            #     )
+            # For prefill and draft, POST_OUT must mean the cloud middle
+            # segment has completed. Store the original SchedulerOutput here
+            # and publish it from _drain_worker_completion_acks() after the
+            # worker reports done. Decode-last is prepared on the edge.
+            if (
+                batch.scheduler_output.batch_type
+                in (BatchType.PREFILL_FIRST, BatchType.DRAFT_FIRST)
                 and (slice_info is None or slice_info.is_last_slice)
             ):
                 head_token = getattr(batch.scheduler_output, "head_token", None)
@@ -631,7 +751,8 @@ class PassiveEngineCoreProc:
 
         Mapping (cloud-side):
             PREFILL_FIRST → PREFILL_LAST
-            DECODE_FIRST  → DECODE_LAST
+            DECODE_FIRST  → dropped (edge prepares DECODE_LAST)
+            DRAFT_FIRST   → DRAFT_LAST
             anything else → dropped (legacy PP batches don't trigger return)
 
         Uses a shallow copy via :py:func:`dataclasses.replace` so the original
@@ -647,9 +768,28 @@ class PassiveEngineCoreProc:
                 scheduler_output, batch_type=BatchType.PREFILL_LAST
             )
         elif bt == BatchType.DECODE_FIRST:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.DECODE_LAST
+            # The edge pre-generates DECODE_LAST, so the cloud does not
+            # publish another control-plane response for DECODE_FIRST.
+            logger.debug(
+                "[Cloud] Skipping POST_OUT for DECODE_FIRST "
+                "head_token=%s (edge pre-generates DECODE_LAST)",
+                scheduler_output.head_token,
             )
+            return
+        elif bt == BatchType.DRAFT_FIRST:
+            tail = replace(
+                scheduler_output, batch_type=BatchType.DRAFT_LAST
+            )
+            if not tail.head_token:
+                raise RuntimeError("DRAFT_LAST POST_OUT missing head_token")
+            if not tail.draft_task_id:
+                raise RuntimeError(
+                    "DRAFT_LAST POST_OUT missing draft_task_id"
+                )
+            if tail.draft_step_idx is None:
+                raise RuntimeError(
+                    "DRAFT_LAST POST_OUT missing draft_step_idx"
+                )
         else:
             return
         # Idempotency guard: publishing the same head_token twice would make
