@@ -1129,11 +1129,11 @@ class PDSeparatedScheduler(Scheduler):
                 self.draft_remote_pending_count = max(
                     0, self.draft_remote_pending_count - 1
                 )
-                logger.info(
-                    "[PD] drop stale DRAFT_LAST task_id=%s step=%s",
-                    scheduler_output.draft_task_id,
-                    scheduler_output.draft_step_idx,
-                )
+                # logger.info(
+                #     "[PD] drop stale DRAFT_LAST task_id=%s step=%s",
+                #     scheduler_output.draft_task_id,
+                #     scheduler_output.draft_step_idx,
+                # )
                 continue
             return scheduler_output
         return self._make_empty_batch()
@@ -1363,14 +1363,14 @@ class PDSeparatedScheduler(Scheduler):
                 remaining_pending.append(req)
         self.prefill_last_pending = remaining_pending
 
-        logger.info(
-            f"[PD] update_from_output PREFILL_LAST done, "
-            f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
-            f"moved {len(newly_running)} reqs to running[], "
-            f"moved {len(newly_chunked)} reqs to chunk_prefill_first[], "
-            f"running[]: {len(self.running)}, "
-            f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
-        )
+        # logger.info(
+        #     f"[PD] update_from_output PREFILL_LAST done, "
+        #     f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
+        #     f"moved {len(newly_running)} reqs to running[], "
+        #     f"moved {len(newly_chunked)} reqs to chunk_prefill_first[], "
+        #     f"running[]: {len(self.running)}, "
+        #     f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
+        # )
 
     def _update_from_output_prefill_last_chunk_prior(
         self, scheduler_output: SchedulerOutput
@@ -1555,15 +1555,15 @@ class PDSeparatedScheduler(Scheduler):
         ):
             try:
                 sti = getattr(model_runner_output, "sampled_token_ids", None)
-                if sti is not None:
-                    logger.info(
-                        "[EC-SAMPLE] batch_type=%s head_token=%s req_ids=%s "
-                        "sampled=%s",
-                        scheduler_output.batch_type.value,
-                        scheduler_output.head_token,
-                        model_runner_output.req_ids,
-                        sti.tolist() if hasattr(sti, "tolist") else sti,
-                    )
+                # if sti is not None:
+                #     logger.info(
+                #         "[EC-SAMPLE] batch_type=%s head_token=%s req_ids=%s "
+                #         "sampled=%s",
+                #         scheduler_output.batch_type.value,
+                #         scheduler_output.head_token,
+                #         model_runner_output.req_ids,
+                #         sti.tolist() if hasattr(sti, "tolist") else sti,
+                #     )
             except Exception:
                 logger.exception("[EC-SAMPLE] failed to log sampled tokens")
         self.chunk_prefill_first = [

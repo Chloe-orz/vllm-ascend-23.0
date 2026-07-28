@@ -4248,13 +4248,13 @@ class NPUModelRunner(GPUModelRunner):
                 >= self._edge_prepare_cache_max
             ):
                 stale_token = next(iter(self._edge_prepare_cache_by_token))
-                logger.warning(
-                    "Edge segment_a cache exceeded bound (%d); evicting oldest "
-                    "head_token=%s (its segment_e likely never arrived, e.g. "
-                    "request abort).",
-                    self._edge_prepare_cache_max,
-                    stale_token,
-                )
+                # logger.warning(
+                #     "Edge segment_a cache exceeded bound (%d); evicting oldest "
+                #     "head_token=%s (its segment_e likely never arrived, e.g. "
+                #     "request abort).",
+                #     self._edge_prepare_cache_max,
+                #     stale_token,
+                # )
                 self._edge_prepare_cache_by_token.pop(stale_token, None)
 
             cache_entry = {
