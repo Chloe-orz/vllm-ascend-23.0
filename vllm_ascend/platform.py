@@ -143,6 +143,7 @@ class NPUPlatform(Platform):
         # Import edge-cloud model patches early so that ModelConfig sees the
         # updated supports_pp flags before is_pp_supported_model is checked.
         import vllm_ascend.patch.models.qwen3_5_edge_cloud  # noqa: F401
+        import vllm_ascend.patch.models.eagle3_edge_cloud  # noqa: F401
 
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
@@ -292,6 +293,21 @@ class NPUPlatform(Platform):
         # by ``PDSeparatedScheduler``; back-fill it from the bool-flavoured
         # user config so the scheduler's reader stays unchanged.
         scheduler_config.pd_prefill_inflight_limit = pd.prefill_inflight_limit
+
+        # Thread the next-prefill-head-prior flag so the scheduler can gate
+        # cross-request head-prior (yield a prefill slot to another request
+        # instead of ahead-dispatching the same request's next chunk).
+        scheduler_config.pd_next_prefill_prior_enable = (
+            pd.next_prefill_prior_enable
+        )
+
+        # Chunk-prefill-prior config.
+        scheduler_config.pd_chunk_prefill_prior_enable = (
+            pd.chunk_prefill_prior_enable
+        )
+        scheduler_config.pd_max_chunk_prefill_ahead = (
+            pd.max_chunk_prefill_ahead
+        )
 
         if getattr(scheduler_config, "async_scheduling", False):
             scheduler_config.scheduler_cls = (
