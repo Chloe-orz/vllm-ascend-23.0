@@ -4289,7 +4289,7 @@ class NPUModelRunner(GPUModelRunner):
             frozen_layerwise_state = _freeze_scheduled_state(
                 {
                     "positions": positions,
-                    "attn_metadata": attn_metadata,
+                    "attn_metadata": None,
                     "logits_indices": logits_indices,
                     "spec_decode_metadata": spec_decode_metadata,
                     "spec_decode_common_attn_metadata": (
@@ -4298,9 +4298,22 @@ class NPUModelRunner(GPUModelRunner):
                 }
             )
             self._layerwise_positions = frozen_layerwise_state["positions"]
-            self._layerwise_attn_metadata = frozen_layerwise_state[
-                "attn_metadata"
-            ]
+            # attn_metadata is cloned with the dedicated GDN-aware deep clone
+            # (baseline mechanism) instead of the generic freeze: GDN chunked
+            # prefill metadata holds device tensors from a shared 2-slot pool
+            # (chunk_indices_chunk64 / chunk_offsets_chunk64 / state_indices
+            # ...) that an interleaved decode batch overwrites in-place.  A
+            # missed clone here makes the continuation slices' chunk kernels
+            # (chunk_scaled_dot_kkt_fwd et al.) read garbage indices and
+            # fault the AICORE with out-of-bounds accesses.
+            if isinstance(attn_metadata, dict):
+                self._layerwise_attn_metadata = {
+                    k: _clone_gdn_attn_metadata(v) for k, v in attn_metadata.items()
+                }
+            elif attn_metadata is not None:
+                self._layerwise_attn_metadata = _clone_gdn_attn_metadata(attn_metadata)
+            else:
+                self._layerwise_attn_metadata = attn_metadata
             self._layerwise_num_tokens_padded = num_tokens_padded
             self._layerwise_num_tokens_across_dp = num_tokens_across_dp
             self._layerwise_batch_desc = batch_desc
