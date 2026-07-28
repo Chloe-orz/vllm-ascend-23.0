@@ -5977,6 +5977,16 @@ class NPUModelRunner(GPUModelRunner):
         # preparation inside inference_mode to match execute_model's
         # inference-mode context.
         with torch.inference_mode():
+            # Honor the async input-prep contract: the CPU reusable buffers
+            # (input_batch .np / *_cpu_tensor) written below may still be
+            # read by the PREVIOUS step's in-flight async H2D copies.  The
+            # slow path protects them via synchronize_input_prep() inside
+            # execute_model, but this early preparation runs before that
+            # point, so it must wait the event itself.  Without this wait,
+            # an in-flight H2D can read overwritten (garbage) indices and
+            # fault the device (vector core exception at the next sync).
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.synchronize()
             # Fix up prev_req_id_to_index (same as execute_model)
             if (
                 self.use_async_scheduling
