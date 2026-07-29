@@ -1204,7 +1204,7 @@ def edge_cloud_irecv_tensor_dict(
         # the leading num_tokens rows (mirrors the non-merge SP path).  When
         # SP is off this view is the whole buffer, a no-op.
         recv_view = merged[:num_tokens]
-        with _hidden_channel_stream_ctx(channel, wait_for_default=False):
+        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
             handle = torch.distributed.irecv(
                 recv_view, src=pp_group.ranks[src], group=group
             )
@@ -1260,7 +1260,7 @@ def edge_cloud_irecv_tensor_dict(
 
             if key in send_keys:
                 recv_view = full_tensor[:num_tokens]
-                with _hidden_channel_stream_ctx(channel, wait_for_default=False):
+                with _hidden_channel_stream_ctx(channel, wait_for_default=True):
                     handle = torch.distributed.irecv(
                         recv_view, src=pp_group.ranks[src], group=group
                     )
