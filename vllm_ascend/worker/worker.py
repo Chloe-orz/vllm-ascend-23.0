@@ -1049,11 +1049,10 @@ class NPUWorker(WorkerBase):
         # resolves to the implicit "next PP rank" which IS the edge.
         if get_pp_group().world_size > 1:
             channel = self._hidden_channel_for(scheduler_output)
-            _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
             self._record_pp_send_work(
                 edge_cloud_send_tensor_dict(_gathered, channel=channel,
                                             num_tokens=scheduler_output.total_num_scheduled_tokens,
-                                            dst=_send_dst),
+                                            dst=0),
                 channel=channel,
             )
             # logger.info(

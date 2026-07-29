@@ -181,21 +181,12 @@ def _build_non_spec_chunked_prefill_metadata(
     return GDNChunkedPrefillMetadata(
         cu_seqlens_host=cu_seqlens_host,
         chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
-        # NOTE: these source tensors are freshly-created PAGEABLE CPU
-        # tensors.  On torch_npu, .to(device, non_blocking=True) from pageable
-        # memory goes through an internal pinned staging pool that is reused
-        # by subsequent copies -- an in-flight H2D can then read overwritten
-        # (torn) index data, and the chunk kernels
-        # (chunk_scaled_dot_kkt / chunk_local_cumsum) fault the AICORE with
-        # out-of-bounds accesses (async 507015/507035, only under load).
-        # The copies are tiny (a few dozen indices per batch), so use
-        # synchronous copies here.
-        chunk_indices_chunk64=chunk_indices_chunk64.to(device=device, non_blocking=False),
-        chunk_offsets_chunk64=chunk_offsets_chunk64.to(device=device, non_blocking=False),
-        update_chunk_offsets_chunk64=update_chunk_offsets_chunk64.to(device=device, non_blocking=False),
-        final_chunk_indices_chunk64=final_chunk_indices_chunk64.to(device=device, non_blocking=False),
-        chunk_indices_large_block=chunk_indices_large_block.to(device=device, non_blocking=False),
-        block_indices_cumsum=block_indices_cumsum.to(device=device, non_blocking=False),
+        chunk_indices_chunk64=chunk_indices_chunk64.to(device=device, non_blocking=True),
+        chunk_offsets_chunk64=chunk_offsets_chunk64.to(device=device, non_blocking=True),
+        update_chunk_offsets_chunk64=update_chunk_offsets_chunk64.to(device=device, non_blocking=True),
+        final_chunk_indices_chunk64=final_chunk_indices_chunk64.to(device=device, non_blocking=True),
+        chunk_indices_large_block=chunk_indices_large_block.to(device=device, non_blocking=True),
+        block_indices_cumsum=block_indices_cumsum.to(device=device, non_blocking=True),
         num_decodes=num_decodes,
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,

@@ -128,7 +128,6 @@ class PassiveScheduler:
 
         self.ready_prefills: deque[SchedulerOutput] = deque()
         self.ready_pdmixes: deque[SchedulerOutput] = deque()
-        self.ready_drafts: deque[SchedulerOutput] = deque()
         self.ready_decodes: deque[SchedulerOutput] = deque()
 
         # Active sliced prefill / PD-mix continuation.  Only one sliced
@@ -163,12 +162,8 @@ class PassiveScheduler:
         self._layer_slice_config: dict[int, int] | None = None
         self._layer_slice_config_mtime: float = 0.0
         self._layer_slice_config_path: str | None = None
-        # Use hf_text_config (not the root hf_config) so multimodal models
-        # whose layer count lives in a nested text sub-config (e.g. KimiK2.5
-        # -> DeepseekV3Config) resolve correctly. For plain-text models
-        # hf_text_config == hf_config, so this is a no-op there.
         num_hidden_layers = (
-            vllm_config.model_config.hf_text_config.num_hidden_layers
+            vllm_config.model_config.hf_config.num_hidden_layers
         )
         pp_size = vllm_config.parallel_config.pipeline_parallel_size
         if vllm_config.parallel_config.enable_edge_cloud:
@@ -298,13 +293,7 @@ class PassiveScheduler:
                     # )
                 self._last_decode_first_arrival_ts = now
                 self.ready_decodes.append(scheduler_output)
-            elif bt == BatchType.DRAFT_FIRST:
-                self.ready_drafts.append(scheduler_output)
-            elif bt in (
-                BatchType.PREFILL_LAST,
-                BatchType.DECODE_LAST,
-                BatchType.DRAFT_LAST,
-            ):
+            elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
                 # Tail-segment batches are edge-only and must never be
                 # dispatched on the cloud. If one shows up here it is a
                 # routing bug at the publisher side — drop with a loud log.
@@ -318,12 +307,11 @@ class PassiveScheduler:
                 self.ready_pdmixes.append(scheduler_output)
             logger.debug(
                 "PassiveScheduler classified seq=%s batch_type=%s "
-                "(prefills=%d, pdmixes=%d, drafts=%d, decodes=%d)",
+                "(prefills=%d, pdmixes=%d, decodes=%d)",
                 self._arrival_seq(scheduler_output),
                 bt.value if bt is not None else "<none>",
                 len(self.ready_prefills),
                 len(self.ready_pdmixes),
-                len(self.ready_drafts),
                 len(self.ready_decodes),
             )
 
@@ -482,7 +470,6 @@ class PassiveScheduler:
         if so.batch_type in (
             BatchType.PURE_DECODE,
             BatchType.DECODE_FIRST,
-            BatchType.DRAFT_FIRST,
         ):
             return [None]
 
@@ -538,17 +525,6 @@ class PassiveScheduler:
         self._prefill_middle_throttle_started_at = None
 
     def _can_fallback_to_prefill_in_decode_state(self) -> bool:
-        # Optimization: when the next prefill to schedule has
-        # cloud_suggest_slicing=False, the edge signaled "no running decode
-        # in flight" -> decode is not about to arrive, so waiting (throttling)
-        # for it is pure idle.  Skip the throttle and fall back to prefill
-        # immediately.  This also means the P-middle is unsliced (see
-        # _slice_for), so there is no slice interleaving to protect either.
-        if self.ready_prefills and not getattr(
-            self.ready_prefills[0], "cloud_suggest_slicing", False
-        ):
-            self._clear_prefill_middle_throttle()
-            return True
         started_at = self._prefill_middle_throttle_started_at
         if started_at is None:
             return True
@@ -574,18 +550,6 @@ class PassiveScheduler:
         machine.  Sliced prefill-like batches are dispatched one slice per call
         so decode batches can be interleaved between the remaining slices.
         """
-        # Finish an active sliced prefill before switching work, but do not
-        # let queued prefills starve a scheduled draft. It owns the shared
-        # bidirectional DECODE channel until its tail is consumed on edge;
-        # delaying it behind a continuous prefill stream can block all decode
-        # progress.
-        if (
-            self.ready_drafts
-            and not self._active_prefill_slices
-        ):
-            self._clear_prefill_middle_throttle()
-            return self._build_batch(self.ready_drafts.popleft())
-
         if self.dispatch_policy == DispatchPolicy.EXPECT_ALTERNATION:
             return self._schedule_expect_alternation()
 
@@ -671,15 +635,7 @@ class PassiveScheduler:
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE
                 )
-                # Only throttle-for-decode when the prefill is sliced
-                # (cloud_suggest_slicing=True): slicing means a decode is in
-                # flight worth waiting for; an unsliced prefill signals no
-                # decode is coming, so skip the throttle (see
-                # _can_fallback_to_prefill_in_decode_state).
-                if getattr(
-                    self.ready_prefills[0], "cloud_suggest_slicing", False
-                ):
-                    self._start_prefill_middle_throttle()
+                self._start_prefill_middle_throttle()
                 return self._build_batch(self.ready_prefills.popleft())
             if self.ready_decodes:
                 self._clear_prefill_middle_throttle()
@@ -696,16 +652,7 @@ class PassiveScheduler:
                     self._start_prefill_middle_throttle()
                     return self._build_active_prefill_slice_batch()
                 if self.ready_prefills:
-                    # Only start the post-prefill decode-wait throttle when the
-                    # prefill was sliced (cloud_suggest_slicing=True): slicing
-                    # means a decode is in flight and worth waiting for.  An
-                    # unsliced prefill (cloud_suggest_slicing=False) signals no
-                    # decode is coming, so throttle would be pure idle.
-                    if getattr(
-                        self.ready_prefills[0],
-                        "cloud_suggest_slicing", False
-                    ):
-                        self._start_prefill_middle_throttle()
+                    self._start_prefill_middle_throttle()
                     return self._build_batch(self.ready_prefills.popleft())
             else:
                 return ScheduledBatch.empty()
@@ -768,14 +715,13 @@ class PassiveScheduler:
         logger.debug(
             "PassiveScheduler.schedule[%s] picked batch_type=%s slices=%d; "
             "pending=(prefills=%d, active_prefill_slices=%d, "
-            "pdmixes=%d, drafts=%d, decodes=%d) seq=%s",
+            "pdmixes=%d, decodes=%d) seq=%s",
             self.dispatch_policy.value,
             so.batch_type.value if so.batch_type is not None else "<none>",
             len(batch.slices),
             len(self.ready_prefills),
             len(self._active_prefill_slices),
             len(self.ready_pdmixes),
-            len(self.ready_drafts),
             len(self.ready_decodes),
             self._arrival_seq(so),
         )
@@ -788,7 +734,6 @@ class PassiveScheduler:
             self.ready_prefills
             or self._active_prefill_slices
             or self.ready_pdmixes
-            or self.ready_drafts
             or self.ready_decodes
         )
 
@@ -798,6 +743,5 @@ class PassiveScheduler:
             len(self.ready_prefills)
             + len(self._active_prefill_slices)
             + len(self.ready_pdmixes)
-            + len(self.ready_drafts)
             + len(self.ready_decodes)
         )
