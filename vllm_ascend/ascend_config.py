@@ -899,8 +899,6 @@ class PDSeparationConfig:
                 "pd_separation": {
                     "enabled": true,
                     "next_prefill_prior_enable": true,
-                    "chunk_prefill_prior_enable": true,
-                    "max_chunk_prefill_ahead": 1,
                 }
             }
         }
@@ -912,12 +910,6 @@ class PDSeparationConfig:
         self.enabled: bool = user_config.get("enabled", False)
         self.next_prefill_prior_enable: bool = user_config.get(
             "next_prefill_prior_enable", False
-        )
-        self.chunk_prefill_prior_enable: bool = user_config.get(
-            "chunk_prefill_prior_enable", False
-        )
-        self.max_chunk_prefill_ahead: int = int(
-            user_config.get("max_chunk_prefill_ahead", 1)
         )
 
     @property
@@ -932,9 +924,7 @@ class PDSeparationConfig:
     def __repr__(self) -> str:
         return (
             f"PDSeparationConfig(enabled={self.enabled}, "
-            f"next_prefill_prior_enable={self.next_prefill_prior_enable}, "
-            f"chunk_prefill_prior_enable={self.chunk_prefill_prior_enable}, "
-            f"max_chunk_prefill_ahead={self.max_chunk_prefill_ahead})"
+            f"next_prefill_prior_enable={self.next_prefill_prior_enable})"
         )
 
 

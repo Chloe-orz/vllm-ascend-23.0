@@ -22,8 +22,6 @@ from typing import Any
 import copy
 import gc
 import logging
-import threading
-import time
 from types import NoneType
 
 import torch
@@ -78,9 +76,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
-    edge_cloud_broadcast_recv_scheduled_draft,
     edge_cloud_send_tensor_dict,
-    edge_cloud_send_tensor_dict_scheduled_draft,
     get_edge_cloud_tensor_meta,
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
@@ -233,7 +229,6 @@ class NPUWorker(WorkerBase):
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
         self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
-
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
@@ -618,7 +613,6 @@ class NPUWorker(WorkerBase):
                 mode=self.model_runner.edge_cloud_cfg.mode,
             )
 
-
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -785,10 +779,8 @@ class NPUWorker(WorkerBase):
             if bt in (
                 BatchType.PREFILL_FIRST,
                 BatchType.DECODE_FIRST,
-                BatchType.DRAFT_FIRST,
                 BatchType.PREFILL_LAST,
                 BatchType.DECODE_LAST,
-                BatchType.DRAFT_LAST,
             ):
                 self._wait_pp_send_work(self._hidden_channel_for(scheduler_output))
             else:
@@ -800,15 +792,9 @@ class NPUWorker(WorkerBase):
         if self.model_runner._edge_cloud_enabled:
             bt = scheduler_output.batch_type
             if is_cloud_device():
-                if bt == BatchType.DRAFT_FIRST:
-                    return self._execute_model_cloud_draft(scheduler_output)
                 return self._execute_model_cloud(
                     scheduler_output, layer_slice_info
                 )
-            if bt == BatchType.DRAFT_FIRST:
-                return self._execute_model_edge_draft_head(scheduler_output)
-            if bt == BatchType.DRAFT_LAST:
-                return self._execute_model_edge_draft_tail(scheduler_output)
             if bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST):
                 return self._execute_model_edge_head(
                     scheduler_output, layer_slice_info
@@ -831,8 +817,6 @@ class NPUWorker(WorkerBase):
         if bt in (BatchType.PREFILL_FIRST, BatchType.PREFILL_LAST):
             return HiddenChannelType.PREFILL_1
         if bt in (BatchType.DECODE_FIRST, BatchType.DECODE_LAST):
-            return HiddenChannelType.DECODE
-        if bt in (BatchType.DRAFT_FIRST, BatchType.DRAFT_LAST):
             return HiddenChannelType.DECODE
         raise RuntimeError(f"No hidden channel for batch_type={bt}")
 
@@ -972,7 +956,7 @@ class NPUWorker(WorkerBase):
             # On the merge_payload fast path the per-key tensors are
             # materialized lazily inside comm_postprocess (after the
             # merged buffer is split), so SP chunking must run there too
-            # - an eager chunk here would iterate an empty dict, rebind
+            # — an eager chunk here would iterate an empty dict, rebind
             # the variable, and sever the link to the postprocess that
             # fills the original dict by reference (broken tokens).
             do_sp_chunk = enable_sp() and (
@@ -1013,6 +997,18 @@ class NPUWorker(WorkerBase):
                 comm_handles=comm_handles,
                 comm_postprocess=comm_postprocess,
             )
+            # logger.info(
+            #     "[EC-TRACE] cloud<-edge recv batch_type=%s head_token=%s "
+            #     "channel=%s req_ids=%s num_tokens=%d slice=%s fp: %s",
+            #     scheduler_output.batch_type.value,
+            #     scheduler_output.head_token, channel.value,
+            #     list(scheduler_output.num_scheduled_tokens.keys()),
+            #     scheduler_output.total_num_scheduled_tokens,
+            #     (f"{layer_slice_info.slice_index}/{layer_slice_info.total_slices}"
+            #      if layer_slice_info is not None else "full"),
+            #     _ec_shapes(tensor_dict),
+            # )
+
         if self.profiler is not None:
             self.profiler.step()
 
@@ -1044,9 +1040,10 @@ class NPUWorker(WorkerBase):
         # with the edge and must send its middle-layer output
         # back to the edge (in-group rank 0). Other cloud
         # workers (TP non-first) are in singleton PP groups
-        # Send intermediate tensors to edge.  In the shared-model topology the
-        # edge sits at in-group rank 0, so dst=0 is needed.  Otherwise dst=None
-        # resolves to the implicit "next PP rank" which IS the edge.
+        # and don't communicate with the edge. We use an
+        # explicit ``dst=0`` rather than the default "next PP
+        # rank" routing because the edge sits at in-group rank
+        # 0, not the slot after the cloud.
         if get_pp_group().world_size > 1:
             channel = self._hidden_channel_for(scheduler_output)
             self._record_pp_send_work(
@@ -1067,92 +1064,6 @@ class NPUWorker(WorkerBase):
             #     _ec_shapes(_gathered),
             # )
         return output
-
-    def _execute_model_cloud_draft(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> ModelRunnerOutput:
-        """Run one cloud-side independently scheduled draft middle step."""
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
-        send_handles = self.model_runner._run_edge_cloud_draft_middle_segment(
-            scheduler_output
-        )
-        # Record the cloud->edge draft payload send instead of waiting it:
-        # the edge posts the matching tail recv (DRAFT_LAST) only after
-        # this worker's ack lets the cloud EngineCore publish the tail
-        # SchedulerOutput.  Waited lazily before the next DECODE-channel
-        # reuse, same as _execute_model_cloud.
-        if send_handles:
-            self._record_pp_send_work(
-                send_handles, channel=HiddenChannelType.DECODE
-            )
-        logger.info(
-            f"Execute model, batch_type: {scheduler_output.batch_type}, after."
-        )
-        req_ids = list(scheduler_output.num_scheduled_tokens)
-        return ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
-        )
-
-    def _execute_model_edge_draft_head(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> ModelRunnerOutput:
-        """Run and send one edge-side scheduled draft first segment."""
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
-        output = self.model_runner._run_edge_cloud_draft_first_segment(
-            scheduler_output
-        )
-        if not isinstance(output, IntermediateTensors):
-            raise RuntimeError("DRAFT_FIRST did not produce intermediates")
-        if get_pp_group().world_size == 2:
-            tensor_dict = {
-                key: value.contiguous()
-                if isinstance(value, torch.Tensor)
-                else value
-                for key, value in output.items()
-            }
-            tensor_dict.update(
-                head_token=scheduler_output.head_token,
-                draft_task_id=scheduler_output.draft_task_id,
-                draft_step_idx=int(scheduler_output.draft_step_idx or 0),
-            )
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict_scheduled_draft(tensor_dict),
-                channel=HiddenChannelType.DECODE,
-            )
-            logger.info(
-                "Send intermediate tensors to cloud, "
-                f"hidden_channel: {HiddenChannelType.DECODE.value}"
-            )
-        req_ids = list(scheduler_output.num_scheduled_tokens)
-        return ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
-        )
-
-    def _execute_model_edge_draft_tail(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> ModelRunnerOutput:
-        """Receive and finish one edge-side scheduled draft step."""
-        logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
-        tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv_scheduled_draft()
-        )
-        for handle in comm_handles:
-            handle.wait()
-        for postprocess in comm_postprocess:
-            postprocess()
-        logger.info(
-            "Receive intermediate tensors from cloud after, "
-            f"hidden_channel: {HiddenChannelType.DECODE.value}"
-        )
-        assert tensor_dict is not None
-        self.model_runner._validate_edge_cloud_draft_payload_identity(
-            scheduler_output, tensor_dict
-        )
-        return self.model_runner._run_edge_cloud_draft_last_segment(
-            scheduler_output, IntermediateTensors(tensor_dict)
-        )
 
     def _execute_model_legacy(
         self,
@@ -1584,23 +1495,6 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
-
-    def take_pending_edge_cloud_draft_scheduler_output(
-        self,
-    ) -> SchedulerOutput | None:
-        return (
-            self.model_runner.take_pending_edge_cloud_draft_scheduler_output()
-        )
-
-    def take_completed_edge_cloud_draft_result(
-        self,
-    ) -> tuple[DraftTokenIds, SchedulerOutput] | None:
-        return self.model_runner.take_completed_edge_cloud_draft_result()
-
-    def clear_pending_edge_cloud_draft_for_req_ids(
-        self, req_ids: set[str] | list[str]
-    ) -> None:
-        self.model_runner.clear_pending_edge_cloud_draft_for_req_ids(req_ids)
 
     def check_health(self) -> None:
         import subprocess
