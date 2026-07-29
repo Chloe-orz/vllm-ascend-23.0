@@ -1040,14 +1040,11 @@ def edge_cloud_isend_tensor_dict(
             "was initialized with inconsistent per-tensor shapes; re-init "
             "it or unset VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD."
         )
-        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
-            handle = torch.distributed.isend(
-                merged, dst=pp_group.ranks[dst], group=group
-            )
-            if merged.is_cuda:
-                merged.record_stream(torch.cuda.current_stream(merged.device))
-            elif merged.device.type == "npu":
-                merged.record_stream(torch.npu.current_stream(merged.device))
+        handle = torch.distributed.isend(
+            merged, dst=pp_group.ranks[dst], group=group
+        )
+        if merged.is_cuda:
+            merged.record_stream(torch.cuda.current_stream(merged.device))
         handles.append(handle)
         return handles
 
@@ -1069,14 +1066,13 @@ def edge_cloud_isend_tensor_dict(
             # only happens when upstream code returned a non-standard
             # layout, in which case we materialize once.
             value = value.contiguous()
-        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
-            handle = torch.distributed.isend(
-                value, dst=pp_group.ranks[dst], group=group
-            )
-            if value.is_cuda:
-                value.record_stream(torch.cuda.current_stream(value.device))
-            elif value.device.type == "npu":
-                value.record_stream(torch.npu.current_stream(value.device))
+        handle = torch.distributed.isend(
+            value, dst=pp_group.ranks[dst], group=group
+        )
+        if value.is_cuda:
+            value.record_stream(torch.cuda.current_stream(value.device))
+        elif value.device.type == "npu":
+            value.record_stream(torch.npu.current_stream(value.device))
         handles.append(handle)
 
     return handles
@@ -1204,12 +1200,9 @@ def edge_cloud_irecv_tensor_dict(
         # the leading num_tokens rows (mirrors the non-merge SP path).  When
         # SP is off this view is the whole buffer, a no-op.
         recv_view = merged[:num_tokens]
-        with _hidden_channel_stream_ctx(channel, wait_for_default=False):
-            handle = torch.distributed.irecv(
-                recv_view, src=pp_group.ranks[src], group=group
-            )
-            if recv_view.device.type == "npu":
-                recv_view.record_stream(torch.npu.current_stream(recv_view.device))
+        handle = torch.distributed.irecv(
+            recv_view, src=pp_group.ranks[src], group=group
+        )
 
         # Zero-fill the SP padding tail (see the non-merge path for why).
         # The merged buffer is TP-broadcast and split into per-key tensors,
@@ -1260,13 +1253,9 @@ def edge_cloud_irecv_tensor_dict(
 
             if key in send_keys:
                 recv_view = full_tensor[:num_tokens]
-                with _hidden_channel_stream_ctx(channel, wait_for_default=False):
-                    handle = torch.distributed.irecv(
-                        recv_view, src=pp_group.ranks[src], group=group
-                    )
-                    if recv_view.device.type == "npu":
-                        recv_view.record_stream(
-                            torch.npu.current_stream(recv_view.device))
+                handle = torch.distributed.irecv(
+                    recv_view, src=pp_group.ranks[src], group=group
+                )
                 handles.append(handle)
                 # Zero-fill the SP padding tail.  The sender only transmits
                 # the real num_tokens rows; the remaining
