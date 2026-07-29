@@ -514,11 +514,10 @@ class PassiveEngineCoreProc:
             _ac = getattr(vllm_config, "additional_config", None) or {}
             _ec = _ac.get("edge_cloud_config", {}) if isinstance(_ac, dict) else {}
             _pd = _ec.get("pd_separation", {}) if isinstance(_ec, dict) else {}
-            self._cher_enabled = bool(
-                getattr(_pc, "enable_edge_cloud", False)
-                and not getattr(_pc, "is_edge_node", True)
-                and _pd.get("enabled", False)
-            )
+            # [CHER-REVERT] Never fire recv-hints: the cloud worker's
+            # early-recv path is disabled and _execute_model_cloud always
+            # uses the synchronous recv fallback (pre-part3 flow).
+            self._cher_enabled = False
             # Track which head_tokens we have already sent a hint for, so
             # layer-slicing's multiple first-slice steps fire it only once.
             self._cher_hint_sent: set[str] = set()

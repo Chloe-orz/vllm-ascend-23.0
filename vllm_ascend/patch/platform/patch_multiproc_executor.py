@@ -127,11 +127,11 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         # cloud node (CHER is a built-in part of PD masking); left None and
         # hints are never sent otherwise.
         self.cloud_recv_hint_mq: MessageQueue | None = None
-        if (
-            self.parallel_config.enable_edge_cloud
-            and not self.parallel_config.is_edge_node
-            and _cloud_pd_enabled(self.vllm_config)
-        ):
+        # [CHER-REVERT] Do not create the hint MQ: without it the worker
+        # never rebuilds one in _init_message_queues, the early-recv guard
+        # thread never starts, and no hint can be delivered.  The whole
+        # early-recv path collapses to the synchronous fallback.
+        if False:
             # Small ring buffer: at most prefill_inflight_limit (<=2) P-middle
             # batches are in flight on the cloud at once, so at most that many
             # early-recv entries are ever useful -- the guard thread skips

@@ -656,12 +656,12 @@ class NPUWorker(WorkerBase):
             _ac = getattr(self.vllm_config, "additional_config", None) or {}
             _ec = _ac.get("edge_cloud_config", {}) if isinstance(_ac, dict) else {}
             _pd = _ec.get("pd_separation", {}) if isinstance(_ec, dict) else {}
-            self._cloud_hidden_early_recv_enabled = bool(
-                getattr(_pc, "enable_edge_cloud", False)
-                and not getattr(_pc, "is_edge_node", True)
-                and _pd.get("enabled", False)
-                and self.local_rank == 0
-            )
+            # [CHER-REVERT] Early-recv is disabled: _execute_model_cloud
+            # always takes the synchronous edge_cloud_broadcast_recv fallback
+            # (the pre-part3 flow).  The guard thread is never fed hints
+            # (PassiveEC gate is also off) and the hint MQ is not created,
+            # so no cross-thread NPU/HCCL/allocator usage remains.
+            self._cloud_hidden_early_recv_enabled = False
             # Max in-flight prefill batches on the cloud = prefill_inflight_limit
             # (2 when next_prefill_prior_enable, else 1).  At most that many
             # early-recv entries are ever useful, so the guard thread caps the
