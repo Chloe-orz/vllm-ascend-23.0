@@ -637,11 +637,13 @@ class PassiveEngineCoreProc:
             #         bt,
             #         _dt_enqueue,
             #     )
-            # For prefill and draft, POST_OUT must mean the cloud middle
-            # segment has completed. Store the original SchedulerOutput here
-            # and publish it from _drain_worker_completion_acks() after the
-            # worker reports done. Decode-last is prepared on the edge.
-            if (
+            # For PREFILL_FIRST, POST_OUT must mean the cloud middle segment
+            # has completed and started sending hidden states back.  Store the
+            # original SchedulerOutput here and publish it from
+            # _drain_worker_completion_acks() after the worker reports done.
+            if batch.scheduler_output.batch_type == BatchType.DECODE_FIRST:
+                self._maybe_publish_post_out(batch.scheduler_output)
+            elif (
                 batch.scheduler_output.batch_type
                 in (BatchType.PREFILL_FIRST, BatchType.DRAFT_FIRST)
                 and (slice_info is None or slice_info.is_last_slice)
@@ -661,7 +663,7 @@ class PassiveEngineCoreProc:
 
         Mapping (cloud-side):
             PREFILL_FIRST → PREFILL_LAST
-            DECODE_FIRST  → dropped (edge prepares DECODE_LAST)
+            DECODE_FIRST  → DECODE_LAST
             DRAFT_FIRST   → DRAFT_LAST
             anything else → dropped (legacy PP batches don't trigger return)
 
@@ -678,14 +680,9 @@ class PassiveEngineCoreProc:
                 scheduler_output, batch_type=BatchType.PREFILL_LAST
             )
         elif bt == BatchType.DECODE_FIRST:
-            # The edge pre-generates DECODE_LAST, so the cloud does not
-            # publish another control-plane response for DECODE_FIRST.
-            logger.debug(
-                "[Cloud] Skipping POST_OUT for DECODE_FIRST "
-                "head_token=%s (edge pre-generates DECODE_LAST)",
-                scheduler_output.head_token,
+            tail = replace(
+                scheduler_output, batch_type=BatchType.DECODE_LAST
             )
-            return
         elif bt == BatchType.DRAFT_FIRST:
             tail = replace(
                 scheduler_output, batch_type=BatchType.DRAFT_LAST
