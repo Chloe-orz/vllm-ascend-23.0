@@ -1483,6 +1483,15 @@ def edge_cloud_broadcast_recv(
                 handle.wait()
 
         comm_postprocess.append(broadcast_postprocess)
+        # SP chunk must run AFTER the TP broadcast fills these tensors.
+        # sequence_parallel_chunk returns a clone (not a view), so chunking
+        # eagerly before broadcast would clone stale/empty data -- the bug
+        # that garbled 3D (DeepSeek V4) output on the per-key path.  Match
+        # the merge path: append as the final postprocess.
+        if sp_chunk:
+            comm_postprocess.append(
+                lambda: _apply_sp_chunk_inplace(tensor_dict)
+            )
         return tensor_dict, comm_handles, comm_postprocess
 
     # Non-PP-NPU0 ranks: receive metadata from NPU 0 via TP broadcast,
@@ -1556,7 +1565,13 @@ def edge_cloud_broadcast_recv(
         for handle in handles:
             handle.wait()
 
-    return recv_tensor_dict, [], [broadcast_postprocess]
+    postprocess: list[Callable[[], None]] = [broadcast_postprocess]
+    # SP chunk after broadcast (see the PP-NPU0 per-key path above).
+    if sp_chunk:
+        postprocess.append(
+            lambda: _apply_sp_chunk_inplace(recv_tensor_dict)
+        )
+    return recv_tensor_dict, [], postprocess
 
 
 def edge_cloud_broadcast_recv_draft() -> tuple[

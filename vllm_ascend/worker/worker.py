@@ -51,7 +51,6 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
-from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
@@ -825,17 +824,11 @@ class NPUWorker(WorkerBase):
         do_sp_chunk = enable_sp() and (
             self.model_runner.edge_cloud_cfg.mode != "embedding_only"
             or not self.model_runner.supports_mm_inputs)
-        merge_payload = get_edge_cloud_tensor_meta().merge_payload
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
             num_tokens=num_tokens,
             channel=channel,
-            sp_chunk=do_sp_chunk and merge_payload,
+            sp_chunk=do_sp_chunk,
         )
-        if do_sp_chunk and not merge_payload:
-            tensor_dict = {
-                k: sequence_parallel_chunk(v)
-                for k, v in tensor_dict.items()
-            }
         entry = AsyncIntermediateTensors(
             tensor_dict,
             comm_handles=comm_handles,
@@ -1110,22 +1103,15 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         edge_sp = enable_sp()
-        edge_merge = get_edge_cloud_tensor_meta().merge_payload
         """Edge tail segment (PL/DL): recv -> segment_e -> return output."""
         #logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         channel = self._hidden_channel_for(scheduler_output)
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
             num_tokens=scheduler_output.total_num_scheduled_tokens,
             channel=channel,
-            sp_chunk=edge_sp and edge_merge,
+            sp_chunk=edge_sp,
         )
         #logger.info(f"Receive intermediate tensors from cloud after, hidden_channel: {channel.value}")
-
-        if edge_sp and not edge_merge:
-            tensor_dict = {
-                k: sequence_parallel_chunk(v)
-                for k, v in tensor_dict.items()
-            }
 
         intermediate_tensors = AsyncIntermediateTensors(
             tensor_dict,
@@ -1218,16 +1204,9 @@ class NPUWorker(WorkerBase):
                 # This overlaps cloud's _update_states, _prepare_inputs,
                 # _determine_batch_execution_and_padding, and
                 # _build_attention_metadata with edge's segment_a forward.
-                # On the merge_payload fast path the per-key tensors are
-                # materialized lazily inside comm_postprocess (after the
-                # merged buffer is split), so SP chunking must run there too
-                # - an eager chunk here would iterate an empty dict, rebind
-                # the variable, and sever the link to the postprocess that
-                # fills the original dict by reference (broken tokens).
                 do_sp_chunk = enable_sp() and (
                     self.model_runner.edge_cloud_cfg.mode != "embedding_only"
                     or not self.model_runner.supports_mm_inputs)
-                merge_payload = get_edge_cloud_tensor_meta().merge_payload
                 channel = self._hidden_channel_for(scheduler_output)
                 # In the shared-model edge-cloud topology the edge has a single
                 # distributed rank at in-group rank 0; the cloud first-worker of
@@ -1238,17 +1217,12 @@ class NPUWorker(WorkerBase):
                 tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     channel=channel,
-                    sp_chunk=do_sp_chunk and merge_payload,
+                    sp_chunk=do_sp_chunk,
                     src=_recv_src,
                 )
                 # logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
 
                 self.model_runner.cloud_prepare_early(scheduler_output)
-                if do_sp_chunk and not merge_payload:
-                    tensor_dict = {
-                        k: sequence_parallel_chunk(v)
-                        for k, v in tensor_dict.items()
-                    }
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
                     comm_handles=comm_handles,
