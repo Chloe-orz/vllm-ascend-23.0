@@ -3856,7 +3856,16 @@ class NPUModelRunner(GPUModelRunner):
                     # batch (attn_metadata / logits_indices / num_tokens all
                     # include the stale reqs' tokens). The segment_e fast
                     # path must not reuse it; force the normal prepare path.
-                    self._edge_prepare_cache = None
+                    # NOTE: this used to be `self._edge_prepare_cache = None`
+                    # but the cache was later keyed by head_token
+                    # (_edge_prepare_cache_by_token), which silently turned
+                    # that assignment into a no-op and let the fast path
+                    # reuse FULL-batch metadata for the filtered batch
+                    # (garbage logits for the alive reqs).  Pop the entry
+                    # for THIS head_token instead.
+                    self._edge_prepare_cache_by_token.pop(
+                        scheduler_output.head_token, None
+                    )
 
         # Save scheduler_output for edge-cloud mamba state sync in sample_tokens().
         self._last_scheduler_output = scheduler_output
