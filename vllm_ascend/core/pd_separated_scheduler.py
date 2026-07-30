@@ -259,9 +259,24 @@ class PDSeparatedScheduler(Scheduler):
     # Chunk-prefill-prior helpers                                         #
     # ------------------------------------------------------------------ #
     def _can_ahead_schedule(self, req_id: str) -> bool:
-        """True when the request can have one more chunk PF dispatched ahead."""
+        """True when the request can have one more chunk PF dispatched ahead.
+
+        Correctness gate (head_tail / stateful-edge fix): the next chunk's
+        PF must NOT be dispatched while a previous chunk's PL tail is still
+        in flight.  In head_tail mode the edge owns ordered per-request
+        state (GDN/mamba state advanced chunk-by-chunk, and tail-layer KV
+        written only when the PL segment runs).  Running PF(cN+1) before
+        PL(cN) makes the head GDN layers advance the state off an
+        incomplete base and then lets PL(cN) write back on top of it --
+        the request's GDN state is permanently corrupted and its decode
+        degrades into garbage (the 3~5/30 multi-request precision bug;
+        embedding_only is immune because the edge holds no layers/state).
+        ``_pending_tail_count[req] == 0`` means every earlier chunk's PL
+        has returned, so the chunk sequence is safely serial again.
+        """
         return (
             self._ahead_chunk_count.get(req_id, 0) < self.max_chunk_prefill_ahead
+            and self._pending_tail_count.get(req_id, 0) == 0
         )
 
     def _has_other_prefill_request(self, current_req_id: str) -> bool:
