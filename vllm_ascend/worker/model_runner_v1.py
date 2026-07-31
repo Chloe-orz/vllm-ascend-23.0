@@ -3955,6 +3955,8 @@ class NPUModelRunner(GPUModelRunner):
             and self.edge_cloud_cfg.role == "cloud"
             and intermediate_tensors is not None
             and self._cloud_prepare_cache is not None
+            and getattr(scheduler_output, "head_token", None)
+            == self._cloud_prepare_cache.get("head_token")
         )
         if _fast_path:
             # Pop this head_token's cache so a later segment_a (different
@@ -4013,6 +4015,18 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_common_attn_metadata
                 )
                 self._cloud_spec_decode_num_reqs = num_reqs
+        elif (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "cloud"
+            and intermediate_tensors is not None
+            and self._cloud_prepare_cache is not None
+            and getattr(scheduler_output, "head_token", None)
+            != self._cloud_prepare_cache.get("head_token")
+        ):
+            # head_token mismatch: cloud_prepare_early prepared for a different
+            # batch.  Discard the stale cache so it cannot be consumed by a
+            # later batch with a matching (stale) token.
+            self._cloud_prepare_cache = None
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 if not _fast_path and not _cloud_fast_path:
@@ -6120,8 +6134,17 @@ class NPUModelRunner(GPUModelRunner):
         # slow path (execute_model applies it after the batch is launched).
         cache["deferred_state_corrections_fn"] = deferred_state_corrections_fn
 
+        # Tag the cache with the head_token so the consume path can verify it
+        # is preparing the same batch that cloud_prepare_early targeted.
+        # This prevents a stale cloud cache (from an early-return or a
+        # speculative prepare for a different batch) from being consumed.
+        cache["head_token"] = getattr(scheduler_output, "head_token", None)
+
         # --- Cache all results ---
-        self._cloud_prepare_cache = cache
+        # Freeze to detach from the reusable input-preparation buffer pool;
+        # otherwise an interleaved batch could mutate the shared views before
+        # the cloud fast path consumes them.
+        self._cloud_prepare_cache = _freeze_scheduled_state(cache)
 
     def _edge_cloud_forward(
         self,
