@@ -80,9 +80,11 @@ from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv_scheduled_draft,
     edge_cloud_send_tensor_dict,
     edge_cloud_send_tensor_dict_scheduled_draft,
-    get_edge_cloud_tensor_meta,
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
+)
+from vllm_ascend.edge_cloud_materialized import (
+    supports_materialized_boundary_for_config,
 )
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
@@ -141,18 +143,8 @@ def _detect_has_residual(model_config) -> bool:
     return True
 
 
-def _ec_shapes(tensors: dict) -> str:
-    """Metadata-only per-tensor summary (shape/dtype) for edge-cloud hidden
-    tracing. Reading shapes requires NO device sync, so this is safe to log
-    on the async communication path (a value fingerprint would force a sync
-    and can stall the pipeline)."""
-    parts = []
-    for k, v in tensors.items():
-        if isinstance(v, torch.Tensor):
-            parts.append(f"{k}[shape={tuple(v.shape)},dtype={v.dtype}]")
-        else:
-            parts.append(f"{k}[{type(v).__name__}]")
-    return "; ".join(parts)
+def _use_materialized_residual_boundary(model_config) -> bool:
+    return supports_materialized_boundary_for_config(model_config)
 
 
 class NPUWorker(WorkerBase):
@@ -635,6 +627,10 @@ class NPUWorker(WorkerBase):
                 has_residual=has_residual,
                 hc_mult=hc_mult,
                 mode=self.model_runner.edge_cloud_cfg.mode,
+                uses_mrope=self.model_config.uses_mrope,
+                materialize_residual_boundary=(
+                    _use_materialized_residual_boundary(self.model_config)
+                ),
             )
 
             # [CHER] Cloud-side hidden early-receive is a built-in part of
@@ -1048,13 +1044,10 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Edge head segment (PF/DF): segment_a -> isend -> suspend -> return EMPTY."""
-        # logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors=None,
             layer_slice_info=layer_slice_info,
         )
-        # logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
-
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
         )
@@ -1079,15 +1072,6 @@ class NPUWorker(WorkerBase):
                                             num_tokens=scheduler_output.total_num_scheduled_tokens),
                 channel=channel,
             )
-            # logger.info(
-            #     "[EC-TRACE] edge->cloud send batch_type=%s head_token=%s "
-            #     "channel=%s req_ids=%s num_tokens=%d fp: %s",
-            #     scheduler_output.batch_type.value,
-            #     scheduler_output.head_token, channel.value,
-            #     list(scheduler_output.num_scheduled_tokens.keys()),
-            #     scheduler_output.total_num_scheduled_tokens,
-            #     _ec_shapes(_gathered),
-            # )
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
         # because sampling happens in the tail segment (PL/DL).
@@ -1111,28 +1095,16 @@ class NPUWorker(WorkerBase):
             channel=channel,
             sp_chunk=edge_sp,
         )
-        #logger.info(f"Receive intermediate tensors from cloud after, hidden_channel: {channel.value}")
 
         intermediate_tensors = AsyncIntermediateTensors(
             tensor_dict,
             comm_handles=comm_handles,
             comm_postprocess=comm_postprocess,
         )
-        # logger.info(
-        #     "[EC-TRACE] edge<-cloud recv batch_type=%s head_token=%s "
-        #     "channel=%s req_ids=%s num_tokens=%d fp: %s",
-        #     scheduler_output.batch_type.value,
-        #     scheduler_output.head_token, channel.value,
-        #     list(scheduler_output.num_scheduled_tokens.keys()),
-        #     scheduler_output.total_num_scheduled_tokens,
-        #     _ec_shapes(tensor_dict),
-        # )
-
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
         )
-        #logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -1204,6 +1176,9 @@ class NPUWorker(WorkerBase):
                 # This overlaps cloud's _update_states, _prepare_inputs,
                 # _determine_batch_execution_and_padding, and
                 # _build_attention_metadata with edge's segment_a forward.
+                # SP chunking is part of edge_cloud_broadcast_recv's
+                # postprocess for both merged and non-merged payloads. It must
+                # run only after the receive and TP broadcast have completed.
                 do_sp_chunk = enable_sp() and (
                     self.model_runner.edge_cloud_cfg.mode != "embedding_only"
                     or not self.model_runner.supports_mm_inputs)
@@ -1220,7 +1195,6 @@ class NPUWorker(WorkerBase):
                     sp_chunk=do_sp_chunk,
                     src=_recv_src,
                 )
-                # logger.info(f"Received intermediate tensors from edge, hidden_channel={channel.value}")
 
                 self.model_runner.cloud_prepare_early(scheduler_output)
                 intermediate_tensors = AsyncIntermediateTensors(
@@ -1235,7 +1209,6 @@ class NPUWorker(WorkerBase):
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
         )
-        #logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}, after.")
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -1271,17 +1244,6 @@ class NPUWorker(WorkerBase):
                                             dst=_send_dst),
                 channel=channel,
             )
-            # logger.info(
-            #     "[EC-TRACE] cloud->edge send batch_type=%s head_token=%s "
-            #     "channel=%s req_ids=%s num_tokens=%d slice=%s fp: %s",
-            #     scheduler_output.batch_type.value,
-            #     scheduler_output.head_token, channel.value,
-            #     list(scheduler_output.num_scheduled_tokens.keys()),
-            #     scheduler_output.total_num_scheduled_tokens,
-            #     (f"{layer_slice_info.slice_index}/{layer_slice_info.total_slices}"
-            #      if layer_slice_info is not None else "full"),
-            #     _ec_shapes(_gathered),
-            # )
         return output
 
     def _execute_model_cloud_draft(
