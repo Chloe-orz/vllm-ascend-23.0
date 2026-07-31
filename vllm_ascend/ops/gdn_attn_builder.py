@@ -40,6 +40,12 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_update_chunk_offsets,
 )
 
+import os
+
+from vllm.logger import logger
+
+_EC_DEBUG = os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1"
+
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
 _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
@@ -517,6 +523,19 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_token_indx = None
             spec_state_indices_tensor = None
             non_spec_state_indices_tensor = block_table_tensor[:, 0]
+            # [EC-DBG] multi-request batch state-slot diagnostic
+            if _EC_DEBUG and getattr(m, "num_reqs", 0) > 1:
+                _n = min(m.num_reqs, block_table_tensor.shape[0])
+                try:
+                    _seq = getattr(m, "seq_lens", None)
+                    _seq_str = _seq[:_n].tolist() if _seq is not None else "n/a"
+                except Exception:
+                    _seq_str = "n/a"
+                logger.info(
+                    "[EC-DBG] build: num_reqs=%d seq_lens=%s state_idx=%s",
+                    m.num_reqs, _seq_str,
+                    non_spec_state_indices_tensor[:_n].tolist(),
+                )
             non_spec_conv1d_cache_indices = block_table_tensor
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc

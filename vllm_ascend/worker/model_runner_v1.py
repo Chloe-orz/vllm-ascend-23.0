@@ -661,6 +661,9 @@ def _reorder_input_batch_to_so_order(input_batch, scheduler_output) -> bool:
     if len(target) != input_batch.num_reqs or list(
             input_batch.req_ids) == target:
         return False
+    if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
+        logger.info("[EC-DBG] reorder: %s -> %s",
+                    list(input_batch.req_ids), target)
     for dst, req_id in enumerate(target):
         src = input_batch.req_id_to_index[req_id]
         if src != dst:
@@ -3975,6 +3978,17 @@ class NPUModelRunner(GPUModelRunner):
             and tuple(self.input_batch.req_ids)
             == tuple(scheduler_output.num_scheduled_tokens)
         )
+        if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1" and self._edge_cloud_enabled:
+            _ht = getattr(scheduler_output, "head_token", None)
+            logger.info(
+                "[EC-DBG] edge fast_path=%s role=%s head=%s num_tokens=%s req_ids=%s "
+                "input_reqs=%s cache_hit=%s",
+                _fast_path, self.edge_cloud_cfg.role, _ht,
+                scheduler_output.total_num_scheduled_tokens,
+                tuple(scheduler_output.num_scheduled_tokens),
+                tuple(self.input_batch.req_ids) if self.input_batch.num_reqs > 0 else (),
+                (_ht in self._edge_prepare_cache_by_token) if _ht else False,
+            )
         # ---- cloud fast path: reuse pre-computed prepare results ----
         _cloud_fast_path = (
             self._edge_cloud_enabled
@@ -3984,6 +3998,14 @@ class NPUModelRunner(GPUModelRunner):
             and getattr(scheduler_output, "head_token", None)
             == self._cloud_prepare_cache.get("head_token")
         )
+        if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1" and self._edge_cloud_enabled:
+            logger.info(
+                "[EC-DBG] cloud fast_path=%s head=%s cache_ht=%s",
+                _cloud_fast_path,
+                getattr(scheduler_output, "head_token", None),
+                self._cloud_prepare_cache.get("head_token")
+                if self._cloud_prepare_cache else None,
+            )
         if _fast_path:
             # Pop this head_token's cache so a later segment_a (different
             # head_token) does not hand the wrong attn_metadata to this PL.
@@ -5706,6 +5728,13 @@ class NPUModelRunner(GPUModelRunner):
             and not self.use_sparse
         ):
             assert positions is not None
+            _t = num_tokens_padded
+            _prev = getattr(self, "_ec_prev_full_graph_tokens", None)
+            if (_prev is not None and _t != _prev
+                    and os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1"):
+                logger.warning("[EC-DBG] full-graph num_tokens CHANGE %s -> %s",
+                               _prev, _t)
+            self._ec_prev_full_graph_tokens = _t
             if graph_wrapper is not None:
                 assert graph_wrapper.graph_params is not None
             # Edge-cloud segments may contain mixed DSA+FIA layers.
@@ -6276,84 +6305,6 @@ class NPUModelRunner(GPUModelRunner):
         """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
         seg_a = self.segment_a_wrapper if use_graph else self.segment_a
         seg_e = self.segment_e_wrapper if use_graph else self.segment_e
-        seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
-        seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
-
-        if intermediate_tensors is None:
-            # Step 1：执行 Segment A（embedding + 首 head_k 层）
-            # 此时 input_ids 有效，输出 IntermediateTensors 供跨节点传输
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-            old_layer_idx = _EXTRA_CTX.layer_idx
-            if _EXTRA_CTX.layer_idx is not None:
-                _EXTRA_CTX.layer_idx = 0
-            try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
-                hidden_states = seg_a(
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
-            finally:
-                if old_layer_idx is not None:
-                    _EXTRA_CTX.layer_idx = old_layer_idx
-
-            assert isinstance(hidden_states, IntermediateTensors)
-            return hidden_states
-
-        # Step 2：执行 Segment E（尾 tail_k 层 + norm）
-        # intermediate_tensors 已由 NPUWorker 从 Cloud 侧接收
-        #
-        # 注意：segment_e 与 segment_a 共用同一个 scheduler_output，num_tokens
-        # 保持不变（scheduler_output 在同一迭代内不变化）。若两者 num_tokens
-        # 出现不一致，会导致 cudagraph shape 不匹配，引发图执行错误。
-        # 关键：重置 layer_idx，使 weight_prefetch / EPLB 定位到尾段起始层，
-        # 执行完毕后恢复原值，避免影响后续非边云路径
-        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-        old_layer_idx = _EXTRA_CTX.layer_idx
-        if _EXTRA_CTX.layer_idx is not None:
-            _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
-
-        try:
-            tail_layer_indices = list(range(
-                self.num_layers - self.tail_k,
-                self.num_layers,
-            ))
-            if seg_e_graph and not forward_context.capturing:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions,
-                    layer_indices=tail_layer_indices,
-                    graph_wrapper=seg_e,
-                )
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
-        finally:
-            # segment_e 执行完毕后恢复原始 layer_idx
-            if old_layer_idx is not None:
-                _EXTRA_CTX.layer_idx = old_layer_idx
-
-    def _edge_cloud_forward_edge(
-        self,
-        num_tokens_padded: int,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor | None,
-        intermediate_tensors: IntermediateTensors | None,
-        inputs_embeds: torch.Tensor | None,
-        use_graph: bool,
-        forward_context,
-        **model_kwargs: dict[str, Any],
-    ):
-        """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
-        seg_a = self.segment_a_wrapper if use_graph else self.segment_a
-        seg_e = self.segment_e_wrapper if use_graph else self.segment_e
         #seg_e = self.segment_e
         seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
         seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
@@ -6457,6 +6408,9 @@ class NPUModelRunner(GPUModelRunner):
                 per_layer_meta._is_layer_slice_continuation = True
         elif attn_metadata is not None:
             attn_metadata._is_layer_slice_continuation = True
+        if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
+            logger.info("[EC-DBG] mark layer-slice continuation (num_tokens=%s)",
+                        num_tokens_padded)
 
         num_tokens_padded = self._layerwise_num_tokens_padded
         num_tokens_across_dp = self._layerwise_num_tokens_across_dp
