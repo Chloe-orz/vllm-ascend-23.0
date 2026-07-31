@@ -1348,45 +1348,13 @@ def edge_cloud_irecv_tensor_dict(
             full_size, dtype=value.dtype, device=value.device
         )
 
-            if full_tensor.numel() == 0:
-                tensor_dict[key] = full_tensor
-                continue
-
-            if key in send_keys:
-                recv_view = full_tensor[:num_tokens]
-                with _hidden_channel_stream_ctx(channel, wait_for_default=True):
-                    handle = torch.distributed.irecv(
-                        recv_view, src=pp_group.ranks[src], group=group
-                    )
-                    if recv_view.device.type == "npu":
-                        recv_view.record_stream(
-                            torch.npu.current_stream(recv_view.device))
-                handles.append(handle)
-                # Zero-fill the SP padding tail.  The sender only transmits
-                # the real num_tokens rows; the remaining
-                # (recv_num_tokens - num_tokens) rows are padding to satisfy
-                # SP's TP-divisibility and must be zero, not torch.empty's
-                # uninitialized memory.  Garbage here is read by downstream
-                # ops that iterate over the full TP-padded buffer (SP
-                # all-gather inside attention, DSA compression, hc_head/norm)
-                # and probabilistically corrupts batched requests on 3D
-                # (DeepSeek V4) models.  Runs on the compute stream
-                # concurrent with the HCCL irecv (disjoint regions); the
-                # irecv handle wait plus the next HCCL op's compute->HCCL
-                # sync make it visible before any read.
-                if recv_num_tokens > num_tokens:
-                    full_tensor[num_tokens:].zero_()
-            else:
-                # The sender skipped this tensor (e.g. the zero residual in
-                # embedding_only e2c). Keep the buffer zeroed so the model
-                # layers see a valid residual without paying cross-node cost.
-                full_tensor.zero_()
+        if full_tensor.numel() == 0:
             tensor_dict[key] = full_tensor
             continue
 
         if key in send_keys:
             recv_view = full_tensor[:num_tokens]
-            with _hidden_channel_stream_ctx(channel, wait_for_default=False):
+            with _hidden_channel_stream_ctx(channel, wait_for_default=True):
                 handle = torch.distributed.irecv(
                     recv_view, src=pp_group.ranks[src], group=group
                 )
