@@ -610,6 +610,7 @@ class PDSeparatedScheduler(Scheduler):
             and self.prefill_inflight_count < self.prefill_inflight_limit
             and self.hidden_channel_manager.has_free_prefill()
             and effective_capacity > 0
+            and self.decode_inflight_count == 0
         )
 
     def _can_schedule_decode_first(self) -> bool:
@@ -621,6 +622,7 @@ class PDSeparatedScheduler(Scheduler):
             and not self.drafts_first_ready
             and not self.drafts_last_ready
             and not self._force_decode_last
+            and self.prefill_inflight_count == 0
         )
 
     def _can_schedule_draft_first(self) -> bool:
