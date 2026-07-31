@@ -41,9 +41,10 @@ from vllm.logger import logger
 
 # ---------------------------------------------------------------------------
 # Temporary edge-cloud multi-request debug instrumentation.
-# Verbose logging is gated by VLLM_ASCEND_EC_DEBUG=1; the state-index and
-# seq-length validation runs ALWAYS and asserts on real-request anomalies so
-# one 30-request run pinpoints the first corrupted shared-state slot.
+# All validation + verbose logging is gated by VLLM_ASCEND_EC_DEBUG=1 and is
+# skipped during graph capture (CPU<->NPU syncs such as .tolist()/.item() are
+# illegal there).  The assertions crash on the first corrupted state slot so
+# one 30-request run pinpoints the anomaly.
 # ---------------------------------------------------------------------------
 _EC_DEBUG = os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1"
 
@@ -53,6 +54,19 @@ def _ec_dbg(tag: str, msg: str, *args) -> None:
         logger.info("[EC-DBG] %s: %s", tag, msg % args if args else msg)
 
 
+def _ec_in_capture() -> bool:
+    """True while a CUDA/ACL graph is being captured.  CPU<->NPU syncs
+    (``.tolist()``/``.item()``/``.cpu()``) are illegal during capture, so the
+    debug checks must skip then."""
+    try:
+        fwd = get_forward_context()
+        if fwd is None:
+            return True
+        return bool(getattr(fwd, "capturing", False))
+    except Exception:
+        return True
+
+
 def _ec_check_state_indices(tag: str, indices, pool_size: int, num_real: int) -> None:
     """Validate GDN shared-pool state indices for the real requests.
 
@@ -60,6 +74,8 @@ def _ec_check_state_indices(tag: str, indices, pool_size: int, num_real: int) ->
     request owns distinct KV/state blocks, so two requests sharing a state
     slot means cross-request contamination.
     """
+    if not _EC_DEBUG or _ec_in_capture():
+        return
     if indices is None or pool_size <= 0:
         return
     idx = indices if isinstance(indices, torch.Tensor) else torch.as_tensor(indices)
@@ -87,6 +103,8 @@ def _ec_check_state_indices(tag: str, indices, pool_size: int, num_real: int) ->
 
 
 def _ec_check_seq_lengths(tag: str, seq_lengths, num_real: int) -> None:
+    if not _EC_DEBUG or _ec_in_capture():
+        return
     if seq_lengths is None or num_real <= 0:
         return
     sl = seq_lengths if isinstance(seq_lengths, torch.Tensor) else torch.as_tensor(seq_lengths)
