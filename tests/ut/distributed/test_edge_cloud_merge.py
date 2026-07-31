@@ -6,8 +6,9 @@
 # You may obtain a copy of the License at
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
-"""Unit tests for the edge-cloud payload merge fast path."""
+"""Unit tests for edge-cloud payload metadata and receive postprocessing."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -278,3 +279,147 @@ def test_init_meta_materialized_boundary_omits_residual():
     assert c2e.send_tensor_keys == ["hidden_states"]
     assert e2c.merge_payload is False
     assert c2e.merge_payload is False
+
+
+# ---------------------------------------------------------------------------
+# Non-merge receive: SP chunk must run after recv + TP broadcast
+# ---------------------------------------------------------------------------
+
+class _RecordingHandle:
+    def __init__(self, events, event, on_wait=None):
+        self.events = events
+        self.event = event
+        self.on_wait = on_wait
+
+    def wait(self):
+        self.events.append(self.event)
+        if self.on_wait is not None:
+            self.on_wait()
+
+
+def _materialized_meta(hidden_size=4):
+    return ps.EdgeCloudTensorMeta(
+        metadata_list=[
+            (
+                "hidden_states",
+                TensorMetadata("cpu", torch.float32, (0, hidden_size)),
+            ),
+        ],
+        tensor_keys=["hidden_states"],
+        hc_mult=1,
+        merge_payload=False,
+        merged_dtype=None,
+        merged_shape_tail=None,
+        split_sizes=None,
+        send_tensor_keys=["hidden_states"],
+    )
+
+
+def test_non_merge_pp_rank_chunks_after_recv_and_broadcast():
+    """PP rank 0 must not clone an unfilled async receive buffer."""
+    events = []
+    recv_tensor = torch.zeros(2, 4)
+    recv_handle = _RecordingHandle(
+        events,
+        "recv_wait",
+        on_wait=lambda: recv_tensor.fill_(1),
+    )
+
+    def fake_broadcast(*args, **kwargs):
+        events.append("broadcast_start")
+        return _RecordingHandle(events, "broadcast_wait")
+
+    def fake_sp_chunk(tensor_dict):
+        events.append("sp_chunk")
+        assert torch.equal(tensor_dict["hidden_states"], torch.ones(2, 4))
+
+    with (
+        patch.object(ps, "get_pp_group", return_value=SimpleNamespace(world_size=2)),
+        patch.object(
+            ps,
+            "get_tp_group",
+            return_value=SimpleNamespace(
+                ranks=[0],
+                cpu_group=object(),
+                device_group=object(),
+            ),
+        ),
+        patch.object(ps, "_select_edge_cloud_meta_for_recv",
+                     return_value=_materialized_meta()),
+        patch.object(
+            ps,
+            "edge_cloud_irecv_tensor_dict_on_hidden_channel",
+            return_value=(
+                {"hidden_states": recv_tensor},
+                [recv_handle],
+                [],
+            ),
+        ),
+        patch.object(torch.distributed, "broadcast", side_effect=fake_broadcast),
+        patch.object(ps, "_apply_sp_chunk_inplace", side_effect=fake_sp_chunk),
+    ):
+        tensor_dict, handles, postprocess = ps.edge_cloud_broadcast_recv(
+            num_tokens=2,
+            sp_chunk=True,
+        )
+
+        assert tensor_dict["hidden_states"].sum().item() == 0
+        assert events == []
+        for handle in handles:
+            handle.wait()
+        for callback in postprocess:
+            callback()
+
+    assert events == [
+        "recv_wait",
+        "broadcast_start",
+        "broadcast_wait",
+        "sp_chunk",
+    ]
+
+
+def test_non_merge_non_pp_rank_chunks_after_broadcast():
+    """Other TP ranks must chunk only after their broadcast buffer is filled."""
+    events = []
+
+    def fake_broadcast(tensor, *args, **kwargs):
+        events.append("broadcast_start")
+        return _RecordingHandle(
+            events,
+            "broadcast_wait",
+            on_wait=lambda: tensor.fill_(2),
+        )
+
+    def fake_sp_chunk(tensor_dict):
+        events.append("sp_chunk")
+        expected = torch.full((2, 4), 2.0)
+        assert torch.equal(tensor_dict["hidden_states"], expected)
+
+    with (
+        patch.object(ps, "get_pp_group", return_value=SimpleNamespace(world_size=1)),
+        patch.object(
+            ps,
+            "get_tp_group",
+            return_value=SimpleNamespace(
+                ranks=[0],
+                cpu_group=object(),
+                device_group=object(),
+            ),
+        ),
+        patch.object(ps, "_select_edge_cloud_meta_for_recv",
+                     return_value=_materialized_meta()),
+        patch.object(ps, "_pad_num_tokens_to_tp_multiple", return_value=2),
+        patch.object(torch.distributed, "broadcast", side_effect=fake_broadcast),
+        patch.object(ps, "_apply_sp_chunk_inplace", side_effect=fake_sp_chunk),
+    ):
+        tensor_dict, handles, postprocess = ps.edge_cloud_broadcast_recv(
+            num_tokens=2,
+            sp_chunk=True,
+        )
+
+        assert handles == []
+        assert events == []
+        for callback in postprocess:
+            callback()
+
+    assert events == ["broadcast_start", "broadcast_wait", "sp_chunk"]

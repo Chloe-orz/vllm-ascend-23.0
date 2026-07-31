@@ -62,7 +62,6 @@ from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 from vllm_ascend.distributed.parallel_state import (
     edge_cloud_broadcast_recv,
     edge_cloud_isend_tensor_dict,
-    get_edge_cloud_tensor_meta,
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
 )
@@ -322,12 +321,11 @@ class _BatchedExecuteMarker(DeferredExecutePostprocess):
             num_tokens=num_tokens,
         )
         edge_sp = enable_sp()
-        edge_merge = get_edge_cloud_tensor_meta().merge_payload
         pending_deferred[dp_rank] = (
             self.worker.make_batched_recv_closure(
                 src=dp_rank + 1,
                 num_tokens=num_tokens,
-                sp_chunk=edge_sp and edge_merge))
+                sp_chunk=edge_sp))
 
     # ------------------------------------------------------------------
     # Phase B/C: 1× batched tail + per-dp_rank post_batched + handle_output
@@ -750,7 +748,6 @@ class SharedModelEdgeWorker(NPUWorker):
         )
 
         edge_sp = enable_sp()
-        edge_merge = get_edge_cloud_tensor_meta().merge_payload
         # Defer the tail recv + tail forward to the end of the
         # current round. The WorkerProc accumulates these
         # callables in ``_pending_deferred`` and invokes them
@@ -769,7 +766,7 @@ class SharedModelEdgeWorker(NPUWorker):
             tensor_dict, comm_handles, comm_postprocess = (
                 edge_cloud_broadcast_recv(
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
-                    sp_chunk=edge_sp and edge_merge,
+                    sp_chunk=edge_sp,
                     src=self.local_rank + 1))
             intermediate_tensors = AsyncIntermediateTensors(
                 tensor_dict,

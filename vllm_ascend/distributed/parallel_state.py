@@ -1373,14 +1373,12 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
 def _apply_sp_chunk_inplace(tensor_dict: dict[str, Any]) -> None:
     """Sequence-parallel chunk each tensor in ``tensor_dict`` along dim 0.
 
-    Mirrors the eager ``sequence_parallel_chunk`` the worker applies on the
-    non-merge recv path.  The merge path needs this here because its per-key
-    tensors are materialized lazily *inside* the comm_postprocess callback
-    (after the merged buffer is split), so the worker's eager chunk runs before
-    the tensors exist: it would iterate an empty dict, rebind the variable to
-    a new dict, and sever the link to the postprocess callback that fills the
-    original dict by reference.  Running the chunk here, after the split,
-    keeps the chunked tensors in the same dict object the caller holds.
+    This runs as the final communication postprocess for both merged and
+    non-merged payloads. It must happen after the inter-node receive and
+    intra-node TP broadcast complete; ``sequence_parallel_chunk`` may clone its
+    input, so running it earlier would detach the model-visible tensor from the
+    buffer that communication later fills. Updating in place also preserves
+    the dict object captured by ``AsyncIntermediateTensors``.
     """
     from vllm.model_executor.models.utils import sequence_parallel_chunk
     for key, value in list(tensor_dict.items()):
@@ -1406,6 +1404,9 @@ def edge_cloud_broadcast_recv(
     still broadcasting metadata within the local TP group (intra-node)
     so that non-NPU0 TP ranks can allocate tensors.
     Args:
+        sp_chunk: Whether to split the fully received tensors across the local
+            TP/SP ranks. The split is deferred until after receive and TP
+            broadcast completion.
         src: optional explicit source rank (in-group index) for the
             PP receive. When ``None`` (the default), the upstream
             vLLM
@@ -1498,6 +1499,10 @@ def edge_cloud_broadcast_recv(
                 handle.wait()
 
         comm_postprocess.append(broadcast_postprocess)
+        if sp_chunk:
+            comm_postprocess.append(
+                lambda: _apply_sp_chunk_inplace(tensor_dict)
+            )
         return tensor_dict, comm_handles, comm_postprocess
 
     # Non-PP-NPU0 ranks: receive metadata from NPU 0 via TP broadcast,
@@ -1571,7 +1576,12 @@ def edge_cloud_broadcast_recv(
         for handle in handles:
             handle.wait()
 
-    return recv_tensor_dict, [], [broadcast_postprocess]
+    postprocess: list[Callable[[], None]] = [broadcast_postprocess]
+    if sp_chunk:
+        postprocess.append(
+            lambda: _apply_sp_chunk_inplace(recv_tensor_dict)
+        )
+    return recv_tensor_dict, [], postprocess
 
 
 def edge_cloud_broadcast_recv_draft() -> tuple[
