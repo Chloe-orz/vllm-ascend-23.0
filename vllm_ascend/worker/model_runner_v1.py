@@ -2348,11 +2348,31 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
-        # In edge-cloud mode, the tail segment reuses the
-        # num_computed_tokens already corrected by the head segment, so skip
-        # both the kernel and the CPU fallback copy to avoid re-introducing
-        # the scheduler's optimistic value.
-        if not self._is_edge_cloud_tail_segment:
+        # Edge-cloud tail segments reuse the GPU num_computed_tokens
+        # corrected by their head segment, so the sync below is normally
+        # skipped. That reuse is only safe when a re-sync would be wrong or
+        # unneeded:
+        #   * embedding_only: the edge has no attention layers, so stale
+        #     positions / seq_lens / slot_mapping cannot corrupt attention.
+        #   * async spec decode (MTP/eagle3): the head already wrote THIS
+        #     step's corrected values into the GPU buffer; re-running the
+        #     correction kernel on the tail reads those already-corrected
+        #     values (buffer indices overlap) and double-counts the accepted
+        #     tokens, and the CPU fallback is optimistic -> both wrong.
+        # head_tail + non-spec-decode tails MUST sync on the slow path: when
+        # PD interleaving churns input_batch between the head and tail
+        # segments, the tail's _update_states refreshes only the CPU
+        # num_computed_tokens while the GPU buffer keeps the head batch's
+        # stale values -> positions / seq_lens / slot_mapping shift -> KV
+        # cache writes land in wrong slots -> whole-batch corruption.
+        _skip_tail_sync = (
+            self._is_edge_cloud_tail_segment
+            and (
+                self.edge_cloud_cfg.mode == "embedding_only"
+                or self.use_async_spec_decode
+            )
+        )
+        if not _skip_tail_sync:
             valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
             if self.use_async_spec_decode:
                 computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
