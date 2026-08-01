@@ -55,16 +55,25 @@ def _ec_dbg(tag: str, msg: str, *args) -> None:
 
 
 def _ec_in_capture() -> bool:
-    """True while a CUDA/ACL graph is being captured.  CPU<->NPU syncs
+    """True while an NPU graph is being captured.  CPU<->NPU syncs
     (``.tolist()``/``.item()``/``.cpu()``) are illegal during capture, so the
-    debug checks must skip then."""
+    debug checks must skip then.
+
+    Covers both capture paths: ACLGraph (``forward_context.capturing``) and
+    torch_npu npugraph_ex (``torch.npu.is_current_stream_capturing()``).
+    """
+    try:
+        if torch.npu.is_current_stream_capturing():
+            return True
+    except Exception:
+        pass
     try:
         fwd = get_forward_context()
-        if fwd is None:
+        if fwd is not None and getattr(fwd, "capturing", False):
             return True
-        return bool(getattr(fwd, "capturing", False))
     except Exception:
-        return True
+        pass
+    return False
 
 
 def _ec_check_state_indices(tag: str, indices, pool_size: int, num_real: int) -> None:

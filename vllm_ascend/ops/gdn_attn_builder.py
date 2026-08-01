@@ -49,14 +49,23 @@ _EC_DEBUG = os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1"
 
 
 def _ec_in_capture() -> bool:
-    """Skip GPU-sync debug output while an ACL graph is being captured."""
+    """Skip GPU-sync debug output while an NPU graph is being captured.
+
+    Covers ACLGraph (``forward_context.capturing``) and torch_npu npugraph_ex
+    (``torch.npu.is_current_stream_capturing()``).
+    """
+    try:
+        if torch.npu.is_current_stream_capturing():
+            return True
+    except Exception:
+        pass
     try:
         fwd = get_forward_context()
-        if fwd is None:
+        if fwd is not None and getattr(fwd, "capturing", False):
             return True
-        return bool(getattr(fwd, "capturing", False))
     except Exception:
-        return True
+        pass
+    return False
 
 
 _GDN_CHUNK_SIZE = 64
