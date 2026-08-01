@@ -42,6 +42,7 @@ Key differences from standard Llama-style models:
 """
 
 from itertools import islice
+import os
 from typing import Any
 
 import torch
@@ -106,6 +107,14 @@ def _forward_edge_cloud_segment_v4(
             "intermediate_tensors required for non-first segment in V4"
         )
         hidden_states = intermediate_tensors["hidden_states"]
+
+    if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
+        print(
+            f"[EC-DBG] segment [{start_layer},{end_layer}) first={is_first_segment} "
+            f"last={is_last_segment} hidden={tuple(hidden_states.shape)} "
+            f"residual={None if residual is None else tuple(residual.shape)}",
+            flush=True,
+        )
 
     # ----- Execute layers in [start_layer, end_layer) -----
     # llama_4_scaling is currently None because scaling config is not enabled.

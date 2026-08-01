@@ -24,6 +24,7 @@
 # limitations under the License.
 #
 import math
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -974,6 +975,12 @@ class DeepseekV2DecoderLayer(nn.Module):
         return y
 
     def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
+        if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
+            print(
+                f"[EC-DBG] hc_post x={tuple(x.shape)} residual={tuple(residual.shape)} "
+                f"post={tuple(post.shape)} comb={tuple(comb.shape)}",
+                flush=True,
+            )
         y = torch.ops._C_ascend.npu_hc_post(
             x.unsqueeze(dim=0), residual.unsqueeze(dim=0), post.unsqueeze(dim=0), comb.unsqueeze(dim=0)
         )
