@@ -654,6 +654,17 @@ class PassiveEngineCoreProc:
                         _channel.value if _channel is not None else None
                     ),
                     "num_tokens": so.total_num_scheduled_tokens,
+                    # has_mrope is stamped by the edge PDSeparatedScheduler
+                    # (it owns the request registry; the passive cloud does
+                    # not - scheduled_cached_reqs carries only req_ids, so
+                    # cached-req multimodality cannot be derived from the SO
+                    # alone here). The stamp mirrors NPUModelRunner.
+                    # step_has_multimodal_req exactly, so the guard-thread
+                    # irecv expects exactly the mrope_positions the edge sender
+                    # puts on the wire (eliminates the mixed-batch mismatch).
+                    # Defaults True when unset (non-PD / no stamp) so mrope is
+                    # received conservatively.
+                    "has_mrope": getattr(so, "has_mrope", True),
                 }
                 _hint_mq = getattr(self.executor, "cloud_recv_hint_mq", None)
                 if _hint_mq is not None:

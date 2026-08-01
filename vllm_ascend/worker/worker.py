@@ -810,6 +810,7 @@ class NPUWorker(WorkerBase):
     # primitives serve CHER (cloud, edge->cloud) and EHER (edge, cloud->edge).
     def _post_early_irecv_locked(
         self, ht: str, channel: "HiddenChannelType", num_tokens: int,
+        include_mrope: bool = True,
     ) -> AsyncIntermediateTensors:
         """Post an irecv and return the entry.  Caller MUST hold
         ``_early_recv_lock``.  Does NOT cache in ``_early_recv_handles`` --
@@ -824,6 +825,7 @@ class NPUWorker(WorkerBase):
             num_tokens=num_tokens,
             channel=channel,
             sp_chunk=do_sp_chunk,
+            include_mrope = include_mrope,
         )
         entry = AsyncIntermediateTensors(
             tensor_dict,
@@ -846,6 +848,7 @@ class NPUWorker(WorkerBase):
             return
         channel_str = hint.get("hidden_channel")
         num_tokens = hint.get("num_tokens")
+        has_mrope = hint.get("has_mrope", True)
         if channel_str is None or num_tokens is None:
             logger.warning(
                 "[CHER] start_early_irecv: incomplete hint %s, skipping.",
@@ -878,7 +881,7 @@ class NPUWorker(WorkerBase):
             if len(self._early_recv_handles) >= _max:
                 return
             try:
-                entry = self._post_early_irecv_locked(ht, channel, num_tokens)
+                entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
                 self._early_recv_handles[ht] = entry  # cache for busy_loop
             except Exception:
                 logger.exception(
@@ -893,7 +896,7 @@ class NPUWorker(WorkerBase):
 
     def get_or_post_early_recv(
         self, head_token: str | None, channel: "HiddenChannelType",
-        num_tokens: int,
+        num_tokens: int, include_mrope: bool = True,
     ) -> AsyncIntermediateTensors | None:
         """Atomically reuse the guard-thread's early-recv entry, or post one.
 
@@ -921,7 +924,7 @@ class NPUWorker(WorkerBase):
             # duplicate (orphan irecv) when its hint arrives later.
             try:
                 return self._post_early_irecv_locked(
-                    head_token, channel, num_tokens)
+                    head_token, channel, num_tokens, include_mrope=include_mrope)
             except Exception:
                 logger.exception(
                     "[CHER] get_or_post_early_recv failed head_token=%s",
@@ -1065,11 +1068,31 @@ class NPUWorker(WorkerBase):
             _gathered = self._all_gather_tensor_dict(output.tensors)
         else:
             _gathered = output.tensors
+        # For M-RoPE VL models, edge has already computed the per-token
+        # mrope positions (which needs image_grid_thw that did not cross
+        # the edge->cloud mm_features boundary). Push them alongside
+        # hidden_states so cloud can reuse them instead of recomputing
+        # (and hitting the missing grid_thw). Transpose [3, N] -> [N, 3]
+        # so the sequence axis is dim-0, matching hidden_states and the
+        # e2c transfer's dim-0 slicing / SP-gather path.
+        # Skip for text-only batches: cloud computes M-RoPE locally then
+        # (empty mm_features degrades to 1D, no grid_thw needed), saving
+        # one P2P RTT. include_mrope is derived from the same scheduler_output
+        # the cloud recv uses (step_has_multimodal_req), so both sides agree.
+        include_mrope = self.model_runner.step_has_multimodal_req(
+            scheduler_output
+        )
+        if (include_mrope and self.model_runner.uses_mrope
+                and "hidden_states" in _gathered):
+            n = _gathered["hidden_states"].shape[0]
+            _gathered["mrope_positions"] = (
+                self.model_runner.mrope_positions.gpu[:, :n].t().contiguous()
+            )
         if get_pp_group().world_size == 2:
             channel = self._hidden_channel_for(scheduler_output)
             self._record_pp_send_work(
                 edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                                            num_tokens=scheduler_output.total_num_scheduled_tokens),
+                num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
                 channel=channel,
             )
         # Return a placeholder output that carries the request IDs so the
@@ -1149,12 +1172,28 @@ class NPUWorker(WorkerBase):
             # done by execute_model's wait_for_comm() on the busy_loop thread.
             _ht = getattr(scheduler_output, "head_token", None)
             entry = None
+            # Match the sender. The edge scheduler stamps `has_mrope` on
+            # every SO from its authoritative request registry, and the edge
+            # sender's include_mrope always equals it. The cloud runner's own
+            # registry LAGS behind (finished_req_ids flushed via EMPTY batches
+            # are dropped before reaching the cloud, and DECODE_FIRST SOs are
+            # published before the pending-finish merge), so computing from
+            # the local registry can disagree with the edge sender after an
+            # mm->text traffic transition and deadlock the HCCL recv. Trust
+            # the stamp; fall back to the local computation only if the stamp
+            # is absent (older edge). (Used by both the CHER early-recv miss
+            # path here and the sync fallback below.)
+            _cloud_include_mrope = getattr(scheduler_output, "has_mrope", None)
+            if _cloud_include_mrope is None:
+                _cloud_include_mrope = self.model_runner.step_has_multimodal_req(
+                    scheduler_output)
             if (self._cloud_hidden_early_recv_enabled and _ht
                     and scheduler_output.batch_type == BatchType.PREFILL_FIRST):
                 _channel = self._hidden_channel_for(scheduler_output)
                 entry = self.get_or_post_early_recv(
                     _ht, _channel,
                     scheduler_output.total_num_scheduled_tokens,
+                    include_mrope=_cloud_include_mrope,
                 )
             if entry is not None:
                 logger.debug("[CHER] consume early-recv head_token=%s", _ht)
@@ -1194,6 +1233,7 @@ class NPUWorker(WorkerBase):
                     channel=channel,
                     sp_chunk=do_sp_chunk,
                     src=_recv_src,
+                    include_mrope=_cloud_include_mrope,
                 )
 
                 self.model_runner.cloud_prepare_early(scheduler_output)

@@ -2348,11 +2348,31 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
-        # In edge-cloud mode, the tail segment reuses the
-        # num_computed_tokens already corrected by the head segment, so skip
-        # both the kernel and the CPU fallback copy to avoid re-introducing
-        # the scheduler's optimistic value.
-        if not self._is_edge_cloud_tail_segment:
+        # Edge-cloud tail segments reuse the GPU num_computed_tokens
+        # corrected by their head segment, so the sync below is normally
+        # skipped. That reuse is only safe when a re-sync would be wrong or
+        # unneeded:
+        #   * embedding_only: the edge has no attention layers, so stale
+        #     positions / seq_lens / slot_mapping cannot corrupt attention.
+        #   * async spec decode (MTP/eagle3): the head already wrote THIS
+        #     step's corrected values into the GPU buffer; re-running the
+        #     correction kernel on the tail reads those already-corrected
+        #     values (buffer indices overlap) and double-counts the accepted
+        #     tokens, and the CPU fallback is optimistic -> both wrong.
+        # head_tail + non-spec-decode tails MUST sync on the slow path: when
+        # PD interleaving churns input_batch between the head and tail
+        # segments, the tail's _update_states refreshes only the CPU
+        # num_computed_tokens while the GPU buffer keeps the head batch's
+        # stale values -> positions / seq_lens / slot_mapping shift -> KV
+        # cache writes land in wrong slots -> whole-batch corruption.
+        _skip_tail_sync = (
+            self._is_edge_cloud_tail_segment
+            and (
+                self.edge_cloud_cfg.mode == "embedding_only"
+                or self.use_async_spec_decode
+            )
+        )
+        if not _skip_tail_sync:
             valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
             if self.use_async_spec_decode:
                 computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
@@ -4246,6 +4266,30 @@ class NPUModelRunner(GPUModelRunner):
                         num_reqs,
                     )
 
+            # Edge-cloud cloud side: reuse the M-RoPE positions edge computed
+            # and pushed via intermediate_tensors (cloud skipped
+            # _init/_calc_mrope_positions). The wire tensor is [N, 3]
+            # (dim-0 = sequence). Materialize it into
+            # self.mrope_positions.gpu[:, :num_tokens_padded] ([3, N]) BEFORE
+            # _preprocess, which reads `positions` as a view over this buffer
+            # and runs update_cos_sin on it. Capture the received reference now:
+            # _preprocess -> sync_and_slice_intermediate_tensors reassigns
+            # `intermediate_tensors` to a local-buffer copy that omits
+            # mrope_positions (the sync loop skips it). Gate on the tensor's
+            # presence so this never KeyErrors regardless of whether the
+            # edge/cloud include_mrope decision (CHER hint vs sync) agreed.
+            recv_intermediate_tensors = intermediate_tensors
+            if (self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "cloud"
+                    and self.uses_mrope
+                    and recv_intermediate_tensors is not None
+                    and "mrope_positions" in recv_intermediate_tensors.tensors):
+                recv_intermediate_tensors.wait_for_comm()
+                recv_mrope = recv_intermediate_tensors.tensors["mrope_positions"]
+                self.mrope_positions.gpu[:, :num_tokens_padded].copy_(
+                    recv_mrope[:num_tokens_padded].t().contiguous()
+                )
+
             (
                 input_ids,
                 inputs_embeds,
@@ -5962,6 +6006,60 @@ class NPUModelRunner(GPUModelRunner):
             "cudagraph_stats": cudagraph_stats,
         }
 
+    def step_has_multimodal_req(self, scheduler_output) -> bool:
+        """Whether the current step's batch contains any multimodal request.
+
+        Used to decide whether mrope_positions must be transferred edge->cloud
+        (only multimodal requests need it; text-only batches can be computed
+        locally on the cloud because empty mm_features degrades M-RoPE to 1D
+        without hitting the missing image_grid_thw). Must return the SAME value
+        on edge and cloud (they share the scheduler_output and build req_state
+        from the same NewRequestData.mm_features).
+        """
+        # cached/running reqs: covers decode of multimodal requests (whose
+        # mm_features stay non-empty after prefill).
+        if any(rs.mm_features for rs in self.requests.values()):
+            return True
+        # new reqs this step: cloud recv runs BEFORE cloud_prepare_early builds
+        # req_state, so on the cloud side self.requests does not yet contain
+        # this step's new reqs; check scheduler_output directly.
+        for nr in scheduler_output.scheduled_new_reqs:
+            if getattr(nr, "mm_features", None):
+                return True
+        return False
+
+    def _init_mrope_positions(self, req_state) -> None:
+        # In edge-cloud cloud mode: skip M-RoPE init only for multimodal
+        # requests (their image_grid_thw / video_grid_thw did not cross the
+        # edge->cloud mm_features boundary, so local init would KeyError).
+        # Text-only requests (empty mm_features) init locally: _iter_mm_grid_hw
+        # does not enter its loop, M-RoPE degrades to 1D, no crash. This lets
+        # text-only batches skip the mrope transfer entirely.
+        # profile_run / _dummy_run do not call this, so the role guard does not
+        # affect profiling.
+        if (self._edge_cloud_enabled
+                and self.edge_cloud_cfg.role == "cloud"
+                and req_state.mm_features):
+            return
+        super()._init_mrope_positions(req_state)
+
+    def _calc_mrope_positions(self, scheduler_output) -> None:
+        # In edge-cloud cloud mode: skip local calc only when the batch carries
+        # wire mrope (edge transfers the whole-batch mrope buffer and
+        # execute_model injects it). Text-only batches compute locally.
+        # Use the edge scheduler's `has_mrope` stamp (authoritative) rather
+        # than the cloud's own registry, which lags behind after an mm->text
+        # transition (finished_req_ids flushed via EMPTY batches never reach
+        # the cloud runner); a stale registry would skip local calc for a
+        # text batch that has no wire mrope either, yielding garbage RoPE.
+        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+            has_mrope = getattr(scheduler_output, "has_mrope", None)
+            if has_mrope is None:
+                has_mrope = self.step_has_multimodal_req(scheduler_output)
+            if has_mrope:
+                return
+        super()._calc_mrope_positions(scheduler_output)
+
     def cloud_prepare_early(self, scheduler_output: "SchedulerOutput") -> None:
         """Pre-compute input preparation on cloud while edge runs segment_a.
 
@@ -6951,7 +7049,7 @@ class NPUModelRunner(GPUModelRunner):
                 # the received prefix and zero-fill the padding locally to avoid
                 # a shape-mismatch copy_ error on NPUs (e.g. 60 vs 64).
                 for k, v in intermediate_tensors.items():
-                    if not isinstance(v, torch.Tensor):
+                    if not isinstance(v, torch.Tensor) or k == "mrope_positions":
                         continue
                     copy_len = num_tokens
                     if k not in self.intermediate_tensors.tensors:
@@ -6980,6 +7078,15 @@ class NPUModelRunner(GPUModelRunner):
                 )
             else:
                 for k, v in intermediate_tensors.items():
+                    # mrope_positions is an edge-cloud side-channel tensor that
+                    # lives outside the model's layer-to-layer intermediate
+                    # buffer (self.intermediate_tensors, declared by
+                    # make_empty_intermediate_tensors as hidden/residual only).
+                    # It is materialized into self.mrope_positions.gpu directly
+                    # in execute_model before _preprocess; skip it here so the
+                    # copy-into-local-buffer loop does not KeyError on it.
+                    if k == "mrope_positions":
+                        continue
                     copy_len = (num_tokens + tp - 1) // tp if enable_sp() else num_tokens
                     dst = self.intermediate_tensors[k][:copy_len]
                     # Senders may transmit only real tokens; fill graph padding locally.
