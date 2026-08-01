@@ -658,6 +658,9 @@ def _reorder_input_batch_to_so_order(input_batch, scheduler_output) -> bool:
     if len(target) != input_batch.num_reqs or list(
             input_batch.req_ids) == target:
         return False
+    if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
+        logger.info("[EC-DBG] reorder: %s -> %s",
+                    list(input_batch.req_ids), target)
     for dst, req_id in enumerate(target):
         src = input_batch.req_id_to_index[req_id]
         if src != dst:
@@ -3949,6 +3952,17 @@ class NPUModelRunner(GPUModelRunner):
             and tuple(self.input_batch.req_ids)
             == tuple(scheduler_output.num_scheduled_tokens)
         )
+        if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1" and self._edge_cloud_enabled:
+            _ht = getattr(scheduler_output, "head_token", None)
+            logger.info(
+                "[EC-DBG] edge fast_path=%s role=%s head=%s num_tokens=%s req_ids=%s "
+                "input_reqs=%s cache_hit=%s",
+                _fast_path, self.edge_cloud_cfg.role, _ht,
+                scheduler_output.total_num_scheduled_tokens,
+                tuple(scheduler_output.num_scheduled_tokens),
+                tuple(self.input_batch.req_ids) if self.input_batch.num_reqs > 0 else (),
+                (_ht in self._edge_prepare_cache_by_token) if _ht else False,
+            )
         # ---- cloud fast path: reuse pre-computed prepare results ----
         _cloud_fast_path = (
             self._edge_cloud_enabled
@@ -3956,6 +3970,13 @@ class NPUModelRunner(GPUModelRunner):
             and intermediate_tensors is not None
             and self._cloud_prepare_cache is not None
         )
+        if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1" and self._edge_cloud_enabled:
+            logger.info(
+                "[EC-DBG] cloud fast_path=%s head=%s cache_set=%s",
+                _cloud_fast_path,
+                getattr(scheduler_output, "head_token", None),
+                self._cloud_prepare_cache is not None,
+            )
         if _fast_path:
             # Pop this head_token's cache so a later segment_a (different
             # head_token) does not hand the wrong attn_metadata to this PL.
@@ -6408,6 +6429,9 @@ class NPUModelRunner(GPUModelRunner):
                 per_layer_meta._is_layer_slice_continuation = True
         elif attn_metadata is not None:
             attn_metadata._is_layer_slice_continuation = True
+        if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
+            logger.info("[EC-DBG] mark layer-slice continuation (num_tokens=%s)",
+                        self._layerwise_num_tokens_padded)
 
         num_tokens_padded = self._layerwise_num_tokens_padded
         num_tokens_across_dp = self._layerwise_num_tokens_across_dp

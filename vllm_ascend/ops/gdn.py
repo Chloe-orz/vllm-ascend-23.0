@@ -35,6 +35,90 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
+import os
+
+from vllm.logger import logger
+
+# ---------------------------------------------------------------------------
+# Temporary edge-cloud multi-request debug instrumentation.
+# All validation + verbose logging is gated by VLLM_ASCEND_EC_DEBUG=1 and is
+# skipped during graph capture (CPU<->NPU syncs such as .tolist()/.item() are
+# illegal there).  The assertions crash on the first corrupted state slot so
+# one 30-request run pinpoints the anomaly.
+# ---------------------------------------------------------------------------
+_EC_DEBUG = os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1"
+
+
+def _ec_dbg(tag: str, msg: str, *args) -> None:
+    if _EC_DEBUG:
+        logger.info("[EC-DBG] %s: %s", tag, msg % args if args else msg)
+
+
+def _ec_in_capture() -> bool:
+    """True while a CUDA/ACL graph is being captured.  CPU<->NPU syncs
+    (``.tolist()``/``.item()``/``.cpu()``) are illegal during capture, so the
+    debug checks must skip then."""
+    try:
+        fwd = get_forward_context()
+        if fwd is None:
+            return True
+        return bool(getattr(fwd, "capturing", False))
+    except Exception:
+        return True
+
+
+def _ec_check_state_indices(tag: str, indices, pool_size: int, num_real: int) -> None:
+    """Validate GDN shared-pool state indices for the real requests.
+
+    Collision or OOB in the real (non-padded) portion is always a bug: each
+    request owns distinct KV/state blocks, so two requests sharing a state
+    slot means cross-request contamination.
+    """
+    if not _EC_DEBUG or _ec_in_capture():
+        return
+    if indices is None or pool_size <= 0:
+        return
+    idx = indices if isinstance(indices, torch.Tensor) else torch.as_tensor(indices)
+    if idx.numel() == 0:
+        return
+    flat = idx.reshape(-1)
+    real = flat[:num_real] if 0 < num_real < flat.numel() else flat
+    if real.numel() == 0:
+        return
+    real_cpu = real.detach().cpu()
+    _ec_dbg(tag, "state_indices[:%d]=%s pool=%d", real_cpu.numel(), real_cpu.tolist(),
+            pool_size)
+    mx = int(real_cpu.max().item())
+    mn = int(real_cpu.min().item())
+    assert mn >= 0 and mx < pool_size, (
+        f"[EC-DBG] {tag}: state_indices OOB min={mn} max={mx} pool={pool_size} "
+        f"num_real={real_cpu.numel()} real={real_cpu.tolist()}"
+    )
+    if real_cpu.numel() > 1:
+        uniq = real_cpu.unique().numel()
+        assert uniq == real_cpu.numel(), (
+            f"[EC-DBG] {tag}: state_indices COLLISION {real_cpu.tolist()} "
+            f"(unique={uniq}/{real_cpu.numel()}) pool={pool_size}"
+        )
+
+
+def _ec_check_seq_lengths(tag: str, seq_lengths, num_real: int) -> None:
+    if not _EC_DEBUG or _ec_in_capture():
+        return
+    if seq_lengths is None or num_real <= 0:
+        return
+    sl = seq_lengths if isinstance(seq_lengths, torch.Tensor) else torch.as_tensor(seq_lengths)
+    if sl.numel() == 0:
+        return
+    real = sl.reshape(-1)[:num_real]
+    real_cpu = real.detach().cpu()
+    _ec_dbg(tag, "seq_lengths[:%d]=%s", real_cpu.numel(), real_cpu.tolist())
+    if real_cpu.numel() > 0:
+        assert bool((real_cpu >= 0).all()), (
+            f"[EC-DBG] {tag}: negative seq_lengths real={real_cpu.tolist()}"
+        )
+
+
 def to_int64_tuple(tensor: torch.Tensor) -> tuple[int, ...]:
     tensor = tensor.to(torch.int64)
     if tensor.dim() == 0:
@@ -691,6 +775,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 g_non_spec = g_non_spec[:, num_decode_tokens:]
                 beta_non_spec = beta_non_spec[:, num_decode_tokens:]
 
+            _ec_check_state_indices(
+                "prefill", prefill_state_indices, ssm_state.shape[0],
+                attn_metadata.num_prefills,
+            )
             initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
             clear_ssm_states(initial_state, prefill_has_initial_state)
             (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
@@ -714,6 +802,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 )
         elif attn_metadata.num_decodes > 0:
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
+            _ec_check_state_indices(
+                "decode", non_spec_state_indices_tensor, ssm_state.shape[0],
+                attn_metadata.num_decodes,
+            )
+            _ec_check_seq_lengths("decode", actual_seq_lengths,
+                                  attn_metadata.num_decodes)
             query_non_spec = l2norm_fwd(query_non_spec)
             key_non_spec = l2norm_fwd(key_non_spec)
             # Dispatches to the vllm-ascend AscendC custom operator

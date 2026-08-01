@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed import get_pcp_group
+from vllm.forward_context import get_forward_context
 from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionBackend,
@@ -39,6 +40,24 @@ from vllm_ascend.ops.triton.fla.utils import (
     prepare_final_chunk_indices,
     prepare_update_chunk_offsets,
 )
+
+import os
+
+from vllm.logger import logger
+
+_EC_DEBUG = os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1"
+
+
+def _ec_in_capture() -> bool:
+    """Skip GPU-sync debug output while an ACL graph is being captured."""
+    try:
+        fwd = get_forward_context()
+        if fwd is None:
+            return True
+        return bool(getattr(fwd, "capturing", False))
+    except Exception:
+        return True
+
 
 _GDN_CHUNK_SIZE = 64
 # Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
@@ -517,6 +536,20 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_token_indx = None
             spec_state_indices_tensor = None
             non_spec_state_indices_tensor = block_table_tensor[:, 0]
+            # [EC-DBG] multi-request batch state-slot diagnostic
+            if (_EC_DEBUG and getattr(m, "num_reqs", 0) > 1
+                    and not _ec_in_capture()):
+                _n = min(m.num_reqs, block_table_tensor.shape[0])
+                try:
+                    _seq = getattr(m, "seq_lens", None)
+                    _seq_str = _seq[:_n].tolist() if _seq is not None else "n/a"
+                except Exception:
+                    _seq_str = "n/a"
+                logger.info(
+                    "[EC-DBG] build: num_reqs=%d seq_lens=%s state_idx=%s",
+                    m.num_reqs, _seq_str,
+                    non_spec_state_indices_tensor[:_n].tolist(),
+                )
             non_spec_conv1d_cache_indices = block_table_tensor
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc

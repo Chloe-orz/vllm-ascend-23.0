@@ -22,6 +22,8 @@ from vllm.distributed.parallel_state import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, enable_sp, flashcomm2_enable
+import os
+
 from vllm.logger import logger
 
 # Currently, mc2 op need their own group coordinator.
@@ -1370,7 +1372,11 @@ def _apply_sp_chunk_inplace(tensor_dict: dict[str, Any]) -> None:
     from vllm.model_executor.models.utils import sequence_parallel_chunk
     for key, value in list(tensor_dict.items()):
         if isinstance(value, torch.Tensor) and value.numel() > 0:
+            before = tuple(value.shape)
             tensor_dict[key] = sequence_parallel_chunk(value)
+            if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
+                logger.info("[EC-DBG] sp_chunk %s: %s -> %s",
+                            key, before, tuple(tensor_dict[key].shape))
 
 
 def edge_cloud_broadcast_recv(
