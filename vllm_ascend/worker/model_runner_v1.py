@@ -3460,6 +3460,14 @@ class NPUModelRunner(GPUModelRunner):
                         try:
                             row = draft_req_ids.index(req_ids[req_idx])
                         except ValueError:
+                            logger.warning(
+                                "Draft snapshot request mismatch: task_id=%s, "
+                                "current_req_id=%s, snapshot_req_ids=%s; "
+                                "leaving speculative placeholders unchanged",
+                                task_id,
+                                req_ids[req_idx],
+                                draft_req_ids,
+                            )
                             start = end
                             continue
                     if row < worker_draft_cpu.shape[0]:
