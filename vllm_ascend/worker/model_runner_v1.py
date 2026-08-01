@@ -368,6 +368,18 @@ class HeadState:
     req_ids: tuple[str, ...]
 
 
+def _edge_prepare_cache_max_from_env() -> int:
+    """In-flight head-segment prepare-cache bound for edge-cloud PD interleave.
+
+    Default 32: with heavy prefill (e.g. dsv4 DSA compression) under 2P1D +
+    chunked prefill, more than 8 heads can be in flight between head and
+    tail; the old bound of 8 silently evicted a live head and forced its
+    tail down the slow prepare path (accuracy risk).  Override with
+    VLLM_ASCEND_EC_PREPARE_CACHE_MAX.
+    """
+    return int(os.environ.get("VLLM_ASCEND_EC_PREPARE_CACHE_MAX", "32"))
+
+
 def _freeze_scheduled_state(value: Any, memo: dict[int, Any] | None = None) -> Any:
     """Clone mutable state that has to survive a scheduler context switch.
 
@@ -818,7 +830,10 @@ class NPUModelRunner(GPUModelRunner):
             # are keyed because prefill/decode heads may be in flight at the
             # same time and must not overwrite one another.
             self._edge_prepare_cache_by_token: dict[str, dict[str, Any]] = {}
-            self._edge_prepare_cache_max: int = 8
+            self._edge_prepare_cache_max: int = _edge_prepare_cache_max_from_env()
+            # dsv4 IndexCache: per-head snapshot of the model-level shared
+            # topk_indices_buffer, restored before the paired tail segment.
+            self._edge_topk_indices_cache: dict[str, torch.Tensor] = {}
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
         else:
@@ -1192,7 +1207,13 @@ class NPUModelRunner(GPUModelRunner):
             # Bounded size guard: a segment_e that never arrives (e.g. request
             # aborted mid-prefill) would otherwise leak its entry.  2P1D keeps
             # at most 2 in-flight; the slack absorbs scheduling jitter.
-            self._edge_prepare_cache_max: int = 8
+            # NOTE: the old bound of 8 was too tight for heavy dsv4 prefill
+            # (silent eviction of a live head -> tail slow path, accuracy
+            # risk); the bound is now configurable and defaults to 32.
+            self._edge_prepare_cache_max: int = _edge_prepare_cache_max_from_env()
+            # dsv4 IndexCache: per-head snapshot of the model-level shared
+            # topk_indices_buffer, restored before the paired tail segment.
+            self._edge_topk_indices_cache: dict[str, torch.Tensor] = {}
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
         else:
@@ -4301,13 +4322,19 @@ class NPUModelRunner(GPUModelRunner):
                 >= self._edge_prepare_cache_max
             ):
                 stale_token = next(iter(self._edge_prepare_cache_by_token))
-                # logger.warning(
-                #     "Edge segment_a cache exceeded bound (%d); evicting oldest "
-                #     "head_token=%s (its segment_e likely never arrived, e.g. "
-                #     "request abort).",
-                #     self._edge_prepare_cache_max,
-                #     stale_token,
-                # )
+                # Loud by design: evicting a LIVE head (rather than one whose
+                # tail genuinely never arrives, e.g. abort) forces its tail
+                # down the slow prepare path, which is an accuracy risk under
+                # PD interleave.  If this fires in production, raise
+                # VLLM_ASCEND_EC_PREPARE_CACHE_MAX.
+                logger.warning(
+                    "Edge segment_a cache exceeded bound (%d); evicting oldest "
+                    "head_token=%s (its segment_e likely never arrived, e.g. "
+                    "request abort). If the tail was still in flight, accuracy "
+                    "may be affected.",
+                    self._edge_prepare_cache_max,
+                    stale_token,
+                )
                 self._edge_prepare_cache_by_token.pop(stale_token, None)
 
             cache_entry = {
@@ -6456,6 +6483,48 @@ class NPUModelRunner(GPUModelRunner):
             self.kv_connector_output = kv_connector_output
             return None
 
+    def _get_dsv4_topk_indices_buffer(self) -> torch.Tensor | None:
+        """Model-level DSA topk indices buffer (dsv4 IndexCache), or None.
+
+        The buffer lives on DeepseekV4Model and is shared by all layers at
+        forward time; it is NOT part of attn_metadata, so the per-head
+        prepare-cache freeze does not cover it.
+        """
+        if not hasattr(self, "_topk_indices_buffer_ref"):
+            buf = None
+            model = self.model
+            for attr_chain in (
+                ("model", "topk_indices_buffer"),
+                ("model", "model", "topk_indices_buffer"),
+                ("language_model", "model", "topk_indices_buffer"),
+            ):
+                obj = model
+                for attr in attr_chain:
+                    obj = getattr(obj, attr, None)
+                    if obj is None:
+                        break
+                if isinstance(obj, torch.Tensor):
+                    buf = obj
+                    break
+            self._topk_indices_buffer_ref = buf
+        return self._topk_indices_buffer_ref
+
+    def _topk_index_cache_active(self) -> bool:
+        """Whether edge-side topk_indices_buffer snapshot/restore is needed.
+
+        Only dsv4 with IndexCache (``use_index_cache``) has skip_topk layers
+        that READ topk indices written by an earlier indexer layer via the
+        model-level shared buffer.  Under PD interleave, an interleaved head
+        segment can overwrite that buffer between this batch's head and tail
+        segments, making the tail layer attend to the wrong KV entries.
+        """
+        return (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and getattr(self.model_config.hf_config, "use_index_cache", False)
+            and self._get_dsv4_topk_indices_buffer() is not None
+        )
+
     def suspend_head_state(self, scheduler_output: SchedulerOutput) -> None:
         """Suspend the minimal head-segment context for later tail-segment pairing.
 
@@ -6475,6 +6544,27 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output=scheduler_output,
             req_ids=tuple(self.input_batch.req_ids),
         )
+
+        # dsv4 IndexCache: snapshot the topk indices that segment_a's indexer
+        # layers just wrote into the model-level shared buffer.  An
+        # interleaved head segment (PD interleave) would otherwise overwrite
+        # them before the paired tail segment's skip_topk layer reads them.
+        # Runs on the default stream, ordered after the head forward.
+        if self._topk_index_cache_active():
+            buffer = self._get_dsv4_topk_indices_buffer()
+            total = scheduler_output.total_num_scheduled_tokens
+            if buffer is not None and 0 < total <= buffer.shape[0]:
+                if len(self._edge_topk_indices_cache) >= self._edge_prepare_cache_max:
+                    stale_token = next(iter(self._edge_topk_indices_cache))
+                    logger.warning(
+                        "[EdgeCloud] topk indices cache exceeded bound (%d); "
+                        "evicting oldest head_token=%s (its segment_e likely "
+                        "never arrived, e.g. request abort).",
+                        self._edge_prepare_cache_max,
+                        stale_token,
+                    )
+                    self._edge_topk_indices_cache.pop(stale_token, None)
+                self._edge_topk_indices_cache[token] = buffer[:total].clone()
 
     def _resume_and_validate_head_state(
         self,
@@ -6518,6 +6608,17 @@ class NPUModelRunner(GPUModelRunner):
                 f"{head_req_ids}, tail scheduler_output has "
                 f"{tail_req_ids}"
             )
+
+        # dsv4 IndexCache: restore the topk indices snapshot taken by this
+        # head's segment_a (see suspend_head_state) before the tail's
+        # skip_topk layer reads the model-level shared buffer.  The restore
+        # is ordered before this tail's forward on the default stream, and no
+        # other batch can interleave within this execute_model call.
+        if self._topk_index_cache_active():
+            snapshot = self._edge_topk_indices_cache.pop(token_ctrl, None)
+            if snapshot is not None:
+                buffer = self._get_dsv4_topk_indices_buffer()
+                buffer[:snapshot.shape[0]].copy_(snapshot)
 
     def _merge_pending_prev_sampled(
         self,
@@ -6595,15 +6696,20 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled = scheduler_output.num_scheduled_tokens
         alive_req_ids = [r for r in num_scheduled if r not in stale]
 
+        # Per-req token ranges of the alive reqs (token layout: each req
+        # contributes num_scheduled_tokens[req_id] tokens in scheduler order).
+        # Hoisted: reused by both the hidden slicing below and the dsv4 topk
+        # buffer compaction.
+        total_tokens = sum(num_scheduled.values())
+        keep_indices: list[int] = []
+        offset = 0
+        for req_id, n in num_scheduled.items():
+            if req_id not in stale:
+                keep_indices.extend(range(offset, offset + n))
+            offset += n
+
         # ---- Slice token-major hidden tensors ----
         if intermediate_tensors is not None:
-            total_tokens = sum(num_scheduled.values())
-            keep_indices: list[int] = []
-            offset = 0
-            for req_id, n in num_scheduled.items():
-                if req_id not in stale:
-                    keep_indices.extend(range(offset, offset + n))
-                offset += n
             new_tensors: dict[str, torch.Tensor] = {}
             for key, tensor in intermediate_tensors.tensors.items():
                 if (isinstance(tensor, torch.Tensor)
@@ -6624,6 +6730,20 @@ class NPUModelRunner(GPUModelRunner):
                 intermediate_tensors, "kv_connector_output", None
             )
             intermediate_tensors = new_intermediate
+
+        # ---- Compact the restored dsv4 topk indices buffer ----
+        # _resume_and_validate_head_state already restored this head's topk
+        # snapshot in the FULL (unfiltered) token layout; apply the same
+        # per-req ranges so the tail's skip_topk layer reads indices aligned
+        # with the compacted batch.
+        if keep_indices and self._topk_index_cache_active():
+            buffer = self._get_dsv4_topk_indices_buffer()
+            if buffer is not None and buffer.shape[0] >= total_tokens:
+                index = torch.tensor(
+                    keep_indices, dtype=torch.long, device=buffer.device
+                )
+                compacted = buffer[:total_tokens].index_select(0, index)
+                buffer[:compacted.shape[0]].copy_(compacted)
 
         # ---- Rewrite per-req scheduling fields ----
         scheduler_output.num_scheduled_tokens = {
