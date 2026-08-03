@@ -278,6 +278,9 @@ class PDSeparatedScheduler(Scheduler):
           - ``chunk_prefill_first`` contains a request with a different id;
           - ``running`` contains a still-prefilling request with a different
             id (drained-window case);
+          - ``prefill_last_pending`` contains a request with a different id
+            whose prefill is still incomplete (it will come back for its
+            next chunk once the pending PL returns);
           - ``waiting`` is non-empty (a new request is available).
         """
         for req in self.chunk_prefill_first:
@@ -288,6 +291,12 @@ class PDSeparatedScheduler(Scheduler):
             for req in running:
                 if (req.request_id != current_req_id
                         and getattr(req, "is_prefill_chunk", False)):
+                    return True
+        prefill_last_pending = getattr(self, "prefill_last_pending", None)
+        if prefill_last_pending:
+            for req in prefill_last_pending:
+                if (req.request_id != current_req_id
+                        and req.num_computed_tokens < req.num_prompt_tokens):
                     return True
         return len(self.waiting) > 0
 
@@ -313,6 +322,19 @@ class PDSeparatedScheduler(Scheduler):
                 and self._has_other_prefill_request(req.request_id)):
             return False
         return True
+
+    @staticmethod
+    def _is_last_prefill_chunk(req: Request) -> bool:
+        """Whether the request's prefill is complete after the current PF.
+
+        Must be called AFTER ``super().schedule()``: by then
+        ``req.num_computed_tokens`` has been advanced by the scheduled
+        tokens (``_update_after_schedule``) and already includes any
+        prefix-cache hit credited at admission, so comparing it against
+        ``num_prompt_tokens`` is exact for both exposed candidates and
+        requests admitted from waiting in the same scheduling call.
+        """
+        return req.num_prompt_tokens - req.num_computed_tokens <= 0
 
     def _select_single_prefill_candidate(
         self, candidates: list[Request],
@@ -794,16 +816,6 @@ class PDSeparatedScheduler(Scheduler):
             saved_waiting_rest = []
 
 
-        # Snapshot num_computed_tokens before super().schedule() so that
-        # the is_last computation below uses the pre-schedule value.
-        # (super().schedule() → _update_after_schedule increments
-        # num_computed_tokens; without the snapshot we would double-count
-        # the current chunk's tokens.)
-        _num_computed_before: dict[str, int] = {
-            req.request_id: req.num_computed_tokens
-            for req in self.running
-        }
-
         scheduler_output = None
         try:
             scheduler_output = super().schedule()
@@ -846,20 +858,20 @@ class PDSeparatedScheduler(Scheduler):
                                         req.request_id
                                     ]
                                 )
-                                # Use pre-schedule num_computed_tokens
-                                # to avoid double-counting the current
-                                # chunk's tokens.
-                                num_comp_before = (
-                                    _num_computed_before.get(
-                                        req.request_id, 0
-                                    )
-                                )
-                                remaining = (
-                                    req.num_prompt_tokens
-                                    - num_comp_before
-                                    - num_scheduled
-                                )
-                                is_last = remaining <= 0
+                                # Use the POST-schedule
+                                # num_computed_tokens (already advanced by
+                                # num_scheduled via _update_after_schedule,
+                                # and already including any prefix-cache hit
+                                # credited at admission).  A pre-schedule
+                                # snapshot over self.running misses requests
+                                # admitted from waiting in this very call —
+                                # self.running was temporarily replaced above
+                                # — so a prefix-cache hit would be
+                                # under-counted and is_last wrongly flipped
+                                # to False: the PL then skips sampling and
+                                # the request stalls in prefill_last_pending
+                                # forever.
+                                is_last = self._is_last_prefill_chunk(req)
                                 flight = PrefillChunkFlight(
                                     request_id=req.request_id,
                                     head_token=scheduler_output.head_token,
