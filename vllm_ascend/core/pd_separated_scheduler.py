@@ -839,6 +839,7 @@ class PDSeparatedScheduler(Scheduler):
                         )
                     )
                     self.prefill_inflight_count += 1
+                    self._trace_pick("PF", scheduler_output)
 
                     scheduled_req_ids = set(
                         scheduler_output.num_scheduled_tokens.keys()
@@ -1064,6 +1065,7 @@ class PDSeparatedScheduler(Scheduler):
                 if req.request_id not in last_req_ids
             ]
         self._validate_prefill_tail_channel(so)
+        self._trace_pick("PL", so)
         return so
 
     def _validate_prefill_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
@@ -1201,7 +1203,30 @@ class PDSeparatedScheduler(Scheduler):
         self._validate_decode_tail_channel(so)
         self._start_decode_first_only_window()
         self._force_decode_last = False
+        self._trace_pick("DL", so)
         return so
+
+    def _trace_pick(self, tag: str, so: SchedulerOutput) -> None:
+        """Ordering trace for PD-interleave debugging (VLLM_ASCEND_PD_TRACE=1).
+
+        Logs every PF/PL/DF/DL pick with its head_token so the actual batch
+        order can be reconstructed and correlated with accuracy anomalies.
+        """
+        if os.environ.get("VLLM_ASCEND_PD_TRACE", "0") != "1":
+            return
+        logger.info(
+            "[PD-TRACE] %s head_token=%s reqs=%d tokens=%d "
+            "inflight(P=%d,D=%d) ready(PL=%d,DL=%d) running=%d",
+            tag,
+            getattr(so, "head_token", None),
+            len(so.num_scheduled_tokens),
+            so.total_num_scheduled_tokens,
+            self.prefill_inflight_count,
+            self.decode_inflight_count,
+            len(self.prefills_last_ready),
+            len(self.decodes_last_ready),
+            len(self.running),
+        )
 
     def _ensure_cached_all_token_ids(
         self, scheduler_output: SchedulerOutput,
@@ -1275,6 +1300,7 @@ class PDSeparatedScheduler(Scheduler):
                     self.decode_inflight_count += 1
                     self._force_decode_last = True
                     self._start_decode_last_delay()
+                    self._trace_pick("DF", scheduler_output)
 
                     # === Decode-first self-posting optimization ===
                     # Cloud's _maybe_publish_post_out merely replaces

@@ -769,6 +769,9 @@ class NPUModelRunner(GPUModelRunner):
         # next slice's skip_topk layers still need to read.  Restored at
         # the start of every layer-slice continuation.
         self._layerwise_topk_snapshot: torch.Tensor | None = None
+        # exec_seq recorded when a slice's continuation state is saved; the
+        # continuation logs how many execute_model calls interleaved since.
+        self._layerwise_exec_seq: int = 0
         self._layerwise_cudagraph_stats: Any = None
 
         # Edge-cloud PD-separation: suspended head-segment states keyed by
@@ -4466,6 +4469,7 @@ class NPUModelRunner(GPUModelRunner):
             ]
             self._layerwise_num_tokens_padded = num_tokens_padded
             self._layerwise_num_tokens_across_dp = num_tokens_across_dp
+            self._layerwise_exec_seq = self._edge_exec_seq
             self._layerwise_batch_desc = batch_desc
             self._layerwise_scheduler_output = scheduler_output
             self._layerwise_logits_indices = frozen_layerwise_state[
@@ -6474,6 +6478,23 @@ class NPUModelRunner(GPUModelRunner):
         if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
             logger.info("[EC-DBG] mark layer-slice continuation (num_tokens=%s)",
                         self._layerwise_num_tokens_padded)
+        # Interleave detector: how many execute_model calls ran between the
+        # previous slice and this continuation.  >0 means another batch
+        # (e.g. a decode) interleaved into the slice gap -- the window in
+        # which shared mutable state (rope runtime buffer, DSA builder
+        # buffers, topk buffer) could be clobbered.  Correlate with
+        # accuracy: if garbage only appears when this fires, the cloud
+        # slice-interleave is the corruption site.
+        _slice_gap = self._edge_exec_seq - self._layerwise_exec_seq - 1
+        if _slice_gap > 0:
+            logger.info(
+                "[EC-SLICE-INTERLEAVE] slice %d/%d head_token=%s: %d "
+                "execute_model call(s) interleaved since previous slice",
+                layer_slice_info.slice_index + 1,
+                layer_slice_info.total_slices,
+                getattr(self._layerwise_scheduler_output, "head_token", None),
+                _slice_gap,
+            )
 
         num_tokens_padded = self._layerwise_num_tokens_padded
         num_tokens_across_dp = self._layerwise_num_tokens_across_dp
@@ -6524,6 +6545,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._layerwise_intermediate = _freeze_intermediate_tensors(
                     hidden_states
                 )
+                self._layerwise_exec_seq = self._edge_exec_seq
                 # dsv4 IndexCache: snapshot the shared topk indices written
                 # by this slice; a decode batch may interleave before the
                 # next slice and overwrite them.
@@ -6833,6 +6855,13 @@ class NPUModelRunner(GPUModelRunner):
             for buf_cos, snap_cos, buf_sin, snap_sin in rope_snaps:
                 buf_cos[: snap_cos.shape[0]].copy_(snap_cos)
                 buf_sin[: snap_sin.shape[0]].copy_(snap_sin)
+            if os.environ.get("VLLM_ASCEND_EC_DEBUG", "0") == "1":
+                logger.info(
+                    "[EC-DBG] restored rope cos/sin for head_token=%s "
+                    "(%d buffers)",
+                    token_ctrl,
+                    len(rope_snaps),
+                )
 
     def _merge_pending_prev_sampled(
         self,
