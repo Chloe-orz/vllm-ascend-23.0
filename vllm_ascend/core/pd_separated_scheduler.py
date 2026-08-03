@@ -1550,8 +1550,9 @@ class PDSeparatedScheduler(Scheduler):
         if scheduler_output.batch_type == BatchType.DECODE_FIRST:
             # D首完成后立即释放 inflight 计数，使下一个 D首可以
             # 在 D尾仍在 batch_queue 中时就被调度，消除 Cloud idle gap。
-            if self.decode_inflight_count > 0:
-                self.decode_inflight_count -= 1
+            # [二分实验] 关闭 decode 提前释放：inflight 改在 DECODE_LAST 释放，
+            # 彻底关闭 DF→DF→DL 调度窗口，用于定位 PD 穿插精度问题。
+            pass
             # logger.info(
             #     f"[PD] update_from_output DECODE_FIRST done, "
             #     f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
@@ -1575,13 +1576,15 @@ class PDSeparatedScheduler(Scheduler):
             #     "draft_remote_pending: %d",
             #     self.draft_remote_pending_count,
             # )
-        # if scheduler_output.batch_type == BatchType.DECODE_LAST:
-        #     # decode_inflight_count 已在 DECODE_FIRST 的 update_from_output
-        #     # 中释放，此处不再重复减 1。
-        #     logger.info(
-        #         f"[PD] update_from_output DECODE_LAST done, "
-        #         f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
-        #     )
+        if scheduler_output.batch_type == BatchType.DECODE_LAST:
+            # [二分实验] inflight 在 D尾 的 update_from_output 中释放：
+            # 下一个 D首 必须等上一个 D尾 采样并处理完毕才能调度。
+            if self.decode_inflight_count > 0:
+                self.decode_inflight_count -= 1
+            # logger.info(
+            #     f"[PD] update_from_output DECODE_LAST done, "
+            #     f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
+            # )
         outputs = super().update_from_output(scheduler_output, model_runner_output)
         self.chunk_prefill_first = [
             req for req in self.chunk_prefill_first if not req.is_finished()
