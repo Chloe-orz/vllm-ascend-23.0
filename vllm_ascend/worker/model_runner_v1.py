@@ -841,6 +841,13 @@ class NPUModelRunner(GPUModelRunner):
             # dsv4 IndexCache: per-head snapshot of the model-level shared
             # topk_indices_buffer, restored before the paired tail segment.
             self._edge_topk_indices_cache: dict[str, torch.Tensor] = {}
+            # dsv4 rope runtime buffer: per-decode-head snapshot of the
+            # shared cos/sin runtime buffers (decode metadata cos/sin are
+            # views into them), restored before the paired tail segment.
+            self._edge_rope_cos_sin_cache: dict[
+                str, list[tuple[torch.Tensor, torch.Tensor,
+                                torch.Tensor, torch.Tensor]]
+            ] = {}
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
         else:
@@ -1221,6 +1228,13 @@ class NPUModelRunner(GPUModelRunner):
             # dsv4 IndexCache: per-head snapshot of the model-level shared
             # topk_indices_buffer, restored before the paired tail segment.
             self._edge_topk_indices_cache: dict[str, torch.Tensor] = {}
+            # dsv4 rope runtime buffer: per-decode-head snapshot of the
+            # shared cos/sin runtime buffers (decode metadata cos/sin are
+            # views into them), restored before the paired tail segment.
+            self._edge_rope_cos_sin_cache: dict[
+                str, list[tuple[torch.Tensor, torch.Tensor,
+                                torch.Tensor, torch.Tensor]]
+            ] = {}
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
         else:
@@ -6665,6 +6679,56 @@ class NPUModelRunner(GPUModelRunner):
                     self._edge_topk_indices_cache.pop(stale_token, None)
                 self._edge_topk_indices_cache[token] = buffer[:total].clone()
 
+        # dsv4 rope runtime buffer: DECODE metadata cos/sin are VIEWS into
+        # the shared runtime buffer (get_cos_and_sin_dsa(use_cache=True);
+        # decode runs under ACL graph so cos/sin must live at stable
+        # addresses).  The scheduler releases decode_inflight at
+        # DECODE_FIRST completion, so the next DF can be dispatched while
+        # this head's tail is still queued on the cloud; that DF's metadata
+        # build overwrites the shared buffer.  The tail's frozen metadata
+        # (RopeDataProxy survives _freeze_scheduled_state by reference)
+        # would then read the NEW head's rotary values — off-by-one RoPE
+        # for every tail layer, corrupting the whole decode batch.  Snapshot
+        # now; _resume_and_validate_head_state restores before the tail
+        # forward.  Prefill heads are immune (fresh cos/sin tensors).
+        if (
+            self._edge_cloud_enabled
+            and scheduler_output.batch_type == BatchType.DECODE_FIRST
+        ):
+            self._snapshot_decode_rope_cos_sin(
+                token, scheduler_output.total_num_scheduled_tokens
+            )
+
+    def _snapshot_decode_rope_cos_sin(self, token: str, total: int) -> None:
+        """Snapshot the shared rope runtime buffers for a DECODE head."""
+        if total <= 0:
+            return
+        from vllm_ascend.ops.rope_dsv4 import _ROPE_STATE
+
+        if len(self._edge_rope_cos_sin_cache) >= self._edge_prepare_cache_max:
+            stale_token = next(iter(self._edge_rope_cos_sin_cache))
+            logger.warning(
+                "[EdgeCloud] rope cos/sin cache exceeded bound (%d); "
+                "evicting oldest head_token=%s (its segment_e likely "
+                "never arrived, e.g. request abort).",
+                self._edge_prepare_cache_max,
+                stale_token,
+            )
+            self._edge_rope_cos_sin_cache.pop(stale_token, None)
+        snaps: list[
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+        ] = []
+        for groups in _ROPE_STATE.runtime_buffer.values():
+            for buf_cos, buf_sin in groups.values():
+                n = min(total, buf_cos.shape[0])
+                if n > 0:
+                    snaps.append(
+                        (buf_cos, buf_cos[:n].clone(),
+                         buf_sin, buf_sin[:n].clone())
+                    )
+        if snaps:
+            self._edge_rope_cos_sin_cache[token] = snaps
+
     def _resume_and_validate_head_state(
         self,
         scheduler_output: SchedulerOutput,
@@ -6718,6 +6782,19 @@ class NPUModelRunner(GPUModelRunner):
             if snapshot is not None:
                 buffer = self._get_dsv4_topk_indices_buffer()
                 buffer[:snapshot.shape[0]].copy_(snapshot)
+
+        # dsv4 rope runtime buffer: restore this decode head's cos/sin
+        # values (see suspend_head_state) — a later DECODE_FIRST's metadata
+        # build may have overwritten the shared buffer while this tail was
+        # queued on the cloud.  Restoring per-tail is safe even with
+        # multiple decode heads in flight: each tail restores its own
+        # snapshot immediately before its own forward, and no other batch
+        # can interleave within this execute_model call.
+        rope_snaps = self._edge_rope_cos_sin_cache.pop(token_ctrl, None)
+        if rope_snaps:
+            for buf_cos, snap_cos, buf_sin, snap_sin in rope_snaps:
+                buf_cos[: snap_cos.shape[0]].copy_(snap_cos)
+                buf_sin[: snap_sin.shape[0]].copy_(snap_sin)
 
     def _merge_pending_prev_sampled(
         self,
