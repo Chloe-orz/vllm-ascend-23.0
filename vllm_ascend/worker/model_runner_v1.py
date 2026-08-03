@@ -1979,7 +1979,37 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        return super()._update_states(scheduler_output)
+        # [edge-cloud fix] Preserve prev_sampled_token_ids mappings across
+        # PD-interleaving churn.  An interleaved prefill batch's
+        # _update_states evicts running decode requests from input_batch,
+        # and InputBatch.remove_request pops their prev_req_id_to_index
+        # entries.  The pending sampled token (still in flight under async
+        # scheduling) then becomes unreachable: when the next DF re-adds
+        # the request, _compute_prev_positions yields -1, the scatter in
+        # _prepare_input_ids skips it, and the embedding consumes a stale/0
+        # input id -> the whole decode batch diverges (confirmed by
+        # [EC-INV-C1] logs).  Finished/aborted requests are NOT restored:
+        # they are popped from self.requests at the top of the same
+        # _update_states call.  The prev_sampled buffer rows are not
+        # touched by _update_states, so the saved row indices stay valid;
+        # the next sampling's _merge_pending_prev_sampled carries the
+        # entries forward from there.
+        shelved_prev_map = None
+        if self._edge_cloud_enabled and self.use_async_scheduling:
+            prev_map = self.input_batch.prev_req_id_to_index
+            if prev_map:
+                shelved_prev_map = dict(prev_map)
+
+        result = super()._update_states(scheduler_output)
+
+        if shelved_prev_map:
+            prev_map = self.input_batch.prev_req_id_to_index
+            if prev_map is not None:
+                for req_id, prev_index in shelved_prev_map.items():
+                    if req_id not in prev_map and req_id in self.requests:
+                        prev_map[req_id] = prev_index
+
+        return result
 
     def _pad_query_start_loc_for_fia(
         self,
