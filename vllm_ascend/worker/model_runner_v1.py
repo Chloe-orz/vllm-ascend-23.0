@@ -7903,25 +7903,25 @@ class NPUModelRunner(GPUModelRunner):
                 with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
-                    num_tokens=intermediate_tokens,
+                    num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     in_profile_run=is_profile,
-                    num_actual_tokens=intermediate_tokens,
+                    num_actual_tokens=num_tokens_padded,
                     aclgraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     model_instance=self.model,
                 ):
-                    # Segment E (edge tail) consumes the SP-sliced
-                    # intermediate_tensors of size intermediate_tokens; the
-                    # forward num_tokens must match it (not the full
-                    # num_tokens_padded) so the layer's residual/attention
-                    # sequence stay in sync.
-                    seg_input_ids = (
-                        input_ids[:intermediate_tokens] if input_ids is not None else None
-                    )
-                    seg_positions = positions[:intermediate_tokens]
+                    # Segment E (edge tail) consumes SP-sliced
+                    # intermediate_tensors, but num_tokens must stay in the
+                    # FULL token space (num_tokens_padded): the reused
+                    # attn_metadata was built for the full batch, and DSA
+                    # layers all-gather hidden_states back to full tokens
+                    # internally, sizing o_proj buffers from
+                    # forward_context.num_tokens.  This mirrors the runtime
+                    # segment_e fast path, which also passes the full
+                    # num_tokens_padded with sharded intermediate_tensors.
                     outputs = self._model_forward(
-                        intermediate_tokens, seg_input_ids, seg_positions,
+                        num_tokens_padded, input_ids, positions,
                         intermediate_tensors, inputs_embeds
                     )
                 if isinstance(outputs, IntermediateTensors):
