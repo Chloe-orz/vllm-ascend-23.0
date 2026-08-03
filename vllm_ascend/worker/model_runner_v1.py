@@ -833,6 +833,13 @@ class NPUModelRunner(GPUModelRunner):
             self.segment_a_wrapper: Any = None
             self.segment_e_wrapper: Any = None
             self.segment_c_wrapper: Any = None
+            # Monotonic execute_model counter.  An edge tail may only use
+            # graph replay when no execute_model ran between its head and
+            # the tail: replay reads the DSA builder's persistent buffers
+            # (slot_mapping / decode_sas_metadata / seq_lens / block_table
+            # views), which any interleaved execute_model rewrites, and the
+            # graph-params update explicitly skips DSA layers.
+            self._edge_exec_seq: int = 0
             # Cache segment_a prepare results for segment_e reuse.  Entries
             # are keyed because prefill/decode heads may be in flight at the
             # same time and must not overwrite one another.
@@ -1217,6 +1224,8 @@ class NPUModelRunner(GPUModelRunner):
             # segment_a would clobber chunk-0's cache while chunk-0's segment_e
             # is still waiting for the cloud PL, and chunk-0's PL would run
             # segment_e with chunk-1's attn_metadata / num_tokens_padded.
+            # Monotonic execute_model counter (see the other role branch).
+            self._edge_exec_seq: int = 0
             self._edge_prepare_cache_by_token: dict[str, dict] = {}
             # Bounded size guard: a segment_e that never arrives (e.g. request
             # aborted mid-prefill) would otherwise leak its entry.  2P1D keeps
@@ -3790,6 +3799,10 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors: IntermediateTensors | None = None,
         layer_slice_info: Any = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
+        # Monotonic execution counter: lets an edge tail detect whether any
+        # other execute_model ran between its head and itself (see the
+        # _fast_path staleness check below).
+        self._edge_exec_seq += 1
         if self.vllm_config.model_config.enable_return_routed_experts:
             if self.routed_experts_initialized:
                 self.routed_experts_capturer.clear_buffer()
@@ -4040,6 +4053,30 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = cache["cudagraph_mode"]
             batch_desc = cache["batch_desc"]
             cudagraph_stats = cache["cudagraph_stats"]
+            # Graph replay reads the DSA builder's persistent buffers
+            # (slot_mapping / decode_sas_metadata / decode_qli_metadata /
+            # seq_lens / block_table views), which ANY interleaved
+            # execute_model rewrites (another head's metadata build, or even
+            # just _update_states touching the runner-level block table /
+            # seq_lens buffers).  The graph-params update path explicitly
+            # skips DSA layers (skip_graph_params_update), so replay has no
+            # refresh mechanism and would consume the interleaved batch's
+            # values — KV scattered to the wrong slots, attention over the
+            # wrong seq_lens.  The frozen metadata clone is only safe with
+            # an EAGER tail forward.  Allow graph replay only when nothing
+            # ran between this head and its tail; otherwise force eager
+            # segment_e with the frozen (correct) metadata.
+            if self._edge_exec_seq != cache["exec_seq"] + 1:
+                if cudagraph_mode == CUDAGraphMode.FULL:
+                    logger.info(
+                        "[EdgeCloud] head_token=%s tail falls back to eager "
+                        "segment_e: %d execute_model call(s) interleaved "
+                        "since its head (graph replay would read stale DSA "
+                        "builder buffers).",
+                        scheduler_output.head_token,
+                        self._edge_exec_seq - cache["exec_seq"] - 1,
+                    )
+                cudagraph_mode = CUDAGraphMode.NONE
             # Re-sync num_computed_tokens from CPU: segment_a forward or
             # async state update may have modified the GPU buffer.
             # NOTE: In async speculative decoding, segment_a has already
@@ -4392,6 +4429,7 @@ class NPUModelRunner(GPUModelRunner):
                 "cudagraph_stats": cudagraph_stats,
                 "total_num_scheduled_tokens": total_num_scheduled_tokens,
                 "positions": positions,
+                "exec_seq": self._edge_exec_seq,
             }
             self._edge_prepare_cache_by_token[scheduler_output.head_token] = (
                 _freeze_scheduled_state(cache_entry)
