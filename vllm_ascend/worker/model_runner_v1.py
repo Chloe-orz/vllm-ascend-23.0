@@ -762,6 +762,13 @@ class NPUModelRunner(GPUModelRunner):
         self._layerwise_spec_decode_metadata: Any = None
         self._layerwise_spec_decode_common_attn_metadata: Any = None
         self._layerwise_ec_connector_output: Any = None
+        # dsv4 IndexCache: snapshot of the model-level shared
+        # topk_indices_buffer taken after each slice's forward.  The cloud
+        # PassiveScheduler may interleave decode batches between slices of
+        # a prefill; the interleaved batch overwrites the buffer that the
+        # next slice's skip_topk layers still need to read.  Restored at
+        # the start of every layer-slice continuation.
+        self._layerwise_topk_snapshot: torch.Tensor | None = None
         self._layerwise_cudagraph_stats: Any = None
 
         # Edge-cloud PD-separation: suspended head-segment states keyed by
@@ -3852,6 +3859,11 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output.head_token,
                         tail_req_ids,
                     )
+                    # This tail never reaches the prepare-cache consumer;
+                    # pop the head's entry so it cannot leak to the bound.
+                    self._edge_prepare_cache_by_token.pop(
+                        scheduler_output.head_token, None
+                    )
                     # Signal sample_tokens to also skip (return EMPTY, not None).
                     self._tail_segment_discarded = True
                     return EMPTY_MODEL_RUNNER_OUTPUT
@@ -4055,6 +4067,23 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_common_attn_metadata
                 )
                 self._cloud_spec_decode_num_reqs = num_reqs
+        if (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and intermediate_tensors is not None
+            and not _fast_path
+            and scheduler_output.head_token
+        ):
+            # Edge tail taking the slow prepare path: the fast-path pop at
+            # the top is the only consumer of the head's segment_a cache
+            # entry, so a slow-path tail would leak it forever.  Under PD
+            # interleave every PL/DL tail can miss the fast path (an
+            # interleaved batch rewrote input_batch), leaking entries up to
+            # the bound and forcing eviction of LIVE heads.  Pop here:
+            # the slow path rebuilds everything it needs.
+            self._edge_prepare_cache_by_token.pop(
+                scheduler_output.head_token, None
+            )
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 if not _fast_path and not _cloud_fast_path:
@@ -4475,6 +4504,12 @@ class NPUModelRunner(GPUModelRunner):
                 assert isinstance(hidden_states, IntermediateTensors)
                 self._layerwise_intermediate = _freeze_intermediate_tensors(
                     hidden_states
+                )
+                # dsv4 IndexCache: also snapshot the shared topk indices —
+                # a decode batch may interleave before the next slice and
+                # overwrite them.
+                self._snapshot_layerwise_topk_indices(
+                    scheduler_output.total_num_scheduled_tokens
                 )
                 if self.debugger is not None:
                     self.debugger.stop()
@@ -6365,6 +6400,12 @@ class NPUModelRunner(GPUModelRunner):
         intermediate_tensors = self._layerwise_intermediate
         self._layerwise_intermediate = None
 
+        # dsv4 IndexCache: restore the topk indices snapshot taken after the
+        # previous slice's forward.  A decode batch interleaved between the
+        # previous slice and this continuation may have overwritten the
+        # model-level shared buffer that this slice's skip_topk layers read.
+        self._restore_layerwise_topk_indices()
+
         # Re-use the positions and attention metadata that slice 0 prepared.
         positions = self._layerwise_positions
         attn_metadata = self._layerwise_attn_metadata
@@ -6431,7 +6472,18 @@ class NPUModelRunner(GPUModelRunner):
                 self._layerwise_intermediate = _freeze_intermediate_tensors(
                     hidden_states
                 )
+                # dsv4 IndexCache: snapshot the shared topk indices written
+                # by this slice; a decode batch may interleave before the
+                # next slice and overwrite them.
+                self._snapshot_layerwise_topk_indices(
+                    self._layerwise_scheduler_output
+                    .total_num_scheduled_tokens
+                )
                 return None
+
+            # Slice group finished: drop the topk snapshot so it cannot be
+            # replayed into an unrelated batch and to free GPU memory.
+            self._layerwise_topk_snapshot = None
 
             # Edge-cloud cloud segment: always returns IntermediateTensors
             # regardless of PP rank, because logits are computed on the edge
@@ -6524,6 +6576,53 @@ class NPUModelRunner(GPUModelRunner):
             and getattr(self.model_config.hf_config, "use_index_cache", False)
             and self._get_dsv4_topk_indices_buffer() is not None
         )
+
+    def _cloud_topk_slice_cache_active(self) -> bool:
+        """Whether cloud-side topk_indices_buffer snapshot/restore is needed
+        for layer-slice continuation.
+
+        The cloud PassiveScheduler dispatches a sliced prefill one slice per
+        call so decode batches can be interleaved between the remaining
+        slices.  An interleaved batch's indexer layers overwrite the
+        model-level shared topk_indices_buffer that the next slice's
+        skip_topk attention layers still need to read, silently corrupting
+        the prefill (garbage first token).  The edge role has its own
+        head/tail snapshot (see _topk_index_cache_active); this covers the
+        cloud slice-continuation window.
+        """
+        return (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "cloud"
+            and getattr(self.model_config.hf_config, "use_index_cache", False)
+            and self._get_dsv4_topk_indices_buffer() is not None
+        )
+
+    def _snapshot_layerwise_topk_indices(self, total_tokens: int) -> None:
+        """Snapshot the shared topk_indices_buffer after a slice's forward.
+
+        Runs on the default stream, ordered after the slice's forward, so
+        the clone captures this slice's indexer writes.  Called after every
+        non-last slice because each slice's layers may write indices that
+        later slices read.
+        """
+        if not self._cloud_topk_slice_cache_active():
+            return
+        buffer = self._get_dsv4_topk_indices_buffer()
+        if buffer is not None and 0 < total_tokens <= buffer.shape[0]:
+            self._layerwise_topk_snapshot = buffer[:total_tokens].clone()
+
+    def _restore_layerwise_topk_indices(self) -> None:
+        """Restore the topk_indices_buffer snapshot at continuation start.
+
+        Ordered before this continuation's forward on the default stream;
+        no other batch can interleave within this execute_model call.
+        """
+        snapshot = self._layerwise_topk_snapshot
+        if snapshot is None or not self._cloud_topk_slice_cache_active():
+            return
+        buffer = self._get_dsv4_topk_indices_buffer()
+        if buffer is not None and buffer.shape[0] >= snapshot.shape[0]:
+            buffer[: snapshot.shape[0]].copy_(snapshot)
 
     def suspend_head_state(self, scheduler_output: SchedulerOutput) -> None:
         """Suspend the minimal head-segment context for later tail-segment pairing.
