@@ -2010,7 +2010,35 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        return super()._update_states(scheduler_output)
+        # Preserve pending sampled tokens across input_batch shrinkage.
+        # Under async scheduling the token sampled by the previous tail
+        # exists ONLY in input_batch.prev_sampled_token_ids (scheduler-side
+        # new_token_ids is empty); prev_req_id_to_index is the sole map to
+        # it.  In edge-cloud PD separation a PF/PL batch contains only the
+        # prefill request(s), so super()._update_states() removes every
+        # decode request from input_batch and remove_request pops their
+        # prev_req_id_to_index entries.  The next DECODE_FIRST then cannot
+        # locate the pending token and falls back to the CPU input_ids
+        # placeholder, producing garbage from that step on.  Snapshot the
+        # map before the update and restore entries for requests that are
+        # still alive afterwards (finished requests were popped from
+        # self.requests by the update itself and correctly stay dropped).
+        prev_map = self.input_batch.prev_req_id_to_index
+        saved_prev_map = dict(prev_map) if prev_map else None
+
+        deferred_state_corrections_fn = super()._update_states(scheduler_output)
+
+        if (
+            saved_prev_map
+            and self.input_batch.prev_sampled_token_ids is not None
+            and self.input_batch.prev_req_id_to_index is not None
+        ):
+            cur_map = self.input_batch.prev_req_id_to_index
+            for req_id, idx in saved_prev_map.items():
+                if req_id not in cur_map and req_id in self.requests:
+                    cur_map[req_id] = idx
+
+        return deferred_state_corrections_fn
 
     def _pad_query_start_loc_for_fia(
         self,
