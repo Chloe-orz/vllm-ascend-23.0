@@ -1979,6 +1979,36 @@ class NPUModelRunner(GPUModelRunner):
         return self.model
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        # [edge-cloud PD interleave] Tail-segment batches (PL/DL) carry a
+        # copy of their head segment's SchedulerOutput (DL: self-posted
+        # dataclasses.replace copy; PL: cloud round-trip).  The head's
+        # _update_states already applied new_block_ids (extend) and
+        # num_computed_tokens.  When an interleaved PF/PL batch changed the
+        # input_batch composition, the tail falls to the slow path and runs
+        # _update_states again with the SAME payload: the cached-req loop
+        # would extend req_state.block_ids with the same new blocks a second
+        # time, permanently shifting the request's block table (positions
+        # past the duplicated block read stale KV -> repetition-loop
+        # garble).  Null out new_block_ids for tail segments; the head
+        # already applied them.  NOTE: use a per-request list of None
+        # (the parent loop indexes new_block_ids[i] unconditionally and
+        # None-checks per request) rather than None for the whole list.
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        if (
+            self._edge_cloud_enabled
+            and is_edge_device()
+            and scheduler_output.batch_type
+            in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST)
+            and cached_reqs.new_block_ids is not None
+        ):
+            scheduler_output = replace(
+                scheduler_output,
+                scheduled_cached_reqs=replace(
+                    cached_reqs,
+                    new_block_ids=[None] * len(cached_reqs.req_ids),
+                ),
+            )
+
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs

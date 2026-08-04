@@ -1061,7 +1061,33 @@ class PDSeparatedScheduler(Scheduler):
             self._prefill_flight_by_token.get(so.head_token)
             if so.head_token else None
         )
-        so.is_last_prefill_chunk = True if flight is None else flight.is_last_chunk
+        if flight is not None:
+            so.is_last_prefill_chunk = flight.is_last_chunk
+        else:
+            # Legacy mode (chunk_prefill_prior off): the flight table is
+            # never populated, so derive last-chunk from the scheduler-side
+            # request state.  A mid-chunk PL must NOT sample: its logits
+            # predict the next *prompt* token, and the garbage token would
+            # be appended to all_token_ids and streamed as the request's
+            # first output token.  (Always True for single-chunk prefills;
+            # a mixed mid/last multi-request PL batch can only arise with
+            # chunked prefill in legacy mode -- log and treat as non-last
+            # to avoid injecting garbage tokens.)
+            pl_reqs = [
+                self.requests.get(req_id) for req_id in so.num_scheduled_tokens
+            ]
+            is_last_flags = [
+                (req is None or not req.is_prefill_chunk) for req in pl_reqs
+            ]
+            so.is_last_prefill_chunk = all(is_last_flags)
+            if any(is_last_flags) and not all(is_last_flags):
+                logger.warning(
+                    "[PD] Mixed mid/last-chunk requests in one legacy "
+                    "PREFILL_LAST batch (head_token=%s); treating as "
+                    "non-last (sampling skipped) to avoid emitting "
+                    "garbage first tokens.",
+                    so.head_token,
+                )
         # Drop these reqs from chunk_prefill_first. Keep them in
         # prefill_last_pending until update_from_output() moves them to running.
         last_req_ids = set(so.num_scheduled_tokens.keys())
