@@ -3924,10 +3924,20 @@ class NPUModelRunner(GPUModelRunner):
                 # while another in-flight tail for it is still queued —
                 # possible with batch_queue depth 4 and many concurrent reqs.
                 finished = scheduler_output.finished_req_ids or set()
+                # Reqs preempted after this tail was queued: their blocks
+                # were freed and may already belong to another request.
+                # The tail must still run (recv contract) but these reqs'
+                # segment_e KV write and sampling must be skipped.
+                preempted = (
+                    getattr(scheduler_output, "preempted_tail_req_ids", None)
+                    or set()
+                )
                 stale = [
                     r
                     for r in tail_req_ids
-                    if r not in self.requests or r in finished
+                    if r not in self.requests
+                    or r in finished
+                    or r in preempted
                 ]
                 if len(stale) == len(tail_req_ids):
                     logger.error(

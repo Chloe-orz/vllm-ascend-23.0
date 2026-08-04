@@ -1365,6 +1365,33 @@ class PDSeparatedScheduler(Scheduler):
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
+        # [PD interleave] Mark still-queued tail batches containing this
+        # request.  The cloud has already sent (or will send) the tail
+        # hidden, so the tail batch MUST still be scheduled and executed to
+        # preserve the channel recv contract -- but this request's blocks
+        # were just freed and may be reallocated and rewritten by another
+        # request BEFORE the queued tail executes (upstream is safe only
+        # because a preempted request has no queued tail; PD's self-posted
+        # DL / cloud-round-trip PL break that invariant).  The worker
+        # treats marked reqs as stale: it performs the recv but skips their
+        # segment_e KV write and sampling.
+        # Each queued tail corresponds to one pending output placeholder
+        # (incremented when its head was scheduled); since the marked tail
+        # will deliver no token for this request, release the placeholder
+        # here to keep the async accounting balanced.
+        for ready in (self.prefills_last_ready, self.decodes_last_ready):
+            for so in ready:
+                if request.request_id not in so.num_scheduled_tokens:
+                    continue
+                marked = getattr(so, "preempted_tail_req_ids", None)
+                if marked is None:
+                    marked = set()
+                    so.preempted_tail_req_ids = marked
+                if request.request_id not in marked:
+                    marked.add(request.request_id)
+                    if request.num_output_placeholders > 0:
+                        request.num_output_placeholders -= 1
+
         if request.is_prefill_chunk:
             self.chunk_prefill_first.append(request)
         else:
