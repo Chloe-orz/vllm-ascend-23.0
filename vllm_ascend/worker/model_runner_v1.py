@@ -821,11 +821,13 @@ class NPUModelRunner(GPUModelRunner):
             self._edge_prepare_cache_max: int = 8
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
-            # Stash of async-sampled pending tokens (req_id -> row view) for
-            # decode requests temporarily removed from input_batch by an
-            # interleaved PF/PL batch.  See
+            # Stash of async-sampled pending tokens for decode requests
+            # temporarily removed from input_batch by an interleaved PF/PL
+            # batch: req_id -> (source buffer, row index).  See
             # _preserve_prev_sampled_pd_interleave.
-            self._edge_prev_token_stash: dict[str, torch.Tensor] = {}
+            self._edge_prev_token_stash: dict[
+                str, tuple[torch.Tensor, int]
+            ] = {}
         else:
             self.head_k = 0
             self.tail_k = 0
@@ -1200,11 +1202,13 @@ class NPUModelRunner(GPUModelRunner):
             self._edge_prepare_cache_max: int = 8
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
-            # Stash of async-sampled pending tokens (req_id -> row view) for
-            # decode requests temporarily removed from input_batch by an
-            # interleaved PF/PL batch.  See
+            # Stash of async-sampled pending tokens for decode requests
+            # temporarily removed from input_batch by an interleaved PF/PL
+            # batch: req_id -> (source buffer, row index).  See
             # _preserve_prev_sampled_pd_interleave.
-            self._edge_prev_token_stash: dict[str, torch.Tensor] = {}
+            self._edge_prev_token_stash: dict[
+                str, tuple[torch.Tensor, int]
+            ] = {}
         else:
             self.head_k = 0
             self.tail_k = 0
@@ -6766,13 +6770,14 @@ class NPUModelRunner(GPUModelRunner):
         stash = self._edge_prev_token_stash
         cur_map = input_batch.prev_req_id_to_index
 
-        # 1) Stash rows for alive requests whose prev entry was just popped.
+        # 1) Stash (buffer, row-index) for alive requests whose prev entry
+        #    was just popped.  Keeping the buffer reference keeps the row
+        #    alive even if a later sampling replaces the tensor; sampled
+        #    rows are never mutated in place.
         if cur_map is not None:
             for req_id, idx in saved_map.items():
                 if req_id not in cur_map and req_id in self.requests:
-                    # A row view keeps the source tensor alive; sampled rows
-                    # are never mutated in place after sampling.
-                    stash[req_id] = saved_buf[idx : idx + 1]
+                    stash[req_id] = (saved_buf, idx)
 
         if not stash:
             return
@@ -6796,14 +6801,35 @@ class NPUModelRunner(GPUModelRunner):
             stash.clear()
             return
         for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-            row = stash.get(req_id)
-            if row is None or req_id not in input_batch.req_id_to_index:
+            entry = stash.get(req_id)
+            if entry is None or req_id not in input_batch.req_id_to_index:
                 continue
             stash.pop(req_id)
-            cur_map[req_id] = cur_buf.shape[0]
-            input_batch.prev_sampled_token_ids = torch.cat(
-                [cur_buf, row], dim=0)
-            cur_buf = input_batch.prev_sampled_token_ids
+            stashed_buf, stashed_idx = entry
+            if cur_buf is stashed_buf:
+                # No sampling happened between the pop and this resume:
+                # the original row is still in place.  Restore the
+                # original index so BOTH consumers stay valid --
+                # _prepare_input_ids (GPU scatter from
+                # prev_sampled_token_ids) and update_async_output_token_ids
+                # (CPU repair from the last sampling's pinned copy, which
+                # shares the same row indexing for this buffer).
+                cur_map[req_id] = stashed_idx
+            else:
+                # An intervening tail sampling replaced the buffer (the
+                # merge could not carry this request -- its entry was
+                # already popped).  Append the stashed row so the GPU
+                # scatter finds it.  The appended index is NOT valid for
+                # the CPU repair copy (its token is not part of the last
+                # sampling); update_async_output_token_ids skips
+                # out-of-range indices, leaving the placeholder to be
+                # repaired at a later step.
+                cur_map[req_id] = cur_buf.shape[0]
+                input_batch.prev_sampled_token_ids = torch.cat(
+                    [cur_buf, stashed_buf[stashed_idx : stashed_idx + 1]],
+                    dim=0,
+                )
+                cur_buf = input_batch.prev_sampled_token_ids
 
     def _merge_pending_prev_sampled(
         self,
