@@ -821,6 +821,11 @@ class NPUModelRunner(GPUModelRunner):
             self._edge_prepare_cache_max: int = 8
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
+            # Stash of async-sampled pending tokens (req_id -> row view) for
+            # decode requests temporarily removed from input_batch by an
+            # interleaved PF/PL batch.  See
+            # _preserve_prev_sampled_pd_interleave.
+            self._edge_prev_token_stash: dict[str, torch.Tensor] = {}
         else:
             self.head_k = 0
             self.tail_k = 0
@@ -1195,6 +1200,11 @@ class NPUModelRunner(GPUModelRunner):
             self._edge_prepare_cache_max: int = 8
             # Cache cloud-side prepare results to overlap with edge segment_a
             self._cloud_prepare_cache: dict | None = None
+            # Stash of async-sampled pending tokens (req_id -> row view) for
+            # decode requests temporarily removed from input_batch by an
+            # interleaved PF/PL batch.  See
+            # _preserve_prev_sampled_pd_interleave.
+            self._edge_prev_token_stash: dict[str, torch.Tensor] = {}
         else:
             self.head_k = 0
             self.tail_k = 0
@@ -1979,7 +1989,27 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        return super()._update_states(scheduler_output)
+        # [edge-cloud PD interleave] Snapshot the pending sampled-token
+        # mappings before super()._update_states(): an interleaved PF/PL
+        # subset batch removes unscheduled decode requests from input_batch,
+        # and remove_request pops their prev_req_id_to_index entries, losing
+        # the async-sampled token the next DECODE_FIRST must scatter into
+        # input_ids.  Restored in _preserve_prev_sampled_pd_interleave.
+        prev_snapshot = None
+        if (self._edge_cloud_enabled and is_edge_device()
+                and self.use_async_scheduling):
+            prev_map = self.input_batch.prev_req_id_to_index
+            prev_buf = self.input_batch.prev_sampled_token_ids
+            if prev_map and prev_buf is not None:
+                prev_snapshot = (dict(prev_map), prev_buf)
+
+        deferred_state_corrections_fn = super()._update_states(scheduler_output)
+
+        if prev_snapshot is not None:
+            self._preserve_prev_sampled_pd_interleave(
+                scheduler_output, prev_snapshot)
+
+        return deferred_state_corrections_fn
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -6696,6 +6726,84 @@ class NPUModelRunner(GPUModelRunner):
                 f"{head_req_ids}, tail scheduler_output has "
                 f"{tail_req_ids}"
             )
+
+    def _preserve_prev_sampled_pd_interleave(
+        self,
+        scheduler_output: "SchedulerOutput",
+        prev_snapshot: tuple[dict[str, int], torch.Tensor],
+    ) -> None:
+        """Preserve async-sampled pending tokens across PD-interleaved batches.
+
+        In edge-cloud PD separation, sampling only happens in tail segments
+        (PL/DL) whose batch is a SUBSET of the running requests.  An
+        interleaved PF/PL batch's ``_update_states`` removes unscheduled
+        decode requests from ``input_batch``, and ``remove_request`` pops
+        their ``prev_req_id_to_index`` entries -- losing the device-side
+        sampled token that the next DECODE_FIRST must scatter into
+        ``input_ids`` (the scheduler's CPU-side ``all_token_ids`` lags one
+        token behind: the batch queue schedules the next DF before the DL
+        output is processed).  Without the mapping, ``_prepare_input_ids``
+        silently skips the scatter (``prev_index < 0: continue``) and a
+        stale CPU value (-1 placeholder or a previous row owner's token id)
+        enters the model input, producing garbled output from that step on.
+
+        Runs right after ``super()._update_states()`` and:
+          1. stashes the token rows of alive requests whose mapping was just
+             popped (interleave removal);
+          2. drops stash entries that must not be replayed -- finished
+             requests, and requests re-added as NEW (a preemption re-prefill
+             must not resurrect a token from the abandoned decode sequence);
+          3. re-injects the stashed row when the request is resumed as a
+             CACHED request (the interleave case), so the following
+             ``_prepare_input_ids`` finds the mapping again.
+
+        ``_merge_pending_prev_sampled`` cannot cover this: it merges at
+        sampling time, but the pop happens one batch earlier, at prepare
+        time.
+        """
+        saved_map, saved_buf = prev_snapshot
+        input_batch = self.input_batch
+        stash = self._edge_prev_token_stash
+        cur_map = input_batch.prev_req_id_to_index
+
+        # 1) Stash rows for alive requests whose prev entry was just popped.
+        if cur_map is not None:
+            for req_id, idx in saved_map.items():
+                if req_id not in cur_map and req_id in self.requests:
+                    # A row view keeps the source tensor alive; sampled rows
+                    # are never mutated in place after sampling.
+                    stash[req_id] = saved_buf[idx : idx + 1]
+
+        if not stash:
+            return
+
+        # 2) Drop entries that can never (or must never) be consumed.
+        new_req_ids = {
+            req_data.req_id
+            for req_data in scheduler_output.scheduled_new_reqs
+        }
+        for req_id in list(stash):
+            if req_id not in self.requests or req_id in new_req_ids:
+                stash.pop(req_id)
+
+        # 3) Re-inject the pending token for requests resumed as CACHED in
+        #    this batch (DF re-adding a decode request, or the self-posted
+        #    DL copy).  Skip requests already re-added as NEW (handled
+        #    above): their stashed token is stale.
+        cur_buf = input_batch.prev_sampled_token_ids
+        if cur_map is None or cur_buf is None:
+            # No async pending tokens at all; the stash is invalid.
+            stash.clear()
+            return
+        for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
+            row = stash.get(req_id)
+            if row is None or req_id not in input_batch.req_id_to_index:
+                continue
+            stash.pop(req_id)
+            cur_map[req_id] = cur_buf.shape[0]
+            input_batch.prev_sampled_token_ids = torch.cat(
+                [cur_buf, row], dim=0)
+            cur_buf = input_batch.prev_sampled_token_ids
 
     def _merge_pending_prev_sampled(
         self,
