@@ -1963,6 +1963,42 @@ class NPUModelRunner(GPUModelRunner):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+    
+    def _ec_check_pending_sampled_tokens(
+            self, scheduler_output: "SchedulerOutput") -> None:
+        """[C1] Invariant: a request whose latest sampled token is still
+        in flight (wire num_output_tokens ahead of the recovered
+        output_token_ids) MUST have an entry in prev_req_id_to_index,
+        otherwise its decode input token is a stale/-1 placeholder and the
+        request diverges from this step on.  PD interleaving evicts and
+        re-adds running requests, which is exactly where the entry can be
+        lost.  Logs only on violation."""
+        if not self.use_async_scheduling:
+            return
+        req_data = scheduler_output.scheduled_cached_reqs
+        num_output = getattr(req_data, "num_output_tokens", None)
+        if num_output is None:
+            return
+        prev_map = self.input_batch.prev_req_id_to_index or {}
+        for i, req_id in enumerate(req_data.req_ids):
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                continue
+            pending = int(num_output[i]) - len(req_state.output_token_ids)
+            if pending > 0 and req_id not in prev_map:
+                logger.warning(
+                    "[EC-INV-C1] batch=%s head=%s req=%s: %d pending "
+                    "sampled token(s) but NO prev_sampled entry "
+                    "(wire_num_output=%d, recovered_outputs=%d, "
+                    "num_computed=%d) -> decode input token is stale/-1",
+                    getattr(scheduler_output, "batch_type", None),
+                    getattr(scheduler_output, "head_token", None),
+                    req_id,
+                    pending,
+                    int(num_output[i]),
+                    len(req_state.output_token_ids),
+                    req_state.num_computed_tokens,
+                )
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
@@ -2264,6 +2300,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
+        if self.edge_cloud_cfg.role == "edge":
+            self._ec_check_pending_sampled_tokens(scheduler_output)
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
