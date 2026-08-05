@@ -4839,27 +4839,87 @@ class NPUModelRunner(GPUModelRunner):
         # _update_request_with_output.  segment_e / KV-cache write
         # already happened in execute_model, so skipping sampling here
         # does not affect prefill correctness.
+        #
+        # A MIXED batch (mid-chunk reqs sharing a legacy multi-request PL
+        # with last-chunk reqs) must NOT take the full-skip path: skipping
+        # sampling for a last-chunk req starves its first output token --
+        # it is moved to running regardless, and its first DECODE_FIRST
+        # would feed a garbage input at position P.  Instead, mask only the
+        # mid-chunk reqs via the discard machinery: they get no sampled
+        # token appended (their placeholder count was never incremented),
+        # while last-chunk reqs are sampled normally.
         if (
             self._edge_cloud_enabled
             and scheduler_output.batch_type == BatchType.PREFILL_LAST
-            and not getattr(scheduler_output, "is_last_prefill_chunk", True)
         ):
-            # Mid chunk: no valid token to sample. Return a placeholder that
-            # carries the req_id mapping (so super().update_from_output can
-            # look up req_index for every req_id in num_scheduled_tokens)
-            # but leaves sampled_token_ids empty (default []), so
-            # generated_token_ids is [] and _update_request_with_output is
-            # skipped -- num_output_placeholders is not decremented. Do NOT
-            # return EMPTY_MODEL_RUNNER_OUTPUT here: its req_id_to_index is
-            # empty, which raises KeyError in update_from_output.
-            req_ids = list(scheduler_output.num_scheduled_tokens.keys())
-            output = ModelRunnerOutput(
-                req_ids=req_ids,
-                req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            last_chunk_req_ids = getattr(
+                scheduler_output, "last_chunk_req_ids", None
             )
-            if kv_connector_output and not kv_connector_output.is_empty():
-                output.kv_connector_output = kv_connector_output
-            return output
+            if last_chunk_req_ids is None:
+                # Fallback for SOs without the per-request set: honor the
+                # batch-level flag.
+                if getattr(scheduler_output, "is_last_prefill_chunk", True):
+                    last_chunk_req_ids = set(
+                        scheduler_output.num_scheduled_tokens
+                    )
+                else:
+                    last_chunk_req_ids = set()
+            mid_chunk_req_ids = [
+                req_id
+                for req_id in scheduler_output.num_scheduled_tokens
+                if req_id not in last_chunk_req_ids
+            ]
+            if mid_chunk_req_ids and len(mid_chunk_req_ids) == len(
+                scheduler_output.num_scheduled_tokens
+            ):
+                # All mid chunk: no valid token to sample. Return a
+                # placeholder that carries the req_id mapping (so
+                # super().update_from_output can look up req_index for
+                # every req_id in num_scheduled_tokens) but leaves
+                # sampled_token_ids empty (default []), so
+                # generated_token_ids is [] and _update_request_with_output
+                # is skipped -- num_output_placeholders is not decremented.
+                # Do NOT return EMPTY_MODEL_RUNNER_OUTPUT here: its
+                # req_id_to_index is empty, which raises KeyError in
+                # update_from_output.
+                req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+                output = ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+                )
+                if kv_connector_output and not kv_connector_output.is_empty():
+                    output.kv_connector_output = kv_connector_output
+                return output
+            if mid_chunk_req_ids:
+                # Mixed batch: mask mid-chunk reqs from sampling by adding
+                # them to the discard set.  Bookkeeping then skips their
+                # token append / prev-map entry / output frame, exactly
+                # like the async-discard path.
+                extra_indices = [
+                    self.input_batch.req_id_to_index[req_id]
+                    for req_id in mid_chunk_req_ids
+                    if req_id in self.input_batch.req_id_to_index
+                ]
+                if extra_indices:
+                    extra_np = np.asarray(extra_indices, dtype=np.int64)
+                    base_n = self.num_discarded_requests
+                    merged = np.concatenate(
+                        [self.discard_request_indices.np[:base_n], extra_np]
+                    )
+                    self.discard_request_indices.np[: len(merged)] = merged
+                    self.discard_request_indices.copy_to_gpu(len(merged))
+                    self.num_discarded_requests = len(merged)
+                    self.discard_request_mask.np[extra_np] = True
+                    self.discard_request_mask.copy_to_gpu(
+                        self.input_batch.num_reqs
+                    )
+                    logger.info(
+                        "[PD] Masked %d mid-chunk req(s) from PL sampling "
+                        "(head_token=%s): %s",
+                        len(extra_indices),
+                        scheduler_output.head_token,
+                        mid_chunk_req_ids,
+                    )
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
