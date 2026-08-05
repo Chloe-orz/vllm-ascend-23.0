@@ -244,6 +244,11 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
+# [DEBUG-EC1] Set VLLM_ASCEND_EC_DEBUG_PROBE=1 to verify the async sampled
+# token D2H copy against a blocking ground-truth copy, one step later (so
+# the probe itself adds no synchronization to the hot path).
+_EC_DEBUG_PROBE = os.environ.get("VLLM_ASCEND_EC_DEBUG_PROBE", "0") == "1"
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -4619,6 +4624,8 @@ class NPUModelRunner(GPUModelRunner):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        if _EC_DEBUG_PROBE:
+            self._debug_ec1_drain()
         if self._edge_cloud_enabled and not self.parallel_config.is_edge_node:
             # Sampling only runs on the edge, but the cloud must retain the
             # rejection-corrected state for its next target/draft forward.
@@ -5049,7 +5056,43 @@ class NPUModelRunner(GPUModelRunner):
             async_output.sampled_token_ids_cpu,
             async_output.async_copy_ready_event,
         )
+        if _EC_DEBUG_PROBE:
+            # [DEBUG-EC1] Stash a ground-truth clone (ordered on the
+            # default stream right after sampling) alongside the async CPU
+            # copy under test; drained by the next sample_tokens call.
+            self._debug_ec1_pending = (
+                async_output.async_copy_ready_event,
+                async_output.sampled_token_ids_cpu,
+                sampler_output.sampled_token_ids.clone(),
+                list(self.input_batch.req_ids),
+                getattr(scheduler_output, "head_token", None),
+            )
         return async_output
+
+    def _debug_ec1_drain(self) -> None:
+        """[DEBUG-EC1] Compare the previous step's async sampled-token D2H
+        copy against a blocking ground-truth copy. Runs one step later, so
+        it perturbs neither the copy under test nor the hot path."""
+        probe = getattr(self, "_debug_ec1_pending", None)
+        if probe is None:
+            return
+        self._debug_ec1_pending = None
+        event, cpu_copy, ref_dev, req_ids, head_token = probe
+        event.synchronize()
+        ref_cpu = ref_dev.to("cpu")
+        if cpu_copy.shape == ref_cpu.shape and torch.equal(cpu_copy, ref_cpu):
+            return
+        bad_rows = []
+        for i in range(min(ref_cpu.shape[0], cpu_copy.shape[0])):
+            if not torch.equal(ref_cpu[i], cpu_copy[i]):
+                bad_rows.append(
+                    (req_ids[i] if i < len(req_ids) else str(i),
+                     ref_cpu[i].tolist(), cpu_copy[i].tolist()))
+        logger.warning(
+            "[DEBUG-EC1] async sampled-token D2H copy mismatch: head=%s "
+            "rows(req_id, ref, got)=%s",
+            head_token, bad_rows,
+        )
 
     def _cache_cloud_spec_decode_metadata(
         self,
