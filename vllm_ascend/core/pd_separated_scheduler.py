@@ -22,6 +22,19 @@ from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
+# Debug: scheduler state logs are also appended to this file (same file
+# used by gpu_model_runner / gpu_worker sample prints).
+_SAMPLE_PRINT_FILE_PATH = "/home/q00842316/sample_print_file.log"
+_sample_print_file = None
+
+
+def _get_sample_print_file():
+    """Lazily open the sample print file (append mode)."""
+    global _sample_print_file
+    if _sample_print_file is None:
+        _sample_print_file = open(_SAMPLE_PRINT_FILE_PATH, "a", encoding="utf-8")
+    return _sample_print_file
+
 
 class PrefillState(enum.Enum):
     """Edge-side prefill in-flight state machine.
@@ -691,6 +704,16 @@ class PDSeparatedScheduler(Scheduler):
         #         f"draft_inflight: {self.draft_inflight_count}/{self.draft_inflight_limit}, "
         #         f"decode_inflight: {self.decode_inflight_count}/{self.decode_inflight_limit}",
         #     )
+
+        # Also append the same (non-commented) log line to the sample
+        # print file so scheduler state can be correlated with the
+        # hidden-recv and per-request sample prints.
+        log_file = _get_sample_print_file()
+        log_file.write(
+            f"[PD] Step{self._step_counter}, state is {state}, "
+            f"batch_type is {batch_type}\n"
+        )
+        log_file.flush()
 
     # ------------------------------------------------------------------ #
     # Layer-slice config loading (Edge side)                             #
