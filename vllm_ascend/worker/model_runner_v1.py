@@ -4066,8 +4066,6 @@ class NPUModelRunner(GPUModelRunner):
             and intermediate_tensors is not None
             and scheduler_output.head_token in self._edge_prepare_cache_by_token
             and self.input_batch.num_reqs > 0
-            and tuple(self.input_batch.req_ids)
-            == tuple(scheduler_output.num_scheduled_tokens)
         )
         # ---- cloud fast path: reuse pre-computed prepare results ----
         _cloud_fast_path = (
@@ -4082,6 +4080,24 @@ class NPUModelRunner(GPUModelRunner):
             cache = self._edge_prepare_cache_by_token.pop(
                 scheduler_output.head_token
             )
+
+            # If intervening decode batches disrupted input_batch (req_ids no
+            # longer match this tail's scheduled reqs), re-add the prefill req
+            # via _update_states so the tail can sample and record the first
+            # token. The cached layout (keyed by head_token) is still correct
+            # and is reused below -- we do NOT recompute it via _prepareInputs.
+            # When req_ids already match, the req is in input_batch, so skip
+            # _update_states to avoid double-counting. deferred_state_corrections_fn
+            # (None when MTP/spec-decode is off) is applied at the end of
+            # execute_model.
+            if (tuple(self.input_batch.req_ids)
+                    != tuple(scheduler_output.num_scheduled_tokens)):
+                deferred_state_corrections_fn = self._update_states(
+                    scheduler_output
+                )
+            else:
+                deferred_state_corrections_fn = None
+
             total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
             num_tokens_padded = cache["num_tokens_padded"]
             num_tokens_across_dp = cache["num_tokens_across_dp"]
@@ -4105,8 +4121,6 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                     non_blocking=True,
                 )
-            # Fast path skips _update_states, so no deferred corrections.
-            deferred_state_corrections_fn = None
         elif _cloud_fast_path:
             cache = self._cloud_prepare_cache
             self._cloud_prepare_cache = None  # consumed, clear for next iteration
