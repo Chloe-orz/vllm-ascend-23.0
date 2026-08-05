@@ -1965,6 +1965,7 @@ class NPUModelRunner(GPUModelRunner):
         return self.model
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        self._ec_update_pending_sampled_marks(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
@@ -2264,6 +2265,8 @@ class NPUModelRunner(GPUModelRunner):
 
         # Copy the tensors to the NPU.
         self._prepare_input_ids(scheduler_output, num_reqs, total_num_scheduled_tokens, cu_num_tokens)
+        self._ec_mark_prev_sampled_consumed(num_reqs)
+        self._ec_check_pending_sampled_tokens(scheduler_output)
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -6697,6 +6700,127 @@ class NPUModelRunner(GPUModelRunner):
                 f"{tail_req_ids}"
             )
 
+    def _ec_check_pending_sampled_tokens(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """[C1] Invariant: a request whose latest sampled token is still
+        in flight (wire num_output_tokens ahead of the recovered
+        output_token_ids) MUST have an entry in prev_req_id_to_index,
+        otherwise its decode input token is a stale/-1 placeholder and the
+        request diverges from this step on.  PD interleaving evicts and
+        re-adds running requests, which is exactly where the entry can be
+        lost.  Logs only on violation.
+
+        Only meaningful on the EDGE for HEAD segments (PF/DF): the head
+        consumes input_ids via the embedding, while tail segments and the
+        cloud middle consume the received hidden states and never read
+        input_ids (so a missing entry there is structurally benign)."""
+        if not self.use_async_scheduling or not self._edge_cloud_enabled:
+            return
+        if self.edge_cloud_cfg.role != "edge":
+            return
+        if scheduler_output.batch_type not in (
+            BatchType.PREFILL_FIRST,
+            BatchType.DECODE_FIRST,
+        ):
+            return
+        req_data = scheduler_output.scheduled_cached_reqs
+        num_output = getattr(req_data, "num_output_tokens", None)
+        if num_output is None:
+            return
+        prev_map = self.input_batch.prev_req_id_to_index or {}
+        offset = 0
+        for i, req_id in enumerate(req_data.req_ids):
+            ntok = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+            req_state = self.requests.get(req_id)
+            if req_state is not None:
+                pending = int(num_output[i]) - len(req_state.output_token_ids)
+                if pending > 0 and req_id not in prev_map and ntok > 0:
+                    # The decode input token (last scheduled position of
+                    # this request) cannot have been filled from the prev
+                    # sampled buffer; read back what is actually there.
+                    pos = offset + ntok - 1
+                    try:
+                        got = int(self.input_ids.gpu[pos].item())
+                    except Exception:
+                        got = None
+                    logger.warning(
+                        "[EC-INV-C1] batch=%s head=%s req=%s: %d pending "
+                        "sampled token(s) but NO prev_sampled entry "
+                        "(wire_num_output=%d, recovered_outputs=%d, "
+                        "num_computed=%d) -> input_ids[%d]=%s (stale/-1)",
+                        getattr(scheduler_output, "batch_type", None),
+                        getattr(scheduler_output, "head_token", None),
+                        req_id,
+                        pending,
+                        int(num_output[i]),
+                        len(req_state.output_token_ids),
+                        req_state.num_computed_tokens,
+                        pos,
+                        got,
+                    )
+            offset += ntok
+
+    def _ec_pending_sampled_marks(self) -> tuple[set[str], set[str]]:
+        """Lazily-initialized marks for the pending-sampled-token protocol.
+
+        Returns ``(tombstones, consumed)``:
+
+        - ``tombstones``: req_ids whose pending token must be dropped
+          (finished / aborted). Driven by ``finished_req_ids`` in
+          ``_update_states``. A resubmitted req_id (abort + re-add with
+          the same id) gets its tombstone cleared there so the old
+          incarnation's token can never leak into the new one.
+        - ``consumed``: req_ids whose pending token was already scattered
+          into ``input_ids`` by a head segment (see
+          ``_ec_mark_prev_sampled_consumed``) and must not be carried
+          forward or re-served by later merges.
+        """
+        marks = getattr(self, "_ec_pending_marks", None)
+        if marks is None:
+            marks = self._ec_pending_marks = (set(), set())
+        return marks
+
+    def _ec_update_pending_sampled_marks(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Maintain tombstone marks from scheduler state transitions."""
+        if not getattr(self, "_edge_cloud_enabled", False):
+            return
+        tombstones, consumed = self._ec_pending_sampled_marks()
+        finished = scheduler_output.finished_req_ids
+        if finished:
+            tombstones.update(finished)
+            consumed.difference_update(finished)
+        # Abort + resubmit with the same req_id arrives as a NEW request;
+        # clear its tombstone so the new incarnation can build a fresh
+        # pending entry (the old incarnation's token stays dropped).
+        for req_data in scheduler_output.scheduled_new_reqs:
+            tombstones.discard(req_data.req_id)
+
+    def _ec_mark_prev_sampled_consumed(self, num_reqs: int) -> None:
+        """Mark pending tokens just scattered into input_ids as consumed.
+
+        Called right after ``_prepare_input_ids``: every request with
+        ``prev_positions[i] >= 0`` just had its pending token copied into
+        its last input slot, so that pending entry is spent. Consumed
+        entries are excluded from future merges, so an already-consumed
+        (stale) token can never be served to a later decode head.
+        """
+        if not self.use_async_scheduling or not getattr(
+            self, "_edge_cloud_enabled", False
+        ):
+            return
+        if self.edge_cloud_cfg.role != "edge":
+            return
+        if self.input_batch.prev_sampled_token_ids is None:
+            return
+        _, consumed = self._ec_pending_sampled_marks()
+        prev_positions = self.prev_positions.np[:num_reqs]
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            if prev_positions[i] >= 0:
+                consumed.add(req_id)
+
     def _merge_pending_prev_sampled(
         self,
         sampled_token_ids: torch.Tensor,
@@ -6713,16 +6837,37 @@ class NPUModelRunner(GPUModelRunner):
         replace drops A's pending token; A's placeholder input (-1) is then
         never filled, and A decodes garbage from that step on. Merge instead:
         keep rows for requests that are absent from the current sampling
-        batch but still alive.
+        batch.
+
+        Two kinds of rows are NOT carried forward:
+
+        - tombstoned: the request finished / was aborted (tracked
+          explicitly in ``_update_states``; do NOT rely on
+          ``req_id in self.requests`` here — the runner's view lags the
+          scheduler's during the head->tail window, and entries for
+          still-scheduled requests would be silently dropped);
+        - consumed: the pending token was already scattered into
+          ``input_ids`` by a head segment. Carrying it forward would let a
+          later decode head re-serve the stale token (output loops).
         """
         prev_buf = self.input_batch.prev_sampled_token_ids
         prev_map = self.input_batch.prev_req_id_to_index
+        tombstones, consumed = self._ec_pending_sampled_marks()
+        # Requests covered by the current sampling batch are alive and own
+        # a freshly sampled token; any stale mark for them is obsolete.
+        # This must run even when there is nothing to merge (empty prev
+        # buffer), otherwise a stale consumed mark could suppress the
+        # carry-forward of a later, freshly sampled token.
+        tombstones.difference_update(new_map)
+        consumed.difference_update(new_map)
         if prev_buf is None or not prev_map:
             return sampled_token_ids, new_map
         stale = [
             (req_id, idx)
             for req_id, idx in prev_map.items()
-            if req_id not in new_map and req_id in self.requests
+            if req_id not in new_map
+            and req_id not in tombstones
+            and req_id not in consumed
         ]
         if not stale:
             return sampled_token_ids, new_map
