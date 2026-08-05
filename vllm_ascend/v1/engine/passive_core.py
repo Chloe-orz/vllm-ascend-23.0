@@ -42,9 +42,10 @@ import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 import zmq
 from vllm import envs
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value,
 )
@@ -54,6 +55,8 @@ from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 
 def _import_passive_scheduler_module():
@@ -565,10 +568,10 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
-                if result.get("batch_type") not in (
-                    BatchType.PREFILL_FIRST,
-                    BatchType.DRAFT_FIRST,
-                ):
+                # Decode and draft tails are self-posted on the edge. Their
+                # worker acks are still drained from the response MQ, but do
+                # not drive a cloud -> edge POST_OUT control message.
+                if result.get("batch_type") != BatchType.PREFILL_FIRST:
                     continue
                 head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
@@ -763,8 +766,7 @@ class PassiveEngineCoreProc:
             # worker reports done. Decode-last and Draft-last are prepared on
             # the edge (self-posting), so they are not pending here.
             if (
-                batch.scheduler_output.batch_type
-                in (BatchType.PREFILL_FIRST, BatchType.DRAFT_FIRST)
+                batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
                 and (slice_info is None or slice_info.is_last_slice)
             ):
                 head_token = getattr(batch.scheduler_output, "head_token", None)
@@ -782,8 +784,8 @@ class PassiveEngineCoreProc:
 
         Mapping (cloud-side):
             PREFILL_FIRST → PREFILL_LAST
-            DECODE_FIRST  → dropped (edge prepares DECODE_LAST)
-            DRAFT_FIRST   → DRAFT_LAST
+            DECODE_FIRST  → skipped (edge self-posts DECODE_LAST)
+            DRAFT_FIRST   → skipped (edge self-posts DRAFT_LAST)
             anything else → dropped (legacy PP batches don't trigger return)
 
         Uses a shallow copy via :py:func:`dataclasses.replace` so the original
@@ -816,16 +818,7 @@ class PassiveEngineCoreProc:
                 "head_token=%s (edge pre-generates DRAFT_LAST)",
                 scheduler_output.head_token,
             )
-            if not tail.head_token:
-                raise RuntimeError("DRAFT_LAST POST_OUT missing head_token")
-            if not tail.draft_task_id:
-                raise RuntimeError(
-                    "DRAFT_LAST POST_OUT missing draft_task_id"
-                )
-            if tail.draft_step_idx is None:
-                raise RuntimeError(
-                    "DRAFT_LAST POST_OUT missing draft_step_idx"
-                )
+            return
         else:
             return
         # Idempotency guard: publishing the same head_token twice would make

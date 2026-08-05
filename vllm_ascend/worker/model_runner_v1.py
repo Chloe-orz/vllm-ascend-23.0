@@ -1761,10 +1761,15 @@ class NPUModelRunner(GPUModelRunner):
             if predictor is None:
                 logger.warning("[EdgeCloud] Cannot find MTP predictor for sharding")
                 return
+            # NOTE: "norm" is deliberately NOT stripped on the cloud.  The
+            # cloud applies the MTP final norm right after its decoder layer
+            # and ships only the normed hidden states back to the edge, which
+            # eliminates the residual transfer (halving the cloud->edge
+            # payload).  The edge keeps its own norm weights as a fallback for
+            # payloads that still carry a pre-norm residual.
             edge_only_modules = (
                 "embed_tokens",
                 "fc",
-                "norm",
                 "pre_fc_norm_hidden",
                 "pre_fc_norm_embedding",
             )
@@ -3708,19 +3713,6 @@ class NPUModelRunner(GPUModelRunner):
             # Eagle3 carries the previous draft layer's pre-norm residual to
             # the cloud. Its edge segment only embeds the proposed token.
             output["hidden_states"] = hidden_states
-        output["positions"] = positions
-        output["spec_step_idx"] = torch.tensor(
-            draft_step_idx, dtype=torch.int64, device="cpu"
-        )
-        if draft_step_idx == 0:
-            # Piggyback the verify step's num_accepted payload (stashed in
-            # sample_tokens) on the first draft payload.  The cloud applies
-            # the correction when it receives step 0, inside its
-            # execute_model stream.
-            num_accepted_payload = context.get("num_accepted_payload")
-            if num_accepted_payload:
-                for key, value in num_accepted_payload.items():
-                    output[key] = value
         context["current_draft_positions"] = positions
         return output
 
@@ -5754,7 +5746,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return per_layer_attn_metadata
 
-    def _apply_cloud_num_accepted_payload(
+    def _apply_cloud_num_accepted_state(
         self,
         scheduler_output: "SchedulerOutput",
         num_accepted: torch.Tensor,
@@ -5763,10 +5755,9 @@ class NPUModelRunner(GPUModelRunner):
         """Apply the edge-sampled rejection correction on the cloud.
 
         Sampling only runs on the edge, but the cloud must retain the
-        rejection-corrected state for its next target/draft forward. For an
-        independently scheduled draft the payload rides the draft-step-0
-        execute_model payload (instead of the racy sample_tokens RPC stream),
-        so the correction runs here, ahead of the draft forwards.
+        rejection-corrected state for its next target/draft forward. An
+        independently scheduled draft carries this state on its step-0
+        SchedulerOutput, so the correction runs here ahead of its forwards.
         """
         num_accepted = num_accepted.to(self.device)
         num_reqs = num_accepted.size(0)
@@ -5834,17 +5825,24 @@ class NPUModelRunner(GPUModelRunner):
             )
 
     def _run_edge_cloud_draft_middle_segment(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> list:
-        """Run one independently scheduled edge-cloud draft middle step.
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: IntermediateTensors,
+    ) -> IntermediateTensors:
+        """Run the cloud-side draft middle (target/C) segment forward.
 
-        Returns the async send handles of the cloud→edge result payload.
-        The caller (worker) must record them and wait before the next
-        DECODE-channel reuse instead of waiting here: the matching edge
-        tail recv (DRAFT_LAST) is only posted after the cloud
-        EngineCore publishes the tail SchedulerOutput, which is gated on
-        this worker's completion ack -- waiting inside this function
-        deadlocks the whole pipeline.
+        Pure compute: consumes the cloud-bound ``intermediate_tensors``
+        (recv is done in the worker, mirroring
+        ``_run_edge_cloud_draft_last_segment``) and returns the segment's
+        output intermediates (the worker sends them, mirroring
+        ``_run_edge_cloud_draft_first_segment``).  Cross-PP edge-cloud
+        communication stays in the worker layer, consistent with the
+        non-draft ``_execute_model_cloud`` path.
+
+        The edge self-posts DRAFT_LAST together with DRAFT_FIRST, so the
+        matching receive does not depend on a cloud worker ack or POST_OUT.
+        The worker records (rather than waits for) the cloud->edge send,
+        exactly like ``_execute_model_cloud``.
         """
         # DRAFT batches bypass execute_model/_update_states on the cloud, so
         # the purge hook there never runs for them.  Consume any piggybacked
@@ -5854,34 +5852,49 @@ class NPUModelRunner(GPUModelRunner):
             getattr(scheduler_output, "cloud_draft_invalidate_task_ids", None)
         )
         spec_step_idx = int(scheduler_output.draft_step_idx or 0)
-        # The edge piggybacks the verify step's num_accepted payload on the
-        # first draft payload (kept inside the execute_model RPC stream so
-        # it cannot race the cloud's TP mq_broadcaster from sample_tokens).
-        # Pop it before building IntermediateTensors and apply the
-        # rejection-corrected state for the next target/draft forward.
-        num_accepted_payload = tensor_dict.pop("num_accepted_tokens", None)
-        valid_sampled_token_count = tensor_dict.pop(
-            "valid_sampled_token_count", None
-        )
-        if num_accepted_payload is not None:
+        # The edge carries rejection-corrected sampling state on the step-0
+        # SchedulerOutput. Keeping it on the control plane avoids extra CPU
+        # tensors in the dynamic hidden-state payload.
+        num_accepted_values = scheduler_output.num_accepted_tokens
+        valid_sampled_values = scheduler_output.valid_sampled_token_count
+        if num_accepted_values is not None:
             if spec_step_idx != 0:
                 logger.warning(
-                    "num_accepted payload arrived on draft step %d; "
+                    "num_accepted scheduler state arrived on draft step %d; "
                     "expected step 0",
                     spec_step_idx,
                 )
-            self._apply_cloud_num_accepted_payload(
+            num_accepted = torch.tensor(
+                num_accepted_values, dtype=torch.int64
+            )
+            valid_sampled_token_count = (
+                torch.tensor(valid_sampled_values, dtype=torch.int64)
+                if valid_sampled_values is not None
+                else None
+            )
+            self._apply_cloud_num_accepted_state(
                 scheduler_output,
-                num_accepted_payload,
+                num_accepted,
                 valid_sampled_token_count,
             )
 
-        positions = tensor_dict.get("positions")
-        if positions is None:
-            raise RuntimeError("DRAFT cloud payload missing positions")
-        num_tokens = positions.shape[-1]
+        token_tensor_key = (
+            "input_embeds"
+            if self.speculative_config.method == "eagle3"
+            else "hidden_states"
+        )
+        token_tensor = intermediate_tensors.tensors.get(token_tensor_key)
+        if token_tensor is None:
+            raise RuntimeError(
+                "DRAFT cloud payload is missing the token tensor: "
+                f"key={token_tensor_key}"
+            )
+        num_tokens = token_tensor.shape[0]
+        positions = self._reconstruct_cloud_draft_positions(
+            scheduler_output, num_tokens
+        )
         intermediate = self._sync_edge_cloud_draft_intermediate_tensors(
-            num_tokens, IntermediateTensors(tensor_dict)
+            num_tokens, intermediate_tensors
         )
         model_kwargs = {
             "intermediate_tensors": intermediate,
@@ -5935,29 +5948,6 @@ class NPUModelRunner(GPUModelRunner):
                 "Edge-cloud draft middle segment returned no intermediates"
             )
 
-        send_handles: list = []
-        if get_pp_group().world_size == 2:
-            out_tensor_dict = {
-                key: value.contiguous()
-                if isinstance(value, torch.Tensor)
-                else value
-                for key, value in output.items()
-            }
-            out_tensor_dict.update(
-                head_token=scheduler_output.head_token,
-                draft_task_id=scheduler_output.draft_task_id,
-                draft_step_idx=spec_step_idx,
-            )
-            # Async send only — do NOT wait here.  The edge posts the
-            # matching tail recv (DRAFT_LAST) only after the cloud
-            # EngineCore publishes the tail SchedulerOutput, which happens
-            # after this worker's completion ack; waiting on these handles
-            # before the ack circular-deadlocks edge and cloud.  Mirrors
-            # _execute_model_cloud's _record_pp_send_work pattern.
-            send_handles = edge_cloud_send_tensor_dict_scheduled_draft(
-                out_tensor_dict
-            )
-
         if (
             scheduler_output.draft_task_id is not None
             and spec_step_idx + 1 >= self.num_spec_tokens
@@ -5974,7 +5964,7 @@ class NPUModelRunner(GPUModelRunner):
             self._eagle3_cloud_aux_hidden_states_by_task.pop(
                 scheduler_output.draft_task_id, None
             )
-        return send_handles
+        return output
 
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):

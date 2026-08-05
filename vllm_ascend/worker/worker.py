@@ -76,6 +76,8 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.parallel_state import (
+    ScheduledDraftTensorMeta,
+    build_scheduled_draft_tensor_meta,
     edge_cloud_broadcast_recv,
     edge_cloud_broadcast_recv_scheduled_draft,
     edge_cloud_send_tensor_dict,
@@ -1249,11 +1251,6 @@ class NPUWorker(WorkerBase):
                     include_mrope=_cloud_include_mrope,
                 )
 
-                if do_sp_chunk and not merge_payload:
-                    tensor_dict = {
-                        k: sequence_parallel_chunk(v)
-                        for k, v in tensor_dict.items()
-                    }
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
                     comm_handles=comm_handles,
@@ -1303,22 +1300,97 @@ class NPUWorker(WorkerBase):
             )
         return output
 
+    def _scheduled_draft_tensor_meta(
+        self,
+        scheduler_output: "SchedulerOutput",
+        direction: str,
+    ) -> ScheduledDraftTensorMeta | None:
+        """Derive the scheduled draft wire schema on both peers.
+
+        Sequence-parallel draft tensors currently retain their dynamic
+        sender-side shard shapes, which can differ between heterogeneous edge
+        and cloud TP groups. Keep that configuration on the compatibility path
+        until draft transfer mirrors the main model's all-gather/re-chunk flow.
+        """
+        if enable_sp():
+            return None
+
+        speculative_config = self.model_runner.speculative_config
+        drafter = self.model_runner.drafter
+        if (
+            speculative_config is None
+            or speculative_config.method is None
+            or drafter is None
+        ):
+            return None
+
+        draft_step_idx = int(scheduler_output.draft_step_idx or 0)
+        num_tokens = (
+            scheduler_output.total_num_scheduled_tokens
+            if draft_step_idx == 0
+            else len(scheduler_output.num_scheduled_tokens)
+        )
+        return build_scheduled_draft_tensor_meta(
+            method=speculative_config.method,
+            direction=direction,
+            draft_step_idx=draft_step_idx,
+            num_tokens=num_tokens,
+            hidden_size=drafter.hidden_size,
+            dtype=self.model_runner.dtype,
+        )
+
     def _execute_model_cloud_draft(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput:
-        """Run one cloud-side independently scheduled draft middle step."""
+        """Run one cloud-side independently scheduled draft middle step.
+
+        Owns the cross-PP edge-cloud communication, mirroring
+        ``_execute_model_cloud``: recv the edge->cloud draft payload, run
+        the cloud target/C segment forward (in the model_runner), then send
+        the cloud->edge result. The send is recorded (not waited); the edge
+        self-posts DRAFT_LAST when it schedules DRAFT_FIRST, so its matching
+        receive can be posted without a worker-ack/POST_OUT round trip.
+        """
         logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
-        send_handles = self.model_runner._run_edge_cloud_draft_middle_segment(
-            scheduler_output
+        recv_tensor_meta = self._scheduled_draft_tensor_meta(
+            scheduler_output,
+            "e2c",
         )
-        # Record the cloud->edge draft payload send instead of waiting it:
-        # the edge posts the matching tail recv (DRAFT_LAST) only after
-        # this worker's ack lets the cloud EngineCore publish the tail
-        # SchedulerOutput.  Waited lazily before the next DECODE-channel
-        # reuse, same as _execute_model_cloud.
-        if send_handles:
+        tensor_dict, comm_handles, comm_postprocess = (
+            edge_cloud_broadcast_recv_scheduled_draft(
+                tensor_meta=recv_tensor_meta,
+            )
+        )
+        for handle in comm_handles:
+            handle.wait()
+        for postprocess in comm_postprocess:
+            postprocess()
+        assert tensor_dict is not None
+        output = self.model_runner._run_edge_cloud_draft_middle_segment(
+            scheduler_output, IntermediateTensors(tensor_dict)
+        )
+        if get_pp_group().world_size == 2:
+            out_tensor_dict = {
+                key: value.contiguous()
+                if isinstance(value, torch.Tensor)
+                else value
+                for key, value in output.items()
+            }
+            # Async send only -- record, do NOT wait.  See method docstring.
+            send_tensor_meta = self._scheduled_draft_tensor_meta(
+                scheduler_output,
+                "c2e",
+            )
             self._record_pp_send_work(
-                send_handles, channel=HiddenChannelType.DECODE
+                edge_cloud_send_tensor_dict_scheduled_draft(
+                    out_tensor_dict,
+                    tensor_meta=send_tensor_meta,
+                ),
+                channel=HiddenChannelType.DECODE,
+            )
+            logger.info(
+                "Send intermediate tensors to edge, "
+                f"hidden_channel: {HiddenChannelType.DECODE.value}"
             )
         logger.info(
             f"Execute model, batch_type: {scheduler_output.batch_type}, after."
@@ -1346,13 +1418,15 @@ class NPUWorker(WorkerBase):
                 else value
                 for key, value in output.items()
             }
-            tensor_dict.update(
-                head_token=scheduler_output.head_token,
-                draft_task_id=scheduler_output.draft_task_id,
-                draft_step_idx=int(scheduler_output.draft_step_idx or 0),
+            send_tensor_meta = self._scheduled_draft_tensor_meta(
+                scheduler_output,
+                "e2c",
             )
             self._record_pp_send_work(
-                edge_cloud_send_tensor_dict_scheduled_draft(tensor_dict),
+                edge_cloud_send_tensor_dict_scheduled_draft(
+                    tensor_dict,
+                    tensor_meta=send_tensor_meta,
+                ),
                 channel=HiddenChannelType.DECODE,
             )
             logger.info(
@@ -1370,8 +1444,14 @@ class NPUWorker(WorkerBase):
     ) -> ModelRunnerOutput:
         """Receive and finish one edge-side scheduled draft step."""
         logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
+        recv_tensor_meta = self._scheduled_draft_tensor_meta(
+            scheduler_output,
+            "c2e",
+        )
         tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv_scheduled_draft()
+            edge_cloud_broadcast_recv_scheduled_draft(
+                tensor_meta=recv_tensor_meta,
+            )
         )
         for handle in comm_handles:
             handle.wait()
@@ -1382,9 +1462,6 @@ class NPUWorker(WorkerBase):
             f"hidden_channel: {HiddenChannelType.DECODE.value}"
         )
         assert tensor_dict is not None
-        self.model_runner._validate_edge_cloud_draft_payload_identity(
-            scheduler_output, tensor_dict
-        )
         return self.model_runner._run_edge_cloud_draft_last_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
         )

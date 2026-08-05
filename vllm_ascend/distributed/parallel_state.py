@@ -578,8 +578,7 @@ def init_ascend_model_parallel(
             pp_group.create_alternate_groups(backend)
             if hasattr(pp_group, "create_hidden_channel_groups"):
                 dp_size = parallel_config.data_parallel_size
-                # Shared-model edge needs distinct channels per DP rank;
-                # per-rank edge topology can reuse the same channel names.
+                # Create extra hidden-channel groups based on dp_size.
                 if parallel_config.is_shared_model_edge:
                     num_prefill = dp_size * 2
                     num_decode = dp_size
@@ -592,15 +591,12 @@ def init_ascend_model_parallel(
                     "edge_npu_count=%s",
                     dp_size,
                     getattr(parallel_config, "data_parallel_rank", 0),
-                    num_prefill,
-                    num_decode,
+                    num_prefill, num_decode,
                     edge_npu_count,
                 )
                 HiddenChannelType.init(dp_size=num_decode)
                 pp_group.create_hidden_channel_groups(
-                    backend,
-                    num_prefill,
-                    num_decode,
+                    backend, num_prefill, num_decode,
                 )
             else:
                 HiddenChannelType.init(dp_size=1)
@@ -610,7 +606,7 @@ def init_ascend_model_parallel(
             # cloud side would make the two sides rendezvous on different
             # channels and deadlock.
             if envs.VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP:
-                warmup_edge_cloud_hidden_channels()
+                warmup_edge_cloud_hidden_channels(parallel_config)
 
         # Ascend-specific groups that are currently disabled by default
         # in edge-cloud mode. If enabled in the future, they must follow
@@ -1010,7 +1006,9 @@ def _get_edge_cloud_hidden_channel_device_group(
         return pp_group.alt_device_group
     return pp_group.device_group
 
-def warmup_edge_cloud_hidden_channels() -> None:
+def warmup_edge_cloud_hidden_channels(
+    parallel_config: ParallelConfig,
+) -> None:
     """Pre-establish every edge-cloud hidden-channel P2P link at startup.
 
     The first isend/irecv on a hidden channel rendezvous the two sides
@@ -1027,7 +1025,7 @@ def warmup_edge_cloud_hidden_channels() -> None:
     both sides are guaranteed to arrive in the same order.
     """
     pp_group = get_pp_group()
-    if pp_group.world_size != 2:
+    if pp_group.world_size <= 1:
         return
     if not hasattr(pp_group, "isend_tensor_dict_on_hidden_channel"):
         logger.warning(
@@ -1035,37 +1033,91 @@ def warmup_edge_cloud_hidden_channels() -> None:
             "isend_tensor_dict_on_hidden_channel"
         )
         return
-    # Only warm channels whose groups were actually created (PREFILL_2
-    # requires create_hidden_channel_groups(), DECODE requires
-    # create_alternate_groups()).  Both sides run the same patched code,
-    # so they derive the same channel list and the fixed order below is
-    # consistent across the pair.
+
     prefill_groups = getattr(pp_group, "_prefill_device_groups", None)
     decode_groups = getattr(pp_group, "_decode_device_groups", None)
+    channel_peers: list[tuple[HiddenChannelType, int]] = []
     if prefill_groups is not None and decode_groups is not None:
-        channels = [
-            HiddenChannelType.prefill(i)
-            for i in range(1, len(prefill_groups) + 1)
-        ]
-        channels.extend(
-            HiddenChannelType.decode(i)
-            for i in range(1, len(decode_groups) + 1)
-        )
+        num_prefill = len(prefill_groups)
+        num_decode = len(decode_groups)
+        if parallel_config.is_shared_model_edge:
+            dp_size = parallel_config.data_parallel_size
+            expected_world_size = dp_size + 1
+            if pp_group.world_size != expected_world_size:
+                logger.warning(
+                    "[edge-cloud] hidden-channel warmup skipped: shared "
+                    "PP group size=%s, expected=%s",
+                    pp_group.world_size,
+                    expected_world_size,
+                )
+                return
+            if num_prefill % dp_size or num_decode % dp_size:
+                raise RuntimeError(
+                    "[edge-cloud] hidden-channel counts cannot be mapped "
+                    f"to shared DP peers: prefill={num_prefill}, "
+                    f"decode={num_decode}, dp_size={dp_size}"
+                )
+            prefill_per_dp = num_prefill // dp_size
+            decode_per_dp = num_decode // dp_size
+            for dp_rank in range(dp_size):
+                peer_rank = dp_rank + 1
+                prefill_start = dp_rank * prefill_per_dp + 1
+                decode_start = dp_rank * decode_per_dp + 1
+                channel_peers.extend(
+                    (
+                        HiddenChannelType.prefill(channel_idx),
+                        peer_rank,
+                    )
+                    for channel_idx in range(
+                        prefill_start,
+                        prefill_start + prefill_per_dp,
+                    )
+                )
+                channel_peers.extend(
+                    (
+                        HiddenChannelType.decode(channel_idx),
+                        peer_rank,
+                    )
+                    for channel_idx in range(
+                        decode_start,
+                        decode_start + decode_per_dp,
+                    )
+                )
+        else:
+            if pp_group.world_size != 2:
+                logger.warning(
+                    "[edge-cloud] hidden-channel warmup skipped: "
+                    "non-shared PP group size=%s, expected=2",
+                    pp_group.world_size,
+                )
+                return
+            channel_peers.extend(
+                (HiddenChannelType.prefill(channel_idx), 1)
+                for channel_idx in range(1, num_prefill + 1)
+            )
+            channel_peers.extend(
+                (HiddenChannelType.decode(channel_idx), 1)
+                for channel_idx in range(1, num_decode + 1)
+            )
     else:
-        channels = [HiddenChannelType.PREFILL_1]
+        # Backward compatibility with the original three-channel layout.
+        channel_peers.append((HiddenChannelType.PREFILL_1, 1))
         if getattr(pp_group, "prefill2_device_group", None) is not None:
-            channels.append(HiddenChannelType.PREFILL_2)
+            channel_peers.append((HiddenChannelType.PREFILL_2, 1))
         if getattr(pp_group, "alt_device_group", None) is not None:
-            channels.append(HiddenChannelType.DECODE)
+            channel_peers.append((HiddenChannelType.DECODE, 1))
+
     rank = pp_group.rank_in_group
-    for channel in channels:
-        # Warm both directions in a fixed global order (rank0 -> rank1,
-        # then rank1 -> rank0) so the two sides can never rendezvous on
+    for channel, peer_rank in channel_peers:
+        # Warm both directions in a fixed global order (edge -> cloud,
+        # then cloud -> edge) so the two sides can never rendezvous on
         # different channels or directions and deadlock inside the warmup
-        # itself.  The tensor-dict exchange covers both the HCCL device
-        # group (hidden tensors) and the gloo cpu group (the metadata
-        # path used by scheduled-draft payloads).
-        for sender_rank in (0, 1):
+        # itself. Ranks unrelated to this channel's DP peer skip the P2P.
+        for sender_rank, receiver_rank in (
+            (0, peer_rank),
+            (peer_rank, 0),
+        ):
+            handles = []
             if rank == sender_rank:
                 payload = {
                     "channel_warmup": torch.zeros(
@@ -1074,12 +1126,15 @@ def warmup_edge_cloud_hidden_channels() -> None:
                     "warmup_channel": channel.value,
                 }
                 handles = pp_group.isend_tensor_dict_on_hidden_channel(
-                    payload, channel=channel
+                    payload,
+                    channel=channel,
+                    dst=receiver_rank,
                 )
-            else:
+            elif rank == receiver_rank:
                 tensor_dict, handles, _ = (
                     pp_group.irecv_tensor_dict_on_hidden_channel(
-                        channel=channel
+                        channel=channel,
+                        src=sender_rank,
                     )
                 )
                 assert tensor_dict is not None and tensor_dict.get(
@@ -1093,7 +1148,10 @@ def warmup_edge_cloud_hidden_channels() -> None:
                 handle.wait()
     logger.info(
         "[edge-cloud] warmed up hidden channels %s (both directions)",
-        [c.value for c in channels],
+        [
+            (channel.value, peer_rank)
+            for channel, peer_rank in channel_peers
+        ],
     )
 
 
@@ -1569,9 +1627,69 @@ def edge_cloud_send_tensor_dict(
 def edge_cloud_send_tensor_dict_scheduled_draft(
     tensor_dict: dict[str, torch.Tensor | Any],
     channel: HiddenChannelType = HiddenChannelType.DECODE,
+    tensor_meta: ScheduledDraftTensorMeta | None = None,
 ) -> list[Handle]:
-    """Send a dynamically-shaped scheduled draft payload."""
+    """Send a scheduled draft payload, avoiding metadata sync when possible."""
     pp_group = get_pp_group()
+    if tensor_meta is not None:
+        if pp_group.world_size <= 1:
+            return []
+
+        dst = (pp_group.rank_in_group + 1) % pp_group.world_size
+        group = _get_edge_cloud_hidden_channel_device_group(
+            pp_group,
+            channel=channel,
+        )
+        sender_tensor_keys = [
+            key
+            for key, value in tensor_dict.items()
+            if key in tensor_meta.send_tensor_keys
+            and isinstance(value, torch.Tensor)
+            and value.numel() > 0
+        ]
+        assert sender_tensor_keys == list(tensor_meta.send_tensor_keys), (
+            "edge_cloud_send_tensor_dict_scheduled_draft: tensor key "
+            f"set/order mismatch. sender={sender_tensor_keys}, "
+            f"expected={list(tensor_meta.send_tensor_keys)}"
+        )
+
+        metadata_by_key = dict(tensor_meta.metadata_list)
+        handles: list[Handle] = []
+        for key in tensor_meta.send_tensor_keys:
+            tensor = tensor_dict[key]
+            expected = metadata_by_key[key]
+            assert isinstance(tensor, torch.Tensor)
+            assert isinstance(expected, TensorMetadata)
+            assert (
+                tuple(tensor.shape) == tuple(expected.size)
+                and tensor.dtype == expected.dtype
+                and tensor.device.type == expected.device
+            ), (
+                "edge_cloud_send_tensor_dict_scheduled_draft: tensor metadata "
+                f"mismatch for '{key}'. got=(shape={tuple(tensor.shape)}, "
+                f"dtype={tensor.dtype}, device={tensor.device.type}), "
+                f"expected=(shape={tuple(expected.size)}, "
+                f"dtype={expected.dtype}, device={expected.device})"
+            )
+            if not tensor.is_contiguous():
+                tensor = tensor.contiguous()
+            with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+                handle = torch.distributed.isend(
+                    tensor,
+                    dst=pp_group.ranks[dst],
+                    group=group,
+                )
+                if tensor.is_cuda:
+                    tensor.record_stream(
+                        torch.cuda.current_stream(tensor.device)
+                    )
+                elif tensor.device.type == "npu":
+                    tensor.record_stream(
+                        torch.npu.current_stream(tensor.device)
+                    )
+            handles.append(handle)
+        return handles
+
     if hasattr(pp_group, "isend_tensor_dict_on_hidden_channel"):
         return pp_group.isend_tensor_dict_on_hidden_channel(
             tensor_dict,

@@ -492,10 +492,8 @@ class _FirstRoundMarker(DeferredExecutePostprocess):
     """PD-separation FIRST-round marker: head-forward + isend only.
 
     Does NOT participate in Phase B/C (recv + tail + logits).
-    The recv closure is registered into the cross-round
-    ``_pd_recv_closures`` cache (owned by
-    :class:`SharedModelWorkerProc`) and is consumed by the matching
-    LAST round.
+    The matching LAST round receives directly via
+    :meth:`_LastRoundMarker.do_direct_recv`.
     """
 
     # Class-level cache of per-dp_rank head hidden slices (same
@@ -542,7 +540,6 @@ class _FirstRoundMarker(DeferredExecutePostprocess):
         per_dp_hidden_list = leader_runner.execute_model_batched_head(
             bundles,
             batched_dp_ranks=batched_dp_ranks,
-            pp_send_work_by_channel=getattr(leader, "_pp_send_work_by_channel", None),
         )
         cls._per_dp_hidden = dict(zip(batched_dp_ranks,
                                        per_dp_hidden_list))
@@ -621,7 +618,6 @@ class _LastRoundMarker(_BatchedExecuteMarker):
         :meth:`NPUWorker._execute_model_edge_tail`.
         """
         edge_sp = enable_sp()
-        edge_merge = get_edge_cloud_tensor_meta().merge_payload
         dp_rank = self.worker.local_rank
         num_tokens = (
             self.bundle.scheduler_output.total_num_scheduled_tokens)
@@ -637,7 +633,7 @@ class _LastRoundMarker(_BatchedExecuteMarker):
         tensor_dict, comm_handles, comm_postprocess = (
             edge_cloud_broadcast_recv(
                 num_tokens=num_tokens,
-                sp_chunk=edge_sp and edge_merge,
+                sp_chunk=edge_sp,
                 src=dp_rank + 1,
                 channel=channel,
             ))
