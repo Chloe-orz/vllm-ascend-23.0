@@ -25,6 +25,12 @@
 # Default: 30 (ms).
 decode_last_delay_schedule_ms: 10
 
+# Edge-side DRAFT_LAST delay schedule time (milliseconds).
+# After DRAFT_FIRST is picked, DRAFT_LAST cannot be scheduled until
+# this delay has elapsed, giving Cloud Draft-middle + P2P transfer time.
+# Default: 5 (ms).
+draft_last_delay_schedule_ms: 5
+
 # Cloud-side prefill-middle throttle: how long (in milliseconds) to wait for
 # a decode-middle batch before falling back to another prefill-middle slice.
 # Default: 10 (ms).

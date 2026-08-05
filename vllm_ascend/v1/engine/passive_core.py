@@ -396,22 +396,26 @@ def _trim_scheduler_output_for_worker_enqueue(
         req_id
         for req_id in all_token_ids
         if req_id in resumed_req_ids
+        or req_id not in prev_dispatch_req_ids
         or num_output_tokens_by_req.get(req_id, 0) > 0
     }
-    # NOTE: entries that are kept must carry the FULL token list
-    # (prompt + outputs). The worker-side recovery path
-    # (gpu_model_runner._update_states) reconstructs output_token_ids by
-    # slicing ``all_token_ids[-num_output_tokens:]`` and therefore assumes
-    # the array is the complete token history. Truncating the arrays here
-    # (e.g. to the last num_output_tokens) silently drops the prompt, makes
-    # the recovered output history empty or polluted with prompt tokens on
-    # the cloud side, and shows up as garbled decode / repeated tokens once
-    # a second request triggers a persistent-batch rebuild.
-    trimmed_all_token_ids = {
-        req_id: token_ids
-        for req_id, token_ids in all_token_ids.items()
-        if req_id in keep_req_ids
-    }
+    trimmed_all_token_ids = {}
+    for req_id, token_ids in all_token_ids.items():
+        if req_id not in keep_req_ids:
+            continue
+        num_output_tokens = num_output_tokens_by_req.get(req_id, 0)
+        if num_output_tokens <= 0:
+            # New request without output tokens yet: keep full token_ids.
+            # The cloud worker's _update_states must see it at least once
+            # to populate req_data.all_token_ids.
+            trimmed_all_token_ids[req_id] = token_ids
+            continue
+        keep_len = min(num_output_tokens, len(token_ids))
+        if keep_len <= 0:
+            continue
+        trimmed_all_token_ids[req_id] = np.ascontiguousarray(
+            token_ids[-keep_len:]
+        )
     if len(trimmed_all_token_ids) == len(all_token_ids) and all(
         len(trimmed_all_token_ids[req_id]) == len(token_ids)
         for req_id, token_ids in all_token_ids.items()
@@ -440,6 +444,18 @@ def _trim_scheduler_output_for_worker_enqueue(
     cached_copy.all_token_ids = trimmed_all_token_ids
     so_copy.scheduled_cached_reqs = cached_copy
     return so_copy
+
+
+def _updates_worker_persistent_batch(
+    scheduler_output: SchedulerOutput,
+    slice_info,
+) -> bool:
+    """Return whether this dispatch updates the cloud worker batch state."""
+    return (
+        scheduler_output.batch_type != BatchType.DRAFT_FIRST
+        and scheduler_output.total_num_scheduled_tokens > 0
+        and (slice_info is None or slice_info.is_first_slice)
+    )
 
 
 class PassiveEngineCoreProc:
@@ -721,27 +737,31 @@ class PassiveEngineCoreProc:
             self.executor.rpc_broadcast_mq.enqueue(
                 (b"pp_scheduler_output", payload, {}, None)
             )
-            self._prev_dispatch_req_ids = set(
-                batch.scheduler_output.num_scheduled_tokens.keys()
-            )
-            # _dt_enqueue = (time.monotonic() - _t0) * 1000
-            # if _dt_trim > 0.5 or _dt_enqueue > 0.5:
-            #     logger.info(
-            #         "[CLOUD-STEP] trim=%.3f ms, enqueue=%.3f ms, batch_type=%s, "
-            #         "drain=%.3f ms, poll=%.3f ms, schedule=%.3f ms",
-            #         _dt_trim, _dt_enqueue, bt,
-            #         _dt_drain, _dt_poll, _dt_sched,
-            #     )
-            # else:
-            #     logger.info(
-            #         "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
-            #         bt,
-            #         _dt_enqueue,
-            #     )
-            # For prefill and draft, POST_OUT must mean the cloud middle
+            if _updates_worker_persistent_batch(
+                batch.scheduler_output, slice_info
+            ):
+                self._prev_dispatch_req_ids = set(
+                    batch.scheduler_output.num_scheduled_tokens.keys()
+                )
+            _dt_enqueue = (time.monotonic() - _t0) * 1000
+            if _dt_trim > 0.5 or _dt_enqueue > 0.5:
+                logger.info(
+                    "[CLOUD-STEP] trim=%.3f ms, enqueue=%.3f ms, batch_type=%s, "
+                    "drain=%.3f ms, poll=%.3f ms, schedule=%.3f ms",
+                    _dt_trim, _dt_enqueue, bt,
+                    _dt_drain, _dt_poll, _dt_sched,
+                )
+            else:
+                logger.info(
+                    "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
+                    bt,
+                    _dt_enqueue,
+                )
+            # For prefill, POST_OUT must mean the cloud middle
             # segment has completed. Store the original SchedulerOutput here
             # and publish it from _drain_worker_completion_acks() after the
-            # worker reports done. Decode-last is prepared on the edge.
+            # worker reports done. Decode-last and Draft-last are prepared on
+            # the edge (self-posting), so they are not pending here.
             if (
                 batch.scheduler_output.batch_type
                 in (BatchType.PREFILL_FIRST, BatchType.DRAFT_FIRST)
@@ -788,8 +808,13 @@ class PassiveEngineCoreProc:
             )
             return
         elif bt == BatchType.DRAFT_FIRST:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.DRAFT_LAST
+            # The edge pre-generates DRAFT_LAST (self-posting, same as
+            # DECODE_FIRST -> DECODE_LAST), so the cloud does not publish
+            # POST_OUT for DRAFT_FIRST.
+            logger.debug(
+                "[Cloud] Skipping POST_OUT for DRAFT_FIRST "
+                "head_token=%s (edge pre-generates DRAFT_LAST)",
+                scheduler_output.head_token,
             )
             if not tail.head_token:
                 raise RuntimeError("DRAFT_LAST POST_OUT missing head_token")
@@ -946,7 +971,7 @@ class PassiveEngineCoreProc:
                     port=master_port + 1 + _dp_rank,
                     world_size=2,
                     is_master=False,
-                    timeout=timedelta(seconds=300),
+                    timeout=timedelta(seconds=600),
                 )
                 _addr_store.set("cloud_ip", _cloud_ip)
                 del _addr_store

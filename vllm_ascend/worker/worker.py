@@ -1168,6 +1168,13 @@ class NPUWorker(WorkerBase):
             layer_slice_info is None or layer_slice_info.is_first_slice
         )
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        # Always run _update_states for the first slice (or unsliced batch),
+        # even when total_num_scheduled_tokens==0.  Some requests may not
+        # contribute tokens to this slice but their state must still be
+        # initialised in the cloud worker's all_token_ids, otherwise a
+        # subsequent DECODE_FIRST / DRAFT_FIRST will KeyError in _update_states.
+        if is_first_slice:
+            self.model_runner.cloud_prepare_early(scheduler_output)
         if forward_pass and is_first_slice:
             # [CHER] Atomically reuse the guard thread's early-recv entry, or
             # post the irecv ourselves.  get_or_post_early_recv guarantees at
@@ -1207,10 +1214,6 @@ class NPUWorker(WorkerBase):
                 )
             if entry is not None:
                 logger.debug("[CHER] consume early-recv head_token=%s", _ht)
-                # cloud_prepare_early overlaps input prep with the (already
-                # in-flight or done) recv; run it before execute_model uses
-                # the intermediate tensors.
-                self.model_runner.cloud_prepare_early(scheduler_output)
                 intermediate_tensors = entry
                 # wait_for_comm() runs implicitly on first .tensors access
                 # inside execute_model (AsyncIntermediateTensors.__getattr__),
@@ -1246,7 +1249,11 @@ class NPUWorker(WorkerBase):
                     include_mrope=_cloud_include_mrope,
                 )
 
-                self.model_runner.cloud_prepare_early(scheduler_output)
+                if do_sp_chunk and not merge_payload:
+                    tensor_dict = {
+                        k: sequence_parallel_chunk(v)
+                        for k, v in tensor_dict.items()
+                    }
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
                     comm_handles=comm_handles,
@@ -1813,22 +1820,14 @@ class NPUWorker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def take_pending_edge_cloud_draft_scheduler_output(
-        self,
-    ) -> SchedulerOutput | None:
-        return (
-            self.model_runner.take_pending_edge_cloud_draft_scheduler_output()
-        )
-
-    def take_completed_edge_cloud_draft_result(
-        self,
-    ) -> tuple[DraftTokenIds, SchedulerOutput] | None:
-        return self.model_runner.take_completed_edge_cloud_draft_result()
-
     def clear_pending_edge_cloud_draft_for_req_ids(
-        self, req_ids: set[str] | list[str]
+        self,
+        req_ids: set[str] | list[str],
+        force_drop_task_ids: set[str] | list[str] = (),
     ) -> None:
-        self.model_runner.clear_pending_edge_cloud_draft_for_req_ids(req_ids)
+        self.model_runner.clear_pending_edge_cloud_draft_for_req_ids(
+            req_ids, force_drop_task_ids
+        )
 
     def check_health(self) -> None:
         import subprocess
