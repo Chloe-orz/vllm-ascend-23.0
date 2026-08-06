@@ -731,6 +731,13 @@ def _patched_step_with_batch_queue(self):
         scheduler_output = self.scheduler.schedule()
         self._ensure_pd_head_token(scheduler_output)
 
+        # [ascend insert] Merge worker cleanup stashed from EMPTY batches
+        # BEFORE publishing to the cloud, so the published SO also carries
+        # the finished_req_ids (EMPTY batches are dropped on the cloud, so
+        # otherwise the cloud runner never learns these finishes).
+        if scheduler_output.batch_type != BatchType.EMPTY:
+            self._merge_pending_worker_cleanup(scheduler_output)
+
         # [ascend insert] Publish head-segment batches immediately at
         # schedule time to keep the pipeline full.
         if scheduler_output.batch_type in (
@@ -744,7 +751,6 @@ def _patched_step_with_batch_queue(self):
                 break
             return self._finish_empty_batch(scheduler_output)
 
-        self._merge_pending_worker_cleanup(scheduler_output)
         with self.log_error_detail(scheduler_output):
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
