@@ -42,7 +42,6 @@ import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
-import numpy as np
 import zmq
 from vllm import envs
 from vllm.logger import init_logger
@@ -402,27 +401,17 @@ def _trim_scheduler_output_for_worker_enqueue(
         or req_id not in prev_dispatch_req_ids
         or num_output_tokens_by_req.get(req_id, 0) > 0
     }
-    trimmed_all_token_ids = {}
-    for req_id, token_ids in all_token_ids.items():
-        if req_id not in keep_req_ids:
-            continue
-        num_output_tokens = num_output_tokens_by_req.get(req_id, 0)
-        if num_output_tokens <= 0:
-            # New request without output tokens yet: keep full token_ids.
-            # The cloud worker's _update_states must see it at least once
-            # to populate req_data.all_token_ids.
-            trimmed_all_token_ids[req_id] = token_ids
-            continue
-        keep_len = min(num_output_tokens, len(token_ids))
-        if keep_len <= 0:
-            continue
-        trimmed_all_token_ids[req_id] = np.ascontiguousarray(
-            token_ids[-keep_len:]
-        )
-    if len(trimmed_all_token_ids) == len(all_token_ids) and all(
-        len(trimmed_all_token_ids[req_id]) == len(token_ids)
+    # Keep the complete prompt + output history for every retained entry.
+    # The v0.23 worker computes the recoverable output length as
+    # ``len(all_token_ids) - num_prompt_tokens``; sending only the output tail
+    # would therefore make the payload look shorter than the prompt and drop
+    # the entire recovered output history.
+    trimmed_all_token_ids = {
+        req_id: token_ids
         for req_id, token_ids in all_token_ids.items()
-    ):
+        if req_id in keep_req_ids
+    }
+    if len(trimmed_all_token_ids) == len(all_token_ids):
         return scheduler_output
 
     before_tokens = sum(len(token_ids) for token_ids in all_token_ids.values())
