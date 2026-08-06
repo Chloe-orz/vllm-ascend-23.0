@@ -486,6 +486,16 @@ class NPUPlatform(Platform):
         if kv_transfer_config is not None and getattr(kv_transfer_config, "kv_role", None) == "kv_producer":
             return
 
+        # Edge-cloud collaborative inference runs PP (edge holds head/tail
+        # layers, cloud holds the middle layers) with its own PD-batch
+        # separation machinery instead of kv_transfer_config, and supports
+        # MTP on top of it. Note: ascend_config is not initialized yet at
+        # this point, so read the raw additional_config here.
+        additional_config = getattr(vllm_config, "additional_config", None) or {}
+        edge_cloud_config = additional_config.get("edge_cloud_config") or {}
+        if edge_cloud_config.get("enabled", False):
+            return
+
         raise ValueError(
             "PP+MTP is only supported on PD-disaggregated P nodes "
             "(kv_role='kv_producer'). D nodes must use "
