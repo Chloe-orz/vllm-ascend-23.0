@@ -1396,9 +1396,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 and getattr(self.runner, "_edge_cloud_enabled", False)
             ):
                 # spec_step_idx for the first pass is 0; subsequent steps are
-                # draft_step + 1 because the first draft token was already
+                # draft_index + 1 because the first draft token was already
                 # generated in the first pass.
-                model_kwargs["spec_step_idx"] = draft_step + 1
+                model_kwargs["spec_step_idx"] = draft_index + 1
                 ret_hidden_states = self._run_draft_edge_cloud(**model_kwargs)
                 if self.runner.edge_cloud_cfg.role == "cloud":
                     # Cloud has already sent hidden states back to edge;
