@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -6,6 +7,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.sample.rejection_sampler import (
     expand_batch_to_tokens,
     expand_pytorch,
+    rejection_sample,
     rejection_greedy_sample_pytorch,
     rejection_random_sample_block_verify_pytorch,
     rejection_random_sample_pytorch,
@@ -29,6 +31,76 @@ def mock_pin_memory(original_func):
 
 
 class TestAscendRejectionSampler(TestBase):
+    def test_rejection_sample_pads_triton_request_inputs(self):
+        """Regression test for undefined padded inputs in the MTP path."""
+        batch_size = 3
+        max_spec_len = 3
+        draft_token_ids = torch.arange(9)
+        num_draft_tokens = [3, 3, 3]
+        cu_num_draft_tokens = torch.tensor([3, 6, 9])
+        target_logits = torch.randn(9, 8)
+        bonus_token_ids = torch.tensor([[100], [200], [300]])
+        sampling_metadata = SimpleNamespace(
+            all_greedy=True,
+            all_random=False,
+            temperature=None,
+        )
+        ascend_config = SimpleNamespace(
+            enable_reduce_sample=False,
+            rejection_sampler_config=SimpleNamespace(
+                enable_block_verify=False,
+                enable_entropy_verify=False,
+                posterior_threshold=0.0,
+                posterior_alpha=0.0,
+            ),
+        )
+
+        with (
+            patch(
+                "vllm_ascend.sample.rejection_sampler.HAS_TRITON", True
+            ),
+            patch(
+                "vllm_ascend.sample.rejection_sampler."
+                "cal_grid_and_block_size",
+                return_value=(2, 2),
+            ),
+            patch(
+                "vllm_ascend.sample.rejection_sampler.get_ascend_config",
+                return_value=ascend_config,
+            ),
+            patch(
+                "vllm_ascend.sample.rejection_sampler."
+                "rejection_greedy_sample_with_triton"
+            ) as mock_kernel,
+        ):
+            output = rejection_sample(
+                draft_token_ids,
+                num_draft_tokens,
+                max_spec_len,
+                cu_num_draft_tokens,
+                None,
+                target_logits,
+                bonus_token_ids,
+                sampling_metadata,
+            )
+
+        kernel_args = mock_kernel.call_args.args
+        padded_output = kernel_args[0]
+        padded_cu_num_draft_tokens = kernel_args[2]
+        padded_bonus_token_ids = kernel_args[5]
+        padded_is_greedy = kernel_args[6]
+
+        assert padded_output.shape == (4, max_spec_len + 1)
+        assert padded_cu_num_draft_tokens.tolist() == [3, 6, 9, 9]
+        assert padded_bonus_token_ids.tolist() == [
+            [100],
+            [200],
+            [300],
+            [300],
+        ]
+        assert padded_is_greedy is None
+        assert output.shape == (batch_size, max_spec_len + 1)
+
     @patch("torch.arange", new=mock_pin_memory(torch.arange))
     @patch("torch.ones", new=mock_pin_memory(torch.ones))
     @patch("torch.full", new=mock_pin_memory(torch.full))
