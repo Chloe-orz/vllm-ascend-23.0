@@ -313,7 +313,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return model
 
     def load_model(self, model: nn.Module) -> None:
-        assert get_pp_group().is_last_rank, f"{self.method} drafter must be loaded on the last pipeline stage."
+        # In edge-cloud mode vLLM overrides the PP group's is_last_rank to
+        # report the edge as the "last" stage (see GroupCoordinator in
+        # vllm/distributed/parallel_state.py), while the drafter is loaded on
+        # the cloud. Skip the upstream last-stage check in that case.
+        is_edge_cloud = getattr(self.runner, "_edge_cloud_enabled", False)
+        assert is_edge_cloud or get_pp_group().is_last_rank, (
+            f"{self.method} drafter must be loaded on the last pipeline stage."
+        )
 
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
 
