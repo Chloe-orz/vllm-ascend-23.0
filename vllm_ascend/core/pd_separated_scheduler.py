@@ -4,7 +4,7 @@ import enum
 import os
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from collections.abc import Iterable
@@ -2028,7 +2028,6 @@ class PDSeparatedScheduler(Scheduler):
                     # that scheduling DECODE_LAST needs no round-trip
                     # through POST_OUT.  The cloud unconditionally skips
                     # POST_OUT for all DECODE_FIRST batches.
-                    from dataclasses import replace
                     decode_last = replace(
                         scheduler_output,
                         batch_type=BatchType.DECODE_LAST,
