@@ -65,6 +65,9 @@ from vllm_ascend.distributed.parallel_state import (
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
 )
+from vllm_ascend.edge_cloud_materialized import (
+    supports_materialized_boundary_for_config,
+)
 from vllm_ascend.worker.edge_cloud.execute_model_bundle import (
     _ExecuteModelBundle,
 )
@@ -795,6 +798,14 @@ class SharedModelEdgeWorker(NPUWorker):
                     has_residual=has_residual,
                     hc_mult=hc_mult,
                     mode=self.model_runner.edge_cloud_cfg.mode,
+                    # Must match the cloud side (worker.py), otherwise the
+                    # e2c/c2e wire payload sizes disagree and HCCL send/recv
+                    # fails with mismatched parameter count. Materialized
+                    # models (e.g. qwen3_5) merge residual into hidden_states
+                    # so only hidden_states crosses the wire.
+                    materialize_residual_boundary=(
+                        supports_materialized_boundary_for_config(
+                            self.model_config)),
                 )
 
     # ----------------------------------------------- distributed env (leader)
