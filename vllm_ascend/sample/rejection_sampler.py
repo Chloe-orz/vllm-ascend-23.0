@@ -459,17 +459,9 @@ def rejection_sample(
         # the random kernels skip padded lanes; bonus repeats its last row so a
         # padded greedy lane has a valid bonus source (written into sliced-off
         # output rows).
-        cu_num_draft_tokens_k = pad_cu_for_kernel(
-            cu_num_draft_tokens, pad_len
-        )
-        bonus_token_ids_k = pad_tail_to(
-            bonus_token_ids, pad_len, repeat_last=True
-        )
-        is_greedy_k = (
-            None
-            if is_greedy is None
-            else pad_tail_to(is_greedy, pad_len, fill=1)
-        )
+        cu_num_draft_tokens_k = pad_cu_for_kernel(cu_num_draft_tokens, pad_len)
+        bonus_token_ids_k = pad_tail_to(bonus_token_ids, pad_len, repeat_last=True)
+        is_greedy_k = None if is_greedy is None else pad_tail_to(is_greedy, pad_len, fill=1)
     else:
         cu_num_draft_tokens_k = cu_num_draft_tokens
         bonus_token_ids_k = bonus_token_ids
@@ -585,7 +577,7 @@ def rejection_sample(
                     max_spec_len,
                     selected_vocab_size,
                     global_vocab_size,
-                    batch_size,
+                    pad_len,
                     ori_target_probs,
                     NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
@@ -637,7 +629,7 @@ def rejection_sample(
                     max_spec_len,
                     selected_vocab_size,
                     global_vocab_size,
-                    batch_size,
+                    pad_len,
                     ori_target_probs,
                     NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
@@ -727,7 +719,7 @@ def rejection_sample(
                     max_spec_len,
                     vocab_size,
                     global_vocab_size,  # global_vocab_size
-                    batch_size,
+                    pad_len,
                     ori_target_probs,
                     NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
@@ -777,7 +769,7 @@ def rejection_sample(
                     max_spec_len,
                     vocab_size,
                     global_vocab_size,  # global_vocab_size
-                    batch_size,
+                    pad_len,
                     ori_target_probs,
                     NO_ORI_TARGET_PROBS=ori_target_probs is None,
                     NO_DRAFT_PROBS=draft_probs is None,
