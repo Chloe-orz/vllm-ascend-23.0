@@ -85,22 +85,48 @@ _PD_FIRST_TO_LAST = {
 _PD_LAST_TO_FIRST = {last: first for first, last in _PD_FIRST_TO_LAST.items()}
 
 
+# Configurable constants for DP-scalable channel management.
+_PREFILL_CHANNELS_PER_DP = 2
+_DECODE_CHANNELS_PER_DP = 1
+
+
 class HiddenChannelManager:
     """Manages data-plane hidden tensor channels for edge-cloud PD separation.
 
-    Two prefill channels (PREFILL_1 / PREFILL_2) support 2P1D; one decode
-    channel (DECODE) supports single in-flight decode. Channels are allocated
-    in FIFO order and freed when the tail segment completes.
+    Each EngineCore_DP owns an independent instance managing only the
+    channel slice for its dp_rank::
+
+        dp_rank=0 -> PREFILL_1..2, DECODE_1
+        dp_rank=1 -> PREFILL_3..4, DECODE_2
+
+    Channels are allocated in FIFO order and freed when the tail segment
+    completes.
     """
 
-    def __init__(self) -> None:
-        self._free_prefills: deque[HiddenChannelType] = deque([
-            HiddenChannelType.PREFILL_1,
-            HiddenChannelType.PREFILL_2,
-        ])
-        # Mapping from head_token to the allocated channel.  Only prefill
-        # batches are recorded here; decode batches always use DECODE and
-        # do not need a mapping.
+    def __init__(
+        self,
+        dp_rank: int = 0,
+        prefill_per_dp: int = _PREFILL_CHANNELS_PER_DP,
+        is_shared_model_edge: bool = False,
+    ) -> None:
+        # In the per-rank edge topology (edge_npu_count > 1, i.e. NOT
+        # shared-model), every DP lives on its own physical card with
+        # its own HCCL world, so all DPs share the same channel pool
+        # (PREFILL_1..2, DECODE_1).  Only in the shared-model topology
+        # (edge_npu_count == 1, dp_size > 1) do we slice by dp_rank.
+        if not is_shared_model_edge:
+            dp_rank = 0
+        prefill_start = dp_rank * prefill_per_dp + 1
+
+        self._free_prefills: deque[HiddenChannelType] = deque(
+            HiddenChannelType.prefill(i)
+            for i in range(prefill_start, prefill_start + prefill_per_dp)
+        )
+        # Decode uses a fixed channel per DP — no dynamic alloc/release.
+        self._decode_channel: HiddenChannelType = (
+            HiddenChannelType.decode(dp_rank + 1)
+        )
+        # Mapping from head_token to the allocated channel (prefill only).
         self._head_token_to_channel: dict[str, HiddenChannelType] = {}
 
     # ------------------------------------------------------------------ #
@@ -115,6 +141,10 @@ class HiddenChannelManager:
             )
         channel = self._free_prefills.popleft()
         self._head_token_to_channel[head_token] = channel
+        logger.info(
+            "[PD] allocate_prefill: channel=%s head_token=%s free_left=%s",
+            channel.value, head_token, list(self._free_prefills),
+        )
         return channel
 
     def release_prefill(self, head_token: str) -> HiddenChannelType | None:
@@ -124,17 +154,21 @@ class HiddenChannelManager:
         if channel is None:
             return None
         self._free_prefills.append(channel)
+        logger.info(
+            "[PD] release_prefill: channel=%s head_token=%s free=%s",
+            channel.value, head_token, list(self._free_prefills),
+        )
         return channel
 
     def has_free_prefill(self) -> bool:
         return bool(self._free_prefills)
 
     # ------------------------------------------------------------------ #
-    # Decode channel (always DECODE, no free-list)                        #
+    # Decode channel (fixed per DP)                                      #
     # ------------------------------------------------------------------ #
-    @staticmethod
-    def decode_channel() -> HiddenChannelType:
-        return HiddenChannelType.DECODE
+    def decode_channel(self) -> HiddenChannelType:
+        """Return the fixed decode channel for this dp_rank."""
+        return self._decode_channel
 
     # ------------------------------------------------------------------ #
     # Introspection                                                      #
@@ -144,7 +178,32 @@ class HiddenChannelManager:
 
     @property
     def in_use_prefills(self) -> list[HiddenChannelType]:
-        return list(self._head_token_to_channel.values())
+        return [
+            ch for ch in self._head_token_to_channel.values()
+            if ch.value.startswith("prefill_")
+        ]
+
+    @property
+    def prefill_pool(self) -> frozenset[HiddenChannelType]:
+        """The set of prefill channels managed by this instance."""
+        return frozenset(self._free_prefills) | frozenset(self.in_use_prefills)
+
+    @property
+    def decode_pool(self) -> frozenset[HiddenChannelType]:
+        """The set of decode channels managed by this instance."""
+        return frozenset([self._decode_channel])
+
+    @staticmethod
+    def prefill_inflight_limit() -> int:
+        return _PREFILL_CHANNELS_PER_DP
+
+    @staticmethod
+    def required_prefill_groups(dp_size: int) -> int:
+        return dp_size * _PREFILL_CHANNELS_PER_DP
+
+    @staticmethod
+    def required_decode_groups(dp_size: int) -> int:
+        return dp_size * _DECODE_CHANNELS_PER_DP
 
 
 class PDSeparatedScheduler(Scheduler):
@@ -190,7 +249,8 @@ class PDSeparatedScheduler(Scheduler):
 
         # In-flight prefill limit (head-segment batches).
         self.prefill_inflight_limit: int = getattr(
-            self.scheduler_config, "pd_prefill_inflight_limit", 1
+            self.scheduler_config, "pd_prefill_inflight_limit",
+            _PREFILL_CHANNELS_PER_DP,
         )
         self.prefill_inflight_count: int = 0
         self.decode_inflight_limit: int = 1
@@ -199,9 +259,21 @@ class PDSeparatedScheduler(Scheduler):
         self.draft_inflight_count: int = 0
         self.draft_remote_pending_count: int = 0
 
-        # Phase6 data-plane channel manager.  Two prefill hidden channels are
-        # available for 2P1D; decode uses a dedicated fixed channel.
-        self.hidden_channel_manager = HiddenChannelManager()
+        # Phase6 data-plane channel manager — per-dp_rank slice.
+        dp_rank = getattr(self.vllm_config.parallel_config,
+                          "data_parallel_rank", 0)
+        is_shared = getattr(self.vllm_config.parallel_config,
+                            "is_shared_model_edge", False)
+        self.hidden_channel_manager = HiddenChannelManager(
+            dp_rank=dp_rank,
+            is_shared_model_edge=is_shared,
+        )
+        logger.info(
+            "[PD] HiddenChannelManager(dp_rank=%d): prefill_pool=%s decode_pool=%s",
+            dp_rank,
+            self.hidden_channel_manager.prefill_pool,
+            self.hidden_channel_manager.decode_pool,
+        )
 
         # Buffer queue: requests whose P-first segment is done but P-last
         # segment has not yet returned from the cloud.  Not eligible for
@@ -1231,9 +1303,11 @@ class PDSeparatedScheduler(Scheduler):
         channel = scheduler_output.hidden_channel
         if not token:
             raise RuntimeError("PREFILL_LAST missing head_token")
-        if channel not in (HiddenChannelType.PREFILL_1, HiddenChannelType.PREFILL_2):
+        pool = self.hidden_channel_manager.prefill_pool
+        if channel not in pool:
             raise RuntimeError(
-                f"PREFILL_LAST expects a prefill hidden channel, got {channel}"
+                f"PREFILL_LAST expects a prefill hidden channel from "
+                f"{pool}, got {channel}"
             )
         expected = self.hidden_channel_manager.get_channel(token)
         if expected != channel:
@@ -1243,10 +1317,11 @@ class PDSeparatedScheduler(Scheduler):
             )
 
     def _validate_decode_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
-        if scheduler_output.hidden_channel != HiddenChannelType.DECODE:
+        pool = self.hidden_channel_manager.decode_pool
+        if scheduler_output.hidden_channel not in pool:
             raise RuntimeError(
-                "DECODE_LAST expects decode hidden channel, got "
-                f"{scheduler_output.hidden_channel}"
+                f"DECODE_LAST expects a decode hidden channel from "
+                f"{pool}, got {scheduler_output.hidden_channel}"
             )
 
     def _validate_draft_tail_channel(

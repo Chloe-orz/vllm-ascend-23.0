@@ -782,6 +782,11 @@ class NPUWorker(WorkerBase):
         if channel is None:
             self._pp_send_work = handles
         else:
+            logger.info(
+                "[PD] _record_pp_send_work: channel=%s handles=%d",
+                channel.value,
+                len(handles),
+            )
             self._pp_send_work_by_channel[channel.value] = handles
 
     def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
@@ -796,6 +801,11 @@ class NPUWorker(WorkerBase):
             return
 
         handles = self._pp_send_work_by_channel.pop(channel.value, [])
+        logger.info(
+            "[PD] _wait_pp_send_work: channel=%s handles=%d",
+            channel.value,
+            len(handles),
+        )
         for handle in handles:
             handle.wait()
 
