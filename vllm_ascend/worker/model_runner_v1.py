@@ -4009,6 +4009,24 @@ class NPUModelRunner(GPUModelRunner):
             and self._cloud_prepare_cache is not None
         )
         if _fast_path:
+            # [ascend fix] The edge tail fast path runs OUTSIDE the
+            # synchronize_input_prep/prepare_inputs_event protection that
+            # the slow path gets.  Its conditional _update_states writes
+            # pinned CPU buffers (num_computed_tokens_cpu, block_table.np)
+            # and the num_computed re-sync below does a non-blocking H2D
+            # READ of a pinned buffer.  Under PD interleaving the GPU queue
+            # backs up behind a slow prefill forward, so a previous batch's
+            # pending H2D reads race with this batch's pinned writes, and
+            # this batch's H2D read races with the next batch's pinned
+            # writes -> corrupted num_computed/block_table -> wrong
+            # positions/slot_mapping -> KV written to wrong slots -> whole
+            # decode batch diverges.  Chain the fast path into the same
+            # event protocol: wait for the previous prep's H2D before
+            # touching pinned state, record after our H2D so the next
+            # batch's prep waits for it.
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.synchronize()
+
             # Pop this head_token's cache so a later segment_a (different
             # head_token) does not hand the wrong attn_metadata to this PL.
             cache = self._edge_prepare_cache_by_token.pop(
@@ -4055,6 +4073,11 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                     non_blocking=True,
                 )
+            # [ascend fix] see above: record so the next batch's
+            # synchronize_input_prep waits for this H2D read of the pinned
+            # buffer before overwriting it.
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.record()
         elif _cloud_fast_path:
             cache = self._cloud_prepare_cache
             self._cloud_prepare_cache = None  # consumed, clear for next iteration
