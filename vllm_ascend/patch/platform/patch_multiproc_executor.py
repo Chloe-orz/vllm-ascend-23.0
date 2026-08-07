@@ -15,7 +15,6 @@ from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQ
 from vllm.logger import logger
 from vllm.utils.network_utils import get_distributed_init_method, get_loopback_ip, get_open_port
 from vllm.utils.system_utils import get_mp_context
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import FailureCallback
 from vllm.v1.executor.multiproc_executor import (
     FutureWrapper,
@@ -24,8 +23,6 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
     set_multiprocessing_worker_envs,
 )
-from vllm.v1.outputs import DraftTokenIds
-
 # [CHER] Environment variable carrying the pickled+base64'd Handle of the
 # cloud_recv_hint_mq, so the cloud worker process (spawned by
 # make_worker_process) can rebuild the sideband MQ without changing
@@ -302,30 +299,14 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             and getattr(self.parallel_config, "is_edge_node", False)
         )
 
-    def take_pending_edge_cloud_draft_scheduler_output(
-        self,
-    ) -> SchedulerOutput | None:
-        return self.collective_rpc(
-            "take_pending_edge_cloud_draft_scheduler_output",
-            unique_reply_rank=self.output_rank,
-            local_only=self._edge_local_only(),
-        )
-
-    def take_completed_edge_cloud_draft_result(
-        self,
-    ) -> tuple[DraftTokenIds, SchedulerOutput] | None:
-        return self.collective_rpc(
-            "take_completed_edge_cloud_draft_result",
-            unique_reply_rank=self.output_rank,
-            local_only=self._edge_local_only(),
-        )
-
     def clear_pending_edge_cloud_draft_for_req_ids(
-        self, req_ids: set[str] | list[str]
+        self,
+        req_ids: set[str] | list[str],
+        force_drop_task_ids: set[str] | list[str] = (),
     ) -> None:
         self.collective_rpc(
             "clear_pending_edge_cloud_draft_for_req_ids",
-            args=(req_ids,),
+            args=(req_ids, force_drop_task_ids),
             # local_only=True keeps this RPC off the cross-node queue, so the
             # cloud workers never execute it and never reply.  Without
             # unique_reply_rank the engine would wait for replies from ALL

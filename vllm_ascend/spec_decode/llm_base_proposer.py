@@ -313,7 +313,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return model
 
     def load_model(self, model: nn.Module) -> None:
-        assert get_pp_group().is_last_rank, f"{self.method} drafter must be loaded on the last pipeline stage."
+        # In edge-cloud mode vLLM overrides the PP group's is_last_rank to
+        # report the edge as the "last" stage (see GroupCoordinator in
+        # vllm/distributed/parallel_state.py), while the drafter is loaded on
+        # the cloud. Skip the upstream last-stage check in that case.
+        is_edge_cloud = getattr(self.runner, "_edge_cloud_enabled", False)
+        assert is_edge_cloud or get_pp_group().is_last_rank, (
+            f"{self.method} drafter must be loaded on the last pipeline stage."
+        )
 
         target_attn_layer_names = set(get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase).keys())
 
@@ -1389,9 +1396,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 and getattr(self.runner, "_edge_cloud_enabled", False)
             ):
                 # spec_step_idx for the first pass is 0; subsequent steps are
-                # draft_step + 1 because the first draft token was already
+                # draft_index + 1 because the first draft token was already
                 # generated in the first pass.
-                model_kwargs["spec_step_idx"] = draft_step + 1
+                model_kwargs["spec_step_idx"] = draft_index + 1
                 ret_hidden_states = self._run_draft_edge_cloud(**model_kwargs)
                 if self.runner.edge_cloud_cfg.role == "cloud":
                     # Cloud has already sent hidden states back to edge;
@@ -2197,7 +2204,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             )
 
-            # Edge last segment: compute logits (Eagle3) or final norm (MTP).
+            # Edge last segment: compute logits (Eagle3); for MTP the final
+            # norm already ran on the cloud, so this is a pass-through.
             model_kwargs["intermediate_tensors"] = intermediate
             for key in ("input_ids", "inputs_embeds", "hidden_states", "spec_step_idx"):
                 model_kwargs.pop(key, None)

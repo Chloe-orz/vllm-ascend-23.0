@@ -151,7 +151,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 self.backend,
             )
 
-            # Phase6 hidden data-plane channel groups (array-based for DP scalability).
+            # Phase6 hidden data-plane channel groups (array-based for DP
+            # scalability).
             #
             # PREFILL channels: _prefill_device_groups[idx] / _prefill_cpu_groups[idx]
             #   idx 0 -> PREFILL_1  (device_group / cpu_group)
@@ -275,18 +276,15 @@ class GroupCoordinatorPatch(GroupCoordinator):
             del self.cpu_group
 
         # Destroy hidden channel groups (array-based).
-        # PREFILL_1 aliases the primary groups already released above, so
-        # exclude those identities to avoid destroying a process group twice.
-        for groups in (
-            getattr(self, "_prefill_device_groups", []),
-            getattr(self, "_prefill_cpu_groups", []),
-            getattr(self, "_decode_device_groups", []),
-            getattr(self, "_decode_cpu_groups", []),
-        ):
+        for groups in (self._prefill_device_groups, self._prefill_cpu_groups,
+                       self._decode_device_groups, self._decode_cpu_groups):
             for pg in groups:
-                if pg is not None and pg is not device_group and pg is not cpu_group:
+                if pg is not None:
                     torch.distributed.destroy_process_group(pg)
-            groups.clear()
+        self._prefill_device_groups.clear()
+        self._prefill_cpu_groups.clear()
+        self._decode_device_groups.clear()
+        self._decode_cpu_groups.clear()
 
     def destroy_hccl(self) -> bool:
         """Release the HCCL process group."""
@@ -322,6 +320,9 @@ class GroupCoordinatorPatch(GroupCoordinator):
         hccl_pg_options = create_hccl_pg_options("pp_alt")
         decode_device_group = None
         decode_cpu_group = None
+        # Iterate over ALL subgroups so that every rank participates in
+        # every new_group call (required because new_group is collective
+        # on the default group).  Only save the group this rank belongs to.
         for ranks in self._all_group_ranks:
             device_group = torch.distributed.new_group(
                 ranks,
@@ -364,16 +365,7 @@ class GroupCoordinatorPatch(GroupCoordinator):
         """
         # --- PREFILL groups (2..N) ---
         # PREFILL_1 uses device_group; PREFILL_2 uses existing prefill2 alias.
-        print(
-            "[PD] _create_prefill: len(prefill)=%d range(%d,%d) "
-            "num_prefill=%d"
-            % (len(self._prefill_device_groups),
-               len(self._prefill_device_groups) + 1, num_prefill + 1,
-               num_prefill),
-            flush=True,
-        )
         for i in range(len(self._prefill_device_groups) + 1, num_prefill + 1):
-            print("[PD] _create_prefill: i=%d pg_name=pp_prefill%d" % (i, i), flush=True)
             self._create_one_hidden_channel(
                 f"pp_prefill{i}", torch_distributed_backend,
                 self._prefill_device_groups, self._prefill_cpu_groups,
@@ -409,10 +401,9 @@ class GroupCoordinatorPatch(GroupCoordinator):
         assert cpu_group is not None
         device_list.append(device_group)
         cpu_list.append(cpu_group)
-        print(
-            "[PP Group] %s hidden channel: ranks=%s size=%d backend=%s"
-            % (pg_name, self.ranks, self.world_size, self.backend),
-            flush=True,
+        logger.info(
+            "[PP Group] %s hidden channel: ranks=%s size=%d backend=%s",
+            pg_name, self.ranks, self.world_size, self.backend,
         )
 
     @property

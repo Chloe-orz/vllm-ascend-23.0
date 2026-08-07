@@ -1124,3 +1124,32 @@
 #       these text-config proxies on the top-level multimodal config, or
 #       when all vllm-ascend call-sites are routed through
 #       ``hf_config.text_config`` / ``model_config.hf_text_config``.
+# ** 31. File: platform/patch_registry_subprocess.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.registry._run_in_subprocess`
+#    Why:
+#       When SERVICE_PROF_CONFIG_PATH is set, ms_service_profiler auto-starts in
+#       every Python process via its sitecustomize hook, including the
+#       short-lived subprocess vLLM spawns to inspect model architectures
+#       (avoiding CUDA init).  There the profiler's C++ thread fires a ctypes
+#       callback into Python that segfaults (PyGILState_Ensure ->
+#       new_threadstate, SIGSEGV) because the process is about to exit.  The
+#       crash kills the inspection, so architectures such as Qwen3_5MTP "fail
+#       to be inspected" and SpeculativeConfig validation aborts startup --
+#       i.e. enabling profiling breaks MTP service bring-up.
+#    How:
+#       Wrap the module-level `_run_in_subprocess` to temporarily scrub
+#       SERVICE_PROF_CONFIG_PATH / PROFILING_SYMBOLS_PATH from os.environ for
+#       the duration of the subprocess spawn (restored in a finally), so the
+#       profiler does not auto-load in the inspection subprocess.  A lock
+#       serializes the scrub so concurrent inspections cannot interleave their
+#       save/restore windows.  Other subprocesses (engine core, workers) are
+#       spawned by separate code paths and keep profiling.  No-op when the
+#       profiler env vars are absent.
+#    Related PR (if no, explain why):
+#       No, ms_service_profiler auto-load + the inspection subprocess are an
+#       Ascend/CANN-specific combination; the scrub belongs in vllm-ascend.
+#    Future Plan:
+#       Remove this patch if ms_service_profiler grows a first-class "skip in
+#       short-lived inspection subprocesses" opt-in, or if vLLM exposes a way
+#       to pass an explicit env to the inspection subprocess.

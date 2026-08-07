@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Optional
 
 import zmq
 from vllm import envs
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value,
 )
@@ -54,6 +54,8 @@ from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = init_logger(__name__)
 
 
 def _import_passive_scheduler_module():
@@ -396,26 +398,20 @@ def _trim_scheduler_output_for_worker_enqueue(
         req_id
         for req_id in all_token_ids
         if req_id in resumed_req_ids
+        or req_id not in prev_dispatch_req_ids
         or num_output_tokens_by_req.get(req_id, 0) > 0
     }
-    # NOTE: entries that are kept must carry the FULL token list
-    # (prompt + outputs). The worker-side recovery path
-    # (gpu_model_runner._update_states) reconstructs output_token_ids by
-    # slicing ``all_token_ids[-num_output_tokens:]`` and therefore assumes
-    # the array is the complete token history. Truncating the arrays here
-    # (e.g. to the last num_output_tokens) silently drops the prompt, makes
-    # the recovered output history empty or polluted with prompt tokens on
-    # the cloud side, and shows up as garbled decode / repeated tokens once
-    # a second request triggers a persistent-batch rebuild.
+    # Keep the complete prompt + output history for every retained entry.
+    # The v0.23 worker computes the recoverable output length as
+    # ``len(all_token_ids) - num_prompt_tokens``; sending only the output tail
+    # would therefore make the payload look shorter than the prompt and drop
+    # the entire recovered output history.
     trimmed_all_token_ids = {
         req_id: token_ids
         for req_id, token_ids in all_token_ids.items()
         if req_id in keep_req_ids
     }
-    if len(trimmed_all_token_ids) == len(all_token_ids) and all(
-        len(trimmed_all_token_ids[req_id]) == len(token_ids)
-        for req_id, token_ids in all_token_ids.items()
-    ):
+    if len(trimmed_all_token_ids) == len(all_token_ids):
         return scheduler_output
 
     before_tokens = sum(len(token_ids) for token_ids in all_token_ids.values())
@@ -440,6 +436,18 @@ def _trim_scheduler_output_for_worker_enqueue(
     cached_copy.all_token_ids = trimmed_all_token_ids
     so_copy.scheduled_cached_reqs = cached_copy
     return so_copy
+
+
+def _updates_worker_persistent_batch(
+    scheduler_output: SchedulerOutput,
+    slice_info,
+) -> bool:
+    """Return whether this dispatch updates the cloud worker batch state."""
+    return (
+        scheduler_output.batch_type != BatchType.DRAFT_FIRST
+        and scheduler_output.total_num_scheduled_tokens > 0
+        and (slice_info is None or slice_info.is_first_slice)
+    )
 
 
 class PassiveEngineCoreProc:
@@ -549,10 +557,10 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
-                if result.get("batch_type") not in (
-                    BatchType.PREFILL_FIRST,
-                    BatchType.DRAFT_FIRST,
-                ):
+                # Decode and draft tails are self-posted on the edge. Their
+                # worker acks are still drained from the response MQ, but do
+                # not drive a cloud -> edge POST_OUT control message.
+                if result.get("batch_type") != BatchType.PREFILL_FIRST:
                     continue
                 head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
@@ -721,30 +729,33 @@ class PassiveEngineCoreProc:
             self.executor.rpc_broadcast_mq.enqueue(
                 (b"pp_scheduler_output", payload, {}, None)
             )
-            self._prev_dispatch_req_ids = set(
-                batch.scheduler_output.num_scheduled_tokens.keys()
-            )
-            # _dt_enqueue = (time.monotonic() - _t0) * 1000
-            # if _dt_trim > 0.5 or _dt_enqueue > 0.5:
-            #     logger.info(
-            #         "[CLOUD-STEP] trim=%.3f ms, enqueue=%.3f ms, batch_type=%s, "
-            #         "drain=%.3f ms, poll=%.3f ms, schedule=%.3f ms",
-            #         _dt_trim, _dt_enqueue, bt,
-            #         _dt_drain, _dt_poll, _dt_sched,
-            #     )
-            # else:
-            #     logger.info(
-            #         "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
-            #         bt,
-            #         _dt_enqueue,
-            #     )
-            # For prefill and draft, POST_OUT must mean the cloud middle
+            if _updates_worker_persistent_batch(
+                batch.scheduler_output, slice_info
+            ):
+                self._prev_dispatch_req_ids = set(
+                    batch.scheduler_output.num_scheduled_tokens.keys()
+                )
+            _dt_enqueue = (time.monotonic() - _t0) * 1000
+            if _dt_trim > 0.5 or _dt_enqueue > 0.5:
+                logger.info(
+                    "[CLOUD-STEP] trim=%.3f ms, enqueue=%.3f ms, batch_type=%s, "
+                    "drain=%.3f ms, poll=%.3f ms, schedule=%.3f ms",
+                    _dt_trim, _dt_enqueue, bt,
+                    _dt_drain, _dt_poll, _dt_sched,
+                )
+            else:
+                logger.info(
+                    "[CLOUD-ENQUEUE] %s enqueue took %.3f ms",
+                    bt,
+                    _dt_enqueue,
+                )
+            # For prefill, POST_OUT must mean the cloud middle
             # segment has completed. Store the original SchedulerOutput here
             # and publish it from _drain_worker_completion_acks() after the
-            # worker reports done. Decode-last is prepared on the edge.
+            # worker reports done. Decode-last and Draft-last are prepared on
+            # the edge (self-posting), so they are not pending here.
             if (
-                batch.scheduler_output.batch_type
-                in (BatchType.PREFILL_FIRST, BatchType.DRAFT_FIRST)
+                batch.scheduler_output.batch_type == BatchType.PREFILL_FIRST
                 and (slice_info is None or slice_info.is_last_slice)
             ):
                 head_token = getattr(batch.scheduler_output, "head_token", None)
@@ -762,8 +773,8 @@ class PassiveEngineCoreProc:
 
         Mapping (cloud-side):
             PREFILL_FIRST → PREFILL_LAST
-            DECODE_FIRST  → dropped (edge prepares DECODE_LAST)
-            DRAFT_FIRST   → DRAFT_LAST
+            DECODE_FIRST  → skipped (edge self-posts DECODE_LAST)
+            DRAFT_FIRST   → skipped (edge self-posts DRAFT_LAST)
             anything else → dropped (legacy PP batches don't trigger return)
 
         Uses a shallow copy via :py:func:`dataclasses.replace` so the original
@@ -788,19 +799,15 @@ class PassiveEngineCoreProc:
             )
             return
         elif bt == BatchType.DRAFT_FIRST:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.DRAFT_LAST
+            # The edge pre-generates DRAFT_LAST (self-posting, same as
+            # DECODE_FIRST -> DECODE_LAST), so the cloud does not publish
+            # POST_OUT for DRAFT_FIRST.
+            logger.debug(
+                "[Cloud] Skipping POST_OUT for DRAFT_FIRST "
+                "head_token=%s (edge pre-generates DRAFT_LAST)",
+                scheduler_output.head_token,
             )
-            if not tail.head_token:
-                raise RuntimeError("DRAFT_LAST POST_OUT missing head_token")
-            if not tail.draft_task_id:
-                raise RuntimeError(
-                    "DRAFT_LAST POST_OUT missing draft_task_id"
-                )
-            if tail.draft_step_idx is None:
-                raise RuntimeError(
-                    "DRAFT_LAST POST_OUT missing draft_step_idx"
-                )
+            return
         else:
             return
         # Idempotency guard: publishing the same head_token twice would make
@@ -946,7 +953,7 @@ class PassiveEngineCoreProc:
                     port=master_port + 1 + _dp_rank,
                     world_size=2,
                     is_master=False,
-                    timeout=timedelta(seconds=300),
+                    timeout=timedelta(seconds=600),
                 )
                 _addr_store.set("cloud_ip", _cloud_ip)
                 del _addr_store

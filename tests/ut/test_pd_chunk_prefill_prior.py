@@ -952,10 +952,13 @@ class TestBackwardCompatibility:
         scheduler.running = []
         scheduler.prefills_last_ready = []
         scheduler.decodes_last_ready = []
+        scheduler.drafts_first_ready = []
+        scheduler.drafts_last_ready = []
         scheduler.prefill_inflight_count = 0
         scheduler.prefill_inflight_limit = 1
-        scheduler.decode_inflight_count = 0
-        scheduler.decode_inflight_limit = 1
+        scheduler.draft_remote_pending_count = 0
+        scheduler.decode_or_draft_inflight_count = 0
+        scheduler.decode_or_draft_inflight_limit = 1
 
         # Should not raise — log format uses legacy fields.
         scheduler._log_scheduler_state(PrefillState.IDLE, BatchType.PREFILL_FIRST)
@@ -978,10 +981,13 @@ class TestBackwardCompatibility:
         scheduler.running = []
         scheduler.prefills_last_ready = []
         scheduler.decodes_last_ready = []
+        scheduler.drafts_first_ready = []
+        scheduler.drafts_last_ready = []
         scheduler.prefill_inflight_count = 0
         scheduler.prefill_inflight_limit = 1
-        scheduler.decode_inflight_count = 0
-        scheduler.decode_inflight_limit = 1
+        scheduler.draft_remote_pending_count = 0
+        scheduler.decode_or_draft_inflight_count = 0
+        scheduler.decode_or_draft_inflight_limit = 1
         scheduler._prefill_flight_by_token = {}
         scheduler._pending_tail_count = {}
         scheduler._ahead_chunk_count = {}
@@ -1035,7 +1041,7 @@ class TestRequestCounts:
 
 
 # ------------------------------------------------------------------ #
-# Test: edge-cloud preemption protection                              #
+# Test: edge-cloud preemption protection                             #
 # ------------------------------------------------------------------ #
 
 
@@ -1053,11 +1059,19 @@ class TestPDPreemptionProtection:
         return scheduler
 
     @staticmethod
-    def _make_output(batch_type, head_token, req_id="req-0"):
+    def _make_output(
+        batch_type,
+        *,
+        head_token=None,
+        draft_task_id=None,
+        draft_step_idx=None,
+        req_id="req-0",
+    ):
         return SimpleNamespace(
             batch_type=batch_type,
             head_token=head_token,
-            draft_task_id=None,
+            draft_task_id=draft_task_id,
+            draft_step_idx=draft_step_idx,
             parent_req_id=None,
             num_scheduled_tokens={req_id: 1},
         )
@@ -1066,8 +1080,12 @@ class TestPDPreemptionProtection:
         from vllm.v1.core.sched.output import BatchType
 
         scheduler = self._make_scheduler()
-        first = self._make_output(BatchType.PREFILL_FIRST, "pf-0")
-        last = self._make_output(BatchType.PREFILL_LAST, "pf-0")
+        first = self._make_output(
+            BatchType.PREFILL_FIRST, head_token="pf-0"
+        )
+        last = self._make_output(
+            BatchType.PREFILL_LAST, head_token="pf-0"
+        )
 
         scheduler._register_pd_flight(first)
         assert scheduler._pd_active_flight_count == {"req-0": 1}
@@ -1080,52 +1098,56 @@ class TestPDPreemptionProtection:
         from vllm.v1.core.sched.output import BatchType
 
         scheduler = self._make_scheduler()
-        scheduler._register_pd_flight(
-            self._make_output(BatchType.PREFILL_FIRST, "pf-0")
-        )
-        scheduler._register_pd_flight(
-            self._make_output(BatchType.PREFILL_FIRST, "pf-1")
-        )
+        for head_token in ("pf-0", "pf-1"):
+            scheduler._register_pd_flight(
+                self._make_output(
+                    BatchType.PREFILL_FIRST,
+                    head_token=head_token,
+                )
+            )
 
         assert scheduler._pd_active_flight_count == {"req-0": 2}
         scheduler._complete_pd_flight(
-            self._make_output(BatchType.PREFILL_LAST, "pf-0")
+            self._make_output(BatchType.PREFILL_LAST, head_token="pf-0")
         )
         assert scheduler._pd_active_flight_count == {"req-0": 1}
         scheduler._complete_pd_flight(
-            self._make_output(BatchType.PREFILL_LAST, "pf-1")
+            self._make_output(BatchType.PREFILL_LAST, head_token="pf-1")
         )
         assert scheduler._pd_active_flight_count == {}
 
-    def test_decode_flight_uses_same_protection(self):
+    def test_pipelined_draft_steps_have_distinct_flight_keys(self):
         from vllm.v1.core.sched.output import BatchType
 
         scheduler = self._make_scheduler()
-        scheduler._register_pd_flight(
-            self._make_output(BatchType.DECODE_FIRST, "df-0")
-        )
+        for step in (0, 1):
+            scheduler._register_pd_flight(
+                self._make_output(
+                    BatchType.DRAFT_FIRST,
+                    draft_task_id="draft-0",
+                    draft_step_idx=step,
+                )
+            )
 
+        assert scheduler._pd_active_flight_count == {"req-0": 2}
+        scheduler._complete_pd_flight(
+            self._make_output(
+                BatchType.DRAFT_LAST,
+                draft_task_id="draft-0",
+                draft_step_idx=0,
+            )
+        )
         assert scheduler._pd_active_flight_count == {"req-0": 1}
         scheduler._complete_pd_flight(
-            self._make_output(BatchType.DECODE_LAST, "df-0")
+            self._make_output(
+                BatchType.DRAFT_LAST,
+                draft_task_id="draft-0",
+                draft_step_idx=1,
+            )
         )
         assert scheduler._pd_active_flight_count == {}
 
-    def test_only_idle_running_request_is_preemptible(self):
-        from vllm.v1.request import RequestStatus
-
-        scheduler = self._make_scheduler()
-        request = _make_mock_request()
-        request.status = RequestStatus.RUNNING
-
-        assert scheduler._is_request_preemptible(request) is True
-        scheduler._pd_active_flight_count[request.request_id] = 1
-        assert scheduler._is_request_preemptible(request) is False
-        scheduler._pd_active_flight_count.clear()
-        request.status = RequestStatus.PREEMPTED
-        assert scheduler._is_request_preemptible(request) is False
-
-    def test_fcfs_candidate_skips_active_tail_request(self):
+    def test_fcfs_candidate_skips_active_request(self):
         from vllm.v1.core.sched.request_queue import SchedulingPolicy
         from vllm.v1.request import RequestStatus
 
@@ -1140,7 +1162,7 @@ class TestPDPreemptionProtection:
 
         assert scheduler._select_preemption_candidate() is idle_request
 
-    def test_candidate_is_none_when_all_requests_are_active(self):
+    def test_no_candidate_when_all_requests_are_active(self):
         from vllm.v1.core.sched.request_queue import SchedulingPolicy
         from vllm.v1.request import RequestStatus
 
@@ -1196,3 +1218,82 @@ class TestPDPreemptionProtection:
 
         with pytest.raises(RuntimeError, match="active edge-cloud request"):
             scheduler._preempt_request(request, 1.0)
+
+
+# ------------------------------------------------------------------ #
+# Test: empty PREFILL_FIRST restores self.running (KV-exhaustion)    #
+# ------------------------------------------------------------------ #
+
+
+class TestPickPrefillFirstEmptyRestoresRunning:
+    """Regression for the KV-exhaustion deadlock.
+
+    When ``super().schedule()`` returns an empty batch (KV cache exhausted by
+    running decode requests), ``_pick_prefill_first_batch`` must restore
+    ``self.running = saved_running``.  ``_prepare_pf_running_state`` swaps
+    ``self.running`` for the prefill candidate(s) before calling
+    ``super().schedule()``; the non-empty branch always restored it, but the
+    empty branch did not.  Without the restore, the decode requests that were
+    in ``self.running`` are lost -- ``_can_schedule_decode_first()`` never sees
+    them, KV is never freed by finished decodes, and prefill keeps returning
+    empty -> deadlock (with the cloud eventually evicting unconsumed draft
+    metadata as a downstream symptom).
+    """
+
+    def _make(self):
+        from vllm_ascend.core.pd_separated_scheduler import PDSeparatedScheduler
+
+        s = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+        decode_req = _make_mock_request(request_id="dec-0", is_prefill_chunk=False)
+        s.running = [decode_req]
+        s.chunk_prefill_first = []
+        s.max_num_running_reqs = 256
+        s.limit_prefill_batch_size = False
+        s.chunk_prefill_prior_enable = True
+        s.next_prefill_prior_enable = False
+        s._pending_tail_count = {}
+        s.prefill_last_pending = []
+        s._ahead_chunk_count = {}
+        s._prefill_flight_by_token = {}
+        s.hidden_channel_manager = MagicMock()
+        s.waiting = []
+        return s, decode_req
+
+    def test_empty_prefill_first_restores_running(self):
+        from vllm.v1.core.sched.output import SchedulerOutput
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        s, decode_req = self._make()
+        empty_so = SchedulerOutput.make_empty()
+
+        with patch.object(Scheduler, "schedule", return_value=empty_so):
+            result = s._pick_prefill_first_batch()
+
+        assert result.total_num_scheduled_tokens == 0
+        # The decode request must survive the empty prefill attempt -- this is
+        # the invariant whose absence caused the deadlock.
+        assert s.running == [decode_req]
+        assert s.max_num_running_reqs == 256
+        assert s.chunk_prefill_first == []
+
+    def test_empty_prefill_first_returns_mid_prefill_candidate(self):
+        """A mid-prefill candidate exposed to super() but not scheduled (KV
+        exhausted) must go back to chunk_prefill_first, and self.running must
+        still be restored to the saved decode requests."""
+        from vllm.v1.core.sched.output import SchedulerOutput
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        s, decode_req = self._make()
+        mid_prefill = _make_mock_request(request_id="pf-0", is_prefill_chunk=True)
+        s.chunk_prefill_first = [mid_prefill]
+        # Fresh candidate (no in-flight tail) -> _prepare exposes it.
+        s._pending_tail_count = {"pf-0": 0}
+
+        empty_so = SchedulerOutput.make_empty()
+        with patch.object(Scheduler, "schedule", return_value=empty_so):
+            result = s._pick_prefill_first_batch()
+
+        assert result.total_num_scheduled_tokens == 0
+        # Decode requests restored, mid-prefill candidate back in chunk_prefill.
+        assert decode_req in s.running
+        assert mid_prefill in s.chunk_prefill_first
