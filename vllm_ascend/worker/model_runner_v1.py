@@ -2022,7 +2022,32 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
+        # A PD-interleaved tail updates only a subset of the running requests.
+        # The base update removes absent requests from input_batch together
+        # with their prev_req_id_to_index entries, even though their sampled
+        # token rows are still pending in prev_sampled_token_ids. Preserve the
+        # mappings for live requests so the next tail can merge and consume
+        # those rows instead of decoding from an unfilled placeholder.
+        shelved_prev_map: dict[str, int] | None = None
+        if (
+            self._edge_cloud_enabled
+            and self.use_async_scheduling
+            and self.input_batch.prev_sampled_token_ids is not None
+            and self.input_batch.prev_req_id_to_index
+        ):
+            shelved_prev_map = dict(
+                self.input_batch.prev_req_id_to_index
+            )
+
         result = super()._update_states(scheduler_output)
+
+        if shelved_prev_map:
+            prev_map = self.input_batch.prev_req_id_to_index
+            if prev_map is not None:
+                for req_id, prev_index in shelved_prev_map.items():
+                    if req_id not in prev_map and req_id in self.requests:
+                        prev_map[req_id] = prev_index
+
         self._purge_invalidated_cloud_draft_metadata(
             getattr(scheduler_output, "cloud_draft_invalidate_task_ids", None)
         )
@@ -4320,6 +4345,8 @@ class NPUModelRunner(GPUModelRunner):
             and intermediate_tensors is not None
             and _edge_cache_entry is not None
             and self.input_batch.num_reqs > 0
+            and tuple(self.input_batch.req_ids)
+            == tuple(scheduler_output.num_scheduled_tokens)
         )
         # ---- cloud fast path: reuse pre-computed prepare results ----
         _cloud_fast_path = (
@@ -4327,6 +4354,8 @@ class NPUModelRunner(GPUModelRunner):
             and self.edge_cloud_cfg.role == "cloud"
             and intermediate_tensors is not None
             and self._cloud_prepare_cache is not None
+            and self._cloud_prepare_cache.get("req_ids_key")
+            == tuple(scheduler_output.num_scheduled_tokens)
         )
         if _fast_path:
             # Entry already popped at segment_e entry (covers fast/normal/
@@ -4373,6 +4402,9 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                     non_blocking=True,
                 )
+            # Fast path reuses the head segment's prepared state and skips
+            # _update_states, so it has no deferred corrections to apply.
+            deferred_state_corrections_fn = None
             # [ascend fix] see above: record so the next batch's
             # synchronize_input_prep waits for this H2D read of the pinned
             # buffer before overwriting it.
@@ -6791,6 +6823,12 @@ class NPUModelRunner(GPUModelRunner):
         # fast path can apply them at the same post-launch point as the
         # slow path (execute_model applies it after the batch is launched).
         cache["deferred_state_corrections_fn"] = deferred_state_corrections_fn
+
+        # An early-returned batch can leave this cache alive until another
+        # request reaches execute_model. Tag it with the exact request order
+        # so the cloud fast path cannot consume another batch's attention
+        # metadata, logits indices, or prepared token layout.
+        cache["req_ids_key"] = tuple(scheduler_output.num_scheduled_tokens)
 
         # --- Cache all results ---
         self._cloud_prepare_cache = cache

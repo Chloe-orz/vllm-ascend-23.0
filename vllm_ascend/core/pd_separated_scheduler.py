@@ -66,6 +66,25 @@ class PrefillChunkFlight:
     num_scheduled_tokens: int
 
 
+@dataclass(frozen=True)
+class PDActiveFlight:
+    """A protected edge-cloud transaction from First creation to Last finish."""
+
+    request_ids: tuple[str, ...]
+    first_batch_type: BatchType
+    last_batch_type: BatchType
+    flight_id: str
+    created_at: float
+
+
+_PD_FIRST_TO_LAST = {
+    BatchType.PREFILL_FIRST: BatchType.PREFILL_LAST,
+    BatchType.DECODE_FIRST: BatchType.DECODE_LAST,
+    BatchType.DRAFT_FIRST: BatchType.DRAFT_LAST,
+}
+_PD_LAST_TO_FIRST = {last: first for first, last in _PD_FIRST_TO_LAST.items()}
+
+
 # DP-scalable hidden-channel allocation.
 _PREFILL_CHANNELS_PER_DP = 2
 _DECODE_CHANNELS_PER_DP = 1
@@ -592,6 +611,137 @@ class PDSeparatedScheduler(Scheduler):
         ]
         for token in to_remove:
             self._prefill_flight_by_token.pop(token, None)
+
+    @staticmethod
+    def _pd_flight_key(
+        scheduler_output: SchedulerOutput,
+        first_batch_type: BatchType,
+    ) -> tuple[BatchType, str]:
+        if first_batch_type == BatchType.DRAFT_FIRST:
+            draft_task_id = scheduler_output.draft_task_id
+            if not draft_task_id:
+                raise RuntimeError("DRAFT flight is missing draft_task_id")
+            if scheduler_output.draft_step_idx is None:
+                raise RuntimeError("DRAFT flight is missing draft_step_idx")
+            # A speculative chain reuses draft_task_id across multiple steps.
+            # Include the step so asynchronously pipelined draft flights do not
+            # collide in the active-flight map.
+            flight_id = f"{draft_task_id}:{scheduler_output.draft_step_idx}"
+        else:
+            flight_id = scheduler_output.head_token
+            if not flight_id:
+                raise RuntimeError(
+                    f"{first_batch_type.value} flight is missing head_token"
+                )
+        return first_batch_type, str(flight_id)
+
+    @staticmethod
+    def _pd_flight_request_ids(
+        scheduler_output: SchedulerOutput,
+    ) -> tuple[str, ...]:
+        request_ids = dict.fromkeys(scheduler_output.num_scheduled_tokens)
+        if scheduler_output.parent_req_id:
+            request_ids.setdefault(scheduler_output.parent_req_id, None)
+        return tuple(request_ids)
+
+    def _register_pd_flight(self, scheduler_output: SchedulerOutput) -> None:
+        """Protect requests in a First batch until its Last batch finishes."""
+        first_batch_type = scheduler_output.batch_type
+        last_batch_type = _PD_FIRST_TO_LAST.get(first_batch_type)
+        if last_batch_type is None:
+            raise RuntimeError(
+                f"Cannot register non-First PD batch: {first_batch_type}"
+            )
+
+        key = self._pd_flight_key(scheduler_output, first_batch_type)
+        if key in self._pd_active_flight_by_key:
+            raise RuntimeError(f"Duplicate active PD flight: {key}")
+
+        request_ids = self._pd_flight_request_ids(scheduler_output)
+        if not request_ids:
+            raise RuntimeError(
+                f"{first_batch_type.value} flight has no associated requests"
+            )
+
+        self._pd_active_flight_by_key[key] = PDActiveFlight(
+            request_ids=request_ids,
+            first_batch_type=first_batch_type,
+            last_batch_type=last_batch_type,
+            flight_id=key[1],
+            created_at=time.monotonic(),
+        )
+        for req_id in request_ids:
+            self._pd_active_flight_count[req_id] = (
+                self._pd_active_flight_count.get(req_id, 0) + 1
+            )
+
+    def _complete_pd_flight(self, scheduler_output: SchedulerOutput) -> bool:
+        """Unprotect requests after a matching Last batch has completed."""
+        last_batch_type = scheduler_output.batch_type
+        first_batch_type = _PD_LAST_TO_FIRST.get(last_batch_type)
+        if first_batch_type is None:
+            raise RuntimeError(
+                f"Cannot complete non-Last PD batch: {last_batch_type}"
+            )
+
+        key = self._pd_flight_key(scheduler_output, first_batch_type)
+        flight = self._pd_active_flight_by_key.pop(key, None)
+        if flight is None:
+            logger.warning(
+                "Ignoring stale or duplicate %s flight completion: key=%s",
+                last_batch_type.value,
+                key,
+            )
+            return False
+        if flight.last_batch_type != last_batch_type:
+            raise RuntimeError(
+                "PD flight type mismatch: "
+                f"expected={flight.last_batch_type}, got={last_batch_type}, "
+                f"key={key}"
+            )
+
+        for req_id in flight.request_ids:
+            count = self._pd_active_flight_count.get(req_id, 0)
+            if count <= 0:
+                raise RuntimeError(
+                    "PD active flight count underflow: "
+                    f"request_id={req_id}, key={key}"
+                )
+            if count == 1:
+                self._pd_active_flight_count.pop(req_id)
+            else:
+                self._pd_active_flight_count[req_id] = count - 1
+        return True
+
+    def _is_request_preemptible(self, request: Request) -> bool:
+        """Only idle RUNNING requests are safe preemption candidates."""
+        return (
+            request.status == RequestStatus.RUNNING
+            and self._pd_active_flight_count.get(request.request_id, 0) == 0
+        )
+
+    def _select_preemption_candidate(self) -> Request | None:
+        """Select an idle request without touching active edge-cloud work."""
+        if self.policy == SchedulingPolicy.PRIORITY:
+            candidates = (
+                request
+                for request in self.running
+                if self._is_request_preemptible(request)
+            )
+            return max(
+                candidates,
+                key=lambda request: (request.priority, request.arrival_time),
+                default=None,
+            )
+
+        return next(
+            (
+                request
+                for request in reversed(self.running)
+                if self._is_request_preemptible(request)
+            ),
+            None,
+        )
 
     def _make_empty_batch(self) -> SchedulerOutput:
         scheduler_output = SchedulerOutput.make_empty()
@@ -1412,6 +1562,7 @@ class PDSeparatedScheduler(Scheduler):
             tuple(scheduler_output.num_scheduled_tokens),
         )
         self._validate_draft_tail_channel(draft_last)
+        self._register_pd_flight(scheduler_output)
         self.drafts_last_ready.append(draft_last)
         self.decode_or_draft_inflight_count += 1
         self.draft_remote_pending_count += 1
@@ -2037,6 +2188,7 @@ class PDSeparatedScheduler(Scheduler):
                     self._ensure_cached_all_token_ids(scheduler_output)
                     self.decode_or_draft_inflight_count += 1
                     self.decode_head_inflight_count += 1
+                    self._register_pd_flight(scheduler_output)
                     self._force_decode_last = True
                     self._start_decode_last_delay()
 
@@ -2091,27 +2243,20 @@ class PDSeparatedScheduler(Scheduler):
                 req.status = RequestStatus.RUNNING
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
-        # In PD separation requests may re-enter ``running`` from
-        # ``chunk_prefill_first`` with a stale ``PREEMPTED`` status when the
-        # ``_migrate_prefill_to_running`` conditions are not met in time.
-        # The upstream scheduler only picks ``RUNNING`` requests to preempt,
-        # so the status is a lagging indicator; ensure it is correct.
-        if request.status != RequestStatus.RUNNING:
-            request.status = RequestStatus.RUNNING
-        self.kv_cache_manager.free(request)
-        self.encoder_cache_manager.free(request)
-        request.status = RequestStatus.PREEMPTED
-        request.num_preemptions += 1
-        if request.spec_token_ids:
-            request.spec_token_ids = []
-        if self.log_stats:
-            request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+        if not self._is_request_preemptible(request):
+            raise RuntimeError(
+                "Cannot preempt an active edge-cloud request: "
+                f"request_id={request.request_id}, status={request.status}, "
+                "active_flights="
+                f"{self._pd_active_flight_count.get(request.request_id, 0)}"
+            )
 
-        if request.is_prefill_chunk:
-            self.chunk_prefill_first.append(request)
-        else:
-            request.num_computed_tokens = 0
-            self.waiting.prepend_request(request)
+        # Use the upstream recovery path so KV ownership, computed progress,
+        # request status, and resumed-request metadata stay consistent.
+        super()._preempt_request(request, timestamp)
+        self._cleanup_request_flight_state(request.request_id)
+        request.chunk_num = 1
+        request.is_prefill_chunk = False
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         was_prefill_map = {}
@@ -2332,6 +2477,8 @@ class PDSeparatedScheduler(Scheduler):
                 f"decode_or_draft_inflight: {self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}",
             )
         outputs = super().update_from_output(scheduler_output, model_runner_output)
+        if scheduler_output.batch_type in _PD_LAST_TO_FIRST:
+            self._complete_pd_flight(scheduler_output)
         if self.finished_req_ids:
             # Natural completion is handled inside the base update path and
             # does not pass through finish_requests().  Do not dispatch any

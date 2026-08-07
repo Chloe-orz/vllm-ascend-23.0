@@ -1041,6 +1041,186 @@ class TestRequestCounts:
 
 
 # ------------------------------------------------------------------ #
+# Test: edge-cloud preemption protection                             #
+# ------------------------------------------------------------------ #
+
+
+class TestPDPreemptionProtection:
+    @staticmethod
+    def _make_scheduler():
+        from vllm_ascend.core.pd_separated_scheduler import PDSeparatedScheduler
+
+        scheduler = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+        scheduler._pd_active_flight_count = {}
+        scheduler._pd_active_flight_by_key = {}
+        scheduler._pending_tail_count = {}
+        scheduler._prefill_flight_by_token = {}
+        scheduler._ahead_chunk_count = {}
+        return scheduler
+
+    @staticmethod
+    def _make_output(
+        batch_type,
+        *,
+        head_token=None,
+        draft_task_id=None,
+        draft_step_idx=None,
+        req_id="req-0",
+    ):
+        return SimpleNamespace(
+            batch_type=batch_type,
+            head_token=head_token,
+            draft_task_id=draft_task_id,
+            draft_step_idx=draft_step_idx,
+            parent_req_id=None,
+            num_scheduled_tokens={req_id: 1},
+        )
+
+    def test_prefill_flight_protects_until_last_completes(self):
+        from vllm.v1.core.sched.output import BatchType
+
+        scheduler = self._make_scheduler()
+        first = self._make_output(
+            BatchType.PREFILL_FIRST, head_token="pf-0"
+        )
+        last = self._make_output(
+            BatchType.PREFILL_LAST, head_token="pf-0"
+        )
+
+        scheduler._register_pd_flight(first)
+        assert scheduler._pd_active_flight_count == {"req-0": 1}
+
+        assert scheduler._complete_pd_flight(last) is True
+        assert scheduler._pd_active_flight_count == {}
+        assert scheduler._pd_active_flight_by_key == {}
+
+    def test_multiple_prefill_flights_use_request_count(self):
+        from vllm.v1.core.sched.output import BatchType
+
+        scheduler = self._make_scheduler()
+        for head_token in ("pf-0", "pf-1"):
+            scheduler._register_pd_flight(
+                self._make_output(
+                    BatchType.PREFILL_FIRST,
+                    head_token=head_token,
+                )
+            )
+
+        assert scheduler._pd_active_flight_count == {"req-0": 2}
+        scheduler._complete_pd_flight(
+            self._make_output(BatchType.PREFILL_LAST, head_token="pf-0")
+        )
+        assert scheduler._pd_active_flight_count == {"req-0": 1}
+        scheduler._complete_pd_flight(
+            self._make_output(BatchType.PREFILL_LAST, head_token="pf-1")
+        )
+        assert scheduler._pd_active_flight_count == {}
+
+    def test_pipelined_draft_steps_have_distinct_flight_keys(self):
+        from vllm.v1.core.sched.output import BatchType
+
+        scheduler = self._make_scheduler()
+        for step in (0, 1):
+            scheduler._register_pd_flight(
+                self._make_output(
+                    BatchType.DRAFT_FIRST,
+                    draft_task_id="draft-0",
+                    draft_step_idx=step,
+                )
+            )
+
+        assert scheduler._pd_active_flight_count == {"req-0": 2}
+        scheduler._complete_pd_flight(
+            self._make_output(
+                BatchType.DRAFT_LAST,
+                draft_task_id="draft-0",
+                draft_step_idx=0,
+            )
+        )
+        assert scheduler._pd_active_flight_count == {"req-0": 1}
+        scheduler._complete_pd_flight(
+            self._make_output(
+                BatchType.DRAFT_LAST,
+                draft_task_id="draft-0",
+                draft_step_idx=1,
+            )
+        )
+        assert scheduler._pd_active_flight_count == {}
+
+    def test_fcfs_candidate_skips_active_request(self):
+        from vllm.v1.core.sched.request_queue import SchedulingPolicy
+        from vllm.v1.request import RequestStatus
+
+        scheduler = self._make_scheduler()
+        idle_request = _make_mock_request("idle")
+        active_request = _make_mock_request("active")
+        idle_request.status = RequestStatus.RUNNING
+        active_request.status = RequestStatus.RUNNING
+        scheduler.running = [idle_request, active_request]
+        scheduler.policy = SchedulingPolicy.FCFS
+        scheduler._pd_active_flight_count[active_request.request_id] = 1
+
+        assert scheduler._select_preemption_candidate() is idle_request
+
+    def test_no_candidate_when_all_requests_are_active(self):
+        from vllm.v1.core.sched.request_queue import SchedulingPolicy
+        from vllm.v1.request import RequestStatus
+
+        scheduler = self._make_scheduler()
+        request = _make_mock_request("active")
+        request.status = RequestStatus.RUNNING
+        scheduler.running = [request]
+        scheduler.policy = SchedulingPolicy.FCFS
+        scheduler._pd_active_flight_count[request.request_id] = 1
+
+        assert scheduler._select_preemption_candidate() is None
+
+    def test_priority_candidate_skips_active_request(self):
+        from vllm.v1.core.sched.request_queue import SchedulingPolicy
+        from vllm.v1.request import RequestStatus
+
+        scheduler = self._make_scheduler()
+        idle_request = _make_mock_request("idle")
+        active_request = _make_mock_request("active")
+        idle_request.status = active_request.status = RequestStatus.RUNNING
+        idle_request.priority, idle_request.arrival_time = 2, 1.0
+        active_request.priority, active_request.arrival_time = 9, 2.0
+        scheduler.running = [idle_request, active_request]
+        scheduler.policy = SchedulingPolicy.PRIORITY
+        scheduler._pd_active_flight_count[active_request.request_id] = 1
+
+        assert scheduler._select_preemption_candidate() is idle_request
+
+    def test_preemption_uses_upstream_recovery_for_idle_request(self):
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.request import RequestStatus
+
+        scheduler = self._make_scheduler()
+        request = _make_mock_request()
+        request.status = RequestStatus.RUNNING
+        scheduler._ahead_chunk_count[request.request_id] = 1
+
+        with patch.object(Scheduler, "_preempt_request") as upstream_preempt:
+            scheduler._preempt_request(request, 1.0)
+
+        upstream_preempt.assert_called_once_with(request, 1.0)
+        assert request.request_id not in scheduler._ahead_chunk_count
+        assert request.chunk_num == 1
+        assert request.is_prefill_chunk is False
+
+    def test_active_request_cannot_be_preempted(self):
+        from vllm.v1.request import RequestStatus
+
+        scheduler = self._make_scheduler()
+        request = _make_mock_request()
+        request.status = RequestStatus.RUNNING
+        scheduler._pd_active_flight_count[request.request_id] = 1
+
+        with pytest.raises(RuntimeError, match="active edge-cloud request"):
+            scheduler._preempt_request(request, 1.0)
+
+
+# ------------------------------------------------------------------ #
 # Test: empty PREFILL_FIRST restores self.running (KV-exhaustion)    #
 # ------------------------------------------------------------------ #
 

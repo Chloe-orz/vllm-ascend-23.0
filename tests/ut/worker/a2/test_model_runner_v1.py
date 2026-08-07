@@ -482,6 +482,39 @@ class TestDeferredDraftTokenBackfill(unittest.TestCase):
             )
 
 
+class TestPendingSampledTokenMapping(unittest.TestCase):
+    def test_update_states_preserves_live_interleaved_request_mapping(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._edge_cloud_enabled = True
+        runner.use_async_scheduling = True
+        runner.requests = {"req-a": MagicMock(), "req-b": MagicMock()}
+        runner.input_batch = SimpleNamespace(
+            prev_sampled_token_ids=torch.tensor([[101], [202]]),
+            prev_req_id_to_index={"req-a": 0, "req-b": 1},
+        )
+        runner._purge_invalidated_cloud_draft_metadata = MagicMock()
+        scheduler_output = SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+            cloud_draft_invalidate_task_ids=None,
+        )
+
+        def update_current_subset(_scheduler_output):
+            runner.input_batch.prev_req_id_to_index = {"req-b": 1}
+            return "deferred-correction"
+
+        with patch(
+            "vllm.v1.worker.gpu_model_runner.GPUModelRunner._update_states",
+            side_effect=update_current_subset,
+        ):
+            result = runner._update_states(scheduler_output)
+
+        self.assertEqual(result, "deferred-correction")
+        self.assertEqual(
+            runner.input_batch.prev_req_id_to_index,
+            {"req-a": 0, "req-b": 1},
+        )
+
+
 class TestNPUModelRunnerDebugger(unittest.TestCase):
     def _build_runner(self, debugger=None):
         runner = NPUModelRunner.__new__(NPUModelRunner)
