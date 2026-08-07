@@ -1979,7 +1979,37 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        return super()._update_states(scheduler_output)
+        # [edge-cloud fix] Preserve prev_sampled_token_ids mappings across
+        # PD-interleaving churn.  An interleaved prefill batch's
+        # _update_states evicts running decode requests from input_batch,
+        # and InputBatch.remove_request pops their prev_req_id_to_index
+        # entries.  The pending sampled token (still in flight under async
+        # scheduling) then becomes unreachable: when the next DF re-adds
+        # the request, _compute_prev_positions yields -1, the scatter in
+        # _prepare_input_ids skips it, and the embedding consumes a stale/0
+        # input id -> the whole decode batch diverges (confirmed by
+        # [EC-INV-C1] logs).  Finished/aborted requests are NOT restored:
+        # they are popped from self.requests at the top of the same
+        # _update_states call.  The prev_sampled buffer rows are not
+        # touched by _update_states, so the saved row indices stay valid;
+        # the next sampling's _merge_pending_prev_sampled carries the
+        # entries forward from there.
+        shelved_prev_map = None
+        if self._edge_cloud_enabled and self.use_async_scheduling:
+            prev_map = self.input_batch.prev_req_id_to_index
+            if prev_map:
+                shelved_prev_map = dict(prev_map)
+
+        result = super()._update_states(scheduler_output)
+
+        if shelved_prev_map:
+            prev_map = self.input_batch.prev_req_id_to_index
+            if prev_map is not None:
+                for req_id, prev_index in shelved_prev_map.items():
+                    if req_id not in prev_map and req_id in self.requests:
+                        prev_map[req_id] = prev_index
+
+        return result
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -3992,8 +4022,6 @@ class NPUModelRunner(GPUModelRunner):
             and intermediate_tensors is not None
             and scheduler_output.head_token in self._edge_prepare_cache_by_token
             and self.input_batch.num_reqs > 0
-            and tuple(self.input_batch.req_ids)
-            == tuple(scheduler_output.num_scheduled_tokens)
         )
         # ---- cloud fast path: reuse pre-computed prepare results ----
         _cloud_fast_path = (
@@ -4003,11 +4031,47 @@ class NPUModelRunner(GPUModelRunner):
             and self._cloud_prepare_cache is not None
         )
         if _fast_path:
+            # [ascend fix] The edge tail fast path runs OUTSIDE the
+            # synchronize_input_prep/prepare_inputs_event protection that
+            # the slow path gets.  Its conditional _update_states writes
+            # pinned CPU buffers (num_computed_tokens_cpu, block_table.np)
+            # and the num_computed re-sync below does a non-blocking H2D
+            # READ of a pinned buffer.  Under PD interleaving the GPU queue
+            # backs up behind a slow prefill forward, so a previous batch's
+            # pending H2D reads race with this batch's pinned writes, and
+            # this batch's H2D read races with the next batch's pinned
+            # writes -> corrupted num_computed/block_table -> wrong
+            # positions/slot_mapping -> KV written to wrong slots -> whole
+            # decode batch diverges.  Chain the fast path into the same
+            # event protocol: wait for the previous prep's H2D before
+            # touching pinned state, record after our H2D so the next
+            # batch's prep waits for it.
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.synchronize()
+
             # Pop this head_token's cache so a later segment_a (different
             # head_token) does not hand the wrong attn_metadata to this PL.
             cache = self._edge_prepare_cache_by_token.pop(
                 scheduler_output.head_token
             )
+
+            # If intervening decode batches disrupted input_batch (req_ids no
+            # longer match this tail's scheduled reqs), re-add the prefill req
+            # via _update_states so the tail can sample and record the first
+            # token. The cached layout (keyed by head_token) is still correct
+            # and is reused below -- we do NOT recompute it via _prepareInputs.
+            # When req_ids already match, the req is in input_batch, so skip
+            # _update_states to avoid double-counting. deferred_state_corrections_fn
+            # (None when MTP/spec-decode is off) is applied at the end of
+            # execute_model.
+            if (tuple(self.input_batch.req_ids)
+                    != tuple(scheduler_output.num_scheduled_tokens)):
+                deferred_state_corrections_fn = self._update_states(
+                    scheduler_output
+                )
+            else:
+                deferred_state_corrections_fn = None
+
             total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
             num_tokens_padded = cache["num_tokens_padded"]
             num_tokens_across_dp = cache["num_tokens_across_dp"]
@@ -4031,8 +4095,11 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                     non_blocking=True,
                 )
-            # Fast path skips _update_states, so no deferred corrections.
-            deferred_state_corrections_fn = None
+            # [ascend fix] see above: record so the next batch's
+            # synchronize_input_prep waits for this H2D read of the pinned
+            # buffer before overwriting it.
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.record()
         elif _cloud_fast_path:
             cache = self._cloud_prepare_cache
             self._cloud_prepare_cache = None  # consumed, clear for next iteration
