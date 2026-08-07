@@ -1692,8 +1692,16 @@ class PDSeparatedScheduler(Scheduler):
                 request.num_preemptions += 1
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
+                # [ascend fix] Use the upstream async-discard protocol.
+                # AsyncScheduler._update_request_with_output only honors
+                # `async_tokens_to_discard`; the previous
+                # `discard_latest_async_tokens` flag is not read anywhere,
+                # so stale in-flight frames from preempted chunk-prefill
+                # requests were never discarded and later hit the
+                # PD-ASYNC-GUARD clamp (and their tokens were appended to
+                # the request's outputs before the clamp).
+                request.async_tokens_to_discard = request.num_output_placeholders
                 request.num_output_placeholders = 0
-                request.discard_latest_async_tokens = True
                 self.waiting.prepend_request(request)
 
             # Also clean up chunk-prefill-prior flight state.

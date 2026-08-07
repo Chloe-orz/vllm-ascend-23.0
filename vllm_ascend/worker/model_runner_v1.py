@@ -249,6 +249,17 @@ SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 # the probe itself adds no synchronization to the hot path).
 _EC_DEBUG_PROBE = os.environ.get("VLLM_ASCEND_EC_DEBUG_PROBE", "0") == "1"
 
+# [EC-TRACE] Set VLLM_ASCEND_EC_TRACE=1 to record the lifecycle of pending
+# sampled-token entries (sampled / carried / dropped / scattered / shelved
+# / restored / tombstoned) in a small per-request ring buffer.  When an
+# [EC-INV-C1] invariant violation fires, the ring for that request is
+# dumped so the missing entry can be attributed: no "sampled" event after
+# the last "scatter" means the producing tail segment (DL) never ran
+# (scheduling-order gap); a "sampled" event followed by a "dropped" event
+# pinpoints where the protocol lost the entry.
+_EC_TRACE = os.environ.get("VLLM_ASCEND_EC_TRACE", "0") == "1"
+_EC_TRACE_RING_SIZE = 16
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -2052,6 +2063,9 @@ class NPUModelRunner(GPUModelRunner):
             prev_map = self.input_batch.prev_req_id_to_index
             if prev_map:
                 shelved_prev_map = dict(prev_map)
+                if _EC_TRACE:
+                    for req_id, row in shelved_prev_map.items():
+                        self._ec_trace_event(req_id, "shelved", row=row)
 
         result = super()._update_states(scheduler_output)
 
@@ -2061,6 +2075,19 @@ class NPUModelRunner(GPUModelRunner):
                 for req_id, prev_index in shelved_prev_map.items():
                     if req_id not in prev_map and req_id in self.requests:
                         prev_map[req_id] = prev_index
+                        if _EC_TRACE:
+                            self._ec_trace_event(
+                                req_id, "restored", row=prev_index
+                            )
+                    elif _EC_TRACE and req_id not in prev_map:
+                        # Entry lost: the request is gone from the runner's
+                        # view (finished / preempted), so the pending token
+                        # can never be re-attached.
+                        self._ec_trace_event(
+                            req_id,
+                            "restore_skipped",
+                            reason="not_in_requests",
+                        )
 
         return result
 
@@ -6979,7 +7006,80 @@ class NPUModelRunner(GPUModelRunner):
                         pos,
                         got,
                     )
+                    if _EC_TRACE:
+                        logger.warning(
+                            "[EC-INV-C1-TRACE] req=%s pending-entry "
+                            "lifecycle (oldest first):\n%s",
+                            req_id,
+                            self._ec_trace_dump(req_id),
+                        )
             offset += ntok
+
+    # ------------------------------------------------------------------ #
+    # [EC-TRACE] pending sampled-token entry lifecycle tracing             #
+    # ------------------------------------------------------------------ #
+    def _ec_trace_event(self, req_id: str, event: str, **details: Any) -> None:
+        """Append an event to a request's pending-entry lifecycle ring.
+
+        No-op unless VLLM_ASCEND_EC_TRACE=1.  Each event records the
+        runner-side step counter, the batch context (batch_type +
+        head_token of the batch being executed) and event-specific
+        details.  The ring is dumped by _ec_check_pending_sampled_tokens
+        when the [EC-INV-C1] invariant fires.
+        """
+        if not _EC_TRACE:
+            return
+        rings = getattr(self, "_ec_trace_rings", None)
+        if rings is None:
+            rings = self._ec_trace_rings = {}
+        ring = rings.get(req_id)
+        if ring is None:
+            ring = rings[req_id] = deque(maxlen=_EC_TRACE_RING_SIZE)
+        elif len(rings) > 4096:
+            # Bound memory: drop rings of requests we have not touched for
+            # the longest time (dict preserves insertion order).
+            rings.pop(next(iter(rings)))
+        batch_type, head_token = getattr(self, "_ec_trace_ctx", (None, None))
+        ring.append(
+            (
+                getattr(self, "_ec_trace_step", -1),
+                batch_type,
+                (head_token[:8] if isinstance(head_token, str) else None),
+                event,
+                details or None,
+            )
+        )
+
+    def _ec_trace_dump(self, req_id: str) -> str:
+        """Render a request's lifecycle ring plus a root-cause hint."""
+        rings = getattr(self, "_ec_trace_rings", None)
+        ring = rings.get(req_id) if rings else None
+        if not ring:
+            return "<no trace recorded; enable VLLM_ASCEND_EC_TRACE=1>"
+        lines = [
+            f"  step={step} batch={bt} head={head} {ev} {det}"
+            for step, bt, head, ev, det in ring
+        ]
+        events = [ev for _, _, _, ev, _ in ring]
+        last_scatter = max(
+            (i for i, ev in enumerate(events) if ev == "scatter+consume"),
+            default=-1,
+        )
+        sampled_after = any(ev == "sampled" for ev in events[last_scatter + 1 :])
+        if sampled_after:
+            hint = (
+                "HINT: entry WAS sampled after the last scatter but is now "
+                "missing -> protocol lost it; check 'dropped' / "
+                "'restore_skipped' events above (candidate B)."
+            )
+        else:
+            hint = (
+                "HINT: NO 'sampled' event after the last scatter -> the "
+                "tail segment (DL) that should produce this token never "
+                "ran before this DF (scheduling-order gap, candidate A)."
+            )
+        lines.append(hint)
+        return "\n".join(lines)
 
     def _ec_pending_sampled_marks(self) -> tuple[set[str], set[str]]:
         """Lazily-initialized marks for the pending-sampled-token protocol.
@@ -7007,16 +7107,27 @@ class NPUModelRunner(GPUModelRunner):
         """Maintain tombstone marks from scheduler state transitions."""
         if not getattr(self, "_edge_cloud_enabled", False):
             return
+        if _EC_TRACE:
+            self._ec_trace_step = getattr(self, "_ec_trace_step", 0) + 1
+            self._ec_trace_ctx = (
+                getattr(scheduler_output, "batch_type", None),
+                getattr(scheduler_output, "head_token", None),
+            )
         tombstones, consumed = self._ec_pending_sampled_marks()
         finished = scheduler_output.finished_req_ids
         if finished:
             tombstones.update(finished)
             consumed.difference_update(finished)
+            if _EC_TRACE:
+                for req_id in finished:
+                    self._ec_trace_event(req_id, "tombstone")
         # Abort + resubmit with the same req_id arrives as a NEW request;
         # clear its tombstone so the new incarnation can build a fresh
         # pending entry (the old incarnation's token stays dropped).
         for req_data in scheduler_output.scheduled_new_reqs:
             tombstones.discard(req_data.req_id)
+            if _EC_TRACE:
+                self._ec_trace_event(req_data.req_id, "tombstone_clear")
 
     def _ec_mark_prev_sampled_consumed(self, num_reqs: int) -> None:
         """Mark pending tokens just scattered into input_ids as consumed.
@@ -7040,6 +7151,13 @@ class NPUModelRunner(GPUModelRunner):
         for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             if prev_positions[i] >= 0:
                 consumed.add(req_id)
+                if _EC_TRACE:
+                    self._ec_trace_event(
+                        req_id,
+                        "scatter+consume",
+                        row=i,
+                        prev_pos=int(prev_positions[i]),
+                    )
 
     def _merge_pending_prev_sampled(
         self,
@@ -7073,6 +7191,9 @@ class NPUModelRunner(GPUModelRunner):
         prev_buf = self.input_batch.prev_sampled_token_ids
         prev_map = self.input_batch.prev_req_id_to_index
         tombstones, consumed = self._ec_pending_sampled_marks()
+        if _EC_TRACE:
+            for req_id, row in new_map.items():
+                self._ec_trace_event(req_id, "sampled", row=row)
         # Requests covered by the current sampling batch are alive and own
         # a freshly sampled token; any stale mark for them is obsolete.
         # This must run even when there is nothing to merge (empty prev
@@ -7081,6 +7202,14 @@ class NPUModelRunner(GPUModelRunner):
         tombstones.difference_update(new_map)
         consumed.difference_update(new_map)
         if prev_buf is None or not prev_map:
+            if _EC_TRACE and prev_map:
+                for req_id in prev_map:
+                    reason = (
+                        "tombstoned" if req_id in tombstones
+                        else "consumed" if req_id in consumed
+                        else "unknown"
+                    )
+                    self._ec_trace_event(req_id, "dropped", reason=reason)
             return sampled_token_ids, new_map
         stale = [
             (req_id, idx)
@@ -7089,6 +7218,17 @@ class NPUModelRunner(GPUModelRunner):
             and req_id not in tombstones
             and req_id not in consumed
         ]
+        if _EC_TRACE:
+            stale_ids = {req_id for req_id, _ in stale}
+            for req_id in prev_map:
+                if req_id in new_map or req_id in stale_ids:
+                    continue
+                reason = (
+                    "tombstoned" if req_id in tombstones
+                    else "consumed" if req_id in consumed
+                    else "unknown"
+                )
+                self._ec_trace_event(req_id, "dropped", reason=reason)
         if not stale:
             return sampled_token_ids, new_map
         offset = sampled_token_ids.shape[0]
@@ -7100,6 +7240,10 @@ class NPUModelRunner(GPUModelRunner):
         for j, (req_id, old_idx) in enumerate(stale):
             combined[offset + j] = prev_buf[old_idx]
             merged_map[req_id] = offset + j
+            if _EC_TRACE:
+                self._ec_trace_event(
+                    req_id, "carried", old_row=old_idx, new_row=offset + j
+                )
         # logger.warning(
         #     "[EDGE-CLOUD-STASH] preserved %d pending sampled token(s) for "
         #     "reqs %s not in the current sampling batch (batch=%s)",
