@@ -791,16 +791,38 @@ class NPUWorker(WorkerBase):
             )
             self._pp_send_work_by_channel[channel.value] = handles
 
-    def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
+    def _wait_pp_send_work(
+        self,
+        channel: HiddenChannelType | None = None,
+        wait: bool = True,
+    ) -> None:
+        # When wait=False (edge-cloud path), do NOT call handle.wait() on the
+        # isend handles - just drop them. ProcessGroupHCCL internally records
+        # isend inputs on the hccl stream (pointToPoint ->
+        # NPUCachingAllocator::recordStream(tensor, hcclStream),
+        # ProcessGroupHCCL.cpp:4585), so the send buffer's lifetime is safe
+        # without an explicit wait. Calling handle.wait() here would do
+        # hcclEndEvent.block(currentStream=compute/default) (see
+        # WorkHCCL::synchronizeInternal, ProcessGroupHCCL.cpp:1001), re-pinning
+        # the isend completion onto the compute stream regardless of which
+        # dedicated comm stream the isend was submitted on. The compute stream
+        # would then stall until the remote (edge/cloud) irecvs the previous
+        # send, which under 2P1D (peer busy with the other DP / idle) or
+        # DP-scheduling desync (peer runs a dummy, no matching irecv) never
+        # happens in time -> deadlock. MindIE discards the isend handle
+        # (_ = isend(...)) for the same reason; this matches that. Legacy PP
+        # keeps wait=True to preserve the original synchronous behavior.
         if channel is None:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-            for handles in self._pp_send_work_by_channel.values():
-                for handle in handles:
+            if wait:
+                for handle in self._pp_send_work:
                     handle.wait()
+                for handles in self._pp_send_work_by_channel.values():
+                    for handle in handles:
+                        handle.wait()
+            self._pp_send_work = []
             self._pp_send_work_by_channel.clear()
             return
+
 
         handles = self._pp_send_work_by_channel.pop(channel.value, [])
         logger.info(
@@ -808,8 +830,9 @@ class NPUWorker(WorkerBase):
             channel.value,
             len(handles),
         )
-        for handle in handles:
-            handle.wait()
+        if wait:
+            for handle in handles:
+                handle.wait()
 
     # ------------------------------------------------------------------ #
     # [CHER/EHER] Cloud/edge hidden early-receive primitives             #
@@ -833,10 +856,15 @@ class NPUWorker(WorkerBase):
         do_sp_chunk = enable_sp() and (
             self.model_runner.edge_cloud_cfg.mode != "embedding_only"
             or not self.model_runner.supports_mm_inputs)
+        # In the shared-model edge-cloud topology the cloud first-worker
+        # must receive from the edge (in-group rank 0).  Otherwise src=None
+        # resolves to the implicit "previous PP rank".
+        _recv_src = 0 if self.parallel_config.is_shared_model_edge else None
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
             num_tokens=num_tokens,
             channel=channel,
             sp_chunk=do_sp_chunk,
+            src=_recv_src,
             include_mrope = include_mrope,
         )
         entry = AsyncIntermediateTensors(
@@ -1007,14 +1035,31 @@ class NPUWorker(WorkerBase):
                 BatchType.DECODE_LAST,
                 BatchType.DRAFT_LAST,
             ):
-                self._wait_pp_send_work(self._hidden_channel_for(scheduler_output))
+                self._wait_pp_send_work(self._hidden_channel_for(scheduler_output), wait=False)
             else:
-                self._wait_pp_send_work()
+                self._wait_pp_send_work(wait=False)
         else:
             self._wait_pp_send_work()
 
         # Edge-cloud PD-separation: dispatch by batch_type and role.
         if self.model_runner._edge_cloud_enabled:
+            # [EC-EXEC] Log the edge-side original_seq (assigned at edge
+            # production) before inference so edge and cloud worker execution
+            # of the same logical batch can be correlated. arrival_seq is the
+            # cloud-side reception order (best-effort: present on the cloud
+            # worker only if it survived the internal EngineCore->worker MQ).
+            logger.info(
+                "[EC-EXEC] role=%s rank=%s original_seq=%s arrival_seq=%s "
+                "batch_type=%s tokens=%s head_token=%s",
+                "CLOUD" if is_cloud_device() else "EDGE",
+                self.rank,
+                getattr(scheduler_output, "original_seq", None),
+                getattr(scheduler_output, "_passive_scheduler_arrival_seq", None),
+                scheduler_output.batch_type.value
+                if scheduler_output.batch_type else None,
+                scheduler_output.total_num_scheduled_tokens,
+                getattr(scheduler_output, "head_token", None),
+            )
             bt = scheduler_output.batch_type
             if is_cloud_device():
                 if bt == BatchType.DRAFT_FIRST:
@@ -1026,6 +1071,15 @@ class NPUWorker(WorkerBase):
                 return self._execute_model_edge_draft_head(scheduler_output)
             if bt == BatchType.DRAFT_LAST:
                 return self._execute_model_edge_draft_tail(scheduler_output)
+
+            # PD-separation dummy (cross-DP coordination): tokens==0 means
+            # this edge runs a dummy of the winner bt to pair the [0,5] EP
+            # all-toall. _dummy_run matches the peer's real segment via
+            # _peer_batch_type_id (head bt -> segment_a, tail bt -> segment_e).
+            # No isend/recv - the dummy carries no real hidden states.
+            if scheduler_output.total_num_scheduled_tokens == 0:
+                return self._execute_model_edge_dummy(scheduler_output)
+
             if bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST):
                 return self._execute_model_edge_head(
                     scheduler_output, layer_slice_info
@@ -1107,6 +1161,14 @@ class NPUWorker(WorkerBase):
                 num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
                 channel=channel,
             )
+            logger.info(
+                "[PP-EVT] SEND dp_rank=%s bt=%s ht=%s ch=%s tokens=%s",
+                self.model_runner.dp_rank,
+                scheduler_output.batch_type.value,
+                getattr(scheduler_output, "head_token", "?"),
+                channel.value,
+                scheduler_output.total_num_scheduled_tokens,
+            )
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
         # because sampling happens in the tail segment (PL/DL).
@@ -1115,6 +1177,33 @@ class NPUWorker(WorkerBase):
             req_ids=req_ids,
             req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
         )
+
+    def _execute_model_edge_dummy(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        """Edge dummy segment (cross-DP coordination, tokens==0).
+
+        Runs ``_dummy_run`` so this edge participates in the cross-DP [0,5]
+        EP all-toall pairing. ``_dummy_run`` matches the peer's real segment
+        via ``_peer_batch_type_id`` (peer head bt -> segment_a, peer tail bt
+        -> segment_e), so the dummy's all-toall pairs 1:1 with the real DP's
+        edge forward on the same layer. No isend/recv - the dummy carries no
+        real hidden states (cloud dummy-middle is driven separately by the
+        head-segment dummy zmq publish).
+
+        Returns an empty ModelRunnerOutput placeholder (NOT None): the edge
+        step_with_batch_queue treats ``future.result() is None`` as an
+        execute_model failure (raises RuntimeError "unexpected error"), so
+        the dummy must return a non-None placeholder. The scheduler's
+        update_from_output short-circuits on is_pd_dummy, so the placeholder
+        is never consumed.
+        """
+        self.model_runner._dummy_run(
+            num_tokens=self.model_runner.decode_token_per_req,
+            uniform_decode=False,
+        )
+        return ModelRunnerOutput(req_ids=[], req_id_to_index={})
 
     def _execute_model_edge_tail(
         self,
@@ -1156,6 +1245,20 @@ class NPUWorker(WorkerBase):
         scheduler_output: "SchedulerOutput",
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # 方案③: dummy-middle published by the edge idle DP via zmq. Run a
+        # uniform-decode dummy forward (empty intermediate, no edge recv) so
+        # this cloud DP participates in the cross-DP all_reduce / MoE
+        # all-toall without real work, keeping the pairing with the real DP.
+        # PD-separation dummy-middle: identified by empty scheduler_output
+        # (total_num_scheduled_tokens == 0). is_pd_dummy dynamic attr is
+        # lost during zmq serialization, so use the native field instead.
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            self.model_runner._dummy_run(
+                num_tokens=self.model_runner.decode_token_per_req,
+                uniform_decode=False,
+                layer_slice_info=layer_slice_info,
+            )
+            return None
         """Cloud middle segment: recv -> segment_b/c -> isend -> return."""
         # logger.info(
         #     f"Execute model, batch_type: {scheduler_output.batch_type}, " + (
