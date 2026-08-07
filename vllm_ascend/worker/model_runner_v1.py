@@ -471,7 +471,13 @@ def _freeze_scheduled_state(value: Any, memo: dict[int, Any] | None = None) -> A
     return value
 
 
-def _restore_frozen_into_views(dst: Any, src: Any) -> None:
+def _restore_frozen_into_views(
+    dst: Any,
+    src: Any,
+    *,
+    memo: set[tuple[int, tuple]] | None = None,
+    _path: str = "<root>",
+) -> None:
     """Copy the contents of a frozen snapshot back into its view tensors.
 
     ``_freeze_scheduled_state`` clones every tensor, which preserves the
@@ -487,34 +493,70 @@ def _restore_frozen_into_views(dst: Any, src: Any) -> None:
 
     Non-tensor (scalar) fields need no restore: they belong to this
     step's view object and were never touched by intervening batches.
-    Structurally mismatched or shape-mismatched entries are skipped --
-    they cannot be consumers of the persistent buffers.
+
+    ``memo`` deduplicates copies across a shared object graph: per-layer
+    metadata entries (e.g. DSA's 61-layer dict) alias the same persistent
+    buffers via distinct view objects, so the key is the destination
+    region -- (data_ptr, shape) -- not the tensor object id.  All tensors
+    involved are kept alive by the cache for the duration of the walk, so
+    a data_ptr cannot be recycled mid-restore.
+
+    Structurally or shape-mismatched entries are skipped WITH a warning:
+    they would leave the graph reading stale buffer contents, and a
+    silent skip hides exactly the failure this restore exists to prevent.
     """
     if dst is None or src is None:
         return
+    if memo is None:
+        memo = set()
     if isinstance(dst, torch.Tensor) and isinstance(src, torch.Tensor):
         if (dst.shape == src.shape and dst.dtype == src.dtype
                 and dst.device == src.device):
+            key = (dst.data_ptr(), tuple(dst.shape))
+            if key in memo:
+                return
+            memo.add(key)
             dst.copy_(src, non_blocking=True)
+        else:
+            logger.warning_once(
+                "_restore_frozen_into_views: skipping %s (dst shape=%s "
+                "dtype=%s device=%s, src shape=%s dtype=%s device=%s) -- "
+                "graph replay may read stale buffer contents",
+                _path,
+                tuple(dst.shape), dst.dtype, dst.device,
+                tuple(src.shape), src.dtype, src.device,
+            )
         return
     if is_dataclass(dst) and not isinstance(dst, type):
         field_names = {f.name for f in fields(dst)}
         for name in field_names:
-            _restore_frozen_into_views(getattr(dst, name),
-                                       getattr(src, name, None))
+            _restore_frozen_into_views(
+                getattr(dst, name),
+                getattr(src, name, None),
+                memo=memo,
+                _path=f"{_path}.{name}",
+            )
         for name, item in getattr(dst, "__dict__", {}).items():
             if name not in field_names:
                 _restore_frozen_into_views(
-                    item, getattr(src, name, None))
+                    item,
+                    getattr(src, name, None),
+                    memo=memo,
+                    _path=f"{_path}.{name}",
+                )
         return
     if isinstance(dst, dict) and isinstance(src, dict):
         for key, item in dst.items():
             if key in src:
-                _restore_frozen_into_views(item, src[key])
+                _restore_frozen_into_views(
+                    item, src[key], memo=memo, _path=f"{_path}[{key!r}]"
+                )
         return
     if isinstance(dst, (list, tuple)) and isinstance(src, (list, tuple)):
-        for d_item, s_item in zip(dst, src):
-            _restore_frozen_into_views(d_item, s_item)
+        for i, (d_item, s_item) in enumerate(zip(dst, src)):
+            _restore_frozen_into_views(
+                d_item, s_item, memo=memo, _path=f"{_path}[{i}]"
+            )
         return
 
 
@@ -4166,41 +4208,66 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_stats = cache["cudagraph_stats"]
             # [ascend fix] Refresh the persistent buffers the ACL graph
             # captured and switch to the original view-based objects.
-            # The frozen clones alone would leave the graph reading
-            # stale/interleaved buffer contents (capture recorded the
-            # persistent-buffer addresses), or -- if the clones themselves
-            # were captured -- reading freed, recycled memory.  Either way
-            # the tail Compressor was fed garbage block tables and hit an
-            # AICORE fault under graph mode.  Copying the frozen contents
-            # back into the views restores "same addresses, fresh data".
-            attn_metadata_views = cache.get("attn_metadata_views")
-            if attn_metadata_views is not None:
-                _restore_frozen_into_views(attn_metadata_views, attn_metadata)
-                attn_metadata = attn_metadata_views
-            spec_decode_metadata_views = cache.get(
-                "spec_decode_metadata_views"
+            #
+            # Gate rationale (see _fast_path_view_restore_required):
+            # * capability, not model family: only backends WITHOUT an
+            #   explicit graph-params update channel (DSA/SFA, whose
+            #   update_graph_params is a no-op) rely on metadata address
+            #   identity and therefore need this restore.  Backends with
+            #   a complete update channel (MLA/FIA, e.g. Qwen) read the
+            #   frozen clones' content through their update flow and need
+            #   nothing -- keeping their fast path free of restore cost.
+            #   GDN models are excluded categorically (pool-slot views
+            #   are unsafe to write back).
+            # * cudagraph_mode == FULL: only FULL-graph replay hard-codes
+            #   metadata addresses. PIECEWISE/NONE (e.g. prefill PL
+            #   segments) consume the metadata objects eagerly, where the
+            #   frozen clones are already correct; restoring there would
+            #   waste large D2D copies (attn_mask/slot_mapping/positions).
+            #
+            # Cross-stream ordering: restore ops enqueue on the main
+            # stream after the previous batch's replay, which is itself
+            # event-ordered after its update_stream work, so ordering is
+            # transitive. Moreover, under this gate the restore only runs
+            # for backends without an update channel -- there is no
+            # update_stream consumer of these buffers at all.
+            use_views = (
+                self._fast_path_view_restore_required()
+                and cudagraph_mode == CUDAGraphMode.FULL
             )
-            if spec_decode_metadata_views is not None:
-                _restore_frozen_into_views(
-                    spec_decode_metadata_views, spec_decode_metadata
+            if use_views:
+                restore_memo: set[tuple[int, tuple]] = set()
+                attn_metadata_views = cache.get("attn_metadata_views")
+                if attn_metadata_views is not None:
+                    _restore_frozen_into_views(
+                        attn_metadata_views, attn_metadata,
+                        memo=restore_memo)
+                    attn_metadata = attn_metadata_views
+                spec_decode_metadata_views = cache.get(
+                    "spec_decode_metadata_views"
                 )
-                spec_decode_metadata = spec_decode_metadata_views
-            spec_common_views = cache.get(
-                "spec_decode_common_attn_metadata_views"
-            )
-            if spec_common_views is not None:
-                _restore_frozen_into_views(
-                    spec_common_views, spec_decode_common_attn_metadata
+                if spec_decode_metadata_views is not None:
+                    _restore_frozen_into_views(
+                        spec_decode_metadata_views, spec_decode_metadata,
+                        memo=restore_memo)
+                    spec_decode_metadata = spec_decode_metadata_views
+                spec_common_views = cache.get(
+                    "spec_decode_common_attn_metadata_views"
                 )
-                spec_decode_common_attn_metadata = spec_common_views
-            # positions buffer content is refreshed here as well (the
-            # model reads the runner's reusable positions buffer); the
-            # local `positions` variable is switched to the view where
-            # the fast path consumes it below.
-            positions_views = cache.get("positions_views")
-            if positions_views is not None:
-                _restore_frozen_into_views(positions_views,
-                                           cache["positions"])
+                if spec_common_views is not None:
+                    _restore_frozen_into_views(
+                        spec_common_views, spec_decode_common_attn_metadata,
+                        memo=restore_memo)
+                    spec_decode_common_attn_metadata = spec_common_views
+                # positions buffer content is refreshed here as well (the
+                # model reads the runner's reusable positions buffer); the
+                # local `positions` variable is switched to the view where
+                # the fast path consumes it below.
+                positions_views = cache.get("positions_views")
+                if positions_views is not None:
+                    _restore_frozen_into_views(
+                        positions_views, cache["positions"],
+                        memo=restore_memo)
             # Re-sync num_computed_tokens from CPU: segment_a forward or
             # async state update may have modified the GPU buffer.
             # NOTE: In async speculative decoding, segment_a has already
@@ -4492,15 +4559,20 @@ class NPUModelRunner(GPUModelRunner):
                 # _preprocess reads the runner's reusable positions buffer,
                 # which may have been rewritten by an interleaved batch even
                 # though the metadata cache itself is keyed by head_token.
-                # Its contents were restored from the frozen snapshot above;
-                # use the persistent-buffer view so a graph replay reads the
-                # captured address holding this step's positions.
+                # When (and only when) the view restore above ran, its
+                # contents were refreshed from the frozen snapshot; use the
+                # persistent-buffer view so a FULL graph replay reads the
+                # captured address holding this step's positions. Otherwise
+                # the frozen clone is already the correct source.
                 positions_views = cache.get("positions_views")
-                positions = (
-                    positions_views
-                    if positions_views is not None
-                    else cache["positions"]
-                )
+                if (
+                    positions_views is not None
+                    and self._fast_path_view_restore_required()
+                    and cudagraph_mode == CUDAGraphMode.FULL
+                ):
+                    positions = positions_views
+                else:
+                    positions = cache["positions"]
 
             if not self.edge_cloud_cfg.role == "edge":
                 # update global cos, sin
@@ -7080,6 +7152,51 @@ class NPUModelRunner(GPUModelRunner):
             )
         lines.append(hint)
         return "\n".join(lines)
+
+    def _fast_path_view_restore_required(self) -> bool:
+        """Whether any attention backend in use relies on address-identity
+        of its attention metadata under FULL-graph replay.
+
+        Backends split into two camps:
+
+        - Content-channel backends (MLA / FIA / their CP variants) refresh
+          graph-visible params through an explicit update flow before every
+          replay.  The metadata object only carries content, so feeding the
+          frozen clone works unchanged.  They declare this via
+          ``updates_graph_params_before_replay = True`` on the impl class.
+        - Address-identity backends (DSA, SFA: ``update_graph_params`` is a
+          no-op) rely on the metadata tensors BEING views of persistent
+          buffers that each step rewrites in place.  The segment_e frozen
+          clones break that contract, so the fast path must restore the
+          frozen contents back into the views before a FULL-graph replay.
+
+        GDN models are unconditionally excluded: their metadata views
+        alias reusable pool slots (``_buffer_slot``) that may have been
+        reassigned to an in-flight batch, so writing back is unsafe; they
+        keep the pre-existing frozen-clone behavior.
+
+        New backends default to "no channel" (restore enabled) -- safe:
+        for a content-channel backend the restore is merely a few
+        redundant same-content copies, whereas a missed address-identity
+        backend crashes under graph replay.
+        """
+        cached = getattr(self, "_view_restore_required_cache", None)
+        if cached is not None:
+            return cached
+        required = False
+        if not self._has_gdn:
+            for groups in self.attn_groups:
+                for group in groups:
+                    impl_cls = group.backend.get_impl_cls()
+                    if not getattr(
+                        impl_cls, "updates_graph_params_before_replay", False
+                    ):
+                        required = True
+                        break
+                if required:
+                    break
+        self._view_restore_required_cache = required
+        return required
 
     def _ec_pending_sampled_marks(self) -> tuple[set[str], set[str]]:
         """Lazily-initialized marks for the pending-sampled-token protocol.
