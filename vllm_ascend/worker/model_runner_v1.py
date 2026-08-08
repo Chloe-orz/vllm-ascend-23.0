@@ -2069,6 +2069,45 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    def _strip_tail_new_block_ids(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> "SchedulerOutput":
+        """Make a tail segment's (PL/DL) SchedulerOutput safe to re-run
+        through _update_states.
+
+        A tail SO is a verbatim copy of its head segment's SO (only
+        batch_type is rewritten; the KV metadata rides along).  The head
+        segment's _update_states already applied this step's
+        ``new_block_ids`` via ``block_ids.extend(...)`` -- which is NOT
+        idempotent.  When PD interleaving evicted a request between the
+        head and the tail, the tail re-runs _update_states and extends
+        the same blocks a second time.  The duplicated entries displace
+        every block appended afterwards, so subsequent prefill chunks /
+        decode steps read stale, duplicated, or other requests' KV
+        blocks (repetitive, cross-language garbage).
+
+        The other _update_states effects are idempotent (num_computed is
+        plain assignment; new_token_ids self-guards on num_tokens), so
+        only new_block_ids needs stripping.  Requests resumed from
+        preemption keep their entry: that path REPLACES block_ids (also
+        idempotent) and asserts new_block_ids is not None.  Re-added
+        requests rebuild their block_table row from req_state.block_ids,
+        which the head segment already completed -- nothing is lost.
+        """
+        req_data = scheduler_output.scheduled_cached_reqs
+        new_block_ids = getattr(req_data, "new_block_ids", None)
+        if not new_block_ids or not any(new_block_ids):
+            return scheduler_output
+        resumed = req_data.resumed_req_ids or set()
+        stripped = replace(
+            req_data,
+            new_block_ids=[
+                nb if req_id in resumed else None
+                for req_id, nb in zip(req_data.req_ids, new_block_ids)
+            ],
+        )
+        return replace(scheduler_output, scheduled_cached_reqs=stripped)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         self._ec_update_pending_sampled_marks(scheduler_output)
         # Temporary rewind guard for KV-load-failure recompute.
@@ -4230,8 +4269,11 @@ class NPUModelRunner(GPUModelRunner):
             # execute_model.
             if (tuple(self.input_batch.req_ids)
                     != tuple(scheduler_output.num_scheduled_tokens)):
+                # The head segment already applied this SO's
+                # new_block_ids; strip them so the re-add below cannot
+                # double-extend block_ids (see _strip_tail_new_block_ids).
                 deferred_state_corrections_fn = self._update_states(
-                    scheduler_output
+                    self._strip_tail_new_block_ids(scheduler_output)
                 )
             else:
                 deferred_state_corrections_fn = None
@@ -4404,6 +4446,14 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     if skip_update_states:
                         deferred_state_corrections_fn = None
+                    elif is_edge_tail_segment:
+                        # Tail re-running _update_states after interleaving
+                        # evicted a request: the head already applied this
+                        # SO's new_block_ids; strip them so block_ids is
+                        # not extended twice (chunked-prefill KV garbage).
+                        deferred_state_corrections_fn = self._update_states(
+                            self._strip_tail_new_block_ids(scheduler_output)
+                        )
                     else:
                         deferred_state_corrections_fn = self._update_states(
                             scheduler_output
