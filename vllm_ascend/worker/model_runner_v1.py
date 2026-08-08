@@ -2182,6 +2182,68 @@ class NPUModelRunner(GPUModelRunner):
 
         return num_reqs_padded
 
+    def _update_discard_request_indices(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Recompute which requests must not have their tokens sampled.
+
+        The mask compares the optimistic sequence length (num_computed +
+        scheduled) against the request's known token count; a request
+        that already has more tokens than this step would reach must not
+        sample again.
+
+        Factored out of _prepare_inputs so the edge segment_e fast path
+        can refresh it as well: the fast path skips _prepare_inputs,
+        which previously left num_discarded_requests /
+        discard_request_indices stale from the segment_a prepare.  The
+        indices are ROW numbers, and interleaved batches between
+        segment_a and segment_e evict/re-add requests, churning
+        input_batch rows -- stale indices then marked the WRONG request
+        invalid: its sampled token was dropped from prev_sampled (no
+        entry for the next DF -> [EC-INV-C1], stale decode input) and
+        cleared from the returned output.
+        """
+        num_reqs = self.input_batch.num_reqs
+        num_tokens_np = np.array(
+            [self.requests[r].num_tokens for r in self.input_batch.req_ids],
+            dtype=np.int32,
+        )
+        if self.pcp_size > 1:
+            # while pcp > 1, we need the original num_scheduled_tokens
+            # before split to calculate discard_requests_mask
+            tokens_original = [
+                scheduler_output.num_scheduled_tokens[i]
+                for i in self.input_batch.req_ids
+            ]
+            original_seq_lens_np = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                + np.array(tokens_original, dtype=np.int32)
+            )
+            discard_requests_mask = original_seq_lens_np < num_tokens_np
+        else:
+            num_scheduled_np = np.array(
+                [
+                    scheduler_output.num_scheduled_tokens[i]
+                    for i in self.input_batch.req_ids
+                ],
+                dtype=np.int32,
+            )
+            optimistic_seq_lens_np = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                + num_scheduled_np
+            )
+            discard_requests_mask = optimistic_seq_lens_np < num_tokens_np
+
+        discard_request_indices = np.nonzero(discard_requests_mask)[0]
+        self.num_discarded_requests = len(discard_request_indices)
+        self.discard_request_indices.np[: self.num_discarded_requests] = (
+            discard_request_indices
+        )
+        self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
+
+        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
+        self.discard_request_mask.copy_to_gpu(num_reqs)
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2446,29 +2508,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
-        num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
-        num_tokens_np = np.array(num_tokens, dtype=np.int32)
-        base_num_reqs = self.input_batch.num_reqs
-        num_reqs = base_num_reqs
-        tokens_original = None
-        if self.pcp_size > 1:
-            # while pcp > 1, we need the original num_scheduled_tokens before split
-            # to calculate discard_requests_mask
-            tokens_original = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
-            original_seq_lens_np = self.input_batch.num_computed_tokens_cpu[:num_reqs] + np.array(
-                tokens_original, dtype=np.int32
-            )
-            discard_requests_mask = original_seq_lens_np < num_tokens_np
-        else:
-            discard_requests_mask = self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
-
-        discard_request_indices = np.nonzero(discard_requests_mask)[0]
-        self.num_discarded_requests = len(discard_request_indices)
-        self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
-        self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
-        
-        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
-        self.discard_request_mask.copy_to_gpu(num_reqs)
+        self._update_discard_request_indices(scheduler_output)
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
@@ -4281,6 +4321,16 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                     non_blocking=True,
                 )
+            # [ascend fix] The fast path skips _prepare_inputs, which also
+            # recomputes the discard indices (requests that must not be
+            # sampled).  Those indices are ROW numbers, and interleaved
+            # batches between segment_a and segment_e churn input_batch
+            # rows -- stale indices from the segment_a prepare mark the
+            # WRONG request invalid: its sampled token is then dropped
+            # from prev_sampled (next DF finds no entry -> [EC-INV-C1],
+            # stale decode input) or cleared from the returned output.
+            # Refresh them for the current layout before sampling.
+            self._update_discard_request_indices(scheduler_output)
             # [ascend fix] see above: record so the next batch's
             # synchronize_input_prep waits for this H2D read of the pinned
             # buffer before overwriting it.
@@ -7137,7 +7187,8 @@ class NPUModelRunner(GPUModelRunner):
             (i for i, ev in enumerate(events) if ev == "scatter+consume"),
             default=-1,
         )
-        sampled_after = any(ev == "sampled" for ev in events[last_scatter + 1 :])
+        tail = list(ring)[last_scatter + 1 :] if last_scatter >= 0 else list(ring)
+        sampled_after = any(ev == "sampled" for _, _, _, ev, _ in tail)
         if sampled_after:
             hint = (
                 "HINT: entry WAS sampled after the last scatter but is now "
@@ -7145,11 +7196,24 @@ class NPUModelRunner(GPUModelRunner):
                 "'restore_skipped' events above (candidate B)."
             )
         else:
-            hint = (
-                "HINT: NO 'sampled' event after the last scatter -> the "
-                "tail segment (DL) that should produce this token never "
-                "ran before this DF (scheduling-order gap, candidate A)."
+            dl_ran = any(
+                bt == BatchType.DECODE_LAST for _, bt, _, _, _ in tail
             )
+            if dl_ran:
+                hint = (
+                    "HINT: a DECODE_LAST ran after the last scatter but "
+                    "produced NO 'sampled' entry for this request -> its "
+                    "token was discarded at sample time (stale discard "
+                    "indices from segment_a applied to a churned row "
+                    "layout; see _update_discard_request_indices)."
+                )
+            else:
+                hint = (
+                    "HINT: NO 'sampled' event and NO DECODE_LAST after "
+                    "the last scatter -> the tail segment (DL) that "
+                    "should produce this token never ran before this DF "
+                    "(scheduling-order gap, candidate A)."
+                )
         lines.append(hint)
         return "\n".join(lines)
 
