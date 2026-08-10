@@ -922,10 +922,9 @@ class PassiveScheduler:
         base = _dp_rank * 5
         for i, v in enumerate(local):
             tensor[base + i] = v
-        _cc_t0 = time.monotonic()
         dist.all_reduce(tensor, op=dist.ReduceOp.SUM,
                          group=self.dp_coord_group)
-        _cc_dt_ms = (time.monotonic() - _cc_t0) * 1000
+
         # Any work across all cloud DPs? (5 fields/DP: pf/dec/pdmix/slices/active)
         # After this all_reduce both DPs hold the same view, so both make the
         # same skip decision -> barrier pairing preserved.
@@ -933,14 +932,6 @@ class PassiveScheduler:
             int(tensor[i].item()) != 0 for i in range(_dp_size * 5)
         )
         self._synced_has_any_work = has_any_work
-        # 仅在有工作时打印，避免空闲刷屏（空闲时仍保留 1 次 all_reduce 作为探测）
-        if has_any_work:
-            logger.error(
-                "[EC-PERF][CLOUD-COORD] dp_rank=%s phase=sync_queue "
-                "all_reduce=%.3fms has_work=%s",
-                self.vllm_config.parallel_config.data_parallel_rank,
-                _cc_dt_ms, has_any_work,
-            )
 
         # Verify all rank values are identical for each of the 5 queues.
         all_match = True
@@ -993,13 +984,8 @@ class PassiveScheduler:
             if (self.ready_prefills and _has_decode_demand) else 0
         )
         _sync = torch.tensor([_local_intent], dtype=torch.int32)
-        _cc_t0 = time.monotonic()
         dist.all_reduce(_sync, op=dist.ReduceOp.MAX,
                         group=self.dp_coord_group)
-        logger.error(
-            "[EC-PERF][CLOUD-COORD] dp_rank=%s phase=intent_max all_reduce=%.3fms",
-            _dp_rank, (time.monotonic() - _cc_t0) * 1000,
-        )
         self._coordinated_total_slices = int(_sync.item()) or None
 
         if _dp_rank == 0:
@@ -1028,13 +1014,8 @@ class PassiveScheduler:
             [d_prefills, d_decodes, d_pdmixes, d_slices],
             dtype=torch.int32,
         )
-        _cc_t0 = time.monotonic()
         dist.all_reduce(_tensor, op=dist.ReduceOp.SUM,
                          group=self.dp_coord_group)
-        logger.error(
-            "[EC-PERF][CLOUD-COORD] dp_rank=%s phase=deltas_sum all_reduce=%.3fms",
-            _dp_rank, (time.monotonic() - _cc_t0) * 1000,
-        )
         d_prefills, d_decodes, d_pdmixes, d_slices = _tensor.tolist()
 
         if _dp_rank == 0:
