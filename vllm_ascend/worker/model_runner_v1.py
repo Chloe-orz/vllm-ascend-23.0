@@ -5883,6 +5883,23 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_gpu = (
                 valid_sampled_token_count.to(self.device)
             )
+            # [PD-FIX] The cloud never samples, so
+            # _copy_valid_sampled_token_count never runs here and
+            # valid_sampled_token_count_cpu stays at its uninitialized
+            # torch.empty allocation.  The next verify's
+            # _correct_optimistic_seq_lens_cpu reads it to correct the
+            # optimistic seq_lens; garbage there produces a wrong (too
+            # short) or wild actual_seq_lengths_kv for FIA -- wrong
+            # attention outputs in the first case, a device-side MTE
+            # out-of-range fault (wedge/hang) in the second.  Populate it
+            # from the edge-stamped authoritative value and record the
+            # event so the correction's synchronize() is well-ordered.
+            if self.valid_sampled_token_count_cpu is not None:
+                self.valid_sampled_token_count_cpu[:num_reqs].copy_(
+                    valid_sampled_token_count
+                )
+            if self.valid_sampled_token_count_event is not None:
+                self.valid_sampled_token_count_event.record()
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
