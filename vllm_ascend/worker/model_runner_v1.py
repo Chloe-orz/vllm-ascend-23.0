@@ -465,6 +465,95 @@ def _freeze_scheduled_state(value: Any, memo: dict[int, Any] | None = None) -> A
     return value
 
 
+def _restore_frozen_into_views(
+    dst: Any,
+    src: Any,
+    *,
+    memo: set[tuple[int, tuple]] | None = None,
+    _path: str = "<root>",
+) -> None:
+    """Copy the contents of a frozen snapshot back into its view tensors.
+
+    ``_freeze_scheduled_state`` clones every tensor, which preserves the
+    contents across interleaved batches but breaks the addresses.  ACL
+    graph replay, however, reads the exact addresses captured at capture
+    time -- for attention metadata those are views into the runner /
+    backend persistent buffers.  The edge segment_e fast path therefore
+    keeps the original (view-based) objects next to the frozen snapshot
+    and calls this to refresh the persistent buffers' contents before the
+    forward pass, so a graph replay reads the captured addresses holding
+    this step's data.  (Eager execution is unaffected: it reads the same
+    tensors with the same, just-restored contents.)
+
+    Non-tensor (scalar) fields need no restore: they belong to this
+    step's view object and were never touched by intervening batches.
+
+    ``memo`` deduplicates copies across a shared object graph: per-layer
+    metadata entries (e.g. DSA's 61-layer dict) alias the same persistent
+    buffers via distinct view objects, so the key is the destination
+    region -- (data_ptr, shape) -- not the tensor object id.  All tensors
+    involved are kept alive by the cache for the duration of the walk, so
+    a data_ptr cannot be recycled mid-restore.
+
+    Structurally or shape-mismatched entries are skipped WITH a warning:
+    they would leave the graph reading stale buffer contents, and a
+    silent skip hides exactly the failure this restore exists to prevent.
+    """
+    if dst is None or src is None:
+        return
+    if memo is None:
+        memo = set()
+    if isinstance(dst, torch.Tensor) and isinstance(src, torch.Tensor):
+        if (dst.shape == src.shape and dst.dtype == src.dtype
+                and dst.device == src.device):
+            key = (dst.data_ptr(), tuple(dst.shape))
+            if key in memo:
+                return
+            memo.add(key)
+            dst.copy_(src, non_blocking=True)
+        else:
+            logger.warning_once(
+                "_restore_frozen_into_views: skipping %s (dst shape=%s "
+                "dtype=%s device=%s, src shape=%s dtype=%s device=%s) -- "
+                "graph replay may read stale buffer contents",
+                _path,
+                tuple(dst.shape), dst.dtype, dst.device,
+                tuple(src.shape), src.dtype, src.device,
+            )
+        return
+    if is_dataclass(dst) and not isinstance(dst, type):
+        field_names = {f.name for f in fields(dst)}
+        for name in field_names:
+            _restore_frozen_into_views(
+                getattr(dst, name),
+                getattr(src, name, None),
+                memo=memo,
+                _path=f"{_path}.{name}",
+            )
+        for name, item in getattr(dst, "__dict__", {}).items():
+            if name not in field_names:
+                _restore_frozen_into_views(
+                    item,
+                    getattr(src, name, None),
+                    memo=memo,
+                    _path=f"{_path}.{name}",
+                )
+        return
+    if isinstance(dst, dict) and isinstance(src, dict):
+        for key, item in dst.items():
+            if key in src:
+                _restore_frozen_into_views(
+                    item, src[key], memo=memo, _path=f"{_path}[{key!r}]"
+                )
+        return
+    if isinstance(dst, (list, tuple)) and isinstance(src, (list, tuple)):
+        for i, (d_item, s_item) in enumerate(zip(dst, src)):
+            _restore_frozen_into_views(
+                d_item, s_item, memo=memo, _path=f"{_path}[{i}]"
+            )
+        return
+
+
 def _freeze_intermediate_tensors(
     intermediate_tensors: IntermediateTensors,
 ) -> IntermediateTensors:
@@ -2007,6 +2096,45 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    def _strip_tail_new_block_ids(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> "SchedulerOutput":
+        """Make a tail segment's (PL/DL) SchedulerOutput safe to re-run
+        through _update_states.
+
+        A tail SO is a verbatim copy of its head segment's SO (only
+        batch_type is rewritten; the KV metadata rides along).  The head
+        segment's _update_states already applied this step's
+        ``new_block_ids`` via ``block_ids.extend(...)`` -- which is NOT
+        idempotent.  When PD interleaving evicted a request between the
+        head and the tail, the tail re-runs _update_states and extends
+        the same blocks a second time.  The duplicated entries displace
+        every block appended afterwards, so subsequent prefill chunks /
+        decode steps read stale, duplicated, or other requests' KV
+        blocks (repetitive, cross-language garbage).
+
+        The other _update_states effects are idempotent (num_computed is
+        plain assignment; new_token_ids self-guards on num_tokens), so
+        only new_block_ids needs stripping.  Requests resumed from
+        preemption keep their entry: that path REPLACES block_ids (also
+        idempotent) and asserts new_block_ids is not None.  Re-added
+        requests rebuild their block_table row from req_state.block_ids,
+        which the head segment already completed -- nothing is lost.
+        """
+        req_data = scheduler_output.scheduled_cached_reqs
+        new_block_ids = getattr(req_data, "new_block_ids", None)
+        if not new_block_ids or not any(new_block_ids):
+            return scheduler_output
+        resumed = req_data.resumed_req_ids or set()
+        stripped = replace(
+            req_data,
+            new_block_ids=[
+                nb if req_id in resumed else None
+                for req_id, nb in zip(req_data.req_ids, new_block_ids)
+            ],
+        )
+        return replace(scheduler_output, scheduled_cached_reqs=stripped)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
@@ -2101,6 +2229,68 @@ class NPUModelRunner(GPUModelRunner):
         copy_snapshot_to_gpu(query_start_loc)
 
         return num_reqs_padded
+
+    def _update_discard_request_indices(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Recompute which requests must not have their tokens sampled.
+
+        The mask compares the optimistic sequence length (num_computed +
+        scheduled) against the request's known token count; a request
+        that already has more tokens than this step would reach must not
+        sample again.
+
+        Factored out of _prepare_inputs so the edge segment_e fast path
+        can refresh it as well: the fast path skips _prepare_inputs,
+        which previously left num_discarded_requests /
+        discard_request_indices stale from the segment_a prepare.  The
+        indices are ROW numbers, and interleaved batches between
+        segment_a and segment_e evict/re-add requests, churning
+        input_batch rows -- stale indices then marked the WRONG request
+        invalid: its sampled token was dropped from prev_sampled (no
+        entry for the next DF -> [EC-INV-C1], stale decode input) and
+        cleared from the returned output.
+        """
+        num_reqs = self.input_batch.num_reqs
+        num_tokens_np = np.array(
+            [self.requests[r].num_tokens for r in self.input_batch.req_ids],
+            dtype=np.int32,
+        )
+        if self.pcp_size > 1:
+            # while pcp > 1, we need the original num_scheduled_tokens
+            # before split to calculate discard_requests_mask
+            tokens_original = [
+                scheduler_output.num_scheduled_tokens[i]
+                for i in self.input_batch.req_ids
+            ]
+            original_seq_lens_np = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                + np.array(tokens_original, dtype=np.int32)
+            )
+            discard_requests_mask = original_seq_lens_np < num_tokens_np
+        else:
+            num_scheduled_np = np.array(
+                [
+                    scheduler_output.num_scheduled_tokens[i]
+                    for i in self.input_batch.req_ids
+                ],
+                dtype=np.int32,
+            )
+            optimistic_seq_lens_np = (
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                + num_scheduled_np
+            )
+            discard_requests_mask = optimistic_seq_lens_np < num_tokens_np
+
+        discard_request_indices = np.nonzero(discard_requests_mask)[0]
+        self.num_discarded_requests = len(discard_request_indices)
+        self.discard_request_indices.np[: self.num_discarded_requests] = (
+            discard_request_indices
+        )
+        self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
+
+        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
+        self.discard_request_mask.copy_to_gpu(num_reqs)
 
     def _prepare_inputs(
         self,
@@ -2375,29 +2565,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
-        num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
-        num_tokens_np = np.array(num_tokens, dtype=np.int32)
-        base_num_reqs = self.input_batch.num_reqs
-        num_reqs = base_num_reqs
-        tokens_original = None
-        if self.pcp_size > 1:
-            # while pcp > 1, we need the original num_scheduled_tokens before split
-            # to calculate discard_requests_mask
-            tokens_original = [scheduler_output.num_scheduled_tokens[i] for i in self.input_batch.req_ids]
-            original_seq_lens_np = self.input_batch.num_computed_tokens_cpu[:num_reqs] + np.array(
-                tokens_original, dtype=np.int32
-            )
-            discard_requests_mask = original_seq_lens_np < num_tokens_np
-        else:
-            discard_requests_mask = self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
-
-        discard_request_indices = np.nonzero(discard_requests_mask)[0]
-        self.num_discarded_requests = len(discard_request_indices)
-        self.discard_request_indices.np[: self.num_discarded_requests] = discard_request_indices
-        self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
-        
-        self.discard_request_mask.np[:num_reqs] = discard_requests_mask
-        self.discard_request_mask.copy_to_gpu(num_reqs)
+        self._update_discard_request_indices(scheduler_output)
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
@@ -4358,11 +4526,48 @@ class NPUModelRunner(GPUModelRunner):
             == tuple(scheduler_output.num_scheduled_tokens)
         )
         if _fast_path:
-            # Entry already popped at segment_e entry (covers fast/normal/
-            # stale-tail paths uniformly, preventing orphan leaks). Reuse it
-            # so a later segment_a (different head_token) does not hand the
-            # wrong attn_metadata to this PL.
+            # [ascend fix] The edge tail fast path runs OUTSIDE the
+            # synchronize_input_prep/prepare_inputs_event protection that
+            # the slow path gets.  Its conditional _update_states writes
+            # pinned CPU buffers (num_computed_tokens_cpu, block_table.np)
+            # and the num_computed re-sync below does a non-blocking H2D
+            # READ of a pinned buffer.  Under PD interleaving the GPU queue
+            # backs up behind a slow prefill forward, so a previous batch's
+            # pending H2D reads race with this batch's pinned writes, and
+            # this batch's H2D read races with the next batch's pinned
+            # writes -> corrupted num_computed/block_table -> wrong
+            # positions/slot_mapping -> KV written to wrong slots -> whole
+            # decode batch diverges.  Chain the fast path into the same
+            # event protocol: wait for the previous prep's H2D before
+            # touching pinned state, record after our H2D so the next
+            # batch's prep waits for it.
+            if self.prepare_inputs_event is not None:
+                self.prepare_inputs_event.synchronize()
+
+            # Pop this head_token's cache so a later segment_a (different
+            # head_token) does not hand the wrong attn_metadata to this PL.
             cache = _edge_cache_entry
+
+            # If intervening decode batches disrupted input_batch (req_ids no
+            # longer match this tail's scheduled reqs), re-add the prefill req
+            # via _update_states so the tail can sample and record the first
+            # token. The cached layout (keyed by head_token) is still correct
+            # and is reused below -- we do NOT recompute it via _prepareInputs.
+            # When req_ids already match, the req is in input_batch, so skip
+            # _update_states to avoid double-counting. deferred_state_corrections_fn
+            # (None when MTP/spec-decode is off) is applied at the end of
+            # execute_model.
+            if (tuple(self.input_batch.req_ids)
+                    != tuple(scheduler_output.num_scheduled_tokens)):
+                # The head segment already applied this SO's
+                # new_block_ids; strip them so the re-add below cannot
+                # double-extend block_ids (see _strip_tail_new_block_ids).
+                deferred_state_corrections_fn = self._update_states(
+                    self._strip_tail_new_block_ids(scheduler_output)
+                )
+            else:
+                deferred_state_corrections_fn = None
+
             total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
             num_tokens_padded = cache["num_tokens_padded"]
             num_tokens_across_dp = cache["num_tokens_across_dp"]
@@ -4389,6 +4594,68 @@ class NPUModelRunner(GPUModelRunner):
             self.discard_request_indices.copy_to_gpu(
                 self.num_discarded_requests
             )
+            # [ascend fix] Refresh the persistent buffers the ACL graph
+            # captured and switch to the original view-based objects.
+            #
+            # Gate rationale (see _fast_path_view_restore_required):
+            # * capability, not model family: only backends WITHOUT an
+            #   explicit graph-params update channel (DSA/SFA, whose
+            #   update_graph_params is a no-op) rely on metadata address
+            #   identity and therefore need this restore.  Backends with
+            #   a complete update channel (MLA/FIA, e.g. Qwen) read the
+            #   frozen clones' content through their update flow and need
+            #   nothing -- keeping their fast path free of restore cost.
+            #   GDN models are excluded categorically (pool-slot views
+            #   are unsafe to write back).
+            # * cudagraph_mode == FULL: only FULL-graph replay hard-codes
+            #   metadata addresses. PIECEWISE/NONE (e.g. prefill PL
+            #   segments) consume the metadata objects eagerly, where the
+            #   frozen clones are already correct; restoring there would
+            #   waste large D2D copies (attn_mask/slot_mapping/positions).
+            #
+            # Cross-stream ordering: restore ops enqueue on the main
+            # stream after the previous batch's replay, which is itself
+            # event-ordered after its update_stream work, so ordering is
+            # transitive. Moreover, under this gate the restore only runs
+            # for backends without an update channel -- there is no
+            # update_stream consumer of these buffers at all.
+            use_views = (
+                self._fast_path_view_restore_required()
+                and cudagraph_mode == CUDAGraphMode.FULL
+            )
+            if use_views:
+                restore_memo: set[tuple[int, tuple]] = set()
+                attn_metadata_views = cache.get("attn_metadata_views")
+                if attn_metadata_views is not None:
+                    _restore_frozen_into_views(
+                        attn_metadata_views, attn_metadata,
+                        memo=restore_memo)
+                    attn_metadata = attn_metadata_views
+                spec_decode_metadata_views = cache.get(
+                    "spec_decode_metadata_views"
+                )
+                if spec_decode_metadata_views is not None:
+                    _restore_frozen_into_views(
+                        spec_decode_metadata_views, spec_decode_metadata,
+                        memo=restore_memo)
+                    spec_decode_metadata = spec_decode_metadata_views
+                spec_common_views = cache.get(
+                    "spec_decode_common_attn_metadata_views"
+                )
+                if spec_common_views is not None:
+                    _restore_frozen_into_views(
+                        spec_common_views, spec_decode_common_attn_metadata,
+                        memo=restore_memo)
+                    spec_decode_common_attn_metadata = spec_common_views
+                # positions buffer content is refreshed here as well (the
+                # model reads the runner's reusable positions buffer); the
+                # local `positions` variable is switched to the view where
+                # the fast path consumes it below.
+                positions_views = cache.get("positions_views")
+                if positions_views is not None:
+                    _restore_frozen_into_views(
+                        positions_views, cache["positions"],
+                        memo=restore_memo)
             # Re-sync num_computed_tokens from CPU: segment_a forward or
             # async state update may have modified the GPU buffer.
             # NOTE: In async speculative decoding, segment_a has already
@@ -4402,9 +4669,16 @@ class NPUModelRunner(GPUModelRunner):
                     self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
                     non_blocking=True,
                 )
-            # Fast path reuses the head segment's prepared state and skips
-            # _update_states, so it has no deferred corrections to apply.
-            deferred_state_corrections_fn = None
+            # [ascend fix] The fast path skips _prepare_inputs, which also
+            # recomputes the discard indices (requests that must not be
+            # sampled).  Those indices are ROW numbers, and interleaved
+            # batches between segment_a and segment_e churn input_batch
+            # rows -- stale indices from the segment_a prepare mark the
+            # WRONG request invalid: its sampled token is then dropped
+            # from prev_sampled (next DF finds no entry -> [EC-INV-C1],
+            # stale decode input) or cleared from the returned output.
+            # Refresh them for the current layout before sampling.
+            self._update_discard_request_indices(scheduler_output)
             # [ascend fix] see above: record so the next batch's
             # synchronize_input_prep waits for this H2D read of the pinned
             # buffer before overwriting it.
@@ -4492,6 +4766,14 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     if skip_update_states:
                         deferred_state_corrections_fn = None
+                    elif is_edge_tail_segment:
+                        # Tail re-running _update_states after interleaving
+                        # evicted a request: the head already applied this
+                        # SO's new_block_ids; strip them so block_ids is
+                        # not extended twice (chunked-prefill KV garbage).
+                        deferred_state_corrections_fn = self._update_states(
+                            self._strip_tail_new_block_ids(scheduler_output)
+                        )
                     else:
                         deferred_state_corrections_fn = self._update_states(
                             scheduler_output
@@ -4681,7 +4963,20 @@ class NPUModelRunner(GPUModelRunner):
                 # _preprocess reads the runner's reusable positions buffer,
                 # which may have been rewritten by an interleaved batch even
                 # though the metadata cache itself is keyed by head_token.
-                positions = cache["positions"]
+                # When (and only when) the view restore above ran, its
+                # contents were refreshed from the frozen snapshot; use the
+                # persistent-buffer view so a FULL graph replay reads the
+                # captured address holding this step's positions. Otherwise
+                # the frozen clone is already the correct source.
+                positions_views = cache.get("positions_views")
+                if (
+                    positions_views is not None
+                    and self._fast_path_view_restore_required()
+                    and cudagraph_mode == CUDAGraphMode.FULL
+                ):
+                    positions = positions_views
+                else:
+                    positions = cache["positions"]
 
             # Save the cloud target metadata and the exact positions passed
             # to the model. The scheduled draft can then reconstruct its
@@ -4770,8 +5065,26 @@ class NPUModelRunner(GPUModelRunner):
                     : self.num_discarded_requests
                 ],
             }
+            frozen_entry = _freeze_scheduled_state(cache_entry)
+            # Keep the original (view-based) objects alive next to the
+            # frozen snapshot. Their tensors reference the persistent
+            # buffers the ACL graph captured (block_table / seq_lens /
+            # query_start_loc / positions / ...); interleaved batches may
+            # overwrite those buffers' contents before segment_e runs.
+            # At segment_e the frozen contents are copied back into these
+            # views and the views are handed to the forward pass, so a
+            # graph replay reads the captured addresses holding this
+            # step's data instead of freed clone memory (which previously
+            # fed the tail Compressor garbage block tables -> AICORE
+            # fault).
+            frozen_entry["attn_metadata_views"] = attn_metadata
+            frozen_entry["spec_decode_metadata_views"] = spec_decode_metadata
+            frozen_entry["spec_decode_common_attn_metadata_views"] = (
+                spec_decode_common_attn_metadata
+            )
+            frozen_entry["positions_views"] = positions
             self._edge_prepare_cache_by_token[scheduler_output.head_token] = (
-                _freeze_scheduled_state(cache_entry)
+                frozen_entry
             )
 
         # Encoder-decoder models can only compile the pure decode steps where no
@@ -7282,6 +7595,51 @@ class NPUModelRunner(GPUModelRunner):
                 f"{head_req_ids}, tail scheduler_output has "
                 f"{tail_req_ids}"
             )
+
+    def _fast_path_view_restore_required(self) -> bool:
+        """Whether any attention backend in use relies on address-identity
+        of its attention metadata under FULL-graph replay.
+
+        Backends split into two camps:
+
+        - Content-channel backends (MLA / FIA / their CP variants) refresh
+          graph-visible params through an explicit update flow before every
+          replay.  The metadata object only carries content, so feeding the
+          frozen clone works unchanged.  They declare this via
+          ``updates_graph_params_before_replay = True`` on the impl class.
+        - Address-identity backends (DSA, SFA: ``update_graph_params`` is a
+          no-op) rely on the metadata tensors BEING views of persistent
+          buffers that each step rewrites in place.  The segment_e frozen
+          clones break that contract, so the fast path must restore the
+          frozen contents back into the views before a FULL-graph replay.
+
+        GDN models are unconditionally excluded: their metadata views
+        alias reusable pool slots (``_buffer_slot``) that may have been
+        reassigned to an in-flight batch, so writing back is unsafe; they
+        keep the pre-existing frozen-clone behavior.
+
+        New backends default to "no channel" (restore enabled) -- safe:
+        for a content-channel backend the restore is merely a few
+        redundant same-content copies, whereas a missed address-identity
+        backend crashes under graph replay.
+        """
+        cached = getattr(self, "_view_restore_required_cache", None)
+        if cached is not None:
+            return cached
+        required = False
+        if not self._has_gdn:
+            for groups in self.attn_groups:
+                for group in groups:
+                    impl_cls = group.backend.get_impl_cls()
+                    if not getattr(
+                        impl_cls, "updates_graph_params_before_replay", False
+                    ):
+                        required = True
+                        break
+                if required:
+                    break
+        self._view_restore_required_cache = required
+        return required
 
     def _merge_pending_prev_sampled(
         self,
