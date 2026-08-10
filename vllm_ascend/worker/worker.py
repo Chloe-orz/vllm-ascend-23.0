@@ -1952,8 +1952,58 @@ class NPUWorker(WorkerBase):
     def reset_encoder_cache(self) -> None:
         self.model_runner.reset_encoder_cache()
 
-    def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
+    def execute_dummy_batch(
+        self,
+        layer_slice_info: Any = None,
+        uniform_decode: bool = True,
+    ) -> None:
+        # ``uniform_decode`` defaults to True (original decode-style dummy),
+        # which is correct for warmup / non-PD-separation runs where the KV
+        # cache is still empty.
+        #
+        # In edge-cloud PD-separation with DP>1, the idle-rank keepalive
+        # dummy fires mid-inference against a KV cache that already holds
+        # real (large) values from active decode traffic. Decode-style
+        # attention (uniform_decode=True) reads that real KV via the live
+        # block_table (slot_mapping is -1 so the dummy never writes, but the
+        # read side is real), and the dummy's zero-input query then produces
+        # large logits -> softmax overflow -> NaN. Force prefill-style
+        # (causal) attention, which computes K/V from the dummy tokens
+        # in-line and does not read the paged cache, avoiding the NaN.
+        #
+        # This is safe for a keepalive dummy whose only job is to run a
+        # forward and keep cross-DP all_reduce paired: num_tokens
+        # (decode_token_per_req) is unchanged, so the coordination shape is
+        # preserved; only the attention mode changes. The override applies
+        # even if a caller passed uniform_decode=True explicitly, since that
+        # would reintroduce the NaN in this scenario.
+        if uniform_decode:
+            _ec_cfg = getattr(self.model_runner, "edge_cloud_cfg", None)
+            _pd_sep_enabled = getattr(
+                getattr(_ec_cfg, "pd_separation", None), "enabled", False
+            )
+            if _pd_sep_enabled and self.parallel_config.data_parallel_size > 1:
+                uniform_decode = False
+
+        _lsi = layer_slice_info
+        logger.info(
+            "[SLICE-DIAG] execute_dummy_batch entry: layer_slice_info=%s "
+            "is_first=%s is_last=%s start=%s end=%s total=%s "
+            "uniform_decode=%s",
+            type(_lsi).__name__ if _lsi is not None else "None",
+            getattr(_lsi, "is_first_slice", None) if _lsi is not None else None,
+            getattr(_lsi, "is_last_slice", None) if _lsi is not None else None,
+            getattr(_lsi, "start_layer", None) if _lsi is not None else None,
+            getattr(_lsi, "end_layer", None) if _lsi is not None else None,
+            getattr(_lsi, "total_slices", None) if _lsi is not None else None,
+            uniform_decode,
+        )
+        self.model_runner._dummy_run(
+            num_tokens=self.model_runner.decode_token_per_req,
+            uniform_decode=uniform_decode,
+            layer_slice_info=layer_slice_info,
+        )
+
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
