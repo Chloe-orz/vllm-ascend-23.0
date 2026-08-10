@@ -2455,6 +2455,12 @@ class NPUModelRunner(GPUModelRunner):
                 or self.use_async_spec_decode
             )
         )
+        # Locals consumed unconditionally below (pcp rebuild,
+        # async_spec_decode_active check, mrope drift). Bind them to None
+        # when the tail sync is skipped so those reads see "no correction
+        # available" instead of raising UnboundLocalError.
+        valid_sampled_token_count_gpu = None
+        computed_token_tensor_cpu = None
         if not _skip_tail_sync:
             valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
             if self.use_async_spec_decode:
@@ -2579,7 +2585,14 @@ class NPUModelRunner(GPUModelRunner):
                 self.positions[:total_num_scheduled_tokens],
             )
 
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        if (
+            self.use_async_spec_decode
+            and (self.uses_mrope or self.uses_xdrope_dim > 0)
+            # None when the tail sync was skipped above: num_computed_tokens
+            # already holds the head-corrected values, so there is no drift
+            # to apply (and no CPU baseline to diff against).
+            and computed_token_tensor_cpu is not None
+        ):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - computed_token_tensor_cpu[req_indices_gpu]
