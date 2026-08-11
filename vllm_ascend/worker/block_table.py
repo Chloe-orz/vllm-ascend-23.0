@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import torch
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.utils.math_utils import cdiv
@@ -7,6 +8,12 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
+
+# See model_runner_v1.py: the DSA compressor kernel's reads are
+# unguarded, so stale block ids in a row tail (left by a previous,
+# longer occupant via move_row/reuse) can redirect reads to recycled
+# blocks.  Zero the tail on every add_row.
+_DSA_ZERO_ROW_TAIL = os.environ.get("VLLM_ASCEND_DSA_ZERO_FIX", "0") == "1"
 
 
 class BlockTable:
@@ -122,6 +129,14 @@ class BlockTable:
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
         self.append_row(block_ids, row_idx)
+        if _DSA_ZERO_ROW_TAIL:
+            # Zero the tail beyond the valid prefix: a previous, longer
+            # occupant of this row may have left stale block ids there
+            # (move_row does not clear its source row, and clear_row only
+            # clears the valid prefix).  Bounded readers never look past
+            # the count, but the DSA compressor kernel's reads are
+            # unguarded and would land on recycled blocks' stale content.
+            self.block_table.np[row_idx, self.num_blocks_per_row[row_idx]:] = 0
 
     def clear_row(self, row_idx: int) -> None:
         num_blocks = self.num_blocks_per_row[row_idx]

@@ -263,6 +263,19 @@ _DSA_BOUNDARY_PROBE_LEVEL = int(os.environ.get("VLLM_ASCEND_DSA_PROBE", "0"))
 _DSA_ANOMALY_WATCH = os.environ.get("VLLM_ASCEND_DSA_WATCH", "0") == "1"
 _DSA_WATCH_REPEAT_THRESHOLD = 8
 
+# [DSA-ZERO] VLLM_ASCEND_DSA_ZERO_FIX=1: zero DSA compressor state-cache
+# blocks at allocation time (fresh blocks only; prefix-cache-hit blocks
+# are skipped).  The compressor kernel's reads are unguarded, so a
+# recycled block's stale content can be read as valid state.  Zeroing at
+# allocation makes such reads deterministic.  Also zeroes block-table
+# row tails (see block_table.py).
+_DSA_ZERO_FIX = os.environ.get("VLLM_ASCEND_DSA_ZERO_FIX", "0") == "1"
+
+# [DSA-TAIL] VLLM_ASCEND_DSA_TAIL_CHECK=1: validate that block-table row
+# tails (entries beyond the valid block count) are all zero, and log any
+# residual block ids -- those are the blocks an unguarded read would hit.
+_DSA_TAIL_CHECK = os.environ.get("VLLM_ASCEND_DSA_TAIL_CHECK", "0") == "1"
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -1718,6 +1731,108 @@ class NPUModelRunner(GPUModelRunner):
                     fired = True  # one dump per request per step
             state[req_id] = (last, run)
 
+    def _collect_dsa_state_caches(self) -> list[torch.Tensor]:
+        """Collect DSA compressor state caches (same set as
+        _zero_dsa_state_block0).  Lazily populated so it also works in
+        eager mode where capture_model never runs."""
+        caches = getattr(self, "_dsa_state_caches_for_zero", None)
+        if caches:
+            return caches
+        caches = []
+        names = getattr(self, "kv_cache_names", None) or []
+        runner_caches = getattr(self, "kv_caches", None) or []
+        for i, name in enumerate(names):
+            if "compressor.state_cache" not in name or i >= len(runner_caches):
+                continue
+            entry = runner_caches[i]
+            cache = entry[0] if isinstance(entry, (list, tuple)) else entry
+            if isinstance(cache, torch.Tensor) and cache.numel() > 0:
+                caches.append(cache)
+        if caches:
+            self._dsa_state_caches_for_zero = caches
+        return caches
+
+    def _zero_dsa_state_blocks(self, block_ids: list[int]) -> None:
+        """Zero the given blocks in every DSA compressor state cache."""
+        if not block_ids:
+            return
+        caches = self._collect_dsa_state_caches()
+        if not caches:
+            return
+        idx = torch.tensor(
+            sorted(set(block_ids)), dtype=torch.int64, device=self.device
+        )
+        for cache in caches:
+            clamped = idx[idx < cache.shape[0]]
+            if clamped.numel() > 0:
+                cache.index_fill_(0, clamped, 0)
+
+    def _zero_new_dsa_state_blocks(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Zero freshly-allocated DSA state blocks for this step.
+
+        The compressor kernel's reads are unguarded; without zeroing, a
+        recycled block's previous-owner content can be read as valid
+        state.  Prefix-cache-hit blocks of new requests hold valid shared
+        content and are skipped; growth blocks of cached requests and all
+        blocks of resumed requests are always fresh from the free queue.
+        """
+        ids: list[int] = []
+        block_size = self.block_size
+
+        def _group0(bids):
+            # block_ids are per-kv-group (tuple of lists); ids are shared
+            if bids and isinstance(bids[0], (list, tuple)):
+                return bids[0]
+            return bids
+
+        for req_data in scheduler_output.scheduled_new_reqs:
+            cached_prefix_blocks = -(-req_data.num_computed_tokens // block_size)
+            bids0 = _group0(req_data.block_ids)
+            if bids0:
+                ids.extend(bids0[cached_prefix_blocks:])
+        cached = scheduler_output.scheduled_cached_reqs
+        new_block_ids = getattr(cached, "new_block_ids", None)
+        if new_block_ids:
+            for new_ids in new_block_ids:
+                ids.extend(_group0(new_ids) or [])
+        self._zero_dsa_state_blocks(ids)
+
+    def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
+        if _DSA_ZERO_FIX and self.use_compress:
+            self._zero_new_dsa_state_blocks(scheduler_output)
+        return super()._update_states(scheduler_output)
+
+    def _dsa_check_block_table_tails(self, num_reqs: int) -> None:
+        """[DSA-TAIL] Log any non-zero entries beyond each row's valid
+        block count -- those are the blocks an unguarded compressor read
+        would hit (stale ids from a previous, longer occupant of the row).
+        """
+        for gid, bt in enumerate(self.input_batch.block_table.block_tables):
+            np_table = bt.block_table.np
+            counts = bt.num_blocks_per_row
+            for i in range(num_reqs):
+                tail = np_table[i, counts[i] :]
+                nz = np.flatnonzero(tail)
+                if nz.size:
+                    req_id = (
+                        self.input_batch.req_ids[i]
+                        if i < len(self.input_batch.req_ids)
+                        else f"<row{i}>"
+                    )
+                    logger.warning(
+                        "[DSA-TAIL] residual block ids in row tail: "
+                        "req=%s row=%d gid=%d valid_blocks=%d "
+                        "residual=%s (total %d)",
+                        req_id,
+                        i,
+                        gid,
+                        int(counts[i]),
+                        tail[nz[:8]].tolist(),
+                        int(nz.size),
+                    )
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1738,6 +1853,8 @@ class NPUModelRunner(GPUModelRunner):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
+        if _DSA_TAIL_CHECK and self.use_compress:
+            self._dsa_check_block_table_tails(num_reqs)
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
