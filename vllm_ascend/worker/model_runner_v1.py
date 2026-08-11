@@ -1604,14 +1604,18 @@ class NPUModelRunner(GPUModelRunner):
         return t
 
     def _dsa_watch_sampled_tokens_gpu(
-        self, sampled_token_ids: torch.Tensor | None
+        self,
+        sampled_token_ids: torch.Tensor | None,
+        logits: torch.Tensor | None = None,
     ) -> None:
         """[DSA-WATCH] GPU-side CJK/Hangul check on sampled tokens.
 
         Runs on the raw sampler output tensor, so it covers every path
         (sync / async scheduling / spec decode) -- unlike the CPU-list
         watch, which only sees the sync path.  On a hit, dumps onset +
-        recent boundary events for the owning request.
+        recent boundary events for the owning request, plus the top-2
+        logit gap at the hit step: a near-zero gap means a numeric
+        tie-flip (not data corruption).
         """
         if not _DSA_ANOMALY_WATCH:
             return
@@ -1648,8 +1652,20 @@ class NPUModelRunner(GPUModelRunner):
                 if row < len(self.input_batch.req_ids)
                 else f"<row{row}>"
             )
+            # Top-2 logit gap at this row: the tie-flip discriminator.
+            gap_info = "logits n/a"
+            if logits is not None and row < logits.shape[0]:
+                top2 = torch.topk(logits[row].float(), 2)
+                gap = float(top2.values[0] - top2.values[1])
+                gap_info = (
+                    f"top1_id={int(top2.indices[0])} "
+                    f"top2_id={int(top2.indices[1])} gap={gap:.6f}"
+                )
             self._dsa_dump_anomaly(
-                req_id, -1, f"cjk token id(s)={hit_ids}", benign=True
+                req_id,
+                -1,
+                f"cjk token id(s)={hit_ids}; {gap_info}",
+                benign=True,
             )
 
     def _dsa_watch_sampled_tokens(
@@ -3961,8 +3977,9 @@ class NPUModelRunner(GPUModelRunner):
         logprobs_lists = None
         # [DSA-WATCH] GPU-side CJK check covers every sampling path
         # (sync / async / spec); the CPU-list watch below only runs on the
-        # sync path.
-        self._dsa_watch_sampled_tokens_gpu(sampled_token_ids)
+        # sync path.  logits are passed so a hit can also report the top-2
+        # logit gap (near-zero => numeric tie-flip, not corruption).
+        self._dsa_watch_sampled_tokens_gpu(sampled_token_ids, logits)
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
