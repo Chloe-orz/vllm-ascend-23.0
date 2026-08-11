@@ -93,6 +93,25 @@ def _patch_missing_cdiv(monkeypatch: pytest.MonkeyPatch, module) -> None:
     )
 
 
+def test_chunk_probe_guard_is_allocated_once_without_environment_variable(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    allocations = []
+    sentinel = object()
+    monkeypatch.delenv("VLLM_ASCEND_GDN_PREFILL_PROBE", raising=False)
+    monkeypatch.setattr(chunk, "_chunk_probe_guard_used", False)
+    monkeypatch.setattr(
+        chunk,
+        "_allocate_chunk_probe_guard",
+        lambda q, k, v: allocations.append((q, k, v)) or sentinel,
+    )
+    q, k, v = object(), object(), object()
+
+    assert chunk._allocate_chunk_probe_guard_once(q, k, v) is sentinel
+    assert chunk._allocate_chunk_probe_guard_once(q, k, v) is None
+    assert allocations == [(q, k, v)]
+
+
 @pytest.mark.parametrize("target", ["chunk_o", "chunk_o_update"])
 def test_chunk_leaf_wrappers_use_prebuilt_chunk_offsets(
     monkeypatch: pytest.MonkeyPatch,
