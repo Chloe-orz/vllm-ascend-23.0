@@ -8,6 +8,7 @@
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
 # mypy: ignore-errors
+import os
 import warnings
 
 import torch
@@ -27,6 +28,15 @@ from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
 from .utils import input_guard, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
+
+
+def _allocate_chunk_probe_guard(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> torch.Tensor:
+    """Reserve the workspace size that avoids the first-request KKT issue."""
+    return q.new_empty(q.numel() + k.numel() + v.numel())
 
 
 def chunk_gated_delta_rule_fwd(
@@ -243,6 +253,9 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
+        chunk_probe_guard = None
+        if os.environ.get("VLLM_ASCEND_GDN_PREFILL_PROBE", "").strip().lower() == "alloc_chunk_after_l2norm":
+            chunk_probe_guard = _allocate_chunk_probe_guard(q, k, v)
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
@@ -255,6 +268,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             prebuilt_meta=prebuilt_meta,
         )
+        del chunk_probe_guard
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
