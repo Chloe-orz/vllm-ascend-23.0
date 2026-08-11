@@ -1243,6 +1243,11 @@ class NPUModelRunner(GPUModelRunner):
         # Saved in execute_model() for legacy synchronous edge-cloud sampling
         # and auxiliary-hidden-state paths.
         self._last_scheduler_output: "SchedulerOutput | None" = None
+        # The parent target-model capture loop also invokes _dummy_run for
+        # every capture shape. Independently scheduled edge-cloud drafts run
+        # outside that loop and must not perform cross-node dummy
+        # communication while the target graph is being captured.
+        self._edge_cloud_target_capture_in_progress = False
 
         # Latest cloud-side target metadata for draft paths that do not cross
         # an independent scheduling boundary.
@@ -3721,6 +3726,21 @@ class NPUModelRunner(GPUModelRunner):
             return False
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
         return "qwen" in str(getattr(hf_config, "model_type", "")).lower()
+
+    def _should_skip_scheduled_drafter_dummy_run(self) -> bool:
+        """Whether target graph capture must omit the scheduled drafter.
+
+        The DRAFT_FIRST/C/DRAFT_LAST path currently creates an explicit eager
+        forward context for every segment. Its cross-node communication is
+        therefore not part of the target model's graph capture lifecycle,
+        regardless of the proposer's generic ``use_cuda_graph`` setting.
+        """
+        return bool(
+            self._edge_cloud_target_capture_in_progress
+            and self._edge_cloud_enabled
+            and self.drafter is not None
+            and self._uses_scheduled_edge_cloud_draft()
+        )
 
     def _should_defer_edge_cloud_draft(
         self, scheduler_output: "SchedulerOutput"
@@ -9208,6 +9228,10 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
+            skip_scheduled_drafter = (
+                self._should_skip_scheduled_drafter_dummy_run()
+            )
+
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -9236,7 +9260,7 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
 
-            if self.drafter and not profile_cpp:
+            if self.drafter and not profile_cpp and not skip_scheduled_drafter:
                 self.drafter.dummy_run(
                     num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
@@ -9247,6 +9271,12 @@ class NPUModelRunner(GPUModelRunner):
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention,
                     is_profile=is_profile,
+                )
+            elif skip_scheduled_drafter:
+                logger.info_once(
+                    "[EdgeCloud][GraphCapture] Skipping independently "
+                    "scheduled %s drafter during target graph capture.",
+                    self.speculative_config.method,
                 )
             if is_profile and self.dynamic_eplb:
                 target = self.model.language_model if hasattr(self.model, "language_model") else self.model
@@ -11050,8 +11080,17 @@ class NPUModelRunner(GPUModelRunner):
         # 因此这里手动清空，强制重新 capture。
         for wrapper in self._get_aclgraph_wrappers():
             wrapper.concrete_aclgraph_entries.clear()
-        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            cuda_graph_size = GPUModelRunner.capture_model(self)
+        previous_capture_state = self._edge_cloud_target_capture_in_progress
+        self._edge_cloud_target_capture_in_progress = True
+        try:
+            with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(
+                parent_module_name
+            ):
+                cuda_graph_size = GPUModelRunner.capture_model(self)
+        finally:
+            self._edge_cloud_target_capture_in_progress = (
+                previous_capture_state
+            )
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):
