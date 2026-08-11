@@ -246,6 +246,16 @@ def graph_capture(device: torch.device):
 def get_tp_context(drafter):
     return getattr(drafter, "tp_group_context", nullcontext())
 
+# [DSA-BDY] Set VLLM_ASCEND_DSA_PROBE to log per-request DSA decode
+# boundary events.  Levels:
+#   1 = rare events only: 512-token state-block crossings and KV block
+#       crossings (~a dozen lines per request per run);
+#   2 = also log every compression-group write (one per 4 tokens per
+#       request; noisy, only for single-request deep dives).
+# Same env var also enables the slot-pairing check in attention/dsa_v1.py
+# (that check only prints on violation).
+_DSA_BOUNDARY_PROBE_LEVEL = int(os.environ.get("VLLM_ASCEND_DSA_PROBE", "0"))
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -1424,6 +1434,71 @@ class NPUModelRunner(GPUModelRunner):
 
         return num_reqs_padded
 
+    def _dsa_decode_boundary_probe(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: np.ndarray,
+    ) -> None:
+        """[DSA-BDY] Log per-request DSA decode boundary events.
+
+        Fires when a request, in this step:
+        - crosses a 512-token multiple (compressor state-block boundary,
+          the suspected corruption point);
+        - crosses a KV block boundary (a new block is appended);
+        - completes a compression group (a compressed row is written;
+          only logged at probe level >= 2).
+
+        Correlate the first garbage token position of a broken request
+        (seq_len at corruption onset) with these events to confirm or
+        refute the boundary hypothesis.  Gate with VLLM_ASCEND_DSA_PROBE.
+        """
+        if not _DSA_BOUNDARY_PROBE_LEVEL or not self.use_compress:
+            return
+        num_reqs = self.input_batch.num_reqs
+        if num_reqs == 0:
+            return
+        block_size = self.block_size
+        verbose = _DSA_BOUNDARY_PROBE_LEVEL >= 2
+        # Track scheduling continuity per request: gap>1 means the request
+        # was unscheduled (evicted / preempted) for gap-1 steps before this
+        # one -- the batch-churn signature we want to correlate with
+        # boundary crossings.  Everyone crosses 512-multiples; corruption
+        # needs crossing x something-rare, and churn is the prime suspect.
+        last_seen = getattr(self, "_dsa_probe_last_seen", None)
+        if last_seen is None:
+            last_seen = self._dsa_probe_last_seen = {}
+        step = getattr(self, "_dsa_probe_step", 0) + 1
+        self._dsa_probe_step = step
+        current_ids = set(self.input_batch.req_ids[:num_reqs])
+        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            ntok = int(num_scheduled_tokens[i])
+            if ntok <= 0:
+                continue
+            prev = int(self.input_batch.num_computed_tokens_cpu[i])
+            cur = prev + ntok
+            events = []
+            if cur // 512 > prev // 512:
+                events.append(f"CROSS-512(at={(cur // 512) * 512})")
+            if block_size and cur // block_size > prev // block_size:
+                events.append(f"NEW-KV-BLOCK(idx={cur // block_size})")
+            if verbose and cur % 4 == 0:
+                events.append(f"COMPRESS-WRITE(row={cur // 4 - 1})")
+            if events:
+                gap = step - last_seen.get(req_id, step - 1)
+                logger.info(
+                    "[DSA-BDY] req=%s row=%d seq %d->%d events=%s "
+                    "gap=%d batch_reqs=%d",
+                    req_id,
+                    i,
+                    prev,
+                    cur,
+                    ",".join(events),
+                    gap,
+                    num_reqs,
+                )
+        for req_id in current_ids:
+            last_seen[req_id] = step
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1475,6 +1550,7 @@ class NPUModelRunner(GPUModelRunner):
             self.query_pos.np[: cu_num_tokens[-1]],
             out=positions_np,
         )
+        self._dsa_decode_boundary_probe(scheduler_output, num_scheduled_tokens)
 
         # For PCP, compute slot_mapping on GPU using pre-PCP-split positions.
         # Use blocking .to(device) to ensure data lands on GPU before PCP

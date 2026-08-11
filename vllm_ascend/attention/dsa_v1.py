@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, TypeAlias
 
@@ -9,6 +10,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
@@ -43,6 +45,15 @@ else:
 
 BUILD_METADATA_STEP_PREFILL = 0
 BUILD_METADATA_STEP_DECODE = 1
+
+logger = init_logger(__name__)
+
+# [DSA-PROBE] Set VLLM_ASCEND_DSA_PROBE=1 to log decode-time compressor
+# invariants: compression-group boundary crossings (the suspected 512-token
+# state-block boundary) and the slot-pairing assumption of the
+# compressed-KV scatter (compressed rows are emitted in completing-token
+# batch order, but the slot pairs are taken as the first-N entries).
+_DSA_DECODE_PROBE = os.environ.get("VLLM_ASCEND_DSA_PROBE", "0") == "1"
 
 _DSV4_DSA_OVERLAP_STREAM = None
 
@@ -955,6 +966,44 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ]
 
         slot_mapping = self.slot_mapping[:compressed_tokens_start]
+
+        if _DSA_DECODE_PROBE and compressed_tokens_start > 0:
+            # The compressor op emits one cmp_kv row per completing token,
+            # in batch order; the scatter below pairs row j with
+            # slot_mapping[j].  That is only correct if the completing
+            # tokens are exactly the FIRST compressed_tokens_start entries
+            # of the batch.  Verify and dump both pairings on violation.
+            _probe_ratio = (
+                self.compressor_ratio if self.compressor_ratio > 0 else 1
+            )
+            _complete_idx = torch.nonzero(
+                (decode_input_positions + 1) % _probe_ratio == 0
+            ).flatten()
+            _taken = slot_mapping  # first-N pairs actually used
+            _correct = self.slot_mapping[
+                _complete_idx.to(self.slot_mapping.device)
+            ]
+            if not torch.equal(_taken, _correct):
+                logger.warning(
+                    "[DSA-PAIR] compressed-row/slot pairing mismatch: "
+                    "complete_idx=%s but scatter uses first %d slot pairs. "
+                    "taken(block,off)=%s correct(block,off)=%s "
+                    "num_decodes=%d start_pos=%s seq_lens=%s",
+                    _complete_idx.tolist()[:16],
+                    compressed_tokens_start,
+                    _taken.tolist()[:8],
+                    _correct.tolist()[:8],
+                    self.num_decodes,
+                    start_pos_decode.tolist()[:16],
+                    self.seq_lens[: self.num_decodes].tolist()[:16],
+                )
+            else:
+                logger.debug(
+                    "[DSA-PAIR] ok: %d completing token(s) form a batch "
+                    "prefix (num_decodes=%d)",
+                    compressed_tokens_start,
+                    self.num_decodes,
+                )
 
         assert self.start_pos_decode is not None
         self.start_pos_decode.fill_(0)
