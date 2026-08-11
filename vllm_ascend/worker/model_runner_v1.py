@@ -1296,8 +1296,10 @@ class NPUModelRunner(GPUModelRunner):
         # Saved in execute_model() for legacy synchronous edge-cloud sampling
         # and auxiliary-hidden-state paths.
         self._last_scheduler_output: "SchedulerOutput | None" = None
-        # True while the parent target graph-capture loop is running. Eager
-        # edge-cloud draft segments must not communicate from inside it.
+        # The parent target-model capture loop also invokes _dummy_run for
+        # every capture shape. Independently scheduled edge-cloud drafts run
+        # outside that loop and must not perform cross-node dummy
+        # communication while the target graph is being captured.
         self._edge_cloud_target_capture_in_progress = False
 
         # Latest cloud-side target metadata for draft paths that do not cross
@@ -4105,6 +4107,21 @@ class NPUModelRunner(GPUModelRunner):
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
         model_type = str(getattr(hf_config, "model_type", "")).lower()
         return "qwen" in model_type or model_type == "deepseek_v4"
+
+    def _should_skip_scheduled_drafter_dummy_run(self) -> bool:
+        """Whether target graph capture must omit the scheduled drafter.
+
+        The DRAFT_FIRST/C/DRAFT_LAST path currently creates an explicit eager
+        forward context for every segment. Its cross-node communication is
+        therefore not part of the target model's graph capture lifecycle,
+        regardless of the proposer's generic ``use_cuda_graph`` setting.
+        """
+        return bool(
+            self._edge_cloud_target_capture_in_progress
+            and self._edge_cloud_enabled
+            and self.drafter is not None
+            and self._uses_scheduled_edge_cloud_draft()
+        )
 
     def _should_defer_edge_cloud_draft(
         self, scheduler_output: "SchedulerOutput"
@@ -9859,6 +9876,10 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
+            skip_scheduled_drafter = (
+                self._should_skip_scheduled_drafter_dummy_run()
+            )
+
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -9887,22 +9908,7 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
 
-            is_scheduled_edge_cloud_draft = (
-                self._edge_cloud_enabled
-                and self.speculative_config is not None
-                and self.speculative_config.method in ("mtp", "eagle3")
-            )
-            skip_eager_edge_cloud_drafter = (
-                self._edge_cloud_target_capture_in_progress
-                and is_scheduled_edge_cloud_draft
-                and self.drafter is not None
-                and not self._edge_cloud_drafter_uses_graph()
-            )
-            if (
-                self.drafter
-                and not profile_cpp
-                and not skip_eager_edge_cloud_drafter
-            ):
+            if self.drafter and not profile_cpp and not skip_scheduled_drafter:
                 self.drafter.dummy_run(
                     num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
@@ -9913,6 +9919,12 @@ class NPUModelRunner(GPUModelRunner):
                     dummy_compute_logits=dummy_drafter_compute_logits,
                     in_graph_capturing=not force_attention,
                     is_profile=is_profile,
+                )
+            elif skip_scheduled_drafter:
+                logger.info_once(
+                    "[EdgeCloud][GraphCapture] Skipping independently "
+                    "scheduled %s drafter during target graph capture.",
+                    self.speculative_config.method,
                 )
             if is_profile and self.dynamic_eplb:
                 target = self.model.language_model if hasattr(self.model, "language_model") else self.model
@@ -11726,6 +11738,7 @@ class NPUModelRunner(GPUModelRunner):
         # 因此这里手动清空，强制重新 capture。
         for wrapper in self._get_aclgraph_wrappers():
             wrapper.concrete_aclgraph_entries.clear()
+        previous_capture_state = self._edge_cloud_target_capture_in_progress
         self._edge_cloud_target_capture_in_progress = True
         try:
             with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(
@@ -11733,7 +11746,9 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 cuda_graph_size = GPUModelRunner.capture_model(self)
         finally:
-            self._edge_cloud_target_capture_in_progress = False
+            self._edge_cloud_target_capture_in_progress = (
+                previous_capture_state
+            )
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):

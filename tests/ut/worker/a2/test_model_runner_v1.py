@@ -293,6 +293,42 @@ class TestDeepSeekV4MTPDraftSequenceParallel(unittest.TestCase):
         self.assertTrue(torch.equal(result, full_positions[:, 4:8]))
 
 
+class TestNPUModelRunnerEdgeCloudGraphCapture(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._edge_cloud_target_capture_in_progress = False
+        runner._edge_cloud_enabled = True
+        runner.drafter = MagicMock()
+        runner._uses_scheduled_edge_cloud_draft = MagicMock(
+            return_value=True
+        )
+        return runner
+
+    def test_skips_scheduled_drafter_during_target_capture(self):
+        runner = self._build_runner()
+        runner._edge_cloud_target_capture_in_progress = True
+
+        self.assertTrue(
+            runner._should_skip_scheduled_drafter_dummy_run()
+        )
+
+    def test_keeps_scheduled_drafter_outside_target_capture(self):
+        runner = self._build_runner()
+
+        self.assertFalse(
+            runner._should_skip_scheduled_drafter_dummy_run()
+        )
+
+    def test_keeps_non_scheduled_drafter_during_target_capture(self):
+        runner = self._build_runner()
+        runner._edge_cloud_target_capture_in_progress = True
+        runner._uses_scheduled_edge_cloud_draft.return_value = False
+
+        self.assertFalse(
+            runner._should_skip_scheduled_drafter_dummy_run()
+        )
+
+
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
