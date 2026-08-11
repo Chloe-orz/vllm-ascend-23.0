@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
-
+import os
 import math
 import sys
 import time
@@ -1556,27 +1556,101 @@ class NPUModelRunner(GPUModelRunner):
         return ids
 
     def _dsa_dump_anomaly(
-        self, req_id: str, token_id: int, reason: str
+        self,
+        req_id: str,
+        token_id: int,
+        reason: str,
+        benign: bool = False,
     ) -> None:
-        """Dump full context when the watch fires on a request."""
+        """Dump full context when the watch fires on a request.
+
+        Every hit (CJK token or repeat lock) is printed: volume is low in
+        practice.  `benign` is kept in the reason text only.
+        """
+        history = getattr(self, "_dsa_anomaly_history", None)
+        if history is None:
+            history = self._dsa_anomaly_history = {}
         req_state = self.requests.get(req_id)
         prompt_len = req_state.num_prompt_tokens if req_state else -1
         n_out = len(req_state.output_token_ids) if req_state else -1
-        # The flagged token is being produced this step, so its position
-        # is prompt_len + (outputs so far).
         onset = prompt_len + n_out if req_state else -1
+        entry = f"onset~{onset} {reason}"
+        history.setdefault(req_id, []).append(entry)
+        if len(history[req_id]) > 8:
+            history[req_id].pop(0)
         rings = getattr(self, "_dsa_bdy_rings", {})
         recent = list(rings.get(req_id, []))
         logger.warning(
             "[DSA-WATCH] anomaly on req=%s: %s; onset_seq_len~=%d "
-            "(prompt=%d + outputs=%d); recent boundary events:\n%s",
+            "(prompt=%d + outputs=%d); anomaly history:\n%s\n"
+            "recent boundary events:\n%s",
             req_id,
             reason,
             onset,
             prompt_len,
             n_out,
+            "\n".join(history.get(req_id, [])) or "<none>",
             "\n".join(recent) if recent else "<none recorded>",
         )
+
+    def _dsa_cjk_token_id_tensor(self) -> torch.Tensor:
+        t = getattr(self, "_dsa_cjk_ids_tensor", None)
+        if t is None:
+            ids = self._dsa_cjk_token_id_set()
+            t = torch.tensor(
+                sorted(ids), dtype=torch.int64, device=self.device
+            )
+            self._dsa_cjk_ids_tensor = t
+        return t
+
+    def _dsa_watch_sampled_tokens_gpu(
+        self, sampled_token_ids: torch.Tensor | None
+    ) -> None:
+        """[DSA-WATCH] GPU-side CJK/Hangul check on sampled tokens.
+
+        Runs on the raw sampler output tensor, so it covers every path
+        (sync / async scheduling / spec decode) -- unlike the CPU-list
+        watch, which only sees the sync path.  On a hit, dumps onset +
+        recent boundary events for the owning request.
+        """
+        if not _DSA_ANOMALY_WATCH:
+            return
+        if not getattr(self, "_dsa_watch_armed_logged", False):
+            self._dsa_watch_armed_logged = True
+            logger.warning(
+                "[DSA-WATCH] armed (async_scheduling=%s); will dump on "
+                "CJK token or >=%d consecutive repeats",
+                self.use_async_scheduling,
+                _DSA_WATCH_REPEAT_THRESHOLD,
+            )
+        if sampled_token_ids is None or sampled_token_ids.numel() == 0:
+            return
+        cjk = self._dsa_cjk_token_id_tensor()
+        flat = sampled_token_ids.reshape(-1).long()
+        valid = flat >= 0
+        if not bool(valid.any()):
+            return
+        hit_mask = torch.isin(flat[valid], cjk)
+        if not bool(hit_mask.any()):
+            return
+        hit_ids = sorted(set(flat[valid][hit_mask].tolist()))
+        if sampled_token_ids.dim() > 1:
+            row_mask = (
+                torch.isin(sampled_token_ids.long(), cjk)
+                & (sampled_token_ids >= 0)
+            ).any(dim=-1)
+        else:
+            row_mask = torch.isin(flat, cjk) & valid
+        rows = torch.nonzero(row_mask).flatten().tolist()
+        for row in rows:
+            req_id = (
+                self.input_batch.req_ids[row]
+                if row < len(self.input_batch.req_ids)
+                else f"<row{row}>"
+            )
+            self._dsa_dump_anomaly(
+                req_id, -1, f"cjk token id(s)={hit_ids}", benign=True
+            )
 
     def _dsa_watch_sampled_tokens(
         self, valid_sampled_token_ids: list[list[int]]
@@ -1619,7 +1693,12 @@ class NPUModelRunner(GPUModelRunner):
                     if t in cjk:
                         reason = f"cjk token_id={t}"
                 if reason is not None:
-                    self._dsa_dump_anomaly(req_id, t, reason)
+                    self._dsa_dump_anomaly(
+                        req_id,
+                        t,
+                        reason,
+                        benign=not reason.startswith("repeat"),
+                    )
                     fired = True  # one dump per request per step
             state[req_id] = (last, run)
 
@@ -3880,6 +3959,10 @@ class NPUModelRunner(GPUModelRunner):
         logprobs_tensors = sampler_output.logprobs_tensors
         invalid_req_indices = []
         logprobs_lists = None
+        # [DSA-WATCH] GPU-side CJK check covers every sampling path
+        # (sync / async / spec); the CPU-list watch below only runs on the
+        # sync path.
+        self._dsa_watch_sampled_tokens_gpu(sampled_token_ids)
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
