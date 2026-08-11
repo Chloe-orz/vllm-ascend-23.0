@@ -30,6 +30,9 @@ from .utils import input_guard, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
 
 
+_chunk_probe_guard_used = False
+
+
 def _allocate_chunk_probe_guard(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -254,8 +257,16 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
         chunk_probe_guard = None
-        if os.environ.get("VLLM_ASCEND_GDN_PREFILL_PROBE", "").strip().lower() == "alloc_chunk_after_l2norm":
+        global _chunk_probe_guard_used
+        if (
+            not _chunk_probe_guard_used
+            and os.environ.get(
+                "VLLM_ASCEND_GDN_PREFILL_PROBE", ""
+            ).strip().lower()
+            == "alloc_chunk_after_l2norm"
+        ):
             chunk_probe_guard = _allocate_chunk_probe_guard(q, k, v)
+            _chunk_probe_guard_used = True
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
