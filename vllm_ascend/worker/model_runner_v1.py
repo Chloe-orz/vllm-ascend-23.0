@@ -384,6 +384,22 @@ class CloudDraftPositionState:
     # accepted counts with the position layout without positional
     # assumptions.
     req_ids: tuple[str, ...] = ()
+    # Confirmed start position for each request.  SchedulerOutput may still
+    # contain an optimistic value from an earlier async speculative step.
+    actual_num_computed_tokens: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class CloudPendingRequestCorrection:
+    """Confirmed async-spec state for one completed cloud target task."""
+
+    task_id: str
+    generation: int
+    num_draft_tokens: int
+    optimistic_num_computed_tokens: int
+    actual_num_computed_tokens: int
+    valid_sampled_token_count: int
+    num_accepted_tokens: int
 
 
 def _freeze_scheduled_state(value: Any, memo: dict[int, Any] | None = None) -> Any:
@@ -1168,6 +1184,23 @@ class NPUModelRunner(GPUModelRunner):
         self._cloud_draft_position_state_by_task: dict[
             str, CloudDraftPositionState
         ] = {}
+        # Async target batches may be interleaved with unrelated prefill or
+        # draft work before their accepted-token result reaches the cloud.
+        # Keep the confirmed correction by request instead of writing it into
+        # a positional global tensor whose row ownership may already differ.
+        self._cloud_target_generation: int = 0
+        self._cloud_target_generation_by_task: dict[str, int] = {}
+        self._cloud_latest_target_generation_by_req: dict[str, int] = {}
+        self._cloud_actual_num_computed_by_req: dict[
+            str, tuple[int, int]
+        ] = {}
+        self._cloud_pending_request_corrections: dict[
+            str, CloudPendingRequestCorrection
+        ] = {}
+        # Set only while preparing a cloud target whose optimistic CPU state
+        # was corrected from the request-keyed records above.  This selects a
+        # direct CPU->NPU copy and avoids the legacy positional gather.
+        self._cloud_current_cpu_state_authoritative: bool = False
         self._eagle3_cloud_aux_hidden_states_by_task: dict[
             str, torch.Tensor
         ] = {}
@@ -2012,11 +2045,101 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    def _consume_cloud_request_corrections(
+        self,
+        scheduler_output: "SchedulerOutput",
+        previous_num_draft_tokens: dict[str, int],
+    ) -> bool:
+        """Apply complete request-keyed cloud corrections without device sync.
+
+        Returns ``True`` only when every request that participated in the
+        previous speculative step has a matching, current-generation result.
+        In that case the CPU batch state is authoritative and input
+        preparation can use its normal single CPU-to-device copy.  An
+        incomplete or stale set falls back to the legacy correction path.
+        """
+        if not (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "cloud"
+            and self._uses_scheduled_edge_cloud_draft()
+            and scheduler_output.batch_type
+            in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST)
+        ):
+            return False
+
+        participating = {
+            req_id: num_draft
+            for req_id, num_draft in previous_num_draft_tokens.items()
+            if num_draft > 0
+            and req_id in self.input_batch.req_id_to_index
+        }
+        if not participating:
+            return False
+
+        resolved: list[
+            tuple[str, int, CloudPendingRequestCorrection]
+        ] = []
+        for req_id, num_draft in participating.items():
+            correction = self._cloud_pending_request_corrections.get(req_id)
+            latest_generation = (
+                self._cloud_latest_target_generation_by_req.get(req_id)
+            )
+            if (
+                correction is None
+                or correction.generation != latest_generation
+                or correction.num_draft_tokens != num_draft
+            ):
+                return False
+
+            req_index = self.input_batch.req_id_to_index[req_id]
+            cpu_value = int(
+                self.input_batch.num_computed_tokens_cpu[req_index]
+            )
+            if cpu_value not in (
+                correction.optimistic_num_computed_tokens,
+                correction.actual_num_computed_tokens,
+            ):
+                logger.warning(
+                    "Cloud request correction does not match scheduler "
+                    "state; falling back to positional correction: "
+                    "req=%s task=%s cpu=%d optimistic=%d actual=%d",
+                    req_id,
+                    correction.task_id,
+                    cpu_value,
+                    correction.optimistic_num_computed_tokens,
+                    correction.actual_num_computed_tokens,
+                )
+                return False
+            resolved.append((req_id, req_index, correction))
+
+        # Apply only after the complete batch has been validated so a partial
+        # mismatch cannot leave CPU and GPU correction paths mixed.
+        for req_id, req_index, correction in resolved:
+            actual = correction.actual_num_computed_tokens
+            self.input_batch.num_computed_tokens_cpu[req_index] = actual
+            req_state = self.requests.get(req_id)
+            if req_state is not None:
+                req_state.num_computed_tokens = actual
+            self.input_batch.num_accepted_tokens_cpu[req_index] = (
+                correction.num_accepted_tokens
+            )
+            self._cloud_pending_request_corrections.pop(req_id, None)
+
+        return True
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
 
+        self._cloud_current_cpu_state_authoritative = False
+        if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
+            for req_id in scheduler_output.finished_req_ids:
+                self._cloud_pending_request_corrections.pop(req_id, None)
+                self._cloud_latest_target_generation_by_req.pop(
+                    req_id, None
+                )
+                self._cloud_actual_num_computed_by_req.pop(req_id, None)
         if self.use_async_scheduling:
             for i, req_id in enumerate(req_data.req_ids):
                 req_state = self.requests.get(req_id)
@@ -2026,6 +2149,23 @@ class NPUModelRunner(GPUModelRunner):
                 num_computed_tokens = req_data.num_computed_tokens[i]
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
+
+        track_cloud_corrections = (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "cloud"
+            and self._uses_scheduled_edge_cloud_draft()
+            and scheduler_output.batch_type
+            in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST)
+        )
+        previous_num_draft_tokens = (
+            {
+                req_id: self.requests[req_id].prev_num_draft_len
+                for req_id in req_data.req_ids
+                if req_id in self.requests
+            }
+            if track_cloud_corrections
+            else {}
+        )
 
         # A PD-interleaved tail updates only a subset of the running requests.
         # The base update removes absent requests from input_batch together
@@ -2045,6 +2185,17 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         result = super()._update_states(scheduler_output)
+
+        if previous_num_draft_tokens and (
+            self._consume_cloud_request_corrections(
+                scheduler_output, previous_num_draft_tokens
+            )
+        ):
+            # The upstream callback would apply the same rejection correction
+            # later using the positional prev_req_id_to_index map.  The CPU
+            # state is already corrected by request identity, so suppress it.
+            result = None
+            self._cloud_current_cpu_state_authoritative = True
 
         if shelved_prev_map:
             prev_map = self.input_batch.prev_req_id_to_index
@@ -2406,7 +2557,16 @@ class NPUModelRunner(GPUModelRunner):
 
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
-        if self.num_accepted_tokens_event is not None:
+        if self._cloud_current_cpu_state_authoritative:
+            # Request-keyed cloud correction already materialized counts in
+            # the current input_batch row order.  Reusing prev_positions here
+            # would reintroduce the stale-positive-index bug.
+            self.num_accepted_tokens.np[:num_reqs] = (
+                self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            )
+            self.num_accepted_tokens.np[num_reqs:].fill(1)
+            self.num_accepted_tokens.copy_to_gpu()
+        elif self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
             # Async mode: condense() reordered indices, use prev_positions mapping
             if self.use_async_scheduling and prev_req_id_to_index:
@@ -2468,11 +2628,27 @@ class NPUModelRunner(GPUModelRunner):
         computed_token_tensor_cpu = None
         if not _skip_tail_sync:
             valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
-            if self.use_async_spec_decode:
+            if (
+                self.use_async_spec_decode
+                and not self._cloud_current_cpu_state_authoritative
+            ):
                 computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
                     device=self.device, non_blocking=True
                 )
-            if (
+            if self._cloud_current_cpu_state_authoritative:
+                self.num_computed_tokens[:num_reqs].copy_(
+                    self.input_batch.num_computed_tokens_cpu_tensor[
+                        :num_reqs
+                    ],
+                    non_blocking=True,
+                )
+                # The authoritative path has no GPU-vs-CPU drift.  Reuse the
+                # destination view below instead of issuing a second H2D copy
+                # solely for M/XD-RoPE drift calculation.
+                computed_token_tensor_cpu = self.num_computed_tokens[
+                    :num_reqs
+                ]
+            elif (
                 self.use_async_spec_decode
                 and valid_sampled_token_count_gpu is not None
                 and prev_req_id_to_index
@@ -2603,6 +2779,7 @@ class NPUModelRunner(GPUModelRunner):
             self.use_async_spec_decode
             and valid_sampled_token_count_gpu is not None
             and prev_req_id_to_index
+            and not self._cloud_current_cpu_state_authoritative
         )
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
             self._correct_optimistic_seq_lens_cpu(num_reqs)
@@ -5545,6 +5722,7 @@ class NPUModelRunner(GPUModelRunner):
             self._cloud_draft_position_state_by_task.pop(
                 stale_task_id, None
             )
+            self._cloud_target_generation_by_task.pop(stale_task_id, None)
             self._eagle3_cloud_aux_hidden_states_by_task.pop(
                 stale_task_id, None
             )
@@ -5572,6 +5750,24 @@ class NPUModelRunner(GPUModelRunner):
                 f"draft input: positions={positions.shape}, "
                 f"num_tokens={num_tokens}, task_id={task_id}"
             )
+        actual_num_computed_tokens: list[int] = []
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            scheduler_value = int(
+                self.input_batch.num_computed_tokens_cpu[i]
+            )
+            confirmed = self._cloud_actual_num_computed_by_req.get(req_id)
+            previous_generation = (
+                self._cloud_latest_target_generation_by_req.get(req_id)
+            )
+            if (
+                confirmed is not None
+                and confirmed[0] == previous_generation
+                and 0 <= scheduler_value - confirmed[1]
+                <= self.num_spec_tokens
+            ):
+                actual_num_computed_tokens.append(confirmed[1])
+            else:
+                actual_num_computed_tokens.append(scheduler_value)
         position_state = CloudDraftPositionState(
             target_positions=positions[..., :num_tokens].clone(),
             num_scheduled_tokens=num_scheduled_tokens,
@@ -5579,8 +5775,18 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output.batch_type == BatchType.PREFILL_FIRST
             ),
             req_ids=tuple(self.input_batch.req_ids),
+            actual_num_computed_tokens=tuple(
+                actual_num_computed_tokens
+            ),
         )
         self._cloud_draft_position_state_by_task[task_id] = position_state
+        generation = self._cloud_target_generation_by_task.get(task_id)
+        if generation is None:
+            self._cloud_target_generation += 1
+            generation = self._cloud_target_generation
+            self._cloud_target_generation_by_task[task_id] = generation
+        for req_id in position_state.req_ids:
+            self._cloud_latest_target_generation_by_req[req_id] = generation
 
     def _resolve_cloud_spec_decode_metadata(
         self,
@@ -5747,6 +5953,16 @@ class NPUModelRunner(GPUModelRunner):
             # cloned positions tensors would otherwise linger until the
             # bounded metadata cache evicts the task.
             self._cloud_draft_position_state_by_task.pop(task_id, None)
+            self._cloud_target_generation_by_task.pop(task_id, None)
+            stale_req_ids = [
+                req_id
+                for req_id, correction in (
+                    self._cloud_pending_request_corrections.items()
+                )
+                if correction.task_id == task_id
+            ]
+            for req_id in stale_req_ids:
+                self._cloud_pending_request_corrections.pop(req_id, None)
             self._eagle3_cloud_aux_hidden_states_by_task.pop(task_id, None)
 
     def _build_edge_cloud_draft_attn_metadata(
@@ -5927,10 +6143,10 @@ class NPUModelRunner(GPUModelRunner):
     ) -> None:
         """Apply the edge-sampled rejection correction on the cloud.
 
-        Sampling only runs on the edge, but the cloud must retain the
-        rejection-corrected state for its next target/draft forward. An
-        independently scheduled draft carries this state on its step-0
-        SchedulerOutput, so the correction runs here ahead of its forwards.
+        Sampling only runs on the edge.  This immediate positional state is
+        used only when the matching task still covers the live cloud batch
+        (notably hybrid draft postprocessing).  Next-target computed-token
+        correction is retained separately by request identity.
 
         ``num_accepted``/``valid_sampled_token_count`` must already be in
         the cloud's current input_batch row order (the caller remaps
@@ -5961,10 +6177,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
             if self.valid_sampled_token_count_event is not None:
                 self.valid_sampled_token_count_event.record()
-            self.input_batch.prev_req_id_to_index = {
-                req_id: i
-                for i, req_id in enumerate(self.input_batch.req_ids)
-            }
 
         if self.model_config.is_hybrid:
             if self.cache_config.mamba_cache_mode == "align":
@@ -6018,6 +6230,134 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
 
+    def _record_cloud_request_corrections(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_accepted_values: dict[str, int] | list[int],
+        valid_sampled_values: dict[str, int] | list[int] | None,
+    ) -> int:
+        """Record rejection corrections in request space, not batch space.
+
+        The edge scheduler value for the next async target may still assume
+        that every draft from this target was accepted.  The confirmed count
+        lets the next target replace that optimistic value without gathering
+        from a positional GPU buffer that unrelated work may have overwritten.
+        """
+        task_id = scheduler_output.draft_task_id
+        if task_id is None or valid_sampled_values is None:
+            return 0
+        target_output = self._cloud_scheduler_output_by_task.get(task_id)
+        position_state = self._cloud_draft_position_state_by_task.get(task_id)
+        generation = self._cloud_target_generation_by_task.get(task_id)
+        if (
+            target_output is None
+            or position_state is None
+            or generation is None
+        ):
+            return 0
+
+        req_ids = position_state.req_ids
+        if isinstance(valid_sampled_values, dict):
+            valid_by_req = valid_sampled_values
+        else:
+            valid_by_req = dict(zip(req_ids, valid_sampled_values))
+        if isinstance(num_accepted_values, dict):
+            accepted_by_req = num_accepted_values
+        else:
+            accepted_by_req = dict(zip(req_ids, num_accepted_values))
+
+        start_by_req = {
+            req_id: int(num_computed)
+            for req_id, num_computed in zip(
+                target_output.scheduled_cached_reqs.req_ids,
+                target_output.scheduled_cached_reqs.num_computed_tokens,
+            )
+        }
+        start_by_req.update({
+            req.req_id: int(req.num_computed_tokens)
+            for req in target_output.scheduled_new_reqs
+        })
+        actual_start_values = getattr(
+            position_state, "actual_num_computed_tokens", ()
+        )
+        actual_start_by_req = dict(zip(req_ids, actual_start_values))
+
+        recorded = 0
+        spec_tokens = target_output.scheduled_spec_decode_tokens
+        for req_id, valid_value in valid_by_req.items():
+            num_draft = len(spec_tokens.get(req_id, ()))
+            if num_draft <= 0 or req_id not in start_by_req:
+                continue
+            valid_count = int(valid_value)
+            if not 1 <= valid_count <= num_draft + 1:
+                logger.warning(
+                    "Ignoring invalid cloud accepted count: task=%s req=%s "
+                    "valid=%d num_draft=%d",
+                    task_id,
+                    req_id,
+                    valid_count,
+                    num_draft,
+                )
+                continue
+            if (
+                self._cloud_latest_target_generation_by_req.get(req_id)
+                != generation
+            ):
+                logger.warning(
+                    "Ignoring late cloud accepted state: task=%s req=%s "
+                    "generation=%d latest=%s",
+                    task_id,
+                    req_id,
+                    generation,
+                    self._cloud_latest_target_generation_by_req.get(req_id),
+                )
+                continue
+
+            optimistic = start_by_req[req_id] + int(
+                target_output.num_scheduled_tokens[req_id]
+            )
+            actual_start = actual_start_by_req.get(
+                req_id, start_by_req[req_id]
+            )
+            actual = actual_start + valid_count
+            pending = CloudPendingRequestCorrection(
+                task_id=task_id,
+                generation=generation,
+                num_draft_tokens=num_draft,
+                optimistic_num_computed_tokens=optimistic,
+                actual_num_computed_tokens=actual,
+                valid_sampled_token_count=valid_count,
+                num_accepted_tokens=int(
+                    accepted_by_req.get(req_id, valid_count)
+                ),
+            )
+            previous = self._cloud_pending_request_corrections.get(req_id)
+            if previous is None or previous.generation <= generation:
+                self._cloud_pending_request_corrections[req_id] = pending
+                self._cloud_actual_num_computed_by_req[req_id] = (
+                    generation,
+                    actual,
+                )
+                recorded += 1
+        return recorded
+
+    def _can_apply_cloud_counts_positionally(
+        self, counts_by_req: dict[str, int]
+    ) -> bool:
+        """Whether a task can safely touch the current positional state."""
+        current_req_ids = set(self.input_batch.req_ids)
+        if not current_req_ids.intersection(counts_by_req):
+            return False
+        current_spec_req_ids = {
+            req_id
+            for req_id in self.input_batch.req_ids
+            if (
+                (req_state := self.requests.get(req_id)) is not None
+                and req_state.prev_num_draft_len > 0
+            )
+        }
+        return current_spec_req_ids.issubset(counts_by_req)
+
     def _run_edge_cloud_draft_middle_segment(
         self,
         scheduler_output: "SchedulerOutput",
@@ -6052,6 +6392,11 @@ class NPUModelRunner(GPUModelRunner):
         num_accepted_values = scheduler_output.num_accepted_tokens
         valid_sampled_values = scheduler_output.valid_sampled_token_count
         if num_accepted_values is not None:
+            self._record_cloud_request_corrections(
+                scheduler_output,
+                num_accepted_values,
+                valid_sampled_values,
+            )
             if spec_step_idx != 0:
                 logger.warning(
                     "num_accepted scheduler state arrived on draft step %d; "
@@ -6069,10 +6414,15 @@ class NPUModelRunner(GPUModelRunner):
                 id2idx = self.input_batch.req_id_to_index
                 n_rows = len(self.input_batch.req_ids)
                 num_accepted = torch.ones(n_rows, dtype=torch.int64)
+                unmapped = 0
+                matched = 0
                 for rid, v in num_accepted_values.items():
                     j = id2idx.get(rid)
                     if j is not None:
                         num_accepted[j] = v
+                        matched += 1
+                    else:
+                        unmapped += 1
                 if valid_sampled_values is not None:
                     valid_sampled_token_count = torch.ones(
                         n_rows, dtype=torch.int64
@@ -6083,6 +6433,26 @@ class NPUModelRunner(GPUModelRunner):
                             valid_sampled_token_count[j] = v
                 else:
                     valid_sampled_token_count = None
+                if unmapped:
+                    logger.warning(
+                        "[CLOUD-MAP-DEBUG] task=%s dropped %d/%d counts for "
+                        "requests absent from the cloud batch",
+                        getattr(scheduler_output, "draft_task_id", None),
+                        unmapped,
+                        len(num_accepted_values),
+                    )
+                # Applying a task positionally is safe only when it covers
+                # every current request that participated in the previous
+                # speculative step.  New/prefill rows legitimately default
+                # to one.  A disjoint or partially stale task is retained in
+                # the request-keyed pending map above and must not overwrite
+                # the live batch (the source of the frozen-sequence bug).
+                can_apply_positionally = (
+                    matched > 0
+                    and self._can_apply_cloud_counts_positionally(
+                        num_accepted_values
+                    )
+                )
             else:
                 num_accepted = torch.tensor(
                     num_accepted_values, dtype=torch.int64
@@ -6092,11 +6462,13 @@ class NPUModelRunner(GPUModelRunner):
                     if valid_sampled_values is not None
                     else None
                 )
-            self._apply_cloud_num_accepted_state(
-                scheduler_output,
-                num_accepted,
-                valid_sampled_token_count,
-            )
+                can_apply_positionally = True
+            if can_apply_positionally:
+                self._apply_cloud_num_accepted_state(
+                    scheduler_output,
+                    num_accepted,
+                    valid_sampled_token_count,
+                )
 
         token_tensor_key = (
             "input_embeds"
@@ -6179,6 +6551,9 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output.draft_task_id, None
             )
             self._cloud_draft_position_state_by_task.pop(
+                scheduler_output.draft_task_id, None
+            )
+            self._cloud_target_generation_by_task.pop(
                 scheduler_output.draft_task_id, None
             )
             self._eagle3_cloud_aux_hidden_states_by_task.pop(
