@@ -15,6 +15,7 @@ import torch
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fla.ops.utils import SUPPRESS_LEVEL
 
 from vllm_ascend.ops.gdn_attn_builder import _compact_empty_segments
@@ -31,6 +32,42 @@ from .wy_fast import recompute_w_u_fwd
 
 
 _chunk_probe_guard_used = False
+logger = init_logger(__name__)
+
+
+def _kkt_diag_enabled() -> bool:
+    return os.environ.get("VLLM_ASCEND_GDN_KKT_DIAG", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def _kkt_tensor_diag(name: str, tensor: torch.Tensor) -> str:
+    if tensor is None:
+        return f"{name}=None"
+    try:
+        storage_nbytes = tensor.untyped_storage().nbytes()
+    except Exception:
+        storage_nbytes = -1
+    return (
+        f"{name}:shape={tuple(tensor.shape)} stride={tuple(tensor.stride())} "
+        f"dtype={tensor.dtype} data_ptr={tensor.data_ptr()} "
+        f"storage_ptr={tensor.untyped_storage().data_ptr()} "
+        f"storage_nbytes={storage_nbytes}"
+    )
+
+
+def _kkt_memory_diag() -> str:
+    for backend_name in ("npu", "cuda"):
+        backend = getattr(torch, backend_name, None)
+        if backend is not None and hasattr(backend, "memory_allocated"):
+            try:
+                return (
+                    f"{backend_name}_memory_allocated={backend.memory_allocated()} "
+                    f"{backend_name}_memory_reserved={backend.memory_reserved()}"
+                )
+            except Exception:
+                pass
+    return "memory_stats=unavailable"
 
 
 def _allocate_chunk_probe_guard(
@@ -258,15 +295,37 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             k = l2norm_fwd(k)
         chunk_probe_guard = None
         global _chunk_probe_guard_used
+        probe_enabled = (
+            os.environ.get("VLLM_ASCEND_GDN_PREFILL_PROBE", "")
+            .strip()
+            .lower()
+            == "alloc_chunk_after_l2norm"
+        )
+        if _kkt_diag_enabled():
+            logger.warning(
+                "[GDN-KKT-DIAG] probe_used=%s probe_enabled=%s device=%s %s %s %s %s %s %s",
+                _chunk_probe_guard_used,
+                probe_enabled,
+                q.device,
+                _kkt_memory_diag(),
+                _kkt_tensor_diag("q", q),
+                _kkt_tensor_diag("k", k),
+                _kkt_tensor_diag("v", v),
+                _kkt_tensor_diag("beta", beta),
+                _kkt_tensor_diag("g", g),
+            )
         if (
             not _chunk_probe_guard_used
-            and os.environ.get(
-                "VLLM_ASCEND_GDN_PREFILL_PROBE", ""
-            ).strip().lower()
-            == "alloc_chunk_after_l2norm"
+            and probe_enabled
         ):
             chunk_probe_guard = _allocate_chunk_probe_guard(q, k, v)
             _chunk_probe_guard_used = True
+            if _kkt_diag_enabled():
+                logger.warning(
+                    "[GDN-KKT-DIAG] probe_allocated %s %s",
+                    _kkt_tensor_diag("probe_guard", chunk_probe_guard),
+                    _kkt_memory_diag(),
+                )
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
@@ -279,6 +338,14 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             prebuilt_meta=prebuilt_meta,
         )
+        if _kkt_diag_enabled():
+            logger.warning(
+                "[GDN-KKT-DIAG] completed %s %s %s %s",
+                _kkt_tensor_diag("A", A),
+                _kkt_tensor_diag("final_state", final_state),
+                _kkt_memory_diag(),
+                "probe_released=True",
+            )
         del chunk_probe_guard
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
