@@ -9,12 +9,53 @@
 # ruff: noqa: E501
 # mypy: ignore-errors
 
+import os
+
 import torch
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 
 from vllm_ascend.ops.triton.triton_utils import extract_slice, insert_slice
 
 from .utils import prepare_chunk_indices
+
+
+logger = init_logger(__name__)
+
+
+def _kkt_diag_enabled() -> bool:
+    return os.environ.get("VLLM_ASCEND_GDN_KKT_DIAG", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def _workspace_diag(
+    name: str,
+    tensor: torch.Tensor,
+    *,
+    required_shape: tuple[int, ...],
+    launch_grid: tuple[int, int],
+    launch_heads: int,
+) -> str:
+    required_numel = 1
+    for dim in required_shape:
+        required_numel *= dim
+    element_size = tensor.element_size()
+    storage_numel = tensor.untyped_storage().nbytes() // element_size
+    storage_end = tensor.storage_offset() + required_numel
+    logical_ok = tuple(tensor.shape) == required_shape
+    storage_ok = storage_end <= storage_numel
+    allocated_heads = tensor.shape[2] if tensor.ndim >= 3 else -1
+    status = logical_ok and storage_ok and allocated_heads == launch_heads
+    return (
+        f"workspace_status={'PASS' if status else 'MISMATCH'} name={name} "
+        f"required_shape={required_shape} actual_shape={tuple(tensor.shape)} "
+        f"launch_grid={launch_grid} launch_heads={launch_heads} "
+        f"allocated_heads={allocated_heads} required_numel={required_numel} "
+        f"logical_numel={tensor.numel()} storage_offset={tensor.storage_offset()} "
+        f"storage_numel={storage_numel} required_bytes={required_numel * element_size} "
+        f"storage_bytes={tensor.untyped_storage().nbytes()}"
+    )
 
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
@@ -363,6 +404,19 @@ def solve_tril(
     chunk_indices = chunk_indices_large_block
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, LARGE_BLOCK_T)
 
+    if _kkt_diag_enabled():
+        logger.warning(
+            "[GDN-KKT-DIAG] stage=before_solve16 %s input_A_heads=%s",
+            _workspace_diag(
+                "Ad",
+                Ad,
+                required_shape=(B, T, H, 16),
+                launch_grid=(NT, B * H),
+                launch_heads=H,
+            ),
+            A.shape[2],
+        )
+
     from vllm_ascend.device.device_op import DeviceOperator
 
     DeviceOperator.solve_tril_16x16(
@@ -387,6 +441,20 @@ def solve_tril(
         chunk_indices_bt = prepare_chunk_indices(cu_seqlens, BT)
     chunk_indices = chunk_indices_bt
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
+
+    if _kkt_diag_enabled():
+        logger.warning(
+            "[GDN-KKT-DIAG] stage=before_solve_merge %s input_A_heads=%s input_Ad_heads=%s",
+            _workspace_diag(
+                "Ai",
+                Ai,
+                required_shape=(B, T, H, BT),
+                launch_grid=(NT, B * H),
+                launch_heads=H,
+            ),
+            A.shape[2],
+            Ad.shape[2],
+        )
 
     merge_fn[NT, B * H](
         A=A,

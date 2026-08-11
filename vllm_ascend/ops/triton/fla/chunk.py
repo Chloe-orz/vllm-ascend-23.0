@@ -87,6 +87,58 @@ def _kkt_value_diag(name: str, tensor: torch.Tensor) -> str:
         return f"{name}:value_diag_error={type(exc).__name__}:{exc}"
 
 
+def _kkt_per_head_value_diag(name: str, tensor: torch.Tensor) -> str:
+    """Summarize [B, T, H, ...] values separately for every head."""
+    if tensor is None or tensor.ndim < 3:
+        return f"{name}_per_head=unavailable"
+    try:
+        values = tensor.detach().float().movedim(2, 0).flatten(1)
+        nonfinite = (~torch.isfinite(values)).sum(dim=1)
+        finite_abs = torch.where(torch.isfinite(values), values.abs(), 0)
+        abs_max = finite_abs.amax(dim=1)
+        return (
+            f"{name}_head_abs_max={abs_max.tolist()} "
+            f"{name}_head_nonfinite={nonfinite.tolist()}"
+        )
+    except Exception as exc:
+        return f"{name}_per_head_diag_error={type(exc).__name__}:{exc}"
+
+
+def _kkt_head_diag(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    beta: torch.Tensor,
+    g: torch.Tensor,
+) -> str:
+    """Describe the value-head to key-head mapping used by the KKT kernel."""
+    q_heads = q.shape[2]
+    k_heads = k.shape[2]
+    value_heads = v.shape[2]
+    beta_heads = beta.shape[2]
+    gate_heads = g.shape[2]
+    divisible = k_heads > 0 and beta_heads % k_heads == 0
+    group_size = beta_heads // k_heads if divisible else -1
+    max_k_head = (
+        (beta_heads - 1) // group_size
+        if beta_heads > 0 and group_size > 0
+        else -1
+    )
+    shapes_match = (
+        q_heads == k_heads
+        and value_heads == beta_heads == gate_heads
+        and divisible
+        and max_k_head < k_heads
+    )
+    return (
+        f"head_mapping_status={'PASS' if shapes_match else 'MISMATCH'} "
+        f"q_heads={q_heads} k_heads={k_heads} value_heads={value_heads} "
+        f"beta_heads={beta_heads} gate_heads={gate_heads} "
+        f"value_heads_per_k_head={group_size} max_k_head_index={max_k_head} "
+        f"kkt_launch_heads={beta_heads}"
+    )
+
+
 def _allocate_chunk_probe_guard(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -140,7 +192,11 @@ def chunk_gated_delta_rule_fwd(
         output_dtype=torch.float32,
     )
     if _kkt_diag_enabled():
-        logger.warning("[GDN-KKT-DIAG] stage=after_kkt %s", _kkt_value_diag("A", A))
+        logger.warning(
+            "[GDN-KKT-DIAG] stage=after_kkt %s %s",
+            _kkt_value_diag("A", A),
+            _kkt_per_head_value_diag("A", A),
+        )
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
@@ -149,7 +205,11 @@ def chunk_gated_delta_rule_fwd(
         output_dtype=k.dtype,
     )
     if _kkt_diag_enabled():
-        logger.warning("[GDN-KKT-DIAG] stage=after_solve %s", _kkt_value_diag("A", A))
+        logger.warning(
+            "[GDN-KKT-DIAG] stage=after_solve %s %s",
+            _kkt_value_diag("A", A),
+            _kkt_per_head_value_diag("A", A),
+        )
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -331,7 +391,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         )
         if _kkt_diag_enabled():
             logger.warning(
-                "[GDN-KKT-DIAG] probe_used=%s probe_enabled=%s device=%s %s %s %s %s %s %s",
+                "[GDN-KKT-DIAG] probe_used=%s probe_enabled=%s device=%s %s %s %s %s %s %s %s",
                 _chunk_probe_guard_used,
                 probe_enabled,
                 q.device,
@@ -341,6 +401,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
                 _kkt_tensor_diag("v", v),
                 _kkt_tensor_diag("beta", beta),
                 _kkt_tensor_diag("g", g),
+                _kkt_head_diag(q, k, v, beta, g),
             )
         if (
             not _chunk_probe_guard_used

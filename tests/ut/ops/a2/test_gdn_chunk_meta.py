@@ -16,7 +16,7 @@
 import pytest
 import torch
 
-from vllm_ascend.ops.triton.fla import chunk, chunk_o, chunk_o_update
+from vllm_ascend.ops.triton.fla import chunk, chunk_o, chunk_o_update, solve_tril
 from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
@@ -91,6 +91,37 @@ def _patch_missing_cdiv(monkeypatch: pytest.MonkeyPatch, module) -> None:
         lambda x, y: (x + y - 1) // y,
         raising=False,
     )
+
+
+def test_kkt_head_diag_reports_grouped_head_mapping():
+    q = torch.empty(1, 14, 8, 128)
+    k = torch.empty_like(q)
+    v = torch.empty(1, 14, 24, 128)
+    beta = torch.empty(1, 14, 24)
+    g = torch.empty_like(beta)
+
+    diag = chunk._kkt_head_diag(q, k, v, beta, g)
+
+    assert "head_mapping_status=PASS" in diag
+    assert "value_heads_per_k_head=3" in diag
+    assert "max_k_head_index=7" in diag
+    assert "kkt_launch_heads=24" in diag
+
+
+def test_workspace_diag_reports_head_mismatch():
+    workspace = torch.empty(1, 14, 8, 16)
+
+    diag = solve_tril._workspace_diag(
+        "Ad",
+        workspace,
+        required_shape=(1, 14, 24, 16),
+        launch_grid=(1, 24),
+        launch_heads=24,
+    )
+
+    assert "workspace_status=MISMATCH" in diag
+    assert "launch_heads=24" in diag
+    assert "allocated_heads=8" in diag
 
 
 @pytest.mark.parametrize("target", ["chunk_o", "chunk_o_update"])
