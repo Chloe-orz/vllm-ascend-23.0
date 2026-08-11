@@ -329,6 +329,36 @@ class TestNPUModelRunnerEdgeCloudGraphCapture(unittest.TestCase):
         )
 
 
+class TestNPUModelRunnerLayerwiseAuxOutput(unittest.TestCase):
+    def test_preserves_intermediate_tensors(self):
+        intermediate = IntermediateTensors(
+            {
+                "hidden_states": torch.randn(2, 4),
+                "residual": torch.randn(2, 4),
+            }
+        )
+
+        result = NPUModelRunner._unwrap_layerwise_aux_output(intermediate)
+
+        self.assertIs(result, intermediate)
+
+    def test_unwraps_final_hidden_state_pair(self):
+        hidden_states = torch.randn(2, 4)
+        aux_hidden_states = [torch.randn(2, 4)]
+
+        result = NPUModelRunner._unwrap_layerwise_aux_output(
+            (hidden_states, aux_hidden_states)
+        )
+
+        self.assertIs(result, hidden_states)
+
+    def test_rejects_malformed_hidden_state_pair(self):
+        with self.assertRaisesRegex(RuntimeError, "must contain two items"):
+            NPUModelRunner._unwrap_layerwise_aux_output(
+                (torch.randn(2, 4),)
+            )
+
+
 class TestNPUModelRunnerKVCache(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)

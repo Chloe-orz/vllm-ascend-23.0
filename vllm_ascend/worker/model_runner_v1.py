@@ -8504,7 +8504,9 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("layerwise post process"):
             if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = hidden_states
+                hidden_states = self._unwrap_layerwise_aux_output(
+                    hidden_states
+                )
             if self.pcp_size > 1:
                 hidden_states = self.pcp_manager.get_restore_hidden_states(
                     hidden_states
@@ -8570,6 +8572,28 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.kv_connector_output = kv_connector_output
             return None
+
+    @staticmethod
+    def _unwrap_layerwise_aux_output(model_output: Any) -> Any:
+        """Keep slice intermediates intact and unwrap final Eagle3 output."""
+        if isinstance(model_output, IntermediateTensors):
+            return model_output
+        if not isinstance(model_output, (tuple, list)):
+            raise RuntimeError(
+                "Layerwise Eagle3 output must be IntermediateTensors or a "
+                f"hidden-state pair, got {type(model_output).__name__}"
+            )
+        if len(model_output) != 2:
+            raise RuntimeError(
+                "Layerwise Eagle3 hidden-state output must contain two items, "
+                f"got {len(model_output)}"
+            )
+        hidden_states, _ = model_output
+        if not torch.is_tensor(hidden_states):
+            raise RuntimeError(
+                "Layerwise Eagle3 primary hidden states must be a tensor"
+            )
+        return hidden_states
 
     def suspend_head_state(self, scheduler_output: SchedulerOutput) -> None:
         """Suspend the minimal head-segment context for later tail-segment pairing.
