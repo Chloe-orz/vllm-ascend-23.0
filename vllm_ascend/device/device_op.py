@@ -993,7 +993,7 @@ class BaseDeviceAdaptor:
             num_core=num_core,
             num_warps=8,
             num_stages=3,
-            multibuffer=True,
+            multibuffer=False,
         )
 
         return A
@@ -1896,7 +1896,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             num_core=num_core,
             num_warps=8,
             num_stages=3,
-            multibuffer=True,
+            multibuffer=False,
             disable_tightly_coupled_buffer_reuse=True,
         )
         return A
