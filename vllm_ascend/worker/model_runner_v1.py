@@ -2623,6 +2623,12 @@ class NPUModelRunner(GPUModelRunner):
                 or self.use_async_spec_decode
             )
         )
+        # Locals consumed unconditionally below (pcp rebuild,
+        # async_spec_decode_active check, mrope drift). Bind them to None
+        # when the tail sync is skipped so those reads see "no correction
+        # available" instead of raising UnboundLocalError.
+        valid_sampled_token_count_gpu = None
+        computed_token_tensor_cpu = None
         if not _skip_tail_sync:
             valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
             if self.use_async_spec_decode:
@@ -2747,7 +2753,14 @@ class NPUModelRunner(GPUModelRunner):
                 self.positions[:total_num_scheduled_tokens],
             )
 
-        if self.use_async_spec_decode and (self.uses_mrope or self.uses_xdrope_dim > 0):
+        if (
+            self.use_async_spec_decode
+            and (self.uses_mrope or self.uses_xdrope_dim > 0)
+            # None when the tail sync was skipped above: num_computed_tokens
+            # already holds the head-corrected values, so there is no drift
+            # to apply (and no CPU baseline to diff against).
+            and computed_token_tensor_cpu is not None
+        ):
             drift = self.num_computed_tokens[req_indices_gpu].to(
                 torch.int64
             ) - computed_token_tensor_cpu[req_indices_gpu]
@@ -6196,6 +6209,23 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_gpu = (
                 valid_sampled_token_count.to(self.device)
             )
+            # [PD-FIX] The cloud never samples, so
+            # _copy_valid_sampled_token_count never runs here and
+            # valid_sampled_token_count_cpu stays at its uninitialized
+            # torch.empty allocation.  The next verify's
+            # _correct_optimistic_seq_lens_cpu reads it to correct the
+            # optimistic seq_lens; garbage there produces a wrong (too
+            # short) or wild actual_seq_lengths_kv for FIA -- wrong
+            # attention outputs in the first case, a device-side MTE
+            # out-of-range fault (wedge/hang) in the second.  Populate it
+            # from the edge-stamped authoritative value and record the
+            # event so the correction's synchronize() is well-ordered.
+            if self.valid_sampled_token_count_cpu is not None:
+                self.valid_sampled_token_count_cpu[:num_reqs].copy_(
+                    valid_sampled_token_count
+                )
+            if self.valid_sampled_token_count_event is not None:
+                self.valid_sampled_token_count_event.record()
             self.input_batch.prev_req_id_to_index = {
                 req_id: i
                 for i, req_id in enumerate(self.input_batch.req_ids)
