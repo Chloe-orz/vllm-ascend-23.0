@@ -28,6 +28,31 @@ from .solve_tril import solve_tril
 from .utils import input_guard, prepare_final_chunk_indices
 from .wy_fast import recompute_w_u_fwd
 
+_chunk_probe_guard_used = False
+
+
+def _allocate_chunk_probe_guard(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> torch.Tensor:
+    """Reserve the workspace size that avoids the first-request KKT issue."""
+    return q.new_empty(q.numel() + k.numel() + v.numel())
+
+
+def _allocate_chunk_probe_guard_once(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+) -> torch.Tensor | None:
+    """Reserve the first-request workspace once per process."""
+    global _chunk_probe_guard_used
+    if _chunk_probe_guard_used:
+        return None
+    chunk_probe_guard = _allocate_chunk_probe_guard(q, k, v)
+    _chunk_probe_guard_used = True
+    return chunk_probe_guard
+
 
 def chunk_gated_delta_rule_fwd(
     q: torch.Tensor,
@@ -243,6 +268,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
+        chunk_probe_guard = _allocate_chunk_probe_guard_once(q, k, v)
         g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
             q=q,
             k=k,
@@ -255,6 +281,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             cu_seqlens=cu_seqlens,
             prebuilt_meta=prebuilt_meta,
         )
+        del chunk_probe_guard
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
         return o.to(q.dtype), final_state
