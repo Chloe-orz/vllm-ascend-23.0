@@ -256,6 +256,13 @@ def get_tp_context(drafter):
 # (that check only prints on violation).
 _DSA_BOUNDARY_PROBE_LEVEL = int(os.environ.get("VLLM_ASCEND_DSA_PROBE", "0"))
 
+# [DSA-WATCH] Set VLLM_ASCEND_DSA_WATCH=1 to detect output anomalies at
+# runtime (CJK token in an English-only eval, or >=8 consecutive repeats
+# of one token) and dump the request's onset + recent boundary events
+# immediately when one fires.
+_DSA_ANOMALY_WATCH = os.environ.get("VLLM_ASCEND_DSA_WATCH", "0") == "1"
+_DSA_WATCH_REPEAT_THRESHOLD = 8
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -1452,13 +1459,18 @@ class NPUModelRunner(GPUModelRunner):
         (seq_len at corruption onset) with these events to confirm or
         refute the boundary hypothesis.  Gate with VLLM_ASCEND_DSA_PROBE.
         """
-        if not _DSA_BOUNDARY_PROBE_LEVEL or not self.use_compress:
+        if not (_DSA_BOUNDARY_PROBE_LEVEL or _DSA_ANOMALY_WATCH):
+            return
+        if not self.use_compress:
             return
         num_reqs = self.input_batch.num_reqs
         if num_reqs == 0:
             return
         block_size = self.block_size
         verbose = _DSA_BOUNDARY_PROBE_LEVEL >= 2
+        # When only the anomaly watch is enabled, maintain the per-request
+        # event rings without printing each event line.
+        log_events = _DSA_BOUNDARY_PROBE_LEVEL > 0
         # Track scheduling continuity per request: gap>1 means the request
         # was unscheduled (evicted / preempted) for gap-1 steps before this
         # one -- the batch-churn signature we want to correlate with
@@ -1485,19 +1497,131 @@ class NPUModelRunner(GPUModelRunner):
                 events.append(f"COMPRESS-WRITE(row={cur // 4 - 1})")
             if events:
                 gap = step - last_seen.get(req_id, step - 1)
-                logger.info(
-                    "[DSA-BDY] req=%s row=%d seq %d->%d events=%s "
-                    "gap=%d batch_reqs=%d",
-                    req_id,
-                    i,
-                    prev,
-                    cur,
-                    ",".join(events),
-                    gap,
-                    num_reqs,
+                if log_events:
+                    logger.info(
+                        "[DSA-BDY] req=%s row=%d seq %d->%d events=%s "
+                        "gap=%d batch_reqs=%d",
+                        req_id,
+                        i,
+                        prev,
+                        cur,
+                        ",".join(events),
+                        gap,
+                        num_reqs,
+                    )
+                # Keep a small per-request ring of boundary events so the
+                # [DSA-WATCH] anomaly dump can show them in context.
+                rings = getattr(self, "_dsa_bdy_rings", None)
+                if rings is None:
+                    rings = self._dsa_bdy_rings = {}
+                ring = rings.setdefault(req_id, [])
+                ring.append(
+                    f"step={step} seq {prev}->{cur} "
+                    f"events={','.join(events)} gap={gap} "
+                    f"batch_reqs={num_reqs}"
                 )
+                if len(ring) > 8:
+                    ring.pop(0)
         for req_id in current_ids:
             last_seen[req_id] = step
+
+    def _dsa_cjk_token_id_set(self) -> set[int]:
+        """Lazily build the set of token ids decoding to CJK/Hangul text.
+
+        One-time O(vocab) scan (~seconds), only when VLLM_ASCEND_DSA_WATCH
+        is on.  In an English-only eval any such token in the output is a
+        corruption signature.
+        """
+        ids = getattr(self, "_dsa_cjk_ids", None)
+        if ids is None:
+            from vllm.transformers_utils.tokenizer import get_tokenizer
+
+            tok = get_tokenizer(self.model_config.tokenizer)
+            ids = set()
+            for tid in range(len(tok)):
+                try:
+                    text = tok.decode([tid])
+                except Exception:
+                    continue
+                if any(
+                    "一" <= ch <= "鿿" or "가" <= ch <= "힯"
+                    for ch in text
+                ):
+                    ids.add(tid)
+            self._dsa_cjk_ids = ids
+            logger.info(
+                "[DSA-WATCH] suspicious token set built: %d CJK/Hangul ids",
+                len(ids),
+            )
+        return ids
+
+    def _dsa_dump_anomaly(
+        self, req_id: str, token_id: int, reason: str
+    ) -> None:
+        """Dump full context when the watch fires on a request."""
+        req_state = self.requests.get(req_id)
+        prompt_len = req_state.num_prompt_tokens if req_state else -1
+        n_out = len(req_state.output_token_ids) if req_state else -1
+        # The flagged token is being produced this step, so its position
+        # is prompt_len + (outputs so far).
+        onset = prompt_len + n_out if req_state else -1
+        rings = getattr(self, "_dsa_bdy_rings", {})
+        recent = list(rings.get(req_id, []))
+        logger.warning(
+            "[DSA-WATCH] anomaly on req=%s: %s; onset_seq_len~=%d "
+            "(prompt=%d + outputs=%d); recent boundary events:\n%s",
+            req_id,
+            reason,
+            onset,
+            prompt_len,
+            n_out,
+            "\n".join(recent) if recent else "<none recorded>",
+        )
+
+    def _dsa_watch_sampled_tokens(
+        self, valid_sampled_token_ids: list[list[int]]
+    ) -> None:
+        """[DSA-WATCH] Runtime anomaly detector for decode outputs.
+
+        Flags, per request: a CJK/Hangul token (suspicious in an
+        English-only eval), or the same token repeated >=
+        _DSA_WATCH_REPEAT_THRESHOLD times consecutively (degenerate
+        loop).  On a hit, dumps onset + recent boundary events so a
+        broken request self-reports with full context.  Gate:
+        VLLM_ASCEND_DSA_WATCH=1.  Only meaningful on the sync
+        (non-async-scheduling) sampling path where the lists hold real
+        token ids.
+        """
+        if not _DSA_ANOMALY_WATCH:
+            return
+        state = getattr(self, "_dsa_watch_state", None)
+        if state is None:
+            state = self._dsa_watch_state = {}
+        cjk: set[int] | None = None
+        for req_id, tokens in zip(
+            self.input_batch.req_ids, valid_sampled_token_ids
+        ):
+            if not tokens:
+                continue
+            last, run = state.get(req_id, (None, 0))
+            fired = False
+            for t in tokens:
+                run = run + 1 if t == last else 1
+                last = t
+                if fired:
+                    continue
+                reason = None
+                if run >= _DSA_WATCH_REPEAT_THRESHOLD:
+                    reason = f"repeat x{run} token_id={t}"
+                else:
+                    if cjk is None:
+                        cjk = self._dsa_cjk_token_id_set()
+                    if t in cjk:
+                        reason = f"cjk token_id={t}"
+                if reason is not None:
+                    self._dsa_dump_anomaly(req_id, t, reason)
+                    fired = True  # one dump per request per step
+            state[req_id] = (last, run)
 
     def _prepare_inputs(
         self,
@@ -3765,6 +3889,7 @@ class NPUModelRunner(GPUModelRunner):
                 # Mask out the sampled tokens that should not be sampled.
                 for i in discard_sampled_tokens_req_indices:
                     valid_sampled_token_ids[int(i)].clear()
+                self._dsa_watch_sampled_tokens(valid_sampled_token_ids)
                 if logprobs_tensors is not None:
                     logprobs_lists = logprobs_tensors.tolists()
             else:
