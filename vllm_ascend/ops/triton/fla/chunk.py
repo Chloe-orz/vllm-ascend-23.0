@@ -70,6 +70,23 @@ def _kkt_memory_diag() -> str:
     return "memory_stats=unavailable"
 
 
+def _kkt_value_diag(name: str, tensor: torch.Tensor) -> str:
+    if tensor is None:
+        return f"{name}=None"
+    try:
+        values = tensor.detach().float()
+        finite = torch.isfinite(values)
+        finite_values = values[finite]
+        abs_max = "nan" if finite_values.numel() == 0 else str(finite_values.abs().max().item())
+        mean = "nan" if finite_values.numel() == 0 else str(finite_values.mean().item())
+        return (f"{name}:all_finite={bool(finite.all().item())} "
+                f"nan_count={int(torch.isnan(values).sum().item())} "
+                f"inf_count={int(torch.isinf(values).sum().item())} "
+                f"abs_max={abs_max} mean={mean}")
+    except Exception as exc:
+        return f"{name}:value_diag_error={type(exc).__name__}:{exc}"
+
+
 def _allocate_chunk_probe_guard(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -122,6 +139,8 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices=chunk_indices_chunk64,
         output_dtype=torch.float32,
     )
+    if _kkt_diag_enabled():
+        logger.warning("[GDN-KKT-DIAG] stage=after_kkt %s", _kkt_value_diag("A", A))
     A = solve_tril(
         A=A,
         cu_seqlens=cu_seqlens,
@@ -129,6 +148,8 @@ def chunk_gated_delta_rule_fwd(
         chunk_indices_bt=chunk_indices_chunk64,
         output_dtype=k.dtype,
     )
+    if _kkt_diag_enabled():
+        logger.warning("[GDN-KKT-DIAG] stage=after_solve %s", _kkt_value_diag("A", A))
     w, u = recompute_w_u_fwd(
         k=k,
         v=v,
@@ -138,6 +159,9 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices_chunk64,
     )
+    if _kkt_diag_enabled():
+        logger.warning("[GDN-KKT-DIAG] stage=after_recompute %s %s",
+                       _kkt_value_diag("w", w), _kkt_value_diag("u", u))
 
     k_ascendc = k.to(torch.bfloat16).transpose(1, 2).contiguous()
     w_ascendc = w.to(torch.bfloat16).transpose(1, 2).contiguous()
@@ -182,6 +206,10 @@ def chunk_gated_delta_rule_fwd(
         use_exp2=False,
         transpose_state_layout=False,
     )
+    if _kkt_diag_enabled():
+        logger.warning("[GDN-KKT-DIAG] stage=after_h %s %s",
+                       _kkt_value_diag("v_new", v_new),
+                       _kkt_value_diag("final_state", final_state))
     if keep_meta is not None:
         # Scatter the compacted final_state back to the original [N, H, K, V]
         # layout the PCP state recursion expects; empty segments keep their
