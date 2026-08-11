@@ -2488,6 +2488,32 @@ class NPUModelRunner(GPUModelRunner):
                     self.prev_num_draft_tokens.gpu,
                     computed_token_tensor_cpu,
                 )
+                # Edge-cloud cloud side: rows with no previous-batch mapping
+                # (prev_positions == -1) are skipped by the correction
+                # kernel.  A request that briefly left the cloud batch (e.g.
+                # while its verify placeholder was in flight, or during the
+                # prefill_last_pending -> running migration gap) returns to
+                # a row recycled by condense, whose GPU num_computed still
+                # holds the previous occupant's stale value; the skip then
+                # freezes its attention seq len and the next reads hit
+                # unwritten KV -> NaN (the frozen-request issue).  The
+                # SO-derived CPU value is authoritative for such rows
+                # (brand-new and returning requests alike), so resync them.
+                if (
+                    self._edge_cloud_enabled
+                    and self.edge_cloud_cfg.role == "cloud"
+                    and computed_token_tensor_cpu is not None
+                ):
+                    stale_rows = np.nonzero(
+                        self.prev_positions.np[:num_reqs] < 0
+                    )[0]
+                    if len(stale_rows):
+                        stale_idx = torch.from_numpy(stale_rows).to(
+                            self.device, non_blocking=True
+                        )
+                        self.num_computed_tokens[stale_idx] = (
+                            computed_token_tensor_cpu[stale_idx]
+                        )
             else:
                 self.num_computed_tokens[:num_reqs].copy_(
                     self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
