@@ -75,6 +75,21 @@ class TestNPUModelRunnerEdgeCloudGraphCapture(unittest.TestCase):
 
 
 class TestNPUModelRunnerLayerwiseAuxOutput(unittest.TestCase):
+    def _build_aux_cache_runner(self, uses_aux=True):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._eagle3_cloud_aux_hidden_states = None
+        runner._eagle3_cloud_aux_hidden_states_by_task = {}
+        runner._uses_scheduled_edge_cloud_draft = MagicMock(
+            return_value=True
+        )
+        runner._eagle3_uses_aux_hidden_state = MagicMock(
+            return_value=uses_aux
+        )
+        runner.speculative_config = SimpleNamespace(method="eagle3")
+        runner._last_scheduler_output = None
+        runner._layerwise_scheduler_output = None
+        return runner
+
     def test_preserves_intermediate_tensors(self):
         intermediate = IntermediateTensors(
             {
@@ -102,6 +117,120 @@ class TestNPUModelRunnerLayerwiseAuxOutput(unittest.TestCase):
             NPUModelRunner._unwrap_layerwise_aux_output(
                 (torch.randn(2, 4),)
             )
+
+    def test_accumulates_aux_states_for_the_original_sliced_task(self):
+        runner = self._build_aux_cache_runner()
+        runner._last_scheduler_output = SimpleNamespace(
+            head_token="sliced-target"
+        )
+        runner._layerwise_scheduler_output = SimpleNamespace(
+            head_token="sliced-target"
+        )
+        first_slice = SimpleNamespace(is_first_slice=True)
+        continuation_slice = SimpleNamespace(is_first_slice=False)
+        first_aux = torch.randn(2, 4)
+        last_aux = torch.randn(2, 8)
+
+        runner._cache_eagle3_cloud_aux_hidden_states(
+            first_aux, first_slice
+        )
+        runner._last_scheduler_output = SimpleNamespace(
+            head_token="interleaved-decode"
+        )
+        runner._cache_eagle3_cloud_aux_hidden_states(
+            None, continuation_slice
+        )
+        runner._cache_eagle3_cloud_aux_hidden_states(
+            last_aux, continuation_slice
+        )
+
+        parts = runner._eagle3_cloud_aux_hidden_states_by_task[
+            "sliced-target"
+        ]
+        self.assertIsInstance(parts, list)
+        self.assertIs(parts[0], first_aux)
+        self.assertIs(parts[1], last_aux)
+        actual = NPUModelRunner._combine_eagle3_cloud_aux_hidden_states(
+            parts
+        )
+        torch.testing.assert_close(
+            actual, torch.cat((first_aux, last_aux), dim=-1)
+        )
+        self.assertNotIn(
+            "interleaved-decode",
+            runner._eagle3_cloud_aux_hidden_states_by_task,
+        )
+
+    def test_first_slice_resets_existing_aux_parts(self):
+        runner = self._build_aux_cache_runner()
+        runner._last_scheduler_output = SimpleNamespace(head_token="target")
+        runner._eagle3_cloud_aux_hidden_states_by_task["target"] = [
+            torch.randn(2, 12)
+        ]
+        new_aux = torch.randn(2, 4)
+
+        runner._cache_eagle3_cloud_aux_hidden_states(
+            new_aux, SimpleNamespace(is_first_slice=True)
+        )
+
+        parts = runner._eagle3_cloud_aux_hidden_states_by_task["target"]
+        self.assertEqual(len(parts), 1)
+        self.assertIs(parts[0], new_aux)
+
+    def test_clones_unsliced_graph_output(self):
+        runner = self._build_aux_cache_runner()
+        runner._last_scheduler_output = SimpleNamespace(head_token="target")
+        aux_hidden_states = torch.randn(2, 12)
+
+        runner._cache_eagle3_cloud_aux_hidden_states(
+            aux_hidden_states, None
+        )
+
+        cached = runner._eagle3_cloud_aux_hidden_states_by_task["target"]
+        self.assertIsInstance(cached, torch.Tensor)
+        self.assertIsNot(cached, aux_hidden_states)
+        torch.testing.assert_close(cached, aux_hidden_states)
+
+    def test_rejects_incompatible_slice_shapes(self):
+        with self.assertRaisesRegex(RuntimeError, "incompatible aux"):
+            NPUModelRunner._combine_eagle3_cloud_aux_hidden_states(
+                [torch.randn(2, 4), torch.randn(3, 4)]
+            )
+
+    def test_pop_clears_matching_global_aux_reference(self):
+        runner = self._build_aux_cache_runner()
+        cached = [torch.randn(2, 4)]
+        runner._eagle3_cloud_aux_hidden_states = cached
+        runner._eagle3_cloud_aux_hidden_states_by_task["target"] = cached
+
+        result = runner._pop_eagle3_cloud_aux_hidden_states("target")
+
+        self.assertIs(result, cached)
+        self.assertIsNone(runner._eagle3_cloud_aux_hidden_states)
+        self.assertNotIn(
+            "target", runner._eagle3_cloud_aux_hidden_states_by_task
+        )
+
+    def test_eagle3_without_aux_states_does_not_require_cloud_cache(self):
+        runner = self._build_aux_cache_runner(uses_aux=False)
+        runner._get_edge_cloud_segment_model = MagicMock(
+            return_value=SimpleNamespace(
+                model=SimpleNamespace(use_aux_hidden_state=False)
+            )
+        )
+        intermediate = IntermediateTensors(
+            {"hidden_states": torch.empty(2, 4)}
+        )
+
+        runner._prepare_eagle3_cloud_hidden_states(
+            object(), intermediate, None, 2, is_first_step=True
+        )
+
+        runner._cache_eagle3_cloud_aux_hidden_states(None, None)
+        self.assertIsNone(runner._eagle3_cloud_aux_hidden_states)
+        self.assertEqual(
+            runner._eagle3_cloud_aux_hidden_states_by_task, {}
+        )
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
