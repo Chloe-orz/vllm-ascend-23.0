@@ -59,6 +59,31 @@ BUILD_METADATA_STEP_DECODE = 1
 _DSV4_DSA_OVERLAP_STREAM = None
 
 
+def _dsa_layer_idx(layer_name: str) -> str:
+    parts = layer_name.split(".")
+    return parts[parts.index("layers") + 1]
+
+
+def _dsa_dump(layer_name: str, tag: str, tensor: torch.Tensor) -> None:
+    """[DIAG] Dump intermediate tensors inside the DSA attention forward.
+
+    Shares the trigger/rank/row gates and DSV4_DUMP_LAYERS filter of
+    vllm_ascend.models.deepseek_v4._maybe_dump_hidden.
+    """
+    from vllm_ascend.models.deepseek_v4 import _maybe_dump_hidden
+
+    _maybe_dump_hidden(f"layer{_dsa_layer_idx(layer_name)}_{tag}", tensor)
+
+
+def _dsa_dump_rope(layer_name: str, cos: Any, sin: Any) -> None:
+    """[DIAG] Dump the cos/sin actually consumed by this layer's attention."""
+    if isinstance(cos, dict):
+        cos = cos.get("default", next(iter(cos.values())))
+        sin = sin.get("default", next(iter(sin.values())))
+    _dsa_dump(layer_name, "rope_cos", cos)
+    _dsa_dump(layer_name, "rope_sin", sin)
+
+
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
     global _DSV4_DSA_OVERLAP_STREAM
     if _DSV4_DSA_OVERLAP_STREAM is None:
@@ -1708,6 +1733,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 kv_cache,
                 attn_metadata,
             )  # type: ignore[arg-type]
+            _dsa_dump(layer_name, "attn_core", output_prefill)
             o_proj_input[decode_tokens:actual_tokens] = output_prefill
             cos = attn_metadata[0].prefill.cos[layer_name]
             sin = attn_metadata[0].prefill.sin[layer_name]
@@ -1721,6 +1747,7 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         cos = attn_metadata[0].cos[layer_name]
         sin = attn_metadata[0].sin[layer_name]
+        _dsa_dump_rope(layer_name, cos, sin)
 
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input.unsqueeze(1),
@@ -1729,6 +1756,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
+        _dsa_dump(layer_name, "pre_o_proj", o_proj_input[:actual_tokens])
 
         # o
         self._forward_o_proj(o_proj_input, output)
