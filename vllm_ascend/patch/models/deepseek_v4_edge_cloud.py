@@ -52,6 +52,7 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.models.deepseek_v4 import (
     AscendDeepseekV4ForCausalLM,
     DeepseekV4Model,
+    _maybe_dump_hidden,
 )
 
 
@@ -101,24 +102,29 @@ def _forward_edge_cloud_segment_v4(
         else:
             hidden_states = self.embed_input_ids(input_ids)
         hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)
+        _maybe_dump_hidden("embed", hidden_states)
     else:
         assert intermediate_tensors is not None, (
             "intermediate_tensors required for non-first segment in V4"
         )
         hidden_states = intermediate_tensors["hidden_states"]
+        # 收到的跨段 hidden（edge 尾段 = c2e 负载；cloud 首段 = e2c 负载）
+        _maybe_dump_hidden(f"recv_l{start_layer}", hidden_states)
 
     # ----- Execute layers in [start_layer, end_layer) -----
     # llama_4_scaling is currently None because scaling config is not enabled.
     # When enabled, compute it from config (see DeepseekV4Model.forward).
     llama_4_scaling = None
     residual = None
-    for idx, layer in enumerate(islice(self.layers, start_layer, end_layer)):
+    for idx, layer in enumerate(islice(self.layers, start_layer, end_layer),
+                                start=start_layer):
         hidden_states, residual = layer(
             positions,
             hidden_states,
             residual,
             llama_4_scaling,
         )
+        _maybe_dump_hidden(f"layer{idx}", hidden_states)
 
     # ----- Return intermediate state or final hidden_states -----
     # In the "head-3 / tail-1" edge-cloud scheme, all Hash MoE layers reside
@@ -139,9 +145,10 @@ def _forward_edge_cloud_segment_v4(
         self.hc_head_scale,
         self.hc_head_base,
     )
-
+    _maybe_dump_hidden("post_hc_head", hidden_states)
 
     hidden_states = self.norm(hidden_states)
+    _maybe_dump_hidden("final", hidden_states)
     return hidden_states
 
 

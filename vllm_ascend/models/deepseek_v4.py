@@ -24,6 +24,7 @@
 # limitations under the License.
 #
 import math
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -999,6 +1000,58 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         return hidden_states, residual
+
+
+_DUMP_LAYER_FILTER: str | None = None
+
+
+def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor) -> None:
+    """[DIAG] Dump hidden states for cross-deployment numerical comparison.
+
+    Enabled by creating a trigger file (default /tmp/dsv4_dump_on, override
+    with env DSV4_DUMP_TRIGGER) so it can be armed right before the measured
+    request, skipping warmup/profile forwards.  Only TP rank 0 of each PP
+    stage writes (hidden is TP-replicated after all-reduce).  Decode steps
+    (1 token per request) are skipped by the row-count gate.  Files land in
+    DSV4_DUMP_DIR (default /tmp/dsv4_dump), one per PP rank per tag, with
+    the token count in the name so chunks never overwrite each other.
+
+    Env DSV4_DUMP_LAYERS (e.g. "0,1,2,41") limits which per-layer dumps are
+    written; embed/recv/post_hc_head/final tags are unaffected.  Unset =
+    all layers.
+    """
+    trigger = os.environ.get("DSV4_DUMP_TRIGGER", "/tmp/dsv4_dump_on")
+    if not os.path.exists(trigger):
+        return
+    if hidden_states.shape[0] <= 4:  # decode / tiny steps
+        return
+    global _DUMP_LAYER_FILTER
+    if _DUMP_LAYER_FILTER is None:
+        _DUMP_LAYER_FILTER = os.environ.get("DSV4_DUMP_LAYERS", "")
+    if _DUMP_LAYER_FILTER and tag.startswith("layer"):
+        if tag[len("layer"):] not in _DUMP_LAYER_FILTER.split(","):
+            return
+    from vllm.distributed import get_tp_group
+    if get_tp_group().rank_in_group != 0:
+        return
+    dump_dir = os.environ.get("DSV4_DUMP_DIR", "/tmp/dsv4_dump")
+    os.makedirs(dump_dir, exist_ok=True)
+    pp_rank = get_pp_group().rank_in_group
+    hs = hidden_states.detach()
+    n_rows = hs.shape[0]
+    path = os.path.join(dump_dir, f"pp{pp_rank}_{tag}_n{n_rows}.pt")
+    torch.save(
+        {
+            "tag": tag,
+            "pp_rank": pp_rank,
+            "shape": tuple(hs.shape),
+            "dtype": str(hs.dtype),
+            "hidden": hs.cpu(),
+            "row_sums": hs.float().sum(dim=-1).cpu(),
+        },
+        path,
+    )
+    print(f"[DSV4-DUMP] wrote {path}", flush=True)
 
 
 @support_torch_compile
