@@ -990,13 +990,17 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
+        _maybe_dump_hidden(f"layer{self.layer_idx}_attn_in", hidden_states)
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
+        _maybe_dump_hidden(f"layer{self.layer_idx}_attn_out", hidden_states)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
+        _maybe_dump_hidden(f"layer{self.layer_idx}_mlp_in", hidden_states)
         hidden_states = self.mlp(hidden_states)
+        _maybe_dump_hidden(f"layer{self.layer_idx}_mlp_out", hidden_states)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         return hidden_states, residual
@@ -1029,7 +1033,8 @@ def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor) -> None:
     if _DUMP_LAYER_FILTER is None:
         _DUMP_LAYER_FILTER = os.environ.get("DSV4_DUMP_LAYERS", "")
     if _DUMP_LAYER_FILTER and tag.startswith("layer"):
-        if tag[len("layer"):] not in _DUMP_LAYER_FILTER.split(","):
+        layer_key = tag[len("layer"):].split("_", 1)[0]
+        if layer_key not in _DUMP_LAYER_FILTER.split(","):
             return
     from vllm.distributed import get_tp_group
     if get_tp_group().rank_in_group != 0:
