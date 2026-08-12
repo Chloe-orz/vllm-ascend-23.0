@@ -3788,6 +3788,38 @@ class NPUModelRunner(GPUModelRunner):
             cache size of each layer
         """
         kv_cache_config = deepcopy(kv_cache_config)
+        # [ascend fix] Project the unified kv_cache_config to this PP rank's
+        # local layers.  With a custom VLLM_PP_LAYER_PARTITION (e.g. "3,57,1"),
+        # some kv_cache_groups (DSv4: full-MLA / C128 / SWA groups) may have no
+        # local layers on this rank.  Left in place they would create empty
+        # attn_groups (IndexError on `attn_group[0]` below) and misalign the
+        # positional attn_groups[kv_cache_gid] indexing used at runtime.
+        local_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase))
+        projected_groups = []
+        for group in kv_cache_config.kv_cache_groups:
+            local_names = [
+                n for n in group.layer_names if n in local_attn_layer_names
+            ]
+            if local_names:
+                projected_groups.append(replace(group, layer_names=local_names))
+        if len(projected_groups) < len(kv_cache_config.kv_cache_groups):
+            logger.info_once(
+                "Projected kv_cache_groups to local layers: %d -> %d groups "
+                "on this rank (uneven PP layer partition).",
+                len(kv_cache_config.kv_cache_groups),
+                len(projected_groups),
+                scope="local",
+            )
+        kv_cache_config.kv_cache_groups = projected_groups
+        kv_cache_config.kv_cache_tensors = [
+            replace(
+                t,
+                shared_by=[n for n in t.shared_by if n in local_attn_layer_names],
+            )
+            for t in kv_cache_config.kv_cache_tensors
+            if any(n in local_attn_layer_names for n in t.shared_by)
+        ]
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
         self._mamba_copy_bufs = None

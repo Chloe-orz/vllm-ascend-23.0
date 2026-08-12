@@ -24,6 +24,7 @@
 # limitations under the License.
 #
 import math
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -1001,6 +1002,45 @@ class DeepseekV2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor) -> None:
+    """[DIAG] Dump hidden states for cross-deployment numerical comparison.
+
+    Enabled by creating a trigger file (default /tmp/dsv4_dump_on, override
+    with env DSV4_DUMP_TRIGGER) so it can be armed right before the measured
+    request, skipping warmup/profile forwards.  Only TP rank 0 of each PP
+    stage writes (hidden is TP-replicated after all-reduce).  Decode steps
+    (1 token per request) are skipped by the row-count gate.  Files land in
+    DSV4_DUMP_DIR (default /tmp/dsv4_dump), one per stage per tag, including
+    the token count in the name so chunks never overwrite each other.
+    """
+    trigger = os.environ.get("DSV4_DUMP_TRIGGER", "/tmp/dsv4_dump_on")
+    if not os.path.exists(trigger):
+        return
+    if hidden_states.shape[0] <= 4:  # decode / tiny steps
+        return
+    from vllm.distributed import get_tp_group
+    if get_tp_group().rank_in_group != 0:
+        return
+    dump_dir = os.environ.get("DSV4_DUMP_DIR", "/tmp/dsv4_dump")
+    os.makedirs(dump_dir, exist_ok=True)
+    pp_rank = get_pp_group().rank_in_group
+    hs = hidden_states.detach()
+    n_rows = hs.shape[0]
+    path = os.path.join(dump_dir, f"pp{pp_rank}_{tag}_n{n_rows}.pt")
+    torch.save(
+        {
+            "tag": tag,
+            "pp_rank": pp_rank,
+            "shape": tuple(hs.shape),
+            "dtype": str(hs.dtype),
+            "hidden": hs.cpu(),
+            "row_sums": hs.float().sum(dim=-1).cpu(),
+        },
+        path,
+    )
+    print(f"[DSV4-DUMP] wrote {path}", flush=True)
+
+
 @support_torch_compile
 class DeepseekV4Model(nn.Module):
     fall_back_to_pt_during_load = False
@@ -1130,8 +1170,12 @@ class DeepseekV4Model(nn.Module):
 
         if get_pp_group().is_first_rank:
             hidden_states = hidden_states.unsqueeze(1).repeat(1, self.hc_mult, 1)  # (b, s, h) -> (b, s, c, h)
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            _maybe_dump_hidden("embed", hidden_states)
+        for _layer_idx, layer in enumerate(
+                islice(self.layers, self.start_layer, self.end_layer),
+                start=self.start_layer):
             hidden_states, residual = layer(positions, hidden_states, residual, llama_4_scaling)
+            _maybe_dump_hidden(f"layer{_layer_idx}", hidden_states)
 
         # Stash pre-hc_head residual for the MTP draft (captured copy_).
         # When FlashComm1 (sequence parallelism) is enabled, tokens are
