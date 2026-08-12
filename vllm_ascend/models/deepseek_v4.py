@@ -1009,7 +1009,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 _DUMP_LAYER_FILTER: str | None = None
 
 
-def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor) -> None:
+def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor, *, force: bool = False) -> None:
     """[DIAG] Dump hidden states for cross-deployment numerical comparison.
 
     Enabled by creating a trigger file (default /tmp/dsv4_dump_on, override
@@ -1027,7 +1027,7 @@ def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor) -> None:
     trigger = os.environ.get("DSV4_DUMP_TRIGGER", "/tmp/dsv4_dump_on")
     if not os.path.exists(trigger):
         return
-    if hidden_states.shape[0] <= 4:  # decode / tiny steps
+    if not force and hidden_states.shape[0] <= 4:  # decode / tiny steps
         return
     global _DUMP_LAYER_FILTER
     if _DUMP_LAYER_FILTER is None:
