@@ -417,7 +417,12 @@ def _merge_pending_worker_cleanup(self, scheduler_output: SchedulerOutput) -> No
 
 def _finish_empty_batch(self, scheduler_output: SchedulerOutput):
     """Complete an EMPTY SchedulerOutput without broadcasting to workers."""
-    self._stash_empty_worker_cleanup(scheduler_output)
+    if not getattr(scheduler_output, "_pd_cleanup_stashed", False):
+        # Already-stashed deferred EMPTYs (see _defer_empty_batch) must not
+        # be stashed twice, or the same finished_req_ids would ride a second
+        # real SO later (harmless for the runners -- pops are idempotent --
+        # but needlessly re-delivered to the cloud).
+        self._stash_empty_worker_cleanup(scheduler_output)
     self._process_aborts_queue()
     with (
         self.log_error_detail(scheduler_output),
@@ -436,6 +441,18 @@ def _defer_empty_batch(self, scheduler_output: SchedulerOutput) -> None:
     if deferred is None:
         deferred = []
         self._pd_deferred_empty_batches = deferred
+    # Stash the worker cleanup NOW, not at finish time.  A deferred EMPTY is
+    # popped only once per later result collection, so when traffic drains
+    # with one still queued, its finished_req_ids would otherwise be locked
+    # past the next real SO: the scheduler registry is already clean (the
+    # has_mrope stamp says False) while the edge runner never learns the
+    # finishes, leaving mm req_states in its registry.  The edge head sender
+    # deriving include_mrope from that stale registry then disagrees with
+    # the stamp-driven cloud recv -> mrope wire mismatch -> HCCL deadlock.
+    # The EMPTY batch itself is still finished later, in order; only the
+    # worker-cleanup delivery is advanced.
+    self._stash_empty_worker_cleanup(scheduler_output)
+    scheduler_output._pd_cleanup_stashed = True
     deferred.append(scheduler_output)
 
 

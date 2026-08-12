@@ -696,25 +696,25 @@ class PassiveScheduler:
             return self._pick_draft_batch()
         return self._pick_decode_batch()
 
-    def _ready_prefill_is_sliced_first_block(self) -> bool:
-        if not self.ready_prefills:
-            return False
-        slices = self._slice_for(self.ready_prefills[0])
-        return len(slices) > 1 and isinstance(slices[0], LayerSliceInfo)
-
     def _schedule_by_arrival(self) -> ScheduledBatch:
         prefill_seq = self._arrival_seq(self.ready_prefills[0])
-        decode_seq = self._arrival_seq(self.ready_decodes[0])
+        # ready_decodes may be empty when only drafts are pending -- guard
+        # the indexing or this raises IndexError.
+        decode_seq = (
+            self._arrival_seq(self.ready_decodes[0])
+            if self.ready_decodes
+            else None
+        )
         draft_seq = (
             self._arrival_seq(self.ready_drafts[0])
             if self.ready_drafts
             else None
         )
         # Decodes and drafts share the DECODE hidden channel, so the
-        # "channel work" competing with prefill slice-0 is whichever of
-        # the two arrived first -- an earlier draft must not be
-        # overtaken by a later decode either (same deadlock hazard as
-        # the reverse, see _pick_decode_or_draft_by_arrival).
+        # "channel work" competing with the prefill is whichever of the
+        # two arrived first -- an earlier draft must not be overtaken by
+        # a later decode either (same deadlock hazard as the reverse,
+        # see _pick_decode_or_draft_by_arrival).
         channel_seq = decode_seq
         if draft_seq is not None and (
             channel_seq is None or draft_seq < channel_seq
@@ -726,7 +726,7 @@ class PassiveScheduler:
             return self._build_batch(self.ready_prefills.popleft())
         if channel_seq < prefill_seq:
             logger.info(
-                "[PD-PASSIVE] Decode/draft arrived before prefill slice-0: "
+                "[PD-PASSIVE] Decode/draft arrived before prefill: "
                 "channel_seq=%d, prefill_seq=%d",
                 channel_seq,
                 prefill_seq,
@@ -734,7 +734,7 @@ class PassiveScheduler:
             self._clear_prefill_middle_throttle()
             return self._pick_decode_or_draft_by_arrival()
         logger.info(
-            "[PD-PASSIVE] Prefill slice-0 arrived before decode/draft: "
+            "[PD-PASSIVE] Prefill arrived before decode/draft: "
             "prefill_seq=%d, channel_seq=%d",
             prefill_seq,
             channel_seq,
@@ -753,10 +753,18 @@ class PassiveScheduler:
                 self._start_prefill_middle_throttle()
                 return self._pick_prefill_batch()
             if self.ready_prefills:
-                if (
-                    self.ready_decodes
-                    and self._ready_prefill_is_sliced_first_block()
-                ):
+                # Arrival-order protection applies to EVERY prefill, not
+                # just sliced ones: the deadlock is a worker-FIFO blocking
+                # problem, independent of slicing.  The edge enqueues the
+                # matching PL tail immediately after the PF head (and DL
+                # right after DF), so if the cloud executes a prefill that
+                # arrived LATER than a pending decode/draft, the cloud
+                # blocks on the prefill's e2c payload while the edge's PF
+                # head is stuck behind a tail that waits for that very
+                # decode/draft reply -> cross-side circular wait.  Dispatch
+                # strictly by arrival seq whenever both kinds of work are
+                # pending.
+                if self.ready_decodes or self.ready_drafts:
                     return self._schedule_by_arrival()
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT
@@ -775,6 +783,36 @@ class PassiveScheduler:
             # Decode/Draft in arrival order (shared DECODE channel --
             # see _pick_decode_or_draft_by_arrival).
             if self.ready_drafts or self.ready_decodes:
+                # [INVERSION-HAZARD] 镜像插队告警(本次不改行为,只观测):
+                # 若 ready_prefills 队头的 prefill 比 decode/draft 更早到达,
+                # 此处派发 decode/draft 即构成插队——边侧 PL 随 PF 即刻投递,
+                # 被阻塞的 PL 会卡住 DF head,payload 发不出,cloud 的 decode
+                # recv 永远等不到 → 与 PREFILL 态死锁互为镜像。尚未在现网
+                # 观测到,触发本日志即说明该场景真实存在,届时再修。
+                if self.ready_prefills:
+                    _pf_seq = self._arrival_seq(self.ready_prefills[0])
+                    _dc_seq = (
+                        self._arrival_seq(self.ready_decodes[0])
+                        if self.ready_decodes else None
+                    )
+                    _dr_seq = (
+                        self._arrival_seq(self.ready_drafts[0])
+                        if self.ready_drafts else None
+                    )
+                    _ch_seq = _dc_seq
+                    if _dr_seq is not None and (
+                            _ch_seq is None or _dr_seq < _ch_seq):
+                        _ch_seq = _dr_seq
+                    if (_pf_seq is not None and _ch_seq is not None
+                            and _pf_seq < _ch_seq):
+                        logger.error(
+                            "[PD-PASSIVE][INVERSION-HAZARD] DECODE-state "
+                            "dispatch overtakes an earlier-arrived prefill: "
+                            "prefill_seq=%d, channel_seq=%d -- potential "
+                            "cross-side FIFO deadlock (mirror of the "
+                            "PREFILL-state inversion).",
+                            _pf_seq, _ch_seq,
+                        )
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_PREFILL
                 )
