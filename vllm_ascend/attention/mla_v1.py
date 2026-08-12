@@ -710,6 +710,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     understand this class
     """
 
+    # Capability declaration consumed by the edge segment_e fast path:
+    # this backend refreshes graph-visible attention params through an
+    # explicit content channel (update_graph_params) before every replay,
+    # so it does not rely on address-identity of the attention metadata
+    # and does not need the frozen-snapshot view restore.
+    updates_graph_params_before_replay = True
+
     def __init__(
         self,
         num_heads: int,
