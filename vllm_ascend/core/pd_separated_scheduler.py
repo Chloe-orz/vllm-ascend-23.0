@@ -825,7 +825,23 @@ class PDSeparatedScheduler(Scheduler):
         # dispatched must stay immediately behind that draft tail.  Its real
         # draft token IDs are filled from the worker-local _draft_token_ids
         # buffer when it executes, exactly like native async spec decode.
-        if self.decodes_first_ready:
+        # Dispatch is gated on draft_remote_pending_count == 0 only: the
+        # channel invariant is that no DRAFT_FIRST may still be at the cloud
+        # when a DECODE_FIRST goes out (they use different recv primitives
+        # on the same stream).  Do NOT gate on decode_or_draft_inflight_count
+        # here -- _pick_decode_first_batch() already incremented it when the
+        # placeholder was *created*, so the placeholder would deadlock
+        # against its own accounting.  A real (non-placeholder) DECODE_FIRST
+        # cannot be in flight while a placeholder exists: placeholder
+        # creation requires an active pre-generated draft chain, while
+        # _can_schedule_decode_first() requires no draft work at all.
+        # Gating costs no extra round trip (the placeholder is pre-built);
+        # it only removes the unsafe overlap window.  Fall through to the
+        # normal priority picks while gated.
+        if (
+            self.decodes_first_ready
+            and self.draft_remote_pending_count == 0
+        ):
             return self.decodes_first_ready.popleft()
 
         first_only = self._pick_decode_or_draft_first_only_or_empty()
@@ -848,7 +864,15 @@ class PDSeparatedScheduler(Scheduler):
                 return self._pick_draft_last_batch()
             if self._can_schedule_draft_first():
                 return self._pick_draft_first_batch()
-            if self.decodes_last_ready and self._can_schedule_decode_last():
+            # A queued placeholder DECODE_FIRST already self-posted its tail
+            # into decodes_last_ready at creation time; while the head is
+            # gated above, the tail must not overtake it (the worker would
+            # find no suspended HeadState for it).
+            if (
+                self.decodes_last_ready
+                and not self.decodes_first_ready
+                and self._can_schedule_decode_last()
+            ):
                 return self._pick_decode_last_batch()
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
@@ -861,7 +885,13 @@ class PDSeparatedScheduler(Scheduler):
             return self._pick_draft_last_batch()
         if self._can_schedule_draft_first():
             return self._pick_draft_first_batch()
-        if self.decodes_last_ready and self._can_schedule_decode_last():
+        # Same overtake guard as the IDLE branch above: a queued placeholder
+        # DECODE_FIRST's self-posted tail must wait for its head.
+        if (
+            self.decodes_last_ready
+            and not self.decodes_first_ready
+            and self._can_schedule_decode_last()
+        ):
             return self._pick_decode_last_batch()
         if self._can_schedule_decode_first():
             return self._pick_decode_first_batch()
