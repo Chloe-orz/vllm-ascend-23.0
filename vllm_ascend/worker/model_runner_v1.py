@@ -4830,6 +4830,23 @@ class NPUModelRunner(GPUModelRunner):
                     self._strip_tail_new_block_ids(scheduler_output)
                 )
             else:
+                # The fast path skips _update_states, but the cleanup riding
+                # this tail SO must still be applied: finished_req_ids (and
+                # free_encoder_mm_hashes) can arrive on a tail when their
+                # EMPTY-batch delivery was deferred behind in-flight work.
+                # Without this, finished requests linger in self.requests
+                # (e.g. a drained mm request), corrupting registry scans such
+                # as step_has_multimodal_req for later text-only batches.
+                # Mirrors the removal in the base _update_states; the tail's
+                # own reqs are guaranteed non-finished here (stale tails are
+                # discarded earlier by the EDGE-TAIL-STALE-DISCARD guard).
+                for req_id in scheduler_output.finished_req_ids or ():
+                    self.requests.pop(req_id, None)
+                    self.num_prompt_logprobs.pop(req_id, None)
+                    self.input_batch.remove_request(req_id)
+                for mm_hash in (scheduler_output.free_encoder_mm_hashes
+                                or ()):
+                    self.encoder_cache.pop(mm_hash, None)
                 deferred_state_corrections_fn = None
 
             total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
