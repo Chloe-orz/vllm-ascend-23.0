@@ -1089,11 +1089,38 @@ class NPUWorker(WorkerBase):
         # e2c transfer's dim-0 slicing / SP-gather path.
         # Skip for text-only batches: cloud computes M-RoPE locally then
         # (empty mm_features degrades to 1D, no grid_thw needed), saving
-        # one P2P RTT. include_mrope is derived from the same scheduler_output
-        # the cloud recv uses (step_has_multimodal_req), so both sides agree.
-        include_mrope = self.model_runner.step_has_multimodal_req(
-            scheduler_output
-        )
+        # one P2P RTT.
+        # Match the receiver: the cloud recv side derives include_mrope from
+        # this SO's `has_mrope` stamp (computed by the edge scheduler from its
+        # authoritative request registry).  Do NOT derive it from the edge
+        # runner's local registry: finished_req_ids of drained requests can
+        # still be locked in a deferred EMPTY batch when this head batch
+        # executes, so the local registry LAGS the stamp and would put an
+        # mrope_positions message on the wire that the cloud -- receiving by
+        # the stamp -- never irecv's -> HCCL rendezvous deadlock on the
+        # hidden channel.  Trust the stamp; fall back to the local
+        # computation only when the stamp is absent (older peer).
+        _stamped_mrope = getattr(scheduler_output, "has_mrope", None)
+        if _stamped_mrope is None:
+            include_mrope = self.model_runner.step_has_multimodal_req(
+                scheduler_output
+            )
+        else:
+            include_mrope = _stamped_mrope
+            _local_mrope = self.model_runner.step_has_multimodal_req(
+                scheduler_output
+            )
+            if _local_mrope != include_mrope:
+                logger.warning(
+                    "[PD] edge sender include_mrope divergence: "
+                    "has_mrope stamp=%s but runner-local registry says %s "
+                    "(batch_type=%s, head_token=%s); using the stamp.  The "
+                    "local registry lag (deferred worker cleanup) should be "
+                    "investigated.",
+                    include_mrope, _local_mrope,
+                    scheduler_output.batch_type,
+                    getattr(scheduler_output, "head_token", None),
+                )
         if (include_mrope and self.model_runner.uses_mrope
                 and "hidden_states" in _gathered):
             n = _gathered["hidden_states"].shape[0]
@@ -1125,10 +1152,17 @@ class NPUWorker(WorkerBase):
         """Edge tail segment (PL/DL): recv -> segment_e -> return output."""
         #logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
         channel = self._hidden_channel_for(scheduler_output)
+        # The cloud->edge reply never carries mrope_positions (the c2e meta
+        # is built with uses_mrope=False: only the edge computes M-RoPE and
+        # pushes it to the cloud).  Pass include_mrope=False explicitly so
+        # this recv stays correct if the c2e meta ever gains an mrope key --
+        # with the default True, the edge would irecv a tensor the cloud
+        # never sends and deadlock on the channel.
         tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
             num_tokens=scheduler_output.total_num_scheduled_tokens,
             channel=channel,
             sp_chunk=edge_sp,
+            include_mrope=False,
         )
 
         intermediate_tensors = AsyncIntermediateTensors(
