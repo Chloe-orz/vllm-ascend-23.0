@@ -4102,6 +4102,21 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output
         )
         draft_step_idx = int(scheduler_output.draft_step_idx or 0)
+        # The chain's SchedulerOutputs are frozen copies of the parent
+        # target batch and the context rows are laid out in that batch's
+        # request order.  Both must agree on the request set: a diverged
+        # set means rows would be consumed positionally against the wrong
+        # requests (shifted draft rows), so fail loudly instead.
+        context_req_ids = set(context["req_ids"])
+        so_req_ids = set(scheduler_output.num_scheduled_tokens)
+        if so_req_ids != context_req_ids:
+            raise RuntimeError(
+                "DRAFT step request set diverged from its stashed "
+                f"context: task_id={scheduler_output.draft_task_id} "
+                f"step={draft_step_idx} "
+                f"missing_in_so={sorted(context_req_ids - so_req_ids)} "
+                f"extra_in_so={sorted(so_req_ids - context_req_ids)}"
+            )
         if draft_step_idx > 0:
             return (
                 context["last_draft_token_ids"],
@@ -4403,11 +4418,40 @@ class NPUModelRunner(GPUModelRunner):
             # outputs are discarded here).
             finished_req_ids = context.get("finished_req_ids") or set()
             draft_output_req_ids = set(context["draft_output_req_ids"])
+            draft_rows = self._draft_token_ids.tolist()
+            vocab_size = self.model_config.get_vocab_size()
             for row, req_id in enumerate(self._draft_token_ids_req_ids):
                 if (
                     req_id in finished_req_ids
                     or req_id not in draft_output_req_ids
                 ):
+                    continue
+                bad_ids = [
+                    token_id
+                    for token_id in draft_rows[row]
+                    if not 0 <= token_id < vocab_size
+                ]
+                if bad_ids:
+                    # An out-of-range draft id means this row was computed
+                    # from another request's hidden states/KV (a row
+                    # shift somewhere in the chain).  Feeding it to the
+                    # verify would put an illegal id into input_ids and
+                    # into the rejection sampler, which indexes target
+                    # probs by draft id -> device-side MTE fault (ACL
+                    # 507035).  Drop the row so the verify falls back to
+                    # the native scatter for this request, and report it
+                    # loudly: this signals a chain/batch misalignment
+                    # that must be fixed, not hidden.
+                    logger.error(
+                        "[DRAFT-OUT] task=%s req=%s produced out-of-vocab "
+                        "draft ids %s (row=%s, vocab_size=%d); dropping "
+                        "the row",
+                        scheduler_output.draft_task_id,
+                        req_id,
+                        bad_ids,
+                        draft_rows[row],
+                        vocab_size,
+                    )
                     continue
                 self._worker_draft_token_ids_by_req[req_id] = (
                     self._draft_token_ids[row]
@@ -4415,7 +4459,7 @@ class NPUModelRunner(GPUModelRunner):
             logger.info(
                 "[DRAFT-OUT] task=%s drafts=%s",
                 scheduler_output.draft_task_id,
-                self._draft_token_ids.tolist(),
+                draft_rows,
             )
         else:
             logger.info(
@@ -6726,7 +6770,7 @@ class NPUModelRunner(GPUModelRunner):
                 id2idx = self.input_batch.req_id_to_index
                 n_rows = len(self.input_batch.req_ids)
                 num_accepted = torch.ones(n_rows, dtype=torch.int64)
-                unmapped = 0
+                unmapped_reqs: list[str] = []
                 matched = 0
                 for rid, v in num_accepted_values.items():
                     j = id2idx.get(rid)
@@ -6734,7 +6778,7 @@ class NPUModelRunner(GPUModelRunner):
                         num_accepted[j] = v
                         matched += 1
                     else:
-                        unmapped += 1
+                        unmapped_reqs.append(rid)
                 if valid_sampled_values is not None:
                     valid_sampled_token_count = torch.ones(
                         n_rows, dtype=torch.int64
@@ -6745,13 +6789,20 @@ class NPUModelRunner(GPUModelRunner):
                             valid_sampled_token_count[j] = v
                 else:
                     valid_sampled_token_count = None
-                if unmapped:
-                    logger.warning(
-                        "[CLOUD-MAP-DEBUG] task=%s dropped %d/%d counts for "
-                        "requests absent from the cloud batch",
+                if unmapped_reqs:
+                    # Chain-referenced finishes are withheld from the
+                    # cloud until the chain releases them, so a request
+                    # covered by this task should still own a row here.
+                    # An absent row means the cloud batch was re-sliced
+                    # under an in-flight chain -- the misalignment this
+                    # task's whole-batch metadata cannot absorb.
+                    logger.error(
+                        "[CLOUD-MAP] task=%s dropped %d/%d counts for "
+                        "requests absent from the cloud batch: %s",
                         getattr(scheduler_output, "draft_task_id", None),
-                        unmapped,
+                        len(unmapped_reqs),
                         len(num_accepted_values),
+                        unmapped_reqs,
                     )
                 # Applying a task positionally is safe only when it covers
                 # every current request that participated in the previous
