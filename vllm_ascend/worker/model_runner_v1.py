@@ -8455,10 +8455,10 @@ class NPUModelRunner(GPUModelRunner):
                     max_actual_tokens = self.max_num_tokens
                     if enable_sp():
                         max_actual_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
-                    self.intermediate_tensors = (
-                        self._make_empty_edge_cloud_intermediate_tensors(
-                            batch_size=max_actual_tokens,
-                        )
+                    self.intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                        batch_size=max_actual_tokens,
+                        dtype=self.dtype,
+                        device=self.device,
                     )
                 intermediate_tensors = IntermediateTensors(
                     {k: v[:intermediate_tokens] for k, v in self.intermediate_tensors.items()}
