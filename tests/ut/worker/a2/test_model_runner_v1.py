@@ -5,10 +5,14 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.v1.core.sched.output import BatchType
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import (
+    CloudPendingRequestCorrection,
+    NPUModelRunner,
+)
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
@@ -512,6 +516,170 @@ class TestPendingSampledTokenMapping(unittest.TestCase):
         self.assertEqual(
             runner.input_batch.prev_req_id_to_index,
             {"req-a": 0, "req-b": 1},
+        )
+
+
+class TestCloudRequestCorrections(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._edge_cloud_enabled = True
+        runner.edge_cloud_cfg = SimpleNamespace(role="cloud")
+        runner._uses_scheduled_edge_cloud_draft = MagicMock(
+            return_value=True
+        )
+        runner.input_batch = SimpleNamespace(
+            req_ids=["req-b", "req-a"],
+            req_id_to_index={"req-b": 0, "req-a": 1},
+            num_computed_tokens_cpu=np.array(
+                [204, 104], dtype=np.int32
+            ),
+            num_accepted_tokens_cpu=np.ones(2, dtype=np.int32),
+        )
+        runner.requests = {
+            "req-a": SimpleNamespace(num_computed_tokens=104),
+            "req-b": SimpleNamespace(num_computed_tokens=204),
+        }
+        runner._cloud_latest_target_generation_by_req = {
+            "req-a": 7,
+            "req-b": 8,
+        }
+        runner._cloud_pending_request_corrections = {
+            "req-a": CloudPendingRequestCorrection(
+                task_id="task-a",
+                generation=7,
+                num_draft_tokens=3,
+                optimistic_num_computed_tokens=104,
+                actual_num_computed_tokens=102,
+                valid_sampled_token_count=2,
+                num_accepted_tokens=2,
+            ),
+            "req-b": CloudPendingRequestCorrection(
+                task_id="task-b",
+                generation=8,
+                num_draft_tokens=3,
+                optimistic_num_computed_tokens=204,
+                actual_num_computed_tokens=201,
+                valid_sampled_token_count=1,
+                num_accepted_tokens=1,
+            ),
+        }
+        return runner
+
+    def test_consumes_by_request_identity_after_batch_reorder(self):
+        runner = self._build_runner()
+        scheduler_output = SimpleNamespace(
+            batch_type=BatchType.DECODE_FIRST
+        )
+
+        applied = runner._consume_cloud_request_corrections(
+            scheduler_output,
+            {"req-a": 3, "req-b": 3},
+        )
+
+        self.assertTrue(applied)
+        np.testing.assert_array_equal(
+            runner.input_batch.num_computed_tokens_cpu,
+            np.array([201, 102], dtype=np.int32),
+        )
+        np.testing.assert_array_equal(
+            runner.input_batch.num_accepted_tokens_cpu,
+            np.array([1, 2], dtype=np.int32),
+        )
+        self.assertEqual(
+            runner.requests["req-a"].num_computed_tokens, 102
+        )
+        self.assertEqual(
+            runner.requests["req-b"].num_computed_tokens, 201
+        )
+        self.assertFalse(runner._cloud_pending_request_corrections)
+
+    def test_incomplete_state_does_not_partially_modify_batch(self):
+        runner = self._build_runner()
+        runner._cloud_pending_request_corrections.pop("req-b")
+        original_computed = (
+            runner.input_batch.num_computed_tokens_cpu.copy()
+        )
+        scheduler_output = SimpleNamespace(
+            batch_type=BatchType.DECODE_FIRST
+        )
+
+        applied = runner._consume_cloud_request_corrections(
+            scheduler_output,
+            {"req-a": 3, "req-b": 3},
+        )
+
+        self.assertFalse(applied)
+        np.testing.assert_array_equal(
+            runner.input_batch.num_computed_tokens_cpu,
+            original_computed,
+        )
+        self.assertIn(
+            "req-a", runner._cloud_pending_request_corrections
+        )
+
+    def test_records_only_spec_requests_from_task_snapshot(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        target_output = SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req-a", "req-prefill"],
+                num_computed_tokens=[100, 20],
+            ),
+            scheduled_new_reqs=[],
+            scheduled_spec_decode_tokens={"req-a": [11, 12, 13]},
+            num_scheduled_tokens={"req-a": 4, "req-prefill": 8},
+        )
+        runner._cloud_scheduler_output_by_task = {
+            "task-a": target_output
+        }
+        runner._cloud_draft_position_state_by_task = {
+            "task-a": SimpleNamespace(
+                req_ids=("req-a", "req-prefill"),
+                actual_num_computed_tokens=(98, 20),
+            )
+        }
+        runner._cloud_target_generation_by_task = {"task-a": 9}
+        runner._cloud_latest_target_generation_by_req = {
+            "req-a": 9,
+            "req-prefill": 9,
+        }
+        runner._cloud_pending_request_corrections = {}
+        runner._cloud_actual_num_computed_by_req = {}
+        scheduler_output = SimpleNamespace(draft_task_id="task-a")
+
+        recorded = runner._record_cloud_request_corrections(
+            scheduler_output,
+            {"req-a": 2, "req-prefill": 1},
+            {"req-a": 2, "req-prefill": 1},
+        )
+
+        self.assertEqual(recorded, 1)
+        correction = runner._cloud_pending_request_corrections[
+            "req-a"
+        ]
+        self.assertEqual(correction.optimistic_num_computed_tokens, 104)
+        self.assertEqual(correction.actual_num_computed_tokens, 100)
+        self.assertNotIn(
+            "req-prefill", runner._cloud_pending_request_corrections
+        )
+
+    def test_disjoint_task_cannot_overwrite_current_spec_batch(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.input_batch = SimpleNamespace(req_ids=["req-a", "req-b"])
+        runner.requests = {
+            "req-a": SimpleNamespace(prev_num_draft_len=3),
+            "req-b": SimpleNamespace(prev_num_draft_len=3),
+        }
+
+        self.assertFalse(
+            runner._can_apply_cloud_counts_positionally({"req-c": 1})
+        )
+        self.assertFalse(
+            runner._can_apply_cloud_counts_positionally({"req-a": 4})
+        )
+        self.assertTrue(
+            runner._can_apply_cloud_counts_positionally(
+                {"req-a": 4, "req-b": 2}
+            )
         )
 
 

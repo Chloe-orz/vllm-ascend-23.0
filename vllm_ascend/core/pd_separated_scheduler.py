@@ -390,12 +390,96 @@ class PDSeparatedScheduler(Scheduler):
         # the cloud model runner can purge the entries instead of
         # leaking them until the bounded cache evicts.
         self._pending_cloud_draft_invalidations: list[str] = []
+        # Finishes deliberately withheld from the cloud: the edge keeps a
+        # finished-but-chain-referenced request in self.requests and
+        # retains its KV blocks, but upstream _free_request has already
+        # added it to finished_req_ids, so the next published FIRST batch
+        # would tell the cloud runner to remove the row mid-chain.  The
+        # cloud's cached whole-batch draft metadata (block tables, seq
+        # lens, positions) is laid out by the batch at chain creation;
+        # removing a row condenses the live batch and shifts every
+        # positional lookup behind it (recycled rows reading another
+        # request's KV -> shifted/garbage draft rows).  Withhold the
+        # finish on the cloud-bound copy until the chain releases the
+        # request, then re-emit it on the next published batch.
+        self._cloud_withheld_finished_req_ids: set[str] = set()
+        self._cloud_released_finished_req_ids: set[str] = set()
 
     def invalidate_cloud_draft_tasks(self, task_ids: list[str]) -> None:
         """Queue cloud-side draft metadata invalidations (edge only)."""
         if not self._edge_cloud_draft_retention_enabled:
             return
         self._pending_cloud_draft_invalidations.extend(task_ids)
+
+    def filter_cloud_finished_req_ids(
+        self, finished_req_ids: set[str]
+    ) -> set[str]:
+        """Compute the finished_req_ids a cloud-bound batch should carry.
+
+        The edge retains finished requests that are still referenced by an
+        in-flight draft chain (see _free_request): their KV blocks stay
+        allocated and they remain in self.requests until the chain
+        releases them.  The cloud must apply the SAME retention for its
+        batch rows: its cached whole-batch draft metadata is laid out by
+        the batch at chain creation, so removing a row mid-chain shifts
+        every positional lookup behind it (condense recycles the row for
+        another request, and later chain steps then read/write the wrong
+        request's KV -- observed as shifted/garbage draft rows and
+        verify-time device faults).  Withhold such finishes here and
+        re-emit them once release_draft_retained_blocks() drops the last
+        referencing task.
+
+        Only the published copy is filtered; the edge worker keeps
+        receiving the unmodified SchedulerOutput and cleans up its own
+        batch immediately, exactly as before.
+        """
+        if not self._edge_cloud_draft_retention_enabled:
+            return finished_req_ids
+        cloud_finished = set(finished_req_ids)
+        for req_id in finished_req_ids:
+            if not self._edge_cloud_draft_req_tasks.get(req_id):
+                continue
+            request = self.requests.get(req_id)
+            if request is not None and not request.is_finished():
+                # req_id was resubmitted while the old request's finish
+                # was pending; the new request owns the row now, so the
+                # stale finish must reach the cloud before its PREFILL.
+                # Withholding it would strand the old row on the cloud.
+                logger.error(
+                    "[PD] req=%s finished while referenced by draft "
+                    "tasks %s but a live request owns the id; NOT "
+                    "withholding the finish from the cloud",
+                    req_id,
+                    self._edge_cloud_draft_req_tasks.get(req_id),
+                )
+                continue
+            cloud_finished.discard(req_id)
+            self._cloud_withheld_finished_req_ids.add(req_id)
+            logger.info(
+                "[PD] withholding cloud finish for req=%s until draft "
+                "tasks %s release it",
+                req_id,
+                self._edge_cloud_draft_req_tasks.get(req_id),
+            )
+        if self._cloud_released_finished_req_ids:
+            still_valid: set[str] = set()
+            for req_id in self._cloud_released_finished_req_ids:
+                request = self.requests.get(req_id)
+                if request is not None and not request.is_finished():
+                    # resubmitted while withheld: the new request adopted
+                    # the cloud row; emitting the stale finish would
+                    # remove the live request's row instead.
+                    logger.error(
+                        "[PD] withheld finish for req=%s became stale "
+                        "(id resubmitted); the cloud row was adopted by "
+                        "the new request",
+                        req_id,
+                    )
+                    continue
+                still_valid.add(req_id)
+            cloud_finished |= still_valid
+            self._cloud_released_finished_req_ids = set()
+        return cloud_finished
 
     def schedule(self) -> SchedulerOutput:
         scheduler_output = self._schedule_pd_separated()
@@ -825,7 +909,29 @@ class PDSeparatedScheduler(Scheduler):
         # dispatched must stay immediately behind that draft tail.  Its real
         # draft token IDs are filled from the worker-local _draft_token_ids
         # buffer when it executes, exactly like native async spec decode.
-        if self.decodes_first_ready:
+        # Dispatch is gated on draft_remote_pending_count == 0 only: the
+        # channel invariant is that no DRAFT_FIRST may still be at the cloud
+        # when a DECODE_FIRST goes out (they use different recv primitives
+        # on the same stream).  Ordering against *queued* draft steps of an
+        # interleaved chain is enforced at creation time instead (see
+        # _prepare_next_decode_first_placeholder): the placeholder is only
+        # pre-built once no other draft work remains, because its creation
+        # already claims decode_or_draft_inflight/decode_head_inflight --
+        # gating the pop on empty draft queues would deadlock against the
+        # draft picks waiting for those very counters.
+        # Do NOT gate on decode_or_draft_inflight_count here either: it was
+        # incremented by the placeholder's own creation.  A real
+        # (non-placeholder) DECODE_FIRST cannot be in flight while a
+        # placeholder exists: placeholder creation requires an active
+        # pre-generated draft chain, while _can_schedule_decode_first()
+        # requires no draft work at all.  Gating costs no extra round trip
+        # (the placeholder is pre-built); it only removes the unsafe
+        # overlap window.  Fall through to the normal priority picks while
+        # gated.
+        if (
+            self.decodes_first_ready
+            and self.draft_remote_pending_count == 0
+        ):
             return self.decodes_first_ready.popleft()
 
         first_only = self._pick_decode_or_draft_first_only_or_empty()
@@ -848,7 +954,15 @@ class PDSeparatedScheduler(Scheduler):
                 return self._pick_draft_last_batch()
             if self._can_schedule_draft_first():
                 return self._pick_draft_first_batch()
-            if self.decodes_last_ready and self._can_schedule_decode_last():
+            # A queued placeholder DECODE_FIRST already self-posted its tail
+            # into decodes_last_ready at creation time; while the head is
+            # gated above, the tail must not overtake it (the worker would
+            # find no suspended HeadState for it).
+            if (
+                self.decodes_last_ready
+                and not self.decodes_first_ready
+                and self._can_schedule_decode_last()
+            ):
                 return self._pick_decode_last_batch()
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
@@ -861,7 +975,13 @@ class PDSeparatedScheduler(Scheduler):
             return self._pick_draft_last_batch()
         if self._can_schedule_draft_first():
             return self._pick_draft_first_batch()
-        if self.decodes_last_ready and self._can_schedule_decode_last():
+        # Same overtake guard as the IDLE branch above: a queued placeholder
+        # DECODE_FIRST's self-posted tail must wait for its head.
+        if (
+            self.decodes_last_ready
+            and not self.decodes_first_ready
+            and self._can_schedule_decode_last()
+        ):
             return self._pick_decode_last_batch()
         if self._can_schedule_decode_first():
             return self._pick_decode_first_batch()
@@ -1853,6 +1973,27 @@ class PDSeparatedScheduler(Scheduler):
             # final DRL before EngineCore has applied the prefill result. Retry
             # on the next schedule turn after that request moves to running.
             return
+        if (
+            self.drafts_first_ready
+            or self.drafts_last_ready
+            or self.draft_remote_pending_count > 1
+        ):
+            # Another draft chain still has steps queued or a head in flight
+            # behind this tail (chains interleave when a newly admitted
+            # request's prefill-warmup chain overlaps the decode chain).
+            # Pre-building the placeholder now would dispatch the verify
+            # before that chain has produced its drafts -- the verify's spec
+            # rows would be filled from stale/crossed worker-side entries,
+            # permanently poisoning the affected requests' draft KV
+            # (observed: zero-valid verify rounds, then [0,0,0] drafts).
+            # Deferring is also required for liveness: creation claims
+            # decode_or_draft_inflight/decode_head_inflight, which the queued
+            # draft picks wait on, so creating now would deadlock.  Keep the
+            # parent set so a later turn retries once the queues drain; if
+            # the other chain was not pre-generated, its own final DRL clears
+            # the parent above and the normal _can_schedule_decode_first()
+            # path schedules the verify instead.
+            return
 
         next_decode = self._pick_decode_first_batch()
         if (
@@ -1961,6 +2102,14 @@ class PDSeparatedScheduler(Scheduler):
                     # Still referenced by another in-flight draft task.
                     continue
                 self._edge_cloud_draft_req_tasks.pop(req_id, None)
+            # The request is no longer referenced by any in-flight chain.
+            # If its finish was withheld from the cloud (see
+            # filter_cloud_finished_req_ids), queue it for re-emission on
+            # the next cloud-bound batch so the cloud runner finally
+            # removes the row.
+            if req_id in self._cloud_withheld_finished_req_ids:
+                self._cloud_withheld_finished_req_ids.discard(req_id)
+                self._cloud_released_finished_req_ids.add(req_id)
             request = retained.get(req_id)
             if request is None:
                 continue

@@ -64,6 +64,7 @@ source and re-apply the dest-only inserts.
 from __future__ import annotations
 
 import functools
+import copy as _copy
 from concurrent.futures import Future
 from typing import cast
 from uuid import uuid4
@@ -212,6 +213,52 @@ def _drain_pd_channel_inbox(self) -> None:
             )
 
 
+def _publish_to_cloud(
+    self, scheduler_output: SchedulerOutput
+) -> None:
+    """Publish one batch on PRE_OUT with the cloud-facing finish filter.
+
+    The edge retains finished requests that are still referenced by an
+    in-flight draft chain (KV blocks stay allocated, the request stays in
+    the scheduler registry).  The cloud must keep the matching batch row
+    for the same duration: its cached whole-batch draft metadata is laid
+    out by the batch at chain creation, so removing the row mid-chain
+    condenses the live batch and shifts every positional lookup behind
+    it.  PDSeparatedScheduler.filter_cloud_finished_req_ids() withholds
+    such finishes and re-emits them once the chain releases the request.
+
+    Only the published copy is filtered -- the edge worker dequeues the
+    original SchedulerOutput and cleans up its own batch immediately.
+    """
+    channel = self._pp_pd_channel
+    filter_finished = getattr(
+        self.scheduler, "filter_cloud_finished_req_ids", None
+    )
+    if filter_finished is None:
+        channel.publish(scheduler_output)
+        return
+    finished = set(getattr(scheduler_output, "finished_req_ids", None) or ())
+    released = getattr(
+        self.scheduler, "_cloud_released_finished_req_ids", None
+    )
+    if not finished and not released:
+        channel.publish(scheduler_output)
+        return
+    cloud_finished = filter_finished(finished)
+    if cloud_finished == finished:
+        channel.publish(scheduler_output)
+        return
+    # copy.copy (NOT dataclasses.replace): the SO carries dynamically
+    # attached attributes that replace() would silently drop -- has_mrope
+    # (stamped per-SO in _schedule_pd_separated; the cloud's CHER
+    # early-recv hint relies on it), is_last_prefill_chunk,
+    # draft_output_req_ids, etc.  A shallow copy preserves __dict__;
+    # only finished_req_ids is overridden with a fresh set.
+    cloud_so = _copy.copy(scheduler_output)
+    cloud_so.finished_req_ids = cloud_finished
+    channel.publish(cloud_so)
+
+
 def _maybe_publish_pre_out(
     self, scheduler_output: SchedulerOutput
 ) -> None:
@@ -245,12 +292,12 @@ def _maybe_publish_pre_out(
                     self._pd_deferred_draft_pre_out = deferred
                 deferred.setdefault(task_id, []).append(scheduler_output)
                 return
-        self._pp_pd_channel.publish(scheduler_output)
+        self._publish_to_cloud(scheduler_output)
     elif bt in (
         BatchType.PREFILL_FIRST,
         BatchType.DECODE_FIRST,
     ):
-        self._pp_pd_channel.publish(scheduler_output)
+        self._publish_to_cloud(scheduler_output)
     elif bt in (
         BatchType.EMPTY,
         BatchType.PREFILL_LAST,
@@ -281,7 +328,7 @@ def _release_deferred_draft_pre_out(
     if channel is None:
         return
     for scheduler_output in queued:
-        channel.publish(scheduler_output)
+        self._publish_to_cloud(scheduler_output)
     if queued:
         logger.info(
             "[PRE_OUT] released %d async draft controls task_id=%s",
@@ -442,11 +489,19 @@ def _advance_edge_cloud_draft(
             # lengths are exactly the accepted counts, so reuse that existing
             # D2H result instead of synchronizing a second copy in the edge
             # worker. The same counts drive async batch-state correction.
-            num_accepted_tokens = [
-                len(token_ids)
-                for token_ids in model_output.sampled_token_ids
-            ]
-            valid_sampled_token_count = list(num_accepted_tokens)
+            # Key the counts by req_id: the output row order (edge worker
+            # input_batch) diverges from both the SchedulerOutput request
+            # order and the cloud input_batch order as soon as a request
+            # finishes or joins; positional application then writes every
+            # count into the wrong request and poisons its cloud-side seq
+            # lens (observed as permanently frozen requests).
+            num_accepted_tokens = {
+                req_id: len(token_ids)
+                for req_id, token_ids in zip(
+                    model_output.req_ids, model_output.sampled_token_ids
+                )
+            }
+            valid_sampled_token_count = dict(num_accepted_tokens)
         finalize = getattr(
             self.scheduler, "finalize_pre_generated_draft_first", None
         )
@@ -1000,6 +1055,7 @@ def install() -> None:
 
     EngineCore.__init__ = _patched_engine_core_init
     EngineCore._drain_pd_channel_inbox = _drain_pd_channel_inbox
+    EngineCore._publish_to_cloud = _publish_to_cloud
     EngineCore._maybe_publish_pre_out = _maybe_publish_pre_out
     EngineCore._release_deferred_draft_pre_out = (
         _release_deferred_draft_pre_out
