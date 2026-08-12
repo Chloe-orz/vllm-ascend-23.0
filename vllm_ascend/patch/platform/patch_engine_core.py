@@ -442,11 +442,19 @@ def _advance_edge_cloud_draft(
             # lengths are exactly the accepted counts, so reuse that existing
             # D2H result instead of synchronizing a second copy in the edge
             # worker. The same counts drive async batch-state correction.
-            num_accepted_tokens = [
-                len(token_ids)
-                for token_ids in model_output.sampled_token_ids
-            ]
-            valid_sampled_token_count = list(num_accepted_tokens)
+            # Key the counts by req_id: the output row order (edge worker
+            # input_batch) diverges from both the SchedulerOutput request
+            # order and the cloud input_batch order as soon as a request
+            # finishes or joins; positional application then writes every
+            # count into the wrong request and poisons its cloud-side seq
+            # lens (observed as permanently frozen requests).
+            num_accepted_tokens = {
+                req_id: len(token_ids)
+                for req_id, token_ids in zip(
+                    model_output.req_ids, model_output.sampled_token_ids
+                )
+            }
+            valid_sampled_token_count = dict(num_accepted_tokens)
         finalize = getattr(
             self.scheduler, "finalize_pre_generated_draft_first", None
         )

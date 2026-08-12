@@ -379,6 +379,11 @@ class CloudDraftPositionState:
     num_scheduled_tokens: tuple[int, ...]
     is_prefill: bool
     base_positions: torch.Tensor | None = None
+    # Request ids in the same row order as num_scheduled_tokens (the cloud
+    # input_batch order at cache time).  Needed to pair the req_id-keyed
+    # accepted counts with the position layout without positional
+    # assumptions.
+    req_ids: tuple[str, ...] = ()
 
 
 def _freeze_scheduled_state(value: Any, memo: dict[int, Any] | None = None) -> Any:
@@ -5547,6 +5552,7 @@ class NPUModelRunner(GPUModelRunner):
             is_prefill=(
                 scheduler_output.batch_type == BatchType.PREFILL_FIRST
             ),
+            req_ids=tuple(self.input_batch.req_ids),
         )
         self._cloud_draft_position_state_by_task[task_id] = position_state
 
@@ -5629,8 +5635,20 @@ class NPUModelRunner(GPUModelRunner):
                     accepted = scheduled
                 else:
                     assert accepted_counts is not None
+                    if isinstance(accepted_counts, dict):
+                        # Counts are keyed by req_id; pair them with the
+                        # cached layout by identity, never by position.
+                        req_id = state.req_ids[req_idx]
+                        if req_id not in accepted_counts:
+                            raise RuntimeError(
+                                "DRAFT accepted counts missing request: "
+                                f"req_id={req_id}, task_id={task_id}"
+                            )
+                        accepted_count = accepted_counts[req_id]
+                    else:
+                        accepted_count = accepted_counts[req_idx]
                     accepted = min(
-                        max(int(accepted_counts[req_idx]), 1),
+                        max(int(accepted_count), 1),
                         scheduled,
                     )
                 sample_rows.append(start + accepted - 1)
@@ -5887,6 +5905,10 @@ class NPUModelRunner(GPUModelRunner):
         rejection-corrected state for its next target/draft forward. An
         independently scheduled draft carries this state on its step-0
         SchedulerOutput, so the correction runs here ahead of its forwards.
+
+        ``num_accepted``/``valid_sampled_token_count`` must already be in
+        the cloud's current input_batch row order (the caller remaps
+        req_id-keyed counts); anything else is applied positionally as-is.
         """
         num_accepted = num_accepted.to(self.device)
         num_reqs = num_accepted.size(0)
@@ -6010,14 +6032,40 @@ class NPUModelRunner(GPUModelRunner):
                     "expected step 0",
                     spec_step_idx,
                 )
-            num_accepted = torch.tensor(
-                num_accepted_values, dtype=torch.int64
-            )
-            valid_sampled_token_count = (
-                torch.tensor(valid_sampled_values, dtype=torch.int64)
-                if valid_sampled_values is not None
-                else None
-            )
+            if isinstance(num_accepted_values, dict):
+                # The counts are keyed by req_id (derived from the edge
+                # worker's output rows, whose order diverges from both the
+                # SchedulerOutput order and the cloud input_batch order once
+                # a request finishes or joins).  Resolve each request's
+                # count into the cloud's current batch row; rows without a
+                # count (e.g. a request that joined after the target tail)
+                # default to 1, matching the async new-request default.
+                id2idx = self.input_batch.req_id_to_index
+                n_rows = len(self.input_batch.req_ids)
+                num_accepted = torch.ones(n_rows, dtype=torch.int64)
+                for rid, v in num_accepted_values.items():
+                    j = id2idx.get(rid)
+                    if j is not None:
+                        num_accepted[j] = v
+                if valid_sampled_values is not None:
+                    valid_sampled_token_count = torch.ones(
+                        n_rows, dtype=torch.int64
+                    )
+                    for rid, v in valid_sampled_values.items():
+                        j = id2idx.get(rid)
+                        if j is not None:
+                            valid_sampled_token_count[j] = v
+                else:
+                    valid_sampled_token_count = None
+            else:
+                num_accepted = torch.tensor(
+                    num_accepted_values, dtype=torch.int64
+                )
+                valid_sampled_token_count = (
+                    torch.tensor(valid_sampled_values, dtype=torch.int64)
+                    if valid_sampled_values is not None
+                    else None
+                )
             self._apply_cloud_num_accepted_state(
                 scheduler_output,
                 num_accepted,
