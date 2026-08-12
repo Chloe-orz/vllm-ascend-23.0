@@ -398,7 +398,6 @@ class CloudPendingRequestCorrection:
     num_draft_tokens: int
     optimistic_num_computed_tokens: int
     actual_num_computed_tokens: int
-    valid_sampled_token_count: int
     num_accepted_tokens: int
 
 
@@ -1241,8 +1240,8 @@ class NPUModelRunner(GPUModelRunner):
         self._mamba_bufs: Any | None = None
         self._mamba_copy_bufs: Any | None = None
 
-        # Saved in execute_model() so sample_tokens() can access scheduler_output
-        # for edge-cloud mamba state sync (especially on the cloud side).
+        # Saved in execute_model() for legacy synchronous edge-cloud sampling
+        # and auxiliary-hidden-state paths.
         self._last_scheduler_output: "SchedulerOutput | None" = None
 
         # Latest cloud-side target metadata for draft paths that do not cross
@@ -1263,10 +1262,10 @@ class NPUModelRunner(GPUModelRunner):
         # cloud never sends the DRAFT_LAST response, deadlocking the edge's
         # matching recv on the shared DECODE channel.
         self._cloud_spec_decode_metadata_cache_max: int = 32
-        # Same per-task treatment for the verify step's scheduler_output:
-        # the independently scheduled draft task applies the
-        # num_accepted / mamba state correction, and by then
-        # _last_scheduler_output may already point at an unrelated batch.
+        # Same per-task treatment for the verify step's scheduler_output. The
+        # independently scheduled draft records request-keyed accepted-token
+        # corrections after unrelated work may have replaced the latest
+        # scheduler-output pointer.
         self._cloud_scheduler_output_by_task: dict[
             str, "SchedulerOutput"
         ] = {}
@@ -2144,8 +2143,9 @@ class NPUModelRunner(GPUModelRunner):
         Returns ``True`` only when every request that participated in the
         previous speculative step has a matching, current-generation result.
         In that case the CPU batch state is authoritative and input
-        preparation can use its normal single CPU-to-device copy.  An
-        incomplete or stale set falls back to the legacy correction path.
+        preparation can use its normal single CPU-to-device copy.  Incomplete
+        or stale results are left pending instead of being applied by batch
+        position.
         """
         if not (
             self._edge_cloud_enabled
@@ -2190,7 +2190,7 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 logger.warning(
                     "Cloud request correction does not match scheduler "
-                    "state; falling back to positional correction: "
+                    "state; leaving the request-keyed correction pending: "
                     "req=%s task=%s cpu=%d optimistic=%d actual=%d",
                     req_id,
                     correction.task_id,
@@ -2313,11 +2313,21 @@ class NPUModelRunner(GPUModelRunner):
 
         result = super()._update_states(scheduler_output)
 
-        if previous_num_draft_tokens and (
-            self._consume_cloud_request_corrections(
+        has_previous_cloud_spec = any(
+            num_draft > 0 and req_id in self.input_batch.req_id_to_index
+            for req_id, num_draft in previous_num_draft_tokens.items()
+        )
+        if has_previous_cloud_spec:
+            if not self._consume_cloud_request_corrections(
                 scheduler_output, previous_num_draft_tokens
-            )
-        ):
+            ):
+                # Scheduled cloud draft results must arrive before the next
+                # target. There is no safe positional fallback once batches
+                # can be independently reordered on the edge and cloud.
+                raise RuntimeError(
+                    "Cloud target is missing request-keyed speculative "
+                    "corrections for one or more active requests"
+                )
             # The upstream callback would apply the same rejection correction
             # later using the positional prev_req_id_to_index map.  The CPU
             # state is already corrected by request identity, so suppress it.
@@ -4698,7 +4708,8 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output.head_token, None
                     )
 
-        # Save scheduler_output for edge-cloud mamba state sync in sample_tokens().
+        # Save scheduler_output for legacy synchronous edge-cloud sampling and
+        # auxiliary-hidden-state paths.
         self._last_scheduler_output = scheduler_output
 
         # In edge-cloud mode, execute_model is called twice for the
@@ -6491,101 +6502,6 @@ class NPUModelRunner(GPUModelRunner):
 
         return per_layer_attn_metadata
 
-    def _apply_cloud_num_accepted_state(
-        self,
-        scheduler_output: "SchedulerOutput",
-        num_accepted: torch.Tensor,
-        valid_sampled_token_count: torch.Tensor | None,
-    ) -> None:
-        """Apply the edge-sampled rejection correction on the cloud.
-
-        Sampling only runs on the edge.  This immediate positional state is
-        used only when the matching task still covers the live cloud batch
-        (notably hybrid draft postprocessing).  Next-target computed-token
-        correction is retained separately by request identity.
-
-        ``num_accepted``/``valid_sampled_token_count`` must already be in
-        the cloud's current input_batch row order (the caller remaps
-        req_id-keyed counts); anything else is applied positionally as-is.
-        """
-        num_accepted = num_accepted.to(self.device)
-        num_reqs = num_accepted.size(0)
-        self.num_accepted_tokens.gpu[:num_reqs] = num_accepted
-
-        if valid_sampled_token_count is not None:
-            self.valid_sampled_token_count_gpu = (
-                valid_sampled_token_count.to(self.device)
-            )
-            # [PD-FIX] The cloud never samples, so
-            # _copy_valid_sampled_token_count never runs here and
-            # valid_sampled_token_count_cpu stays at its uninitialized
-            # torch.empty allocation.  The next verify's
-            # _correct_optimistic_seq_lens_cpu reads it to correct the
-            # optimistic seq_lens; garbage there produces a wrong (too
-            # short) or wild actual_seq_lengths_kv for FIA -- wrong
-            # attention outputs in the first case, a device-side MTE
-            # out-of-range fault (wedge/hang) in the second.  Populate it
-            # from the edge-stamped authoritative value and record the
-            # event so the correction's synchronize() is well-ordered.
-            if self.valid_sampled_token_count_cpu is not None:
-                self.valid_sampled_token_count_cpu[:num_reqs].copy_(
-                    valid_sampled_token_count
-                )
-            if self.valid_sampled_token_count_event is not None:
-                self.valid_sampled_token_count_event.record()
-
-        if self.model_config.is_hybrid:
-            if self.cache_config.mamba_cache_mode == "align":
-                accepted_counts = (
-                    self.num_accepted_tokens.gpu[:num_reqs]
-                    .cpu()
-                    .numpy()
-                )
-                for i, num_tokens in enumerate(accepted_counts):
-                    self.input_batch.num_accepted_tokens_cpu[i] = (
-                        num_tokens
-                    )
-                # The draft task is scheduled independently of the verify
-                # step, so the global _last_scheduler_output may already
-                # point at an unrelated batch.  Use the per-task snapshot
-                # cached during the verify step's execute_model.
-                target_scheduler_output = (
-                    self._cloud_scheduler_output_by_task.get(
-                        scheduler_output.draft_task_id
-                    )
-                    or self._last_scheduler_output
-                )
-                if target_scheduler_output is None:
-                    raise RuntimeError(
-                        "Cloud draft mamba sync has no scheduler_output for "
-                        f"task_id={scheduler_output.draft_task_id}"
-                    )
-                mamba_utils.postprocess_mamba(
-                    target_scheduler_output,
-                    self.kv_cache_config,
-                    self.cache_config,
-                    self.input_batch,
-                    self.requests,
-                    self.mamba_state_idx,
-                    self.compilation_config.static_forward_context,
-                    self.model.get_mamba_state_copy_func(),
-                    self._get_mamba_copy_bufs(),
-                )
-            else:
-                self.input_batch.num_accepted_tokens_cpu_tensor[
-                    :num_reqs
-                ].copy_(
-                    self.num_accepted_tokens.gpu[:num_reqs],
-                    non_blocking=True,
-                )
-        else:
-            self.input_batch.num_accepted_tokens_cpu_tensor[
-                :num_reqs
-            ].copy_(
-                self.num_accepted_tokens.gpu[:num_reqs],
-                non_blocking=True,
-            )
-
     def _record_cloud_request_corrections(
         self,
         scheduler_output: "SchedulerOutput",
@@ -6682,7 +6598,6 @@ class NPUModelRunner(GPUModelRunner):
                 num_draft_tokens=num_draft,
                 optimistic_num_computed_tokens=optimistic,
                 actual_num_computed_tokens=actual,
-                valid_sampled_token_count=valid_count,
                 num_accepted_tokens=int(
                     accepted_by_req.get(req_id, valid_count)
                 ),
@@ -6696,23 +6611,6 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 recorded += 1
         return recorded
-
-    def _can_apply_cloud_counts_positionally(
-        self, counts_by_req: dict[str, int]
-    ) -> bool:
-        """Whether a task can safely touch the current positional state."""
-        current_req_ids = set(self.input_batch.req_ids)
-        if not current_req_ids.intersection(counts_by_req):
-            return False
-        current_spec_req_ids = {
-            req_id
-            for req_id in self.input_batch.req_ids
-            if (
-                (req_state := self.requests.get(req_id)) is not None
-                and req_state.prev_num_draft_len > 0
-            )
-        }
-        return current_spec_req_ids.issubset(counts_by_req)
 
     def _run_edge_cloud_draft_middle_segment(
         self,
@@ -6758,79 +6656,6 @@ class NPUModelRunner(GPUModelRunner):
                     "num_accepted scheduler state arrived on draft step %d; "
                     "expected step 0",
                     spec_step_idx,
-                )
-            if isinstance(num_accepted_values, dict):
-                # The counts are keyed by req_id (derived from the edge
-                # worker's output rows, whose order diverges from both the
-                # SchedulerOutput order and the cloud input_batch order once
-                # a request finishes or joins).  Resolve each request's
-                # count into the cloud's current batch row; rows without a
-                # count (e.g. a request that joined after the target tail)
-                # default to 1, matching the async new-request default.
-                id2idx = self.input_batch.req_id_to_index
-                n_rows = len(self.input_batch.req_ids)
-                num_accepted = torch.ones(n_rows, dtype=torch.int64)
-                unmapped_reqs: list[str] = []
-                matched = 0
-                for rid, v in num_accepted_values.items():
-                    j = id2idx.get(rid)
-                    if j is not None:
-                        num_accepted[j] = v
-                        matched += 1
-                    else:
-                        unmapped_reqs.append(rid)
-                if valid_sampled_values is not None:
-                    valid_sampled_token_count = torch.ones(
-                        n_rows, dtype=torch.int64
-                    )
-                    for rid, v in valid_sampled_values.items():
-                        j = id2idx.get(rid)
-                        if j is not None:
-                            valid_sampled_token_count[j] = v
-                else:
-                    valid_sampled_token_count = None
-                if unmapped_reqs:
-                    # Chain-referenced finishes are withheld from the
-                    # cloud until the chain releases them, so a request
-                    # covered by this task should still own a row here.
-                    # An absent row means the cloud batch was re-sliced
-                    # under an in-flight chain -- the misalignment this
-                    # task's whole-batch metadata cannot absorb.
-                    logger.error(
-                        "[CLOUD-MAP] task=%s dropped %d/%d counts for "
-                        "requests absent from the cloud batch: %s",
-                        getattr(scheduler_output, "draft_task_id", None),
-                        len(unmapped_reqs),
-                        len(num_accepted_values),
-                        unmapped_reqs,
-                    )
-                # Applying a task positionally is safe only when it covers
-                # every current request that participated in the previous
-                # speculative step.  New/prefill rows legitimately default
-                # to one.  A disjoint or partially stale task is retained in
-                # the request-keyed pending map above and must not overwrite
-                # the live batch (the source of the frozen-sequence bug).
-                can_apply_positionally = (
-                    matched > 0
-                    and self._can_apply_cloud_counts_positionally(
-                        num_accepted_values
-                    )
-                )
-            else:
-                num_accepted = torch.tensor(
-                    num_accepted_values, dtype=torch.int64
-                )
-                valid_sampled_token_count = (
-                    torch.tensor(valid_sampled_values, dtype=torch.int64)
-                    if valid_sampled_values is not None
-                    else None
-                )
-                can_apply_positionally = True
-            if can_apply_positionally:
-                self._apply_cloud_num_accepted_state(
-                    scheduler_output,
-                    num_accepted,
-                    valid_sampled_token_count,
                 )
 
         token_tensor_key = (
