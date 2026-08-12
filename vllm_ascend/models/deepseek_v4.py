@@ -990,16 +990,23 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
+        _maybe_dump_hidden(f"layer{self.layer_idx}_attn_in", hidden_states)
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
+        _maybe_dump_hidden(f"layer{self.layer_idx}_attn_out", hidden_states)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
+        _maybe_dump_hidden(f"layer{self.layer_idx}_mlp_in", hidden_states)
         hidden_states = self.mlp(hidden_states)
+        _maybe_dump_hidden(f"layer{self.layer_idx}_mlp_out", hidden_states)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         return hidden_states, residual
+
+
+_DUMP_LAYER_FILTER: str | None = None
 
 
 def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor) -> None:
@@ -1012,12 +1019,23 @@ def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor) -> None:
     (1 token per request) are skipped by the row-count gate.  Files land in
     DSV4_DUMP_DIR (default /tmp/dsv4_dump), one per stage per tag, including
     the token count in the name so chunks never overwrite each other.
+
+    Env DSV4_DUMP_LAYERS (e.g. "0,1,2,42") limits which per-layer dumps are
+    written (sub-step tags like layer42_attn_in match by layer number too);
+    embed/recv/post_hc_head/final tags are unaffected.  Unset = all layers.
     """
     trigger = os.environ.get("DSV4_DUMP_TRIGGER", "/tmp/dsv4_dump_on")
     if not os.path.exists(trigger):
         return
     if hidden_states.shape[0] <= 4:  # decode / tiny steps
         return
+    global _DUMP_LAYER_FILTER
+    if _DUMP_LAYER_FILTER is None:
+        _DUMP_LAYER_FILTER = os.environ.get("DSV4_DUMP_LAYERS", "")
+    if _DUMP_LAYER_FILTER and tag.startswith("layer"):
+        layer_key = tag[len("layer"):].split("_", 1)[0]
+        if layer_key not in _DUMP_LAYER_FILTER.split(","):
+            return
     from vllm.distributed import get_tp_group
     if get_tp_group().rank_in_group != 0:
         return
@@ -1206,8 +1224,10 @@ class DeepseekV4Model(nn.Module):
             )
 
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
+        _maybe_dump_hidden("post_hc_head", hidden_states)
 
         hidden_states = self.norm(hidden_states)
+        _maybe_dump_hidden("final", hidden_states)
         return hidden_states
 
 
