@@ -828,16 +828,22 @@ class PDSeparatedScheduler(Scheduler):
         # Dispatch is gated on draft_remote_pending_count == 0 only: the
         # channel invariant is that no DRAFT_FIRST may still be at the cloud
         # when a DECODE_FIRST goes out (they use different recv primitives
-        # on the same stream).  Do NOT gate on decode_or_draft_inflight_count
-        # here -- _pick_decode_first_batch() already incremented it when the
-        # placeholder was *created*, so the placeholder would deadlock
-        # against its own accounting.  A real (non-placeholder) DECODE_FIRST
-        # cannot be in flight while a placeholder exists: placeholder
-        # creation requires an active pre-generated draft chain, while
-        # _can_schedule_decode_first() requires no draft work at all.
-        # Gating costs no extra round trip (the placeholder is pre-built);
-        # it only removes the unsafe overlap window.  Fall through to the
-        # normal priority picks while gated.
+        # on the same stream).  Ordering against *queued* draft steps of an
+        # interleaved chain is enforced at creation time instead (see
+        # _prepare_next_decode_first_placeholder): the placeholder is only
+        # pre-built once no other draft work remains, because its creation
+        # already claims decode_or_draft_inflight/decode_head_inflight --
+        # gating the pop on empty draft queues would deadlock against the
+        # draft picks waiting for those very counters.
+        # Do NOT gate on decode_or_draft_inflight_count here either: it was
+        # incremented by the placeholder's own creation.  A real
+        # (non-placeholder) DECODE_FIRST cannot be in flight while a
+        # placeholder exists: placeholder creation requires an active
+        # pre-generated draft chain, while _can_schedule_decode_first()
+        # requires no draft work at all.  Gating costs no extra round trip
+        # (the placeholder is pre-built); it only removes the unsafe
+        # overlap window.  Fall through to the normal priority picks while
+        # gated.
         if (
             self.decodes_first_ready
             and self.draft_remote_pending_count == 0
@@ -1882,6 +1888,27 @@ class PDSeparatedScheduler(Scheduler):
             # A chain pre-generated from the final PREFILL_LAST can reach its
             # final DRL before EngineCore has applied the prefill result. Retry
             # on the next schedule turn after that request moves to running.
+            return
+        if (
+            self.drafts_first_ready
+            or self.drafts_last_ready
+            or self.draft_remote_pending_count > 1
+        ):
+            # Another draft chain still has steps queued or a head in flight
+            # behind this tail (chains interleave when a newly admitted
+            # request's prefill-warmup chain overlaps the decode chain).
+            # Pre-building the placeholder now would dispatch the verify
+            # before that chain has produced its drafts -- the verify's spec
+            # rows would be filled from stale/crossed worker-side entries,
+            # permanently poisoning the affected requests' draft KV
+            # (observed: zero-valid verify rounds, then [0,0,0] drafts).
+            # Deferring is also required for liveness: creation claims
+            # decode_or_draft_inflight/decode_head_inflight, which the queued
+            # draft picks wait on, so creating now would deadlock.  Keep the
+            # parent set so a later turn retries once the queues drain; if
+            # the other chain was not pre-generated, its own final DRL clears
+            # the parent above and the normal _can_schedule_decode_first()
+            # path schedules the verify instead.
             return
 
         next_decode = self._pick_decode_first_batch()
