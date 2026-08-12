@@ -1907,12 +1907,14 @@ class AscendDSAImpl(DSAAttentionImpl):
         actual_seq_lengths_query = common_prefill_metadata.query_start_loc
         actual_seq_lengths_key = common_prefill_metadata.seq_lens
         # [DIAG] 上层喂给 attention 的全部关键输入：寻址与长度信息
-        _dsa_dump_meta(layer_name, "qsl", actual_seq_lengths_query)
-        _dsa_dump_meta(layer_name, "seq_lens", actual_seq_lengths_key)
-        _dsa_dump_meta(layer_name, "slot_mapping",
-                       swa_prefill_metadata.slot_mapping)
-        _dsa_dump_meta(layer_name, "block_table",
-                       swa_prefill_metadata.block_table)
+        # 只在真实 prefill（本层输入行数>4）时 dump，防止被 decode 步覆盖
+        if hidden_states.shape[0] > 4:
+            _dsa_dump_meta(layer_name, "qsl", actual_seq_lengths_query)
+            _dsa_dump_meta(layer_name, "seq_lens", actual_seq_lengths_key)
+            _dsa_dump_meta(layer_name, "slot_mapping",
+                           swa_prefill_metadata.slot_mapping)
+            _dsa_dump_meta(layer_name, "block_table",
+                           swa_prefill_metadata.block_table)
 
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel

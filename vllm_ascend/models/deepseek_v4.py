@@ -1007,6 +1007,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
 
 _DUMP_LAYER_FILTER: str | None = None
+_DUMPED_TAGS: set = set()
 
 
 def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor, *, force: bool = False) -> None:
@@ -1036,9 +1037,15 @@ def _maybe_dump_hidden(tag: str, hidden_states: torch.Tensor, *, force: bool = F
         layer_key = tag[len("layer"):].split("_", 1)[0]
         if layer_key not in _DUMP_LAYER_FILTER.split(","):
             return
+    # One-shot per (pp_rank, tag): later batches (decode steps, warmup,
+    # subsequent requests) must not overwrite the measured prefill dump.
     from vllm.distributed import get_tp_group
     if get_tp_group().rank_in_group != 0:
         return
+    dump_key = f"{get_pp_group().rank_in_group}:{tag}"
+    if dump_key in _DUMPED_TAGS:
+        return
+    _DUMPED_TAGS.add(dump_key)
     dump_dir = os.environ.get("DSV4_DUMP_DIR", "/tmp/dsv4_dump")
     os.makedirs(dump_dir, exist_ok=True)
     pp_rank = get_pp_group().rank_in_group
