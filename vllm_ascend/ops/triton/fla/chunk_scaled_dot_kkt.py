@@ -12,8 +12,6 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.triton_utils import get_aicore_num
-
 from .utils import prepare_chunk_indices, safe_exp
 
 
@@ -128,9 +126,11 @@ def chunk_scaled_dot_kkt_fwd(
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
 
-    num_core = get_aicore_num()
     bh_step = B * H
     task_num = NT * bh_step
+    # Launch one Triton program per task so no program processes a second
+    # task through the tl.range loop (for example, heads 0 and 20 together).
+    num_core = task_num
 
     from vllm_ascend.device.device_op import DeviceOperator
 
