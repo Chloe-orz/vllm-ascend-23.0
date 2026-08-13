@@ -550,7 +550,6 @@ class TestCloudRequestCorrections(unittest.TestCase):
                 num_draft_tokens=3,
                 optimistic_num_computed_tokens=104,
                 actual_num_computed_tokens=102,
-                valid_sampled_token_count=2,
                 num_accepted_tokens=2,
             ),
             "req-b": CloudPendingRequestCorrection(
@@ -559,7 +558,6 @@ class TestCloudRequestCorrections(unittest.TestCase):
                 num_draft_tokens=3,
                 optimistic_num_computed_tokens=204,
                 actual_num_computed_tokens=201,
-                valid_sampled_token_count=1,
                 num_accepted_tokens=1,
             ),
         }
@@ -617,6 +615,29 @@ class TestCloudRequestCorrections(unittest.TestCase):
             "req-a", runner._cloud_pending_request_corrections
         )
 
+    def test_next_target_rejects_incomplete_request_corrections(self):
+        runner = self._build_runner()
+        runner._cloud_pending_request_corrections.pop("req-b")
+        runner.use_async_scheduling = False
+        runner.requests["req-a"].prev_num_draft_len = 3
+        runner.requests["req-b"].prev_num_draft_len = 3
+        scheduler_output = SimpleNamespace(
+            batch_type=BatchType.DECODE_FIRST,
+            finished_req_ids=set(),
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req-a", "req-b"]
+            ),
+        )
+
+        with patch(
+            "vllm.v1.worker.gpu_model_runner.GPUModelRunner._update_states",
+            return_value="deferred-correction",
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "missing request-keyed speculative corrections"
+            ):
+                runner._update_states(scheduler_output)
+
     def test_records_only_spec_requests_from_task_snapshot(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         target_output = SimpleNamespace(
@@ -660,26 +681,6 @@ class TestCloudRequestCorrections(unittest.TestCase):
         self.assertEqual(correction.actual_num_computed_tokens, 100)
         self.assertNotIn(
             "req-prefill", runner._cloud_pending_request_corrections
-        )
-
-    def test_disjoint_task_cannot_overwrite_current_spec_batch(self):
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner.input_batch = SimpleNamespace(req_ids=["req-a", "req-b"])
-        runner.requests = {
-            "req-a": SimpleNamespace(prev_num_draft_len=3),
-            "req-b": SimpleNamespace(prev_num_draft_len=3),
-        }
-
-        self.assertFalse(
-            runner._can_apply_cloud_counts_positionally({"req-c": 1})
-        )
-        self.assertFalse(
-            runner._can_apply_cloud_counts_positionally({"req-a": 4})
-        )
-        self.assertTrue(
-            runner._can_apply_cloud_counts_positionally(
-                {"req-a": 4, "req-b": 2}
-            )
         )
 
 
