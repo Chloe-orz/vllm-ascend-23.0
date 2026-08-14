@@ -319,6 +319,15 @@ class TestNPUModelRunnerEdgeCloudGraphCapture(unittest.TestCase):
             runner._should_skip_scheduled_drafter_dummy_run()
         )
 
+    def test_skips_scheduled_drafter_during_target_profile(self):
+        runner = self._build_runner()
+
+        self.assertTrue(
+            runner._should_skip_scheduled_drafter_dummy_run(
+                is_profile=True
+            )
+        )
+
     def test_keeps_non_scheduled_drafter_during_target_capture(self):
         runner = self._build_runner()
         runner._edge_cloud_target_capture_in_progress = True
@@ -327,34 +336,6 @@ class TestNPUModelRunnerEdgeCloudGraphCapture(unittest.TestCase):
         self.assertFalse(
             runner._should_skip_scheduled_drafter_dummy_run()
         )
-
-
-class TestNPUModelRunnerDraftIntermediateSync(unittest.TestCase):
-    def test_profile_bypasses_fixed_graph_buffers(self):
-        runner = NPUModelRunner.__new__(NPUModelRunner)
-        runner._edge_cloud_draft_intermediate_buffers = (
-            IntermediateTensors(
-                {
-                    "hidden_states": torch.empty(
-                        2048, 7168, device="meta"
-                    )
-                }
-            )
-        )
-        runner._is_dummy_or_profile_run = MagicMock(return_value=True)
-        received = IntermediateTensors(
-            {
-                "hidden_states": torch.empty(
-                    8192, 7168, device="meta"
-                )
-            }
-        )
-
-        result = runner._sync_edge_cloud_draft_intermediate_tensors(
-            8192, received
-        )
-
-        self.assertIs(result, received)
 
 
 class TestNPUModelRunnerLayerwiseAuxOutput(unittest.TestCase):

@@ -2543,15 +2543,6 @@ class NPUModelRunner(GPUModelRunner):
             prepared[key] = value
 
         buffers = self._edge_cloud_draft_intermediate_buffers
-        # Profile runs execute the draft segments eagerly, so they do not
-        # require stable graph input addresses. Their maximum-token payload
-        # can also be larger than the runtime graph buffers. Preserve the
-        # DeepSeek-V4 cloud-side SP chunking performed above when applicable.
-        if self._is_dummy_or_profile_run():
-            if chunk_on_cloud:
-                return IntermediateTensors(prepared)
-            return intermediate_tensors
-
         if buffers is None:
             return IntermediateTensors(prepared)
 
@@ -4280,16 +4271,24 @@ class NPUModelRunner(GPUModelRunner):
         model_type = str(getattr(hf_config, "model_type", "")).lower()
         return "qwen" in model_type or model_type == "deepseek_v4"
 
-    def _should_skip_scheduled_drafter_dummy_run(self) -> bool:
-        """Whether target graph capture must omit the scheduled drafter.
+    def _should_skip_scheduled_drafter_dummy_run(
+        self, is_profile: bool = False
+    ) -> bool:
+        """Whether target profile/capture must omit the scheduled drafter.
 
         The DRAFT_FIRST/C/DRAFT_LAST path currently creates an explicit eager
         forward context for every segment. Its cross-node communication is
         therefore not part of the target model's graph capture lifecycle,
         regardless of the proposer's generic ``use_cuda_graph`` setting.
+
+        It must also stay out of the target model's profile run. That run uses
+        the target's global maximum-token shape, while the independently
+        scheduled cloud drafter consumes local sequence-parallel shards.
+        Profiling the drafter through this generic path therefore produces an
+        invalid token/hidden-state shape combination.
         """
         return bool(
-            self._edge_cloud_target_capture_in_progress
+            (is_profile or self._edge_cloud_target_capture_in_progress)
             and self._edge_cloud_enabled
             and self.drafter is not None
             and self._uses_scheduled_edge_cloud_draft()
@@ -10062,7 +10061,9 @@ class NPUModelRunner(GPUModelRunner):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
             skip_scheduled_drafter = (
-                self._should_skip_scheduled_drafter_dummy_run()
+                self._should_skip_scheduled_drafter_dummy_run(
+                    is_profile=is_profile
+                )
             )
 
             with set_ascend_forward_context(
@@ -10107,9 +10108,10 @@ class NPUModelRunner(GPUModelRunner):
                 )
             elif skip_scheduled_drafter:
                 logger.info_once(
-                    "[EdgeCloud][GraphCapture] Skipping independently "
-                    "scheduled %s drafter during target graph capture.",
+                    "[EdgeCloud] Skipping independently scheduled %s "
+                    "drafter during target %s.",
                     self.speculative_config.method,
+                    "profile" if is_profile else "graph capture",
                 )
             if is_profile and self.dynamic_eplb:
                 target = self.model.language_model if hasattr(self.model, "language_model") else self.model
