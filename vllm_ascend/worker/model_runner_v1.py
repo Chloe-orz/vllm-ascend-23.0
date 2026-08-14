@@ -2543,6 +2543,15 @@ class NPUModelRunner(GPUModelRunner):
             prepared[key] = value
 
         buffers = self._edge_cloud_draft_intermediate_buffers
+        # Profile runs execute the draft segments eagerly, so they do not
+        # require stable graph input addresses. Their maximum-token payload
+        # can also be larger than the runtime graph buffers. Preserve the
+        # DeepSeek-V4 cloud-side SP chunking performed above when applicable.
+        if self._is_dummy_or_profile_run():
+            if chunk_on_cloud:
+                return IntermediateTensors(prepared)
+            return intermediate_tensors
+
         if buffers is None:
             return IntermediateTensors(prepared)
 
