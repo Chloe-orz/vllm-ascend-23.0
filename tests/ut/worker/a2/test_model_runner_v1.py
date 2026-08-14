@@ -12,7 +12,29 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.model_runner_v1 import (
     CloudPendingRequestCorrection,
     NPUModelRunner,
+    _get_edge_cloud_moe_start_index,
 )
+
+
+class TestEdgeCloudMoEStartIndex(unittest.TestCase):
+    def test_tail_skips_locally_registered_head_moe_layers(self):
+        all_moe_layers = [
+            "model.layers.0.mlp.experts",
+            "model.layers.1.mlp.experts",
+            "model.layers.2.mlp.experts",
+            "model.layers.60.mlp.experts",
+        ]
+
+        self.assertEqual(
+            _get_edge_cloud_moe_start_index(all_moe_layers, start_layer=60),
+            3,
+        )
+
+    def test_empty_layer_registry_starts_at_zero(self):
+        self.assertEqual(
+            _get_edge_cloud_moe_start_index(None, start_layer=60),
+            0,
+        )
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):
