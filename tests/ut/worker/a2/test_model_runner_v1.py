@@ -74,6 +74,34 @@ class TestNPUModelRunnerEdgeCloudGraphCapture(unittest.TestCase):
         )
 
 
+class TestNPUModelRunnerDraftIntermediateSync(unittest.TestCase):
+    def test_profile_bypasses_fixed_graph_buffers(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._edge_cloud_draft_intermediate_buffers = (
+            IntermediateTensors(
+                {
+                    "hidden_states": torch.empty(
+                        2048, 7168, device="meta"
+                    )
+                }
+            )
+        )
+        runner._is_dummy_or_profile_run = MagicMock(return_value=True)
+        received = IntermediateTensors(
+            {
+                "hidden_states": torch.empty(
+                    8192, 7168, device="meta"
+                )
+            }
+        )
+
+        result = runner._sync_edge_cloud_draft_intermediate_tensors(
+            8192, received
+        )
+
+        self.assertIs(result, received)
+
+
 class TestNPUModelRunnerLayerwiseAuxOutput(unittest.TestCase):
     def _build_aux_cache_runner(self, uses_aux=True):
         runner = NPUModelRunner.__new__(NPUModelRunner)
