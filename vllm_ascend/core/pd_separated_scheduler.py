@@ -2165,6 +2165,33 @@ class PDSeparatedScheduler(Scheduler):
         gone = {
             rid for rid in decode_first.num_scheduled_tokens if rid in req_ids
         }
+        # Roll back the schedule-time mutations made when the placeholder
+        # was created (_pick_decode_first_batch -> super().schedule()):
+        # _update_after_schedule advanced every member request as if this
+        # verify step would really run (num_computed_tokens += num_scheduled,
+        # plus 1 + num_spec async output placeholders).  The batch is never
+        # dispatched, so no update_from_output will ever settle these
+        # counters -- and rejection rewinds are RELATIVE (-= num_rejected),
+        # so the phantom advance survives later settlements and every
+        # subsequent DECODE_FIRST carries num_computed_tokens that run ahead
+        # of the edge worker's verified state (observed on the cloud as
+        # "cpu-state mismatch ... optimistic=actual=N, cpu=N+2" for every
+        # member request, followed by the missing-corrections crash).
+        # KV blocks allocated for the phantom step are intentionally NOT
+        # freed: the same positions are re-scheduled by the next real
+        # DECODE_FIRST, so the already-appended blocks are used, not leaked.
+        scheduled_spec_tokens = (
+            decode_first.scheduled_spec_decode_tokens or {}
+        )
+        for req_id, num_scheduled in decode_first.num_scheduled_tokens.items():
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            request.num_computed_tokens -= num_scheduled
+            num_spec = len(scheduled_spec_tokens.get(req_id, ()))
+            request.num_output_placeholders = max(
+                0, request.num_output_placeholders - (1 + num_spec)
+            )
         if tail is None:
             logger.warning(
                 "[PD] placeholder DECODE_FIRST head_token=%s dropped but no "
