@@ -2220,7 +2220,10 @@ class NPUModelRunner(GPUModelRunner):
         addresses for the current num_tokens.
         """
         buffers = self._edge_cloud_draft_intermediate_buffers
-        if buffers is None:
+        # Profile runs execute the draft segments eagerly, so they do not
+        # require stable graph input addresses. Their maximum-token payload
+        # can also be larger than the runtime graph buffers.
+        if buffers is None or self._is_dummy_or_profile_run():
             return intermediate_tensors
 
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
