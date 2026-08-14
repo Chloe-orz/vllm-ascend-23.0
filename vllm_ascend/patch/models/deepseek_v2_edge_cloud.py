@@ -74,7 +74,9 @@ def _forward_edge_cloud_segment_deepseek_v2(
         tensors = make_boundary_tensors(self, hidden_states, residual)
         if aux_hidden_states:
             # aux_hidden_states is always present regardless of materialization
-            tensors._tensors["aux_hidden_states"] = torch.cat(aux_hidden_states, dim=-1)
+            tensors.tensors["aux_hidden_states"] = torch.cat(
+                aux_hidden_states, dim=-1
+            )
         return tensors
 
     return apply_final_norm(self.norm, hidden_states, residual)
