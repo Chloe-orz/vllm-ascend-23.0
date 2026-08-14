@@ -223,6 +223,7 @@ from vllm_ascend.ascend_forward_context import (  # isort: skip
 )
 
 from vllm.model_executor.models.interfaces import supports_multimodal_pruning
+from vllm.model_executor.models.utils import extract_layer_index
 
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
@@ -359,6 +360,25 @@ class EdgeCloudSegment(torch.nn.Module):
             is_last_segment=self._is_last_segment,
             **extra_layer_kwargs,
         )
+
+
+def _get_edge_cloud_moe_start_index(
+    all_moe_layers: list[str] | None,
+    start_layer: int,
+) -> int:
+    """Return the MoE cursor for a segment starting at ``start_layer``.
+
+    Edge workers own two non-contiguous layer ranges (head and tail), while
+    ``ForwardContext.moe_layer_index`` is reset to zero for every segment
+    forward.  The tail segment must therefore advance the cursor past the
+    locally registered head MoE layers before entering its first MoE.
+    """
+    if not all_moe_layers:
+        return 0
+    return sum(
+        extract_layer_index(layer_name) < start_layer
+        for layer_name in all_moe_layers
+    )
 
 @dataclass
 class HeadState:
@@ -7898,6 +7918,18 @@ class NPUModelRunner(GPUModelRunner):
         if _EXTRA_CTX.layer_idx is not None:
             _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
 
+        # segment_e runs in a fresh ForwardContext. Since an edge worker owns
+        # both the head and tail ranges, index zero refers to a head MoE, not
+        # the first MoE executed by this tail segment.
+        old_moe_layer_index = forward_context.moe_layer_index
+        if forward_context.all_moe_layers:
+            forward_context.moe_layer_index = (
+                _get_edge_cloud_moe_start_index(
+                    forward_context.all_moe_layers,
+                    self.num_layers - self.tail_k,
+                )
+            )
+
         try:
             tail_layer_indices = list(range(
                 self.num_layers - self.tail_k,
@@ -7918,6 +7950,7 @@ class NPUModelRunner(GPUModelRunner):
             # segment_e 执行完毕后恢复原始 layer_idx
             if old_layer_idx is not None:
                 _EXTRA_CTX.layer_idx = old_layer_idx
+            forward_context.moe_layer_index = old_moe_layer_index
 
         if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
             hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
@@ -8422,16 +8455,13 @@ class NPUModelRunner(GPUModelRunner):
                 forward_context is not None
                 and forward_context.all_moe_layers is not None
             ):
-                from vllm.model_executor.models.utils import (
-                    extract_layer_index,
-                )
                 global_start = layer_slice_info.start_layer + self.head_k
-                moe_start = sum(
-                    1
-                    for name in forward_context.all_moe_layers
-                    if extract_layer_index(name) < global_start
+                forward_context.moe_layer_index = (
+                    _get_edge_cloud_moe_start_index(
+                        forward_context.all_moe_layers,
+                        global_start,
+                    )
                 )
-                forward_context.moe_layer_index = moe_start
         hidden_states = seg_c(
             positions=positions,
             intermediate_tensors=intermediate_tensors,
