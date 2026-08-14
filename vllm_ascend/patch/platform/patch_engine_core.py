@@ -519,6 +519,39 @@ def _advance_edge_cloud_draft(
                 )
             }
             valid_sampled_token_count = dict(num_accepted_tokens)
+        # [EC-DEBUG] A zero count for a request means its sampled row in the
+        # returned target-tail output was empty (discarded row or
+        # placeholder-truncated row on the edge worker).  Forwarded to the
+        # cloud as valid_sampled_token_count=0, it is dropped by
+        # _record_cloud_request_corrections ("Ignoring invalid cloud
+        # accepted count") and the cloud then crashes on the next
+        # DECODE_FIRST ("missing request-keyed speculative corrections").
+        # Mid-prefill-chunk PREFILL_LAST tails legitimately produce zero
+        # rows (their outputs are discarded by design), so those log at INFO.
+        if num_accepted_tokens is not None:
+            _already_finished = (
+                completed_scheduler_output.finished_req_ids or set()
+            )
+            _zero_rows = [
+                req_id
+                for req_id, count in num_accepted_tokens.items()
+                if count == 0 and req_id not in _already_finished
+            ]
+            if _zero_rows:
+                _log = (
+                    logger.warning
+                    if batch_type == BatchType.DECODE_LAST
+                    else logger.info
+                )
+                _log(
+                    "[EC-DEBUG] zero-length sampled rows in %s output: "
+                    "task_id=%s reqs=%s (forwarded to the cloud as "
+                    "valid_sampled_token_count=0; the cloud drops such "
+                    "corrections as invalid)",
+                    batch_type,
+                    task_id,
+                    _zero_rows,
+                )
         finalize = getattr(
             self.scheduler, "finalize_pre_generated_draft_first", None
         )

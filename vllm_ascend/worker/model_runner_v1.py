@@ -2407,9 +2407,50 @@ class NPUModelRunner(GPUModelRunner):
                 # Scheduled cloud draft results must arrive before the next
                 # target. There is no safe positional fallback once batches
                 # can be independently reordered on the edge and cloud.
+                # [EC-DEBUG] Enumerate exactly which requests lack a usable
+                # correction and why, so the edge-side report that dropped
+                # them (valid_sampled_token_count=0 / late generation) can
+                # be correlated with the edge logs.
+                _failure_details: list[str] = []
+                for _rid, _num_draft in previous_num_draft_tokens.items():
+                    if (
+                        _num_draft <= 0
+                        or _rid not in self.input_batch.req_id_to_index
+                    ):
+                        continue
+                    _corr = self._cloud_pending_request_corrections.get(_rid)
+                    _latest_gen = (
+                        self._cloud_latest_target_generation_by_req.get(_rid)
+                    )
+                    if _corr is None:
+                        _failure_details.append(
+                            f"{_rid}: no correction recorded "
+                            f"(prev_num_draft={_num_draft}, "
+                            f"latest_gen={_latest_gen})"
+                        )
+                    elif _corr.generation != _latest_gen:
+                        _failure_details.append(
+                            f"{_rid}: generation mismatch "
+                            f"(correction gen={_corr.generation} "
+                            f"task={_corr.task_id}, latest={_latest_gen})"
+                        )
+                    elif _corr.num_draft_tokens != _num_draft:
+                        _failure_details.append(
+                            f"{_rid}: num_draft mismatch "
+                            f"(correction={_corr.num_draft_tokens} "
+                            f"task={_corr.task_id}, prev={_num_draft})"
+                        )
+                    else:
+                        _failure_details.append(
+                            f"{_rid}: cpu-state mismatch "
+                            f"(task={_corr.task_id}, "
+                            f"optimistic={_corr.optimistic_num_computed_tokens}, "
+                            f"actual={_corr.actual_num_computed_tokens})"
+                        )
                 raise RuntimeError(
                     "Cloud target is missing request-keyed speculative "
-                    "corrections for one or more active requests"
+                    "corrections for one or more active requests: "
+                    + "; ".join(_failure_details)
                 )
             # The upstream callback would apply the same rejection correction
             # later using the positional prev_req_id_to_index map.  The CPU
@@ -2531,6 +2572,72 @@ class NPUModelRunner(GPUModelRunner):
             discard_requests_mask = optimistic_seq_lens_np < num_tokens_np
 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
+
+        # [EC-DEBUG] A discard in a decode/draft batch means the worker's
+        # per-request token count ran ahead of this batch's optimistic seq
+        # len (accepted-count divergence between worker and scheduler), or a
+        # stale row index marked the wrong request invalid ([EC-INV-C1]).
+        # The discarded row materializes as an EMPTY sampled row, which the
+        # edge EngineCore turns into valid_sampled_token_count=0 for the
+        # cloud -> the cloud ignores the invalid correction and crashes on
+        # the next DECODE_FIRST ("missing request-keyed speculative
+        # corrections").  Mid-prefill-chunk discards are expected (no target
+        # token is sampled mid-prompt); decode discards are not.  Log the
+        # full per-request accounting so the divergence can be pinned down.
+        if len(discard_request_indices) > 0:
+            _sched_num_computed: dict[str, int] = {}
+            _cached = scheduler_output.scheduled_cached_reqs
+            if _cached is not None and _cached.req_ids is not None:
+                _sched_num_computed = {
+                    rid: int(nc)
+                    for rid, nc in zip(
+                        _cached.req_ids, _cached.num_computed_tokens
+                    )
+                }
+            for _row in discard_request_indices:
+                _req_id = self.input_batch.req_ids[int(_row)]
+                _req_state = self.requests.get(_req_id)
+                _detail = (
+                    "batch_type=%s head_token=%s req=%s row=%d "
+                    "num_computed_cpu=%d num_scheduled=%d "
+                    "worker_num_tokens=%d sched_num_computed=%s "
+                    "req_state_num_computed=%s"
+                ) % (
+                    scheduler_output.batch_type,
+                    scheduler_output.head_token,
+                    _req_id,
+                    int(_row),
+                    int(self.input_batch.num_computed_tokens_cpu[int(_row)]),
+                    int(
+                        scheduler_output.num_scheduled_tokens.get(_req_id, -1)
+                    ),
+                    int(num_tokens_np[int(_row)]),
+                    _sched_num_computed.get(_req_id),
+                    (
+                        _req_state.num_computed_tokens
+                        if _req_state is not None
+                        else None
+                    ),
+                )
+                if scheduler_output.batch_type in (
+                    BatchType.DECODE_FIRST,
+                    BatchType.DECODE_LAST,
+                    BatchType.DRAFT_FIRST,
+                    BatchType.DRAFT_LAST,
+                ):
+                    logger.warning(
+                        "[EC-DEBUG] discarded sampled row in decode/draft "
+                        "batch (worker token count ahead of batch optimistic "
+                        "seq len): %s",
+                        _detail,
+                    )
+                else:
+                    logger.info(
+                        "[EC-DEBUG] discarded sampled row (expected for "
+                        "mid-prefill chunks): %s",
+                        _detail,
+                    )
+
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[: self.num_discarded_requests] = (
             discard_request_indices
