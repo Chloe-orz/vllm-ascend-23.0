@@ -568,11 +568,39 @@ def _advance_edge_cloud_draft(
                 valid_sampled_token_count=valid_sampled_token_count,
             )
             if finalized is not None:
+                # [EC-DEBUG] Snapshot the exact scalars patched into the
+                # cloud-bound DRAFT_FIRST, so they can be diffed against what
+                # the cloud actually records ("Ignoring invalid cloud
+                # accepted count ... valid_by_req=...").
+                logger.info(
+                    "[EC-DEBUG] finalized draft scalars: task_id=%s "
+                    "valid_sampled_token_count=%s",
+                    task_id,
+                    valid_sampled_token_count,
+                )
                 # This only opens the cloud control stream. Edge DRF/DRL
                 # SchedulerOutputs were already dispatched independently and
                 # never wait for accepted-token propagation.
                 self._release_deferred_draft_pre_out(task_id)
                 return
+            # [EC-DEBUG] finalize found no matching pending DRAFT_FIRST for
+            # this task: the scalars fall back to enqueue_draft_first, which
+            # does NOT patch the pre-generated cloud-bound control.  For a
+            # pre-generated chain the cloud will see stale/absent scalars.
+            _is_pregen = getattr(
+                self.scheduler, "is_pre_generated_draft", None
+            )
+            if _is_pregen is not None and _is_pregen(
+                completed_scheduler_output
+            ):
+                logger.warning(
+                    "[EC-DEBUG] finalize_pre_generated_draft_first found no "
+                    "pending DRAFT_FIRST for pre-generated task_id=%s "
+                    "(batch_type=%s); scalars took the enqueue_draft_first "
+                    "fallback",
+                    task_id,
+                    batch_type,
+                )
         enqueue_draft_first(
             completed_scheduler_output,
             draft_task_id=task_id,

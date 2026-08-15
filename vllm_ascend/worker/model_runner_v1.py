@@ -2441,9 +2441,14 @@ class NPUModelRunner(GPUModelRunner):
                             f"task={_corr.task_id}, prev={_num_draft})"
                         )
                     else:
+                        _cpu_val = int(
+                            self.input_batch.num_computed_tokens_cpu[
+                                self.input_batch.req_id_to_index[_rid]
+                            ]
+                        )
                         _failure_details.append(
                             f"{_rid}: cpu-state mismatch "
-                            f"(task={_corr.task_id}, "
+                            f"(task={_corr.task_id}, cpu={_cpu_val}, "
                             f"optimistic={_corr.optimistic_num_computed_tokens}, "
                             f"actual={_corr.actual_num_computed_tokens})"
                         )
@@ -6861,13 +6866,19 @@ class NPUModelRunner(GPUModelRunner):
                 continue
             valid_count = int(valid_value)
             if not 1 <= valid_count <= num_draft + 1:
+                # [EC-DEBUG] Dump the full received mapping so the cloud-side
+                # view can be diffed against the edge EngineCore's derived
+                # counts (a valid=0 here with no edge-side zero-row log means
+                # the mapping was mis-keyed/misaligned in transit).
                 logger.warning(
                     "Ignoring invalid cloud accepted count: task=%s req=%s "
-                    "valid=%d num_draft=%d",
+                    "valid=%d num_draft=%d valid_type=%s valid_by_req=%s",
                     task_id,
                     req_id,
                     valid_count,
                     num_draft,
+                    type(valid_sampled_values).__name__,
+                    valid_by_req,
                 )
                 continue
             if (
