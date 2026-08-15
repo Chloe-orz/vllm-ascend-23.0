@@ -7069,7 +7069,8 @@ class NPUModelRunner(GPUModelRunner):
                 # [EC-DBG] spec 分支整体替换 prev map（无 merge），探测多请求下
                 # 仍在存活请求的被丢弃 pending token（H1 假设）。
                 _prev_dropped = [
-                    r for r in self.input_batch.prev_req_id_to_index
+                    r
+                    for r in (self.input_batch.prev_req_id_to_index or {})
                     if r not in new_prev_map and r in self.requests
                 ]
                 if _prev_dropped:
