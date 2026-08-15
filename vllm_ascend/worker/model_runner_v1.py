@@ -7063,9 +7063,22 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
                 self.input_batch.prev_req_id_to_index = new_prev_map
             else:
-                self.input_batch.prev_req_id_to_index = {
+                new_prev_map = {
                     req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
                 }
+                # [EC-DBG] spec 分支整体替换 prev map（无 merge），探测多请求下
+                # 仍在存活请求的被丢弃 pending token（H1 假设）。
+                _prev_dropped = [
+                    r for r in self.input_batch.prev_req_id_to_index
+                    if r not in new_prev_map and r in self.requests
+                ]
+                if _prev_dropped:
+                    logger.warning(
+                        "[EC-DBG] SPEC-PREV-DROP: alive reqs %s lose pending "
+                        "prev tokens (new batch=%s, batch_type=%s)",
+                        _prev_dropped, list(new_prev_map.keys()),
+                        getattr(scheduler_output, "batch_type", None))
+                self.input_batch.prev_req_id_to_index = new_prev_map
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
