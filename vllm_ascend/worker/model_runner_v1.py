@@ -2412,6 +2412,7 @@ class NPUModelRunner(GPUModelRunner):
                 # them (valid_sampled_token_count=0 / late generation) can
                 # be correlated with the edge logs.
                 _failure_details: list[str] = []
+                _ok_count = 0
                 for _rid, _num_draft in previous_num_draft_tokens.items():
                     if (
                         _num_draft <= 0
@@ -2446,6 +2447,14 @@ class NPUModelRunner(GPUModelRunner):
                                 self.input_batch.req_id_to_index[_rid]
                             ]
                         )
+                        if _cpu_val in (
+                            _corr.optimistic_num_computed_tokens,
+                            _corr.actual_num_computed_tokens,
+                        ):
+                            # This request passes -- not the cause; skip so
+                            # the failure list only names real offenders.
+                            _ok_count += 1
+                            continue
                         _failure_details.append(
                             f"{_rid}: cpu-state mismatch "
                             f"(task={_corr.task_id}, cpu={_cpu_val}, "
@@ -2456,6 +2465,7 @@ class NPUModelRunner(GPUModelRunner):
                     "Cloud target is missing request-keyed speculative "
                     "corrections for one or more active requests: "
                     + "; ".join(_failure_details)
+                    + f" [{_ok_count} other request(s) passed the check]"
                 )
             # The upstream callback would apply the same rejection correction
             # later using the positional prev_req_id_to_index map.  The CPU

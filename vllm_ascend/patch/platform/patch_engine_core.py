@@ -571,11 +571,13 @@ def _advance_edge_cloud_draft(
                 # [EC-DEBUG] Snapshot the exact scalars patched into the
                 # cloud-bound DRAFT_FIRST, so they can be diffed against what
                 # the cloud actually records ("Ignoring invalid cloud
-                # accepted count ... valid_by_req=...").
-                logger.info(
+                # accepted count ... valid_by_req=...").  WARNING level so it
+                # survives warning-only log captures during debugging.
+                logger.warning(
                     "[EC-DEBUG] finalized draft scalars: task_id=%s "
-                    "valid_sampled_token_count=%s",
+                    "num_accepted=%s valid_sampled_token_count=%s",
                     task_id,
+                    num_accepted_tokens,
                     valid_sampled_token_count,
                 )
                 # This only opens the cloud control stream. Edge DRF/DRL
