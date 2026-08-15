@@ -334,6 +334,14 @@ class PDSeparatedScheduler(Scheduler):
         self._force_decode_last: bool = False
         self._force_draft_last: bool = False
 
+        # [EC debug switch] VLLM_EC_DISABLE_PD_INTERLEAVE=1: fully disable
+        # prefill/decode interleaving (incl. MTP draft chains).  While any
+        # tail is owed (PL/DL/DRL pending) the opposite kind of head may not
+        # be scheduled, and the DL/DRL delays are skipped, forcing strict
+        # head -> tail adjacency (synchronous round-trip baseline).
+        self._disable_pd_interleave: bool = os.environ.get(
+            "VLLM_EC_DISABLE_PD_INTERLEAVE", "0") == "1"
+
         self._layer_slice_config_path: str | None = None
         self._layer_slice_config_mtime: float = 0.0
         self._load_layer_slice_config()
@@ -1029,6 +1037,15 @@ class PDSeparatedScheduler(Scheduler):
         # empty batch, causing a tight-loop.  Pre-check capacity to avoid
         # the useless call.
         effective_capacity = self.max_num_running_reqs - len(self.running)
+        if self._disable_pd_interleave and (
+            self._force_decode_last
+            or self._force_draft_last
+            or self.decodes_last_ready
+            or self.drafts_last_ready
+            or self.decodes_first_ready
+        ):
+            # A decode/draft tail is owed: keep head -> tail adjacency.
+            return False
         return (
             self._has_prefill_work()
             and self.prefill_inflight_count < self.prefill_inflight_limit
@@ -1037,6 +1054,11 @@ class PDSeparatedScheduler(Scheduler):
         )
 
     def _can_schedule_decode_first(self) -> bool:
+        if self._disable_pd_interleave and (
+            self.prefills_last_ready or self.prefill_inflight_count > 0
+        ):
+            # A prefill tail is owed: keep head -> tail adjacency.
+            return False
         return bool(
             self.running
             and self.decode_or_draft_inflight_count == 0
@@ -1048,6 +1070,11 @@ class PDSeparatedScheduler(Scheduler):
         )
 
     def _can_schedule_draft_first(self) -> bool:
+        if self._disable_pd_interleave and (
+            self.prefills_last_ready or self.prefill_inflight_count > 0
+        ):
+            # A prefill tail is owed: keep head -> tail adjacency.
+            return False
         if not self.drafts_first_ready:
             return False
         next_output = self.drafts_first_ready[0]
@@ -1216,6 +1243,10 @@ class PDSeparatedScheduler(Scheduler):
 
     def _can_schedule_decode_last(self) -> bool:
         """Return True if the delay since DECODE_FIRST has elapsed."""
+        if self._disable_pd_interleave:
+            # No interleave to fill the round-trip window with; dispatch the
+            # tail immediately (the worker simply waits on the c2e recv).
+            return True
         if self._decode_last_delay_start_ts is None:
             return True
         elapsed_ms = (time.monotonic() - self._decode_last_delay_start_ts) * 1000
@@ -1237,6 +1268,8 @@ class PDSeparatedScheduler(Scheduler):
 
     def _can_schedule_draft_last(self) -> bool:
         """Return True if the delay since DRAFT_FIRST has elapsed."""
+        if self._disable_pd_interleave:
+            return True
         if self._draft_last_delay_start_ts is None:
             return True
         elapsed_ms = (time.monotonic() - self._draft_last_delay_start_ts) * 1000
