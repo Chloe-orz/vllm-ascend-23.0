@@ -1260,6 +1260,24 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.sampling_done_event: torch.npu.Event | None = None
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
+        # Request-keyed store of pending prev-sampled state for async spec
+        # decode: req_id -> (next_token, valid_count, prev_num_computed,
+        # num_draft).  Written by _stash_pending_prev_sampled at every
+        # sampling step (edge-cloud tail segments sample only a subset of
+        # the running requests, so the upstream wholesale replacement of
+        # prev_sampled_token_ids / prev_req_id_to_index destroys the other
+        # live requests' pending tokens) and consumed by
+        # _reseed_pending_prev_for_batch on the next batch that runs the
+        # request.  All tensor fields are 0-dim NPU tensors; num_draft is a
+        # plain int.
+        self._pending_prev_by_req: dict[
+            str, tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]
+        ] = {}
+        # Set by _stash_pending_prev_sampled; tells _bookkeeping_sync that
+        # this step's prev state lives in _pending_prev_by_req, so the
+        # wholesale prev_req_id_to_index replacement must be skipped (the
+        # map is rebuilt per consuming batch from the store).
+        self._pending_prev_stashed_this_step: bool = False
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -2343,6 +2361,15 @@ class NPUModelRunner(GPUModelRunner):
         req_data = scheduler_output.scheduled_cached_reqs
 
         self._cloud_current_cpu_state_authoritative = False
+        if self._pending_prev_by_req:
+            # Request-keyed pending prev tokens must not survive the request
+            # itself (finished/aborted) nor a preemption rewind: a resumed
+            # request recomputes from the scheduler's num_computed_tokens,
+            # so its pre-preemption pending token is stale.
+            for req_id in scheduler_output.finished_req_ids:
+                self._pending_prev_by_req.pop(req_id, None)
+            for req_id in scheduler_output.scheduled_cached_reqs.resumed_req_ids:
+                self._pending_prev_by_req.pop(req_id, None)
         if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
             for req_id in scheduler_output.finished_req_ids:
                 self._cloud_pending_request_corrections.pop(req_id, None)
@@ -2622,6 +2649,13 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.num_computed_tokens_cpu,
                 self.input_batch.num_prompt_tokens,
             )
+
+        # Re-seed pending prev sampled tokens request-keyed BEFORE building
+        # prev_positions: pending requests get an identity mapping
+        # (prev_positions[i] == i), all others -1.  Tail segments take the
+        # fast path and skip _prepare_inputs, so this only runs for batches
+        # that actually need to consume pending tokens (e.g. DF heads).
+        self._reseed_pending_prev_for_batch(scheduler_output)
 
         # Build prev_positions before PCP prepares full-layout spec inputs so
         # PCP can repair async sampled/draft ids with device-side index math.
@@ -3432,7 +3466,147 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
-        self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+            # Request-keyed pending store.  Replaces the former wholesale
+            # `self.input_batch.prev_sampled_token_ids =
+            # next_token_ids.unsqueeze(1)`: an edge-cloud tail segment (PL/DL)
+            # samples only a SUBSET of the running requests, and replacing the
+            # buffer wholesale destroyed the still-pending tokens of the other
+            # live requests, which then decoded from an unfilled placeholder
+            # forever after (H1).
+            self._stash_pending_prev_sampled(
+                next_token_ids, valid_sampled_tokens_count
+            )
+
+    def _stash_pending_prev_sampled(
+        self,
+        next_token_ids: torch.Tensor,
+        valid_sampled_tokens_count: torch.Tensor,
+    ) -> None:
+        """Stash this sampling batch's pending prev state request-keyed.
+
+        Row order of ``next_token_ids`` / ``valid_sampled_tokens_count`` is
+        ``self.input_batch.req_ids`` (one next token per request).  Entries
+        are consumed by :meth:`_reseed_pending_prev_for_batch` on the next
+        batch that runs each request.
+
+        All tensors stay on the NPU as 0-dim clones -- no CPU sync on the
+        hot path.  ``num_computed_tokens[i]`` must be cloned because the
+        shared buffer is overwritten by every interleaved batch's
+        ``_prepare_inputs`` before this entry is consumed.
+        """
+        req_ids = self.input_batch.req_ids
+        pending = self._pending_prev_by_req
+        for i in range(min(next_token_ids.shape[0], len(req_ids))):
+            req_id = req_ids[i]
+            req_state = self.requests.get(req_id)
+            if req_state is None:
+                pending.pop(req_id, None)
+                continue
+            # num_draft: req_state.prev_num_draft_len is request-keyed and
+            # equals the number of draft tokens verified by this sampling
+            # step.  The positional prev_num_draft_tokens.np row is NOT
+            # reliable here: interleaved batches fill(0) and re-write it via
+            # the (stale) positional map between the head and tail segments.
+            pending[req_id] = (
+                next_token_ids[i].clone(),
+                valid_sampled_tokens_count[i].clone(),
+                self.num_computed_tokens[i].clone(),
+                req_state.prev_num_draft_len,
+            )
+        # Discarded requests recover through the wire; drop any stale entry.
+        for idx in self.discard_request_indices.np[: self.num_discarded_requests]:
+            pending.pop(req_ids[int(idx)], None)
+        self._pending_prev_stashed_this_step = True
+
+    def _reseed_pending_prev_for_batch(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Re-seed this batch's positional prev-token state from the store.
+
+        Counterpart of :meth:`_stash_pending_prev_sampled`.  Runs in
+        ``_prepare_inputs`` before ``_compute_prev_positions`` so every
+        pending request gets an identity mapping (``prev_positions[i] == i``)
+        while all other requests get -1.  The correction kernel
+        (``update_num_computed_tokens_for_batch_change``) then gathers the
+        re-seeded row-i values: ``num_computed_tokens[i]`` (the stashed
+        pre-sampling clone), ``valid_sampled_token_count_gpu[i]`` and
+        ``prev_num_draft_tokens.np[i]``.
+
+        Pre-seeding ``num_computed_tokens[i]`` is safe: between here and the
+        kernel, row i is only read through that gather (the
+        non-async-spec-decode and cloud-authoritative branches overwrite the
+        row from CPU instead of running the kernel), and the kernel writes
+        back ``prev_computed + valid_count`` for participating rows.
+        Consumed entries are deleted so a token is never fed twice; entries
+        of vanished requests are dropped lazily.
+        """
+        if not self.use_async_spec_decode:
+            return
+        pending = self._pending_prev_by_req
+        if not pending:
+            return
+        # Lazy cleanup of entries whose request is gone (finished/aborted).
+        for req_id in [r for r in pending if r not in self.requests]:
+            pending.pop(req_id, None)
+        if not pending:
+            return
+
+        num_reqs = self.input_batch.num_reqs
+        req_ids = self.input_batch.req_ids
+        matches = [
+            (i, req_id, pending[req_id])
+            for i, req_id in enumerate(req_ids[:num_reqs])
+            if req_id in pending
+        ]
+        # The positional map is derived exclusively from the store now:
+        # rebuild it for this batch so no stale row reference from a previous
+        # layout can survive (requests without a pending entry get -1).
+        new_map: dict[str, int] = {}
+        if not matches:
+            self.input_batch.prev_req_id_to_index = new_map
+            return
+
+        prev_buf = self.input_batch.prev_sampled_token_ids
+        if prev_buf is None or prev_buf.dim() != 2 or prev_buf.shape[0] < num_reqs:
+            prev_buf = torch.zeros(
+                (self.max_num_reqs, 1), dtype=torch.int32, device=self.device
+            )
+            self.input_batch.prev_sampled_token_ids = prev_buf
+
+        count_gpu = self.valid_sampled_token_count_gpu
+        if count_gpu is None or count_gpu.shape[0] < num_reqs:
+            count_gpu = torch.zeros(
+                self.max_num_reqs,
+                dtype=matches[0][2][1].dtype,
+                device=self.device,
+            )
+            self.valid_sampled_token_count_gpu = count_gpu
+
+        for i, req_id, (token, valid_count, prev_computed, num_draft) in matches:
+            prev_buf[i].copy_(token)
+            count_gpu[i].copy_(valid_count)
+            self.num_computed_tokens[i].copy_(prev_computed)
+            self.prev_num_draft_tokens.np[i] = num_draft
+            new_map[req_id] = i
+            del pending[req_id]  # consumed; never feed twice
+        self.input_batch.prev_req_id_to_index = new_map
+
+        # Mirror the counts into the pinned CPU buffer for
+        # _correct_optimistic_seq_lens_cpu on the dedicated copy stream; the
+        # consumer synchronizes valid_sampled_token_count_event before
+        # reading, so the hot path itself stays free of D2H syncs.
+        if (
+            self.valid_sampled_token_count_cpu is not None
+            and self.valid_sampled_token_count_event is not None
+        ):
+            counts_cpu = self.valid_sampled_token_count_cpu
+            with torch.npu.stream(self.valid_sampled_token_count_copy_stream):
+                self.valid_sampled_token_count_copy_stream.wait_stream(
+                    torch.npu.current_stream()
+                )
+                for i, _, entry in matches:
+                    counts_cpu[i].copy_(entry[1], non_blocking=True)
+                self.valid_sampled_token_count_event.record()
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
@@ -5169,7 +5343,11 @@ class NPUModelRunner(GPUModelRunner):
                     # prev_num_draft_len > 0 but is missing from
                     # prev_req_id_to_index, the parent _update_states would
                     # hit a KeyError. Reset prev_num_draft_len to 0 for such
-                    # requests so they fall through safely.
+                    # requests so they fall through safely.  Requests with a
+                    # live entry in _pending_prev_by_req are exempt: the map is
+                    # rebuilt from that request-keyed store in
+                    # _reseed_pending_prev_for_batch below, so a missing
+                    # positional map entry no longer implies lost prev state.
                     if (
                         self.use_async_scheduling
                         and self.num_spec_tokens
@@ -5178,6 +5356,7 @@ class NPUModelRunner(GPUModelRunner):
                         for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                             if (
                                 req_id not in self.input_batch.prev_req_id_to_index
+                                and req_id not in self._pending_prev_by_req
                                 and (req_state := self.requests.get(req_id)) is not None
                                 and req_state.prev_num_draft_len
                             ):
@@ -7066,20 +7245,44 @@ class NPUModelRunner(GPUModelRunner):
                 new_prev_map = {
                     req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
                 }
-                # [EC-DBG] spec 分支整体替换 prev map（无 merge），探测多请求下
-                # 仍在存活请求的被丢弃 pending token（H1 假设）。
-                _prev_dropped = [
-                    r
-                    for r in (self.input_batch.prev_req_id_to_index or {})
-                    if r not in new_prev_map and r in self.requests
-                ]
-                if _prev_dropped:
-                    logger.warning(
-                        "[EC-DBG] SPEC-PREV-DROP: alive reqs %s lose pending "
-                        "prev tokens (new batch=%s, batch_type=%s)",
-                        _prev_dropped, list(new_prev_map.keys()),
-                        getattr(scheduler_output, "batch_type", None))
-                self.input_batch.prev_req_id_to_index = new_prev_map
+                if self._pending_prev_stashed_this_step:
+                    # This step's prev state was stashed request-keyed in
+                    # _pending_prev_by_req (see _stash_pending_prev_sampled);
+                    # the positional map is rebuilt per consuming batch by
+                    # _reseed_pending_prev_for_batch.  Do NOT wholesale
+                    # replace the map here: an edge-cloud tail batch covers
+                    # only a subset of the running requests, and replacing
+                    # it drops the surviving requests' pending bookkeeping
+                    # (H1).
+                    self._pending_prev_stashed_this_step = False
+                    # [EC-DBG] 保护生效探测：旧字典里"不在本批但存活"的请求
+                    # 的 pending token 被保留（原先会被整体替换销毁）。
+                    _prev_kept = [
+                        r
+                        for r in self._pending_prev_by_req
+                        if r not in new_prev_map and r in self.requests
+                    ]
+                    if _prev_kept:
+                        logger.warning(
+                            "[EC-DBG] SPEC-PREV-KEEP: kept pending for reqs %s "
+                            "(new batch=%s, batch_type=%s)",
+                            _prev_kept, list(new_prev_map.keys()),
+                            getattr(scheduler_output, "batch_type", None))
+                else:
+                    # [EC-DBG] spec 分支整体替换 prev map（无 merge），探测多请求下
+                    # 仍在存活请求的被丢弃 pending token（H1 假设）。
+                    _prev_dropped = [
+                        r
+                        for r in (self.input_batch.prev_req_id_to_index or {})
+                        if r not in new_prev_map and r in self.requests
+                    ]
+                    if _prev_dropped:
+                        logger.warning(
+                            "[EC-DBG] SPEC-PREV-DROP: alive reqs %s lose pending "
+                            "prev tokens (new batch=%s, batch_type=%s)",
+                            _prev_dropped, list(new_prev_map.keys()),
+                            getattr(scheduler_output, "batch_type", None))
+                    self.input_batch.prev_req_id_to_index = new_prev_map
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
@@ -7575,7 +7778,9 @@ class NPUModelRunner(GPUModelRunner):
         # preparation inside inference_mode to match execute_model's
         # inference-mode context.
         with torch.inference_mode():
-            # Fix up prev_req_id_to_index (same as execute_model)
+            # Fix up prev_req_id_to_index (same as execute_model).  Requests
+            # with a live _pending_prev_by_req entry are exempt: the map is
+            # rebuilt from that store in _reseed_pending_prev_for_batch.
             if (
                 self.use_async_scheduling
                 and self.num_spec_tokens
@@ -7584,6 +7789,7 @@ class NPUModelRunner(GPUModelRunner):
                 for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                     if (
                         req_id not in self.input_batch.prev_req_id_to_index
+                        and req_id not in self._pending_prev_by_req
                         and (req_state := self.requests.get(req_id)) is not None
                         and req_state.prev_num_draft_len
                     ):

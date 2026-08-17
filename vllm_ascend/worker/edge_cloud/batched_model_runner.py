@@ -654,9 +654,14 @@ class BatchedModelRunner(NPUModelRunner):
                     for req_id in (
                             scheduler_output.scheduled_cached_reqs
                             .req_ids):
+                        # Exempt requests with a live _pending_prev_by_req
+                        # entry: the positional map is rebuilt from that
+                        # request-keyed store in
+                        # _reseed_pending_prev_for_batch.
                         if (
                             req_id
                             not in self.input_batch.prev_req_id_to_index
+                            and req_id not in self._pending_prev_by_req
                             and (req_state := self.requests.get(req_id))
                                 is not None
                             and req_state.prev_num_draft_len
