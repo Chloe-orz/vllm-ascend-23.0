@@ -11,11 +11,14 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from vllm.v1.core.sched.output import HiddenChannelType
 
-from vllm_ascend.distributed.parallel_state import ScheduledDraftTensorMeta
+if TYPE_CHECKING:
+    # Annotation only — keep this module importable from scheduler-side
+    # (engine core) processes without pulling in the HCCL wire layer.
+    from vllm_ascend.distributed.parallel_state import ScheduledDraftTensorMeta
 
 
 class CommChannelType(enum.Enum):

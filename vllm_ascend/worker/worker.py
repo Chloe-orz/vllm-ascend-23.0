@@ -80,10 +80,12 @@ from vllm_ascend.distributed.edge_cloud_comm import (
     CommChannelType,
     CommFuture,
     CommRequest,
+    LoggingSchedulerCommSink,
     channel_for,
     channel_for_direction,
     get_comm_service,
     kind_for_batch_type,
+    recv_request_from_hint,
 )
 from vllm_ascend.distributed.parallel_state import (
     ScheduledDraftTensorMeta,
@@ -252,6 +254,12 @@ class NPUWorker(WorkerBase):
         # recv when its hint arrives after busy_loop already submitted its
         # own.
         self._early_recv_consumed: set[str] = set()
+        # comm -> scheduler completion feedback (design doc 8.3-2):
+        # register the logging no-op sink so the chain
+        # submit -> reap -> sink is live end-to-end; poll_completions()
+        # at the execute_model loop head drives it.  Registration is
+        # type-idempotent (shared-model virtual workers share a process).
+        get_comm_service().register_sink(LoggingSchedulerCommSink())
         # Whether cloud-side hidden early-receive (CHER) is active on this
         # worker.  CHER is a built-in part of PD-separation masking, so on a
         # PD-separated cloud worker (local_rank==0) this is always True; False
@@ -842,33 +850,21 @@ class NPUWorker(WorkerBase):
     def start_early_irecv(self, hint: dict) -> None:
         """Submit a recv for the hinted hidden tensors and cache the future.
 
-        Atomic check-or-submit under ``_early_recv_lock``: a repeated hint
-        for the same head_token (or one that execute_model already
-        submitted via get_or_post_early_recv) is a no-op -- exactly one
-        recv is ever submitted per head_token, avoiding the double-post
-        deadlock where two irecvs on the same channel would race for the
-        sender's single isend.
+        The hint schema is owned by the comm layer
+        (``edge_cloud_comm.scheduler_api``); this method only adds the
+        worker-side idempotency/cap bookkeeping.  Atomic check-or-submit
+        under ``_early_recv_lock``: a repeated hint for the same
+        head_token (or one that execute_model already submitted via
+        get_or_post_early_recv) is a no-op -- exactly one recv is ever
+        submitted per head_token, avoiding the double-post deadlock where
+        two irecvs on the same channel would race for the sender's single
+        isend.
         """
-        ht = hint.get("head_token")
-        if not ht:
-            return
-        channel_str = hint.get("hidden_channel")
-        num_tokens = hint.get("num_tokens")
-        has_mrope = hint.get("has_mrope", True)
-        if channel_str is None or num_tokens is None:
-            logger.warning(
-                "[CHER] start_early_irecv: incomplete hint %s, skipping.",
-                {k: hint.get(k) for k in ("head_token", "hidden_channel",
-                                          "num_tokens")},
-            )
-            return
-        try:
-            channel = HiddenChannelType(channel_str)
-        except Exception:
-            logger.warning(
-                "[CHER] start_early_irecv: bad channel %r, skipping.",
-                channel_str,
-            )
+        do_sp_chunk = enable_sp() and (
+            self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+            or not self.model_runner.supports_mm_inputs)
+        request, ht = recv_request_from_hint(hint, sp_chunk=do_sp_chunk)
+        if request is None or ht is None:
             return
         with self._early_recv_lock:
             if ht in self._early_recv_futures:
@@ -888,18 +884,17 @@ class NPUWorker(WorkerBase):
             if len(self._early_recv_futures) >= _max:
                 return
             try:
-                future = self._submit_early_recv_locked(
-                    channel, num_tokens, include_mrope=has_mrope)
+                future = get_comm_service().submit_recv(request)
                 self._early_recv_futures[ht] = future  # cache for busy_loop
             except Exception:
                 logger.exception(
-                    "[CHER] start_early_irecv failed head_token=%s channel=%s",
-                    ht, channel_str,
+                    "[CHER] start_early_irecv failed head_token=%s",
+                    ht,
                 )
                 return
         logger.debug(
             "[CHER] early-recv submitted head_token=%s channel=%s num_tokens=%d",
-            ht, channel_str, num_tokens,
+            ht, hint.get("hidden_channel"), request.num_tokens,
         )
 
     def get_or_post_early_recv(

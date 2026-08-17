@@ -100,7 +100,12 @@ class EdgeCloudCommService:
         return completed
 
     def register_sink(self, sink: SchedulerCommSink) -> None:
+        """Register a completion sink.  Type-idempotent: a second instance
+        of the same class is ignored, so shared-model virtual workers
+        co-located in one process don't pile up duplicate sinks."""
         with self._lock:
+            if any(type(s) is type(sink) for s in self._sinks):
+                return
             self._sinks.append(sink)
 
     def unregister_sink(self, sink: SchedulerCommSink) -> None:
