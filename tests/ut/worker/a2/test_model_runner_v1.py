@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCache
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.model_runner_v1 import (
+    CloudExpectedRequestCorrection,
     CloudPendingRequestCorrection,
     NPUModelRunner,
 )
@@ -745,8 +746,22 @@ class TestCloudRequestCorrections(unittest.TestCase):
             "req-b": SimpleNamespace(num_computed_tokens=204),
         }
         runner._cloud_latest_target_generation_by_req = {
-            "req-a": 7,
-            "req-b": 8,
+            # An unrelated interleaved target may have advanced this global
+            # view. Correction matching must use the task-scoped expectation.
+            "req-a": 70,
+            "req-b": 80,
+        }
+        runner._cloud_expected_request_corrections = {
+            "req-a": CloudExpectedRequestCorrection(
+                task_id="task-a",
+                generation=7,
+                num_draft_tokens=3,
+            ),
+            "req-b": CloudExpectedRequestCorrection(
+                task_id="task-b",
+                generation=8,
+                num_draft_tokens=3,
+            ),
         }
         runner._cloud_pending_request_corrections = {
             "req-a": CloudPendingRequestCorrection(
@@ -767,6 +782,35 @@ class TestCloudRequestCorrections(unittest.TestCase):
             ),
         }
         return runner
+
+    def test_tracks_only_active_requests_with_draft_tokens(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._cloud_expected_request_corrections = {}
+        scheduler_output = SimpleNamespace(
+            scheduled_spec_decode_tokens={
+                "req-a": [11, 12, 13],
+                "req-prefill": [],
+                "req-not-active": [21, 22],
+            }
+        )
+
+        runner._track_cloud_expected_request_corrections(
+            scheduler_output,
+            task_id="task-a",
+            generation=9,
+            active_req_ids={"req-a", "req-prefill"},
+        )
+
+        self.assertEqual(
+            runner._cloud_expected_request_corrections,
+            {
+                "req-a": CloudExpectedRequestCorrection(
+                    task_id="task-a",
+                    generation=9,
+                    num_draft_tokens=3,
+                )
+            },
+        )
 
     def test_consumes_by_request_identity_after_batch_reorder(self):
         runner = self._build_runner()
@@ -795,6 +839,7 @@ class TestCloudRequestCorrections(unittest.TestCase):
             runner.requests["req-b"].num_computed_tokens, 201
         )
         self.assertFalse(runner._cloud_pending_request_corrections)
+        self.assertFalse(runner._cloud_expected_request_corrections)
 
     def test_incomplete_state_does_not_partially_modify_batch(self):
         runner = self._build_runner()
@@ -819,6 +864,43 @@ class TestCloudRequestCorrections(unittest.TestCase):
         self.assertIn(
             "req-a", runner._cloud_pending_request_corrections
         )
+
+    def test_stale_draft_len_without_expected_task_is_cleared(self):
+        runner = self._build_runner()
+        runner._cloud_expected_request_corrections = {}
+        runner._cloud_pending_request_corrections = {}
+        runner.use_async_scheduling = False
+        runner.requests["req-a"].prev_num_draft_len = 3
+        runner.requests["req-b"].prev_num_draft_len = 3
+        scheduler_output = SimpleNamespace(
+            batch_type=BatchType.DECODE_FIRST,
+            finished_req_ids=set(),
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req-a", "req-b"]
+            ),
+            cloud_draft_invalidate_task_ids=None,
+        )
+
+        def update_current_target(_scheduler_output):
+            self.assertEqual(
+                runner.requests["req-a"].prev_num_draft_len, 0
+            )
+            self.assertEqual(
+                runner.requests["req-b"].prev_num_draft_len, 0
+            )
+            runner.requests["req-a"].prev_num_draft_len = 2
+            runner.requests["req-b"].prev_num_draft_len = 2
+            return "deferred-correction"
+
+        with patch(
+            "vllm.v1.worker.gpu_model_runner.GPUModelRunner._update_states",
+            side_effect=update_current_target,
+        ):
+            result = runner._update_states(scheduler_output)
+
+        self.assertEqual(result, "deferred-correction")
+        self.assertEqual(runner.requests["req-a"].prev_num_draft_len, 2)
+        self.assertEqual(runner.requests["req-b"].prev_num_draft_len, 2)
 
     def test_next_target_rejects_incomplete_request_corrections(self):
         runner = self._build_runner()
@@ -865,8 +947,17 @@ class TestCloudRequestCorrections(unittest.TestCase):
         }
         runner._cloud_target_generation_by_task = {"task-a": 9}
         runner._cloud_latest_target_generation_by_req = {
-            "req-a": 9,
+            # Regression: the old implementation discarded this otherwise
+            # valid task-9 result when latest had already advanced.
+            "req-a": 10,
             "req-prefill": 9,
+        }
+        runner._cloud_expected_request_corrections = {
+            "req-a": CloudExpectedRequestCorrection(
+                task_id="task-a",
+                generation=9,
+                num_draft_tokens=3,
+            )
         }
         runner._cloud_pending_request_corrections = {}
         runner._cloud_actual_num_computed_by_req = {}
@@ -887,6 +978,52 @@ class TestCloudRequestCorrections(unittest.TestCase):
         self.assertNotIn(
             "req-prefill", runner._cloud_pending_request_corrections
         )
+
+    def test_record_is_atomic_when_expected_request_is_missing(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        target_output = SimpleNamespace(
+            scheduled_cached_reqs=SimpleNamespace(
+                req_ids=["req-a", "req-b"],
+                num_computed_tokens=[100, 200],
+            ),
+            scheduled_new_reqs=[],
+            scheduled_spec_decode_tokens={
+                "req-a": [11, 12, 13],
+                "req-b": [21, 22, 23],
+            },
+            num_scheduled_tokens={"req-a": 4, "req-b": 4},
+        )
+        runner._cloud_scheduler_output_by_task = {
+            "task-a": target_output
+        }
+        runner._cloud_draft_position_state_by_task = {
+            "task-a": SimpleNamespace(
+                req_ids=("req-a", "req-b"),
+                actual_num_computed_tokens=(100, 200),
+            )
+        }
+        runner._cloud_target_generation_by_task = {"task-a": 9}
+        runner._cloud_expected_request_corrections = {
+            req_id: CloudExpectedRequestCorrection(
+                task_id="task-a",
+                generation=9,
+                num_draft_tokens=3,
+            )
+            for req_id in ("req-a", "req-b")
+        }
+        runner._cloud_pending_request_corrections = {}
+        runner._cloud_actual_num_computed_by_req = {}
+        scheduler_output = SimpleNamespace(draft_task_id="task-a")
+
+        recorded = runner._record_cloud_request_corrections(
+            scheduler_output,
+            {"req-a": 2},
+            {"req-a": 2},
+        )
+
+        self.assertEqual(recorded, 0)
+        self.assertFalse(runner._cloud_pending_request_corrections)
+        self.assertFalse(runner._cloud_actual_num_computed_by_req)
 
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):

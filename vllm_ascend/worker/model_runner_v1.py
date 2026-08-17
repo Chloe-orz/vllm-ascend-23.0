@@ -401,6 +401,15 @@ class CloudPendingRequestCorrection:
     num_accepted_tokens: int
 
 
+@dataclass(frozen=True)
+class CloudExpectedRequestCorrection:
+    """Speculative correction expected from one cloud target task."""
+
+    task_id: str
+    generation: int
+    num_draft_tokens: int
+
+
 def _freeze_scheduled_state(value: Any, memo: dict[int, Any] | None = None) -> Any:
     """Clone mutable state that has to survive a scheduler context switch.
 
@@ -1289,6 +1298,12 @@ class NPUModelRunner(GPUModelRunner):
         ] = {}
         self._cloud_pending_request_corrections: dict[
             str, CloudPendingRequestCorrection
+        ] = {}
+        # Track only requests that actually verified speculative tokens in a
+        # target task. ``prev_num_draft_len`` alone is insufficient because it
+        # can survive request reordering or an invalidated draft task.
+        self._cloud_expected_request_corrections: dict[
+            str, CloudExpectedRequestCorrection
         ] = {}
         # Set only while preparing a cloud target whose optimistic CPU state
         # was corrected from the request-keyed records above.  This selects a
@@ -2301,6 +2316,28 @@ class NPUModelRunner(GPUModelRunner):
             return self.model.unwrap()
         return self.model
 
+    def _track_cloud_expected_request_corrections(
+        self,
+        scheduler_output: "SchedulerOutput",
+        task_id: str,
+        generation: int,
+        active_req_ids: set[str],
+    ) -> None:
+        """Bind speculative requests to the target task that verifies them."""
+        for req_id, draft_token_ids in (
+            scheduler_output.scheduled_spec_decode_tokens.items()
+        ):
+            num_draft_tokens = len(draft_token_ids)
+            if num_draft_tokens <= 0 or req_id not in active_req_ids:
+                continue
+            self._cloud_expected_request_corrections[req_id] = (
+                CloudExpectedRequestCorrection(
+                    task_id=task_id,
+                    generation=generation,
+                    num_draft_tokens=num_draft_tokens,
+                )
+            )
+
     def _consume_cloud_request_corrections(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2337,15 +2374,25 @@ class NPUModelRunner(GPUModelRunner):
             tuple[str, int, CloudPendingRequestCorrection]
         ] = []
         for req_id, num_draft in participating.items():
+            expected = self._cloud_expected_request_corrections.get(req_id)
             correction = self._cloud_pending_request_corrections.get(req_id)
-            latest_generation = (
-                self._cloud_latest_target_generation_by_req.get(req_id)
-            )
             if (
-                correction is None
-                or correction.generation != latest_generation
+                expected is None
+                or correction is None
+                or correction.task_id != expected.task_id
+                or correction.generation != expected.generation
+                or correction.num_draft_tokens != expected.num_draft_tokens
                 or correction.num_draft_tokens != num_draft
             ):
+                logger.warning(
+                    "Cloud request correction is not ready for the expected "
+                    "target task: req=%s previous_num_draft=%d "
+                    "expected=%s pending=%s",
+                    req_id,
+                    num_draft,
+                    expected,
+                    correction,
+                )
                 return False
 
             req_index = self.input_batch.req_id_to_index[req_id]
@@ -2381,8 +2428,10 @@ class NPUModelRunner(GPUModelRunner):
                 correction.num_accepted_tokens
             )
             self._cloud_pending_request_corrections.pop(req_id, None)
+            self._cloud_expected_request_corrections.pop(req_id, None)
 
         return True
+
     def _strip_tail_new_block_ids(
         self, scheduler_output: "SchedulerOutput"
     ) -> "SchedulerOutput":
@@ -2431,6 +2480,7 @@ class NPUModelRunner(GPUModelRunner):
         if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
             for req_id in scheduler_output.finished_req_ids:
                 self._cloud_pending_request_corrections.pop(req_id, None)
+                self._cloud_expected_request_corrections.pop(req_id, None)
                 self._cloud_latest_target_generation_by_req.pop(
                     req_id, None
                 )
@@ -2461,6 +2511,21 @@ class NPUModelRunner(GPUModelRunner):
             if track_cloud_corrections
             else {}
         )
+        # A non-zero prev_num_draft_len does not by itself prove that the
+        # request participated in the preceding cloud verify task. It can be
+        # left behind by task invalidation or request reordering. Clear that
+        # stale pre-super state so the base correction path cannot consume an
+        # unrelated positional result. A real expected correction remains
+        # strict and is consumed below after the base batch update.
+        for req_id, num_draft in previous_num_draft_tokens.items():
+            if (
+                num_draft > 0
+                and req_id
+                not in self._cloud_expected_request_corrections
+            ):
+                req_state = self.requests.get(req_id)
+                if req_state is not None:
+                    req_state.prev_num_draft_len = 0
 
         # A PD-interleaved tail updates only a subset of the running requests.
         # The base update removes absent requests from input_batch together
@@ -2482,7 +2547,9 @@ class NPUModelRunner(GPUModelRunner):
         result = super()._update_states(scheduler_output)
 
         has_previous_cloud_spec = any(
-            num_draft > 0 and req_id in self.input_batch.req_id_to_index
+            num_draft > 0
+            and req_id in self._cloud_expected_request_corrections
+            and req_id in self.input_batch.req_id_to_index
             for req_id, num_draft in previous_num_draft_tokens.items()
         )
         if has_previous_cloud_spec:
@@ -6298,6 +6365,15 @@ class NPUModelRunner(GPUModelRunner):
                 stale_task_id, None
             )
             self._cloud_target_generation_by_task.pop(stale_task_id, None)
+            stale_req_ids = [
+                req_id
+                for req_id, expected in (
+                    self._cloud_expected_request_corrections.items()
+                )
+                if expected.task_id == stale_task_id
+            ]
+            for req_id in stale_req_ids:
+                self._cloud_expected_request_corrections.pop(req_id, None)
             self._pop_eagle3_cloud_aux_hidden_states(stale_task_id)
             logger.warning(
                 "Cloud draft metadata cache exceeded bound (%d); evicting "
@@ -6360,6 +6436,12 @@ class NPUModelRunner(GPUModelRunner):
             self._cloud_target_generation_by_task[task_id] = generation
         for req_id in position_state.req_ids:
             self._cloud_latest_target_generation_by_req[req_id] = generation
+        self._track_cloud_expected_request_corrections(
+            scheduler_output,
+            task_id,
+            generation,
+            set(position_state.req_ids),
+        )
 
     def _resolve_cloud_spec_decode_metadata(
         self,
@@ -6536,6 +6618,15 @@ class NPUModelRunner(GPUModelRunner):
             ]
             for req_id in stale_req_ids:
                 self._cloud_pending_request_corrections.pop(req_id, None)
+            stale_expected_req_ids = [
+                req_id
+                for req_id, expected in (
+                    self._cloud_expected_request_corrections.items()
+                )
+                if expected.task_id == task_id
+            ]
+            for req_id in stale_expected_req_ids:
+                self._cloud_expected_request_corrections.pop(req_id, None)
             self._pop_eagle3_cloud_aux_hidden_states(task_id)
 
     def _build_edge_cloud_draft_attn_metadata(
@@ -6760,12 +6851,47 @@ class NPUModelRunner(GPUModelRunner):
         )
         actual_start_by_req = dict(zip(req_ids, actual_start_values))
 
-        recorded = 0
         spec_tokens = target_output.scheduled_spec_decode_tokens
-        for req_id, valid_value in valid_by_req.items():
+        expected_by_req = {
+            req_id: expected
+            for req_id, expected in (
+                self._cloud_expected_request_corrections.items()
+            )
+            if expected.task_id == task_id
+        }
+        if not expected_by_req:
+            return 0
+
+        resolved: list[tuple[str, CloudPendingRequestCorrection]] = []
+        for req_id, expected in expected_by_req.items():
             num_draft = len(spec_tokens.get(req_id, ()))
-            if num_draft <= 0 or req_id not in start_by_req:
-                continue
+            if (
+                generation != expected.generation
+                or num_draft != expected.num_draft_tokens
+                or req_id not in start_by_req
+                or req_id not in target_output.num_scheduled_tokens
+                or req_id not in valid_by_req
+                or req_id not in accepted_by_req
+            ):
+                logger.warning(
+                    "Cloud correction input is incomplete for expected "
+                    "request: task=%s req=%s generation=%d/%d "
+                    "num_draft=%d/%d has_start=%s has_valid=%s "
+                    "has_scheduled=%s has_accepted=%s",
+                    task_id,
+                    req_id,
+                    generation,
+                    expected.generation,
+                    num_draft,
+                    expected.num_draft_tokens,
+                    req_id in start_by_req,
+                    req_id in valid_by_req,
+                    req_id in target_output.num_scheduled_tokens,
+                    req_id in accepted_by_req,
+                )
+                return 0
+
+            valid_value = valid_by_req[req_id]
             valid_count = int(valid_value)
             if not 1 <= valid_count <= num_draft + 1:
                 logger.warning(
@@ -6776,20 +6902,7 @@ class NPUModelRunner(GPUModelRunner):
                     valid_count,
                     num_draft,
                 )
-                continue
-            if (
-                self._cloud_latest_target_generation_by_req.get(req_id)
-                != generation
-            ):
-                logger.warning(
-                    "Ignoring late cloud accepted state: task=%s req=%s "
-                    "generation=%d latest=%s",
-                    task_id,
-                    req_id,
-                    generation,
-                    self._cloud_latest_target_generation_by_req.get(req_id),
-                )
-                continue
+                return 0
 
             optimistic = start_by_req[req_id] + int(
                 target_output.num_scheduled_tokens[req_id]
@@ -6805,18 +6918,31 @@ class NPUModelRunner(GPUModelRunner):
                 optimistic_num_computed_tokens=optimistic,
                 actual_num_computed_tokens=actual,
                 num_accepted_tokens=int(
-                    accepted_by_req.get(req_id, valid_count)
+                    accepted_by_req[req_id]
                 ),
             )
             previous = self._cloud_pending_request_corrections.get(req_id)
-            if previous is None or previous.generation <= generation:
-                self._cloud_pending_request_corrections[req_id] = pending
-                self._cloud_actual_num_computed_by_req[req_id] = (
+            if previous is not None and previous.generation > generation:
+                logger.warning(
+                    "Cloud correction would overwrite a newer request "
+                    "state: task=%s req=%s generation=%d newer=%d",
+                    task_id,
+                    req_id,
                     generation,
-                    actual,
+                    previous.generation,
                 )
-                recorded += 1
-        return recorded
+                return 0
+            resolved.append((req_id, pending))
+
+        # Publish the task only after every expected request has validated.
+        # This keeps the next target from observing a partially-filled batch.
+        for req_id, pending in resolved:
+            self._cloud_pending_request_corrections[req_id] = pending
+            self._cloud_actual_num_computed_by_req[req_id] = (
+                generation,
+                pending.actual_num_computed_tokens,
+            )
+        return len(resolved)
 
     def _run_edge_cloud_draft_middle_segment(
         self,
