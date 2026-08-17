@@ -341,6 +341,12 @@ class PDSeparatedScheduler(Scheduler):
         # head -> tail adjacency (synchronous round-trip baseline).
         self._disable_pd_interleave: bool = os.environ.get(
             "VLLM_EC_DISABLE_PD_INTERLEAVE", "0") == "1"
+        # Set at every PL/DL pick (a tail just produced sampled tokens),
+        # cleared at the next DF pick (which consumes prev_sampled).  While
+        # set, no PF may be scheduled: a subset sampling (e.g. PL(C)) between
+        # a token's sampling and its DF consumption would wholesale-replace
+        # prev_sampled/prev_map and destroy the pending token (H1).
+        self._sampled_pending_df: bool = False
 
         self._layer_slice_config_path: str | None = None
         self._layer_slice_config_mtime: float = 0.0
@@ -940,6 +946,8 @@ class PDSeparatedScheduler(Scheduler):
             self.decodes_first_ready
             and self.draft_remote_pending_count == 0
         ):
+            # A (placeholder) DF consumes pending prev_sampled at execution.
+            self._sampled_pending_df = False
             return self.decodes_first_ready.popleft()
 
         first_only = self._pick_decode_or_draft_first_only_or_empty()
@@ -1043,8 +1051,10 @@ class PDSeparatedScheduler(Scheduler):
             or self.decodes_last_ready
             or self.drafts_last_ready
             or self.decodes_first_ready
+            or self._sampled_pending_df
         ):
-            # A decode/draft tail is owed: keep head -> tail adjacency.
+            # A decode/draft tail is owed, or sampled tokens are awaiting
+            # their consuming DF: keep head -> tail -> consume adjacency.
             return False
         return (
             self._has_prefill_work()
@@ -1565,6 +1575,10 @@ class PDSeparatedScheduler(Scheduler):
         assert so.batch_type == BatchType.PREFILL_LAST, (
             f"prefills_last_ready expects PREFILL_LAST, got {so.batch_type}"
         )
+        if self._disable_pd_interleave:
+            # This PL just sampled first tokens; they stay pending until the
+            # next DF consumes them.  Block PF in that window.
+            self._sampled_pending_df = True
         # Mark whether this PL is the request's last prefill chunk.  Mid-chunk
         # PL still has to run the drafter so that the MTP layer populates its
         # KV cache for every prompt chunk; its sampled/draft tokens are only
@@ -2296,6 +2310,10 @@ class PDSeparatedScheduler(Scheduler):
         self._validate_decode_tail_channel(so)
         self._start_decode_or_draft_first_only_window()
         self._force_decode_last = False
+        if self._disable_pd_interleave:
+            # This DL just produced sampled tokens; they stay pending until
+            # the next DF consumes them.  Block PF in that window.
+            self._sampled_pending_df = True
         self._pregenerate_draft_chain(so)
         return so
 
@@ -2364,6 +2382,9 @@ class PDSeparatedScheduler(Scheduler):
                 else:
                     scheduler_output.batch_type = BatchType.DECODE_FIRST
                     scheduler_output.head_token = uuid4().hex
+                    # This DF consumes all pending prev_sampled tokens at
+                    # execution; PF may be scheduled again.
+                    self._sampled_pending_df = False
                     scheduler_output.hidden_channel = (
                         self.hidden_channel_manager.decode_channel()
                     )
