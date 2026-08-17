@@ -1051,7 +1051,11 @@ class PDSeparatedScheduler(Scheduler):
             or self.decodes_last_ready
             or self.drafts_last_ready
             or self.decodes_first_ready
-            or self._sampled_pending_df
+            # Only honor the pending-sample gate when decode-eligible work
+            # exists (a DF can actually run and consume the pending tokens).
+            # In a pure-prefill phase (mid-chunk / startup burst) no DF can
+            # ever clear the flag -- honoring it deadlocks the engine.
+            or (self._sampled_pending_df and self._has_decode_work())
         ):
             # A decode/draft tail is owed, or sampled tokens are awaiting
             # their consuming DF: keep head -> tail -> consume adjacency.
@@ -1061,6 +1065,15 @@ class PDSeparatedScheduler(Scheduler):
             and self.prefill_inflight_count < self.prefill_inflight_limit
             and self.hidden_channel_manager.has_free_prefill()
             and effective_capacity > 0
+        )
+
+    def _has_decode_work(self) -> bool:
+        """True when any running request is fully prefilled (decode-eligible),
+        i.e. a future DF pick can actually happen to consume pending
+        prev_sampled tokens."""
+        return any(
+            req.num_computed_tokens >= req.num_prompt_tokens
+            for req in self.running
         )
 
     def _can_schedule_decode_first(self) -> bool:
