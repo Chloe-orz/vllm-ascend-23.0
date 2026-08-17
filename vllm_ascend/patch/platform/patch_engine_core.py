@@ -539,7 +539,7 @@ def _advance_edge_cloud_draft(
             ]
             if _zero_rows:
                 _log = (
-                    logger.warning
+                    logger.error
                     if batch_type == BatchType.DECODE_LAST
                     else logger.info
                 )

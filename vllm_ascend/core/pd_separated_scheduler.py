@@ -1796,7 +1796,35 @@ class PDSeparatedScheduler(Scheduler):
             pending is None
             or pending.draft_task_id != draft_task_id
         ):
+            # [EC-DEBUG] A pre-generated chain whose scalars arrive with no
+            # matching pending control leaves the cloud without correction
+            # input for this task.
+            if draft_task_id in self._pregenerated_draft_task_ids:
+                logger.warning(
+                    "[PD] [EC-DEBUG] finalize found no pending DRAFT_FIRST "
+                    "for pre-generated task_id=%s (pending=%s); scalars "
+                    "dropped: valid=%s",
+                    draft_task_id,
+                    (
+                        self._draft_first_cloud_publish_pending.draft_task_id
+                        if self._draft_first_cloud_publish_pending
+                        is not None
+                        else None
+                    ),
+                    valid_sampled_token_count,
+                )
             return None
+        # [EC-DEBUG] Snapshot the exact scalars patched into the cloud-bound
+        # DRAFT_FIRST ([PD]-prefixed so log captures that include the
+        # scheduler's [PD] lines pick it up); diff against the cloud-side
+        # "Ignoring invalid cloud accepted count ... valid_by_req=" dump.
+        logger.warning(
+            "[PD] [EC-DEBUG] finalize draft scalars: task_id=%s "
+            "valid_sampled_token_count=%s num_accepted_tokens=%s",
+            draft_task_id,
+            valid_sampled_token_count,
+            num_accepted_tokens,
+        )
         pending.num_accepted_tokens = num_accepted_tokens
         pending.valid_sampled_token_count = valid_sampled_token_count
         if not self._draft_first_dispatched:

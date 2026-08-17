@@ -4730,6 +4730,27 @@ class NPUModelRunner(GPUModelRunner):
                         vocab_size,
                     )
                     continue
+                if not any(draft_rows[row]):
+                    # [EC-DEBUG] An all-zero draft row for a live request
+                    # means its draft hidden states were zero/garbage
+                    # (argmax of flat logits -> 0): the stashed deferred
+                    # context for this request was never properly written
+                    # (or was built from an empty/placeholder sampled row).
+                    # Observed as the common precursor of every
+                    # missing-corrections cloud crash so far: the zero draft
+                    # feeds the next verify, whose row then materializes
+                    # empty (valid=0) for this request.
+                    logger.error(
+                        "[EC-DEBUG] [DRAFT-OUT] task=%s req=%s produced an "
+                        "all-zero draft row (row=%d, num_rows=%d, "
+                        "draft_step_idx=%s); its deferred draft context is "
+                        "suspect",
+                        scheduler_output.draft_task_id,
+                        req_id,
+                        row,
+                        len(draft_rows),
+                        context.get("draft_step_idx"),
+                    )
                 self._worker_draft_token_ids_by_req[req_id] = (
                     self._draft_token_ids[row]
                 )
