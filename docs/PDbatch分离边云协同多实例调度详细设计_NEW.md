@@ -32,7 +32,7 @@
 | **CPU 可见完成** | `event.query()` / `Event.synchronize()`：让调度器/worker 在 CPU 上得知 recv 完成 |
 | **coord** | 跨 DP batch_type 协调（`_coordinate_bt` all_reduce），锁 bt 不锁 instance |
 | **leader** | shared-model 下 `_is_leader` 的 worker（tail 1× 代算）；实例调度上指 dp0 EngineCore |
-| **POST_OUT** | ~~控制面信号：云 worker 推理完成 + isend 已发起~~ → **本设计删除**：由尾段自投递 + 数据面 recv fence 取代 |
+| **POST_OUT** | 控制面信号：云 worker 推理完成 + isend 已发起。**2026-08 定**：§3.4 TAIL 自投递 + recv fence **采纳**；POST_OUT 通道**保留**（剩余载荷 = 完成 ack 类控制信号），**形态已定 b** = 共用 PRE_OUT 的 ROUTER/DEALER 双向 socket（§3.7.1，线程模型 §3.7.2） |
 
 ### 当前基线（1:1 已落地）
 
@@ -74,6 +74,7 @@
 ### 1.3 收益约束
 
 - 边侧算力是天花板：N 越大，边侧首/尾处理越成瓶颈，N 上限受边侧算力约束
+- **目标边云算力比（2026-08 明确）**：embedding_only（边 1 卡）= 1:32、head_tail 首 x 尾 x（边 2 卡）= 2:32--云侧总量固定 32 卡（4 台 8 卡服务器满配），边侧以 1~2 卡服务全部 N 流，是"边侧是吞吐天花板"的量化口径；多实例重叠收益兑现的前提 = 边侧首/尾吞吐 ≥ N 流喂入速率（§6.4）
 - **N 范围（更新，2026-08）**：qwen3.6 典型配置 2 卡/实例，8 卡 A2 服务器可部署 4 实例（§2.6 形态二），N 典型 4~8、上限 16（§1.4）。**N ≥ 8 进入容量临界区**（edge/N ≈ cloud，翻转点 N* = R ≈ 8.16，见 §6.3），边侧 KV/算力资源需随 N 扩展（§1.4 遗留问题）或启用 §6.2 共享池
 - inflight 约束：2P1D 下每 (instance,dp) 2 个 prefill 在飞，边侧共 4N 个 prefill 在飞（N=8 时 32 个在飞，边侧压力评估见 §6.4）
 - 边侧 KV 约束：per-instance 分区下每 (instance,dp) 分到 per_dp_num_blocks/N，须覆盖 2 inflight prefill 的 KV
@@ -81,10 +82,21 @@
 
 ### 1.4 场景范围
 1、多实例支持mtp 等特性；多实例叠加多dp（云双机）设计要考虑
-2、模型：边云支持模型，优先qwen3.6（=qwen3.6-27b，同一模型沿用 §6.3 实测数字）
+2、模型（云侧部署卡数，2026-08 明确）：qwen3.6-27b = **2 卡**/实例、deepseek-v4-flash-w8a8 = **8 卡**/实例、kimi25_w4a8_static_m6 = **16 卡**/实例（跨 2 台 8 卡服务器）；优先 qwen3.6-27b（沿用 §6.3 实测数字）
 3、基于HCCL通信域，不支持在线动态加入退出，某个云实例故障，多实例故障
 4、不支持云异构，云实例同构（卡型 / gpu_memory_utilization / 模型与 dp·tp 配置一致）
 5、**云侧一台服务器部署多个实例（2026-08 新增，必选场景）**：qwen3.6 计算基线是 2 卡，云侧实例 2 卡，8 卡 A2 推理服务器部署 4 实例（§2.6 形态二，由"v1 不支持"改为 v1 支持）；实例数最大 16（= 4 服务器 × 4 实例），边侧资源要基于实例数扩展（N ≥ 8 容量临界分析见 §6.3）
+6、**目标边云算力比（2026-08 明确）**：embedding_only（边 1 卡）= 1:32、head_tail 首 x 尾 x（边 2 卡）= 2:32（云侧 32 卡 = 4 台 8 卡服务器满配）
+
+**每模型部署矩阵（4 台 8 卡服务器 = 32 卡满配下）**：
+
+| 模型 | 实例卡数 C | 每服务器实例数 K | N（满配） | 形态 | 备注 |
+|------|-----------|----------------|-----------|------|------|
+| qwen3.6-27b | 2 | 4 | **16** | §2.6 形态三c | 同机多实例主力场景；N=16 容量翻转（§6.3） |
+| deepseek-v4-flash-w8a8 | 8 | 1 | 4 | 每服务器 1 实例（无共置） | 单机 tp8 实例；R≈17.56，N=4 远低于翻转点 |
+| kimi25_w4a8_static_m6 | 16 | -（实例跨机） | 2 | 实例跨 2 台服务器（云双机，§2.1 不占额外 node-rank） | 实例内多机；跨机带宽承载实例内 tp 通信 |
+
+-> 同机多实例（K>1）仅发生在小实例模型（qwen3.6 2 卡）；DS/kimi 实例卡数 ≥ 服务器卡数，天然每机 1 实例或跨机实例，§2.6 共置分析只对 qwen3.6 形态生效。**N=16 上限结论是 qwen3.6 特有口径**。
 
 问题：
 1、一个实例挂死，多实例挂死，-- 逃生手段；**同机共置下一台服务器挂 = 该机 K 个实例同时挂（相关性故障，故障域=服务器，见 §2.6）**
@@ -159,7 +171,7 @@
 
 | 通道 | 参与者 / 方向 | 功能 | 代码锚点 |
 |------|--------------|------|---------|
-| **ZMQ port（PRE_OUT / POST_OUT 对）** | 边 EngineCore ↔ 云 PassiveEC，每 dp_rank 一对 | PD 段级 `SchedulerOutput` 传输通道（`PPSchedulerZmqChannel`）：边经 **PRE_OUT** 发首段（PF/DF：首层调度指令 + head_token，云据此改写为 PL/DL 前执行中间层）；云经 **POST_OUT** 回尾段（PL/DL，本设计删除，§3.4，收敛为单向 PRE_OUT）。PUSH/PULL + 后台 pub/sub 线程 + `queue.Queue(1000)` 桥接，scheduler 线程不阻塞在 ZMQ 上；`IMMEDIATE=1` + warmup 消息防 2P1D 首消息丢失死锁 | passive_core.py:302-324（双端镜像构造）、:1037-1045（云侧端口 `pd_config.post/pre_out_port + dp_rank*2`）；patch_engine_core.py:181-194（边侧同偏移 + cloud_addr 自动发现） |
+| **ZMQ port（PRE_OUT / POST_OUT 对）** | 边 EngineCore ↔ 云 PassiveEC，每 dp_rank 一对 | PD 段级 `SchedulerOutput` 传输通道（`PPSchedulerZmqChannel`）：边经 **PRE_OUT** 发首段（PF/DF：首层调度指令 + head_token，云据此改写为 PL/DL 前执行中间层）；云经 **POST_OUT** 回尾段（PL/DL；§3.4 提案删除、**未定**，定删则收敛为单向 PRE_OUT，见 §2.2.2）。PUSH/PULL + 后台 pub/sub 线程 + `queue.Queue(1000)` 桥接，scheduler 线程不阻塞在 ZMQ 上；`IMMEDIATE=1` + warmup 消息防 2P1D 首消息丢失死锁 | passive_core.py:302-324（双端镜像构造）、:1037-1045（云侧端口 `pd_config.post/pre_out_port + dp_rank*2`）；patch_engine_core.py:181-194（边侧同偏移 + cloud_addr 自动发现） |
 | **gloo coord group（master_port+201）** | 云实例内 DP0 ↔ DP1（云到云直连，边不在组） | 实例内跨 DP 协调通信域：云侧 EP all-toall 配对所需的跨 DP batch_type 协调 / 中间层段同步走此 gloo 组；双机部署时云 DP0 host、DP1 connect（单机 dp 同进程组内走本机） | passive_core.py:1096-1112（DP1 侧 connect）；IP 发现见下行 IP-exchange store |
 
 **B. 启动期一次性握手（2 类，one-shot，用完即删）**
@@ -179,36 +191,59 @@
 **启动顺序依赖链（1:1 现状，多实例逐实例复制，§3.10）**：
 
 ```
-云 PassiveEC 起 -> 写 cloud_ip（master_port+1+dp）
-    -> 边读 cloud_ip、host PD TCPStore（master_port）
+云 PassiveEC 起 -> DEALER connect 边 pre_out_port + 发 HELLO（IDENTITY = instance*D+dp）
+    -> 边 host PD TCPStore（master_port），LEADER ROUTER actor 收 HELLO 建 readiness 表
     -> 云 worker distributed init（连 store，HCCL rendezvous）+ _init_message_queues
     -> rpc_broadcast_mq / response_mq wait_until_ready
-    -> 启动 method 链（profile/KV/warmup）-> 运行期（PRE_OUT 单向 + coord group + 数据面 isend/irecv）
+    -> 启动 method 链（profile/KV/warmup）-> 运行期（单 socket 双向：PRE_OUT 下发 + POST_OUT 完成 ack；coord group + 数据面 isend/irecv；IP-exchange 显式配置、cloud_ip store 已删）
 ```
 
 （另有一类同机通道 cloud_recv_hint_mq / §5.2.3 新增 recv_done_mq：进程内/同机 MessageQueue，不占跨机端口，不在本表范围。）
+
+#### 2.2.2 通道收敛（2026-08 定型：IP-exchange 改显式配置已定；POST_OUT 保留 + 形态 b（共用 PRE_OUT 的 ROUTER/DEALER）已定，cloud_ip store 连带删除 -> **收敛 4 类**）
+
+| 决策 | 状态 | 连带删除 | 依据 |
+|------|------|---------|------|
+| 云双机 coord IP 改**显式配置**（对端机 IP 经 CLI/env/拉起脚本传入，不进 vllm 配置面） | **已定** | IP-exchange store（+200） | 功能被显式配置取代；与 §2.1「静态推导、无动态注册」一致 |
+| **POST_OUT 删除**（§3.4 提案：TAIL 自投递 + recv fence） | **已关闭（2026-08 定：不删）**--TAIL 自投递本身**采纳**，通道**保留**；**形态 b 已定**（共用 PRE_OUT 的 ROUTER/DEALER） | **cloud_ip store（+1+dp_rank）连带删除（已定）** | TAIL SO 自投递后 POST_OUT 剩余载荷 = 完成 ack；形态 b 下云不 bind 任何端口、边不需知云 IP，store 的唯一消费者（边构造 POST_OUT connect endpoint，passive_core.py:1006-1029）消失 |
+
+**定型 4 类跨机通道**（IP-exchange 已删；POST_OUT 保留但形态 b 已定 = 与 PRE_OUT 共用同一 ROUTER/DEALER，cloud_ip store 连带删除）：
+
+```
+启动期：PD TCPStore（master_port，HCCL rendezvous，边 host / 云 connect master_addr）
+        + rpc_broadcast_mq / peer_worker_response_mq（method 链）
+运行期：ZMQ 单端口 ROUTER/DEALER（边 bind pre_out_port，云 DEALER connect：PRE_OUT 下发 + POST_OUT 完成 ack 回传双向，§3.7.1/§3.7.2）
+        + gloo coord group（+201，云到云直连，IP 显式配置）
+数据面：HCCL isend/irecv（不占 TCP 端口）
+```
+
+**最终形态 4 类**（2026-08 定：TAIL 自投递采纳 + POST_OUT 保留 + 形态 b 共用 socket）：cloud_ip store 连带删除，启动链少 2N 条 one-shot 握手（§3.10 风险 #3 顺序死锁面部分消解）；ZMQ 满配端口 62 -> 1（§3.7.1）。
+
+**收益（已定部分）**：IP-exchange 删除即少 N 条启动链与对应端口；失去自动发现（换机换 IP 改配置重拉），静态部署模型下可接受。
+
+**代价**：云双机每实例需传对端机 IP（N 对地址，拉起脚本生成）；**实现期核实项：peer_worker_response_mq 的 handle 交换是否依赖云侧 bind 地址**（若依赖，云侧地址仍需传到边的途径，不能只靠 master_addr 反连）。
 
 现有所有按 dp_rank 编码的端口/store，N 实例下会撞端口，需加 **instance 偏移**（与 ZMQ `instance*D+dp` 同类改动）：
 
 | 通道 | 现有编码 | 多实例编码 |
 |------|----------|------------|
-| ZMQ port | `base + dp_rank*2` | `base + (instance*D + dp_rank)*2` |
-| IP-exchange store | `master_port+200` (按 dp_rank) | 加 instance 偏移 |
-| gloo coord group | `master_port+201` (云到云) | 每实例独立 gloo 组，加 instance 偏移 |
-| cloud_ip store | `master_port+1+dp_rank` | 加 instance 偏移 |
+| ZMQ port | `base + dp_rank*2` | **PRE_OUT（部署要求已定，2026-08）：边侧单端口**、不随 N/D 增长，显示配置无默认值；方案 = 边 ROUTER bind 单端口 / 云 DEALER connect（显式 identity = `instance*D+dp_rank`，`ZMQ_ROUTER_MANDATORY` 报 EAGAIN 不静默丢，per-instance 背压，分析见 §3.7.1）。POST_OUT **已定保留、形态已定 b**（2026-08，§3.4/§3.7.1）：与 PRE_OUT 共用同一 ROUTER/DEALER socket（全双工，剩余载荷 = 完成 ack 类轻信号），**两方向合计 1 端口、post_out_port 配置项取消、cloud_ip store 连带删**。N=16/D=2 满配端口数 62 -> 1 |
+| IP-exchange store | `master_port+200` (按 dp_rank) | **删除**（云双机 coord IP 改显式配置，已定，§2.2.2） |
+| gloo coord group | `master_port+201` (云到云) | 每实例独立 gloo 组，保留；对端 IP 改显式配置（已定，§2.2.2），端口仍加 instance 偏移 |
+| cloud_ip store | `master_port+1+dp_rank` | **删除（已定，§3.7.1 形态 b）**：POST_OUT 共用 PRE_OUT 的 ROUTER/DEALER，云不 bind 任何端口、边不需知云 IP，key/port 双偏移问题随之消失 |
 | rpc_broadcast_mq / peer_worker_response_mq（跨节点 collective_rpc ZMQ） | 按 dp_rank/world 编码 | 加 instance 偏移；**启动期 method 链全走此通道**（get_kv_cache_specs / determine_available_memory / initialize_from_config / warmup，见 §3.10），撞端口 = 控制面串台 |
-| 边侧 PD TCPStore（HCCL rendezvous store） | 单 store 服务单实例 | per-instance store/key（N 个实例各自 rendezvous，见 §4.2 G2） |
+| 边侧 PD TCPStore（HCCL rendezvous store） | 单 store 服务单实例 | **无需扩展端口、也无需 per-instance store**（2026-08 代码核实）：`nnodes>1` 时边云全体 dp rank 并入**同一个 world group**（`init_distributed_environment` 里 rank 重排 + `world_size_across_dp`，vllm/parallel_state.py:1602-1645），gloo cpu_group 与 HCCL device_group 均为该 world 上的 `new_group` 子组（parallel_state.py:416-425），靠 torch 内部 PrefixStore key 前缀（由全局唯一 rank 集派生）隔离，**不新增端口**。多实例沿用 G0 单世界组（§2.1，world = E+N·D·C）：各实例子组 rank 集全局唯一 ⇒ key 天然不撞。`get_next_dp_init_port()`（29500 递增）仅在 `nnodes==1` 单机多 DP 路径生效（:1646-1649），边云不经过。代价：`new_group` 是全 world 集合通信，N 实例启动偏差互相 gate（见 §3.10） |
 
 云侧镜像不变（各实例独立 deployment，按 §2.1 推导的 instance_id 入自己子组，本就隔离）。
 
-**同机多实例 = 偏移硬前提（2026-08 升级）**：跨服务器时同端口可靠 IP 区分，**同一服务器上多实例同 IP**，§2.2 全部通道（ZMQ / gloo coord / IP-exchange / cloud_ip store / PD TCPStore）**不偏移必然撞、且无法靠 IP 兜底**。原 §2.6 形态二风险 #2 从"多实例风险"升级为同机部署的硬性前提，实现上必须：
+**同机多实例 = 偏移硬前提（2026-08 升级；形态 b 后偏移面收窄）**：跨服务器时同端口可靠 IP 区分，**同一服务器上多实例同 IP**。2026-08 通道收敛后仍在偏移面上的只剩 **gloo coord（+201）与 rpc_broadcast_mq / peer_worker_response_mq**（ZMQ 已单端口化、IP-exchange/cloud_ip store 已删、PD TCPStore 单 store 零偏移）；这两类**不偏移必然撞、且无法靠 IP 兜底**。原 §2.6 形态二风险 #2 从"多实例风险"升级为同机部署的硬性前提，实现上必须：
 
 - 偏移对同机场景**强制校验**：拉起期按 `instance*D + dp_rank` 规则推导端口并检查可用性（被占且非本实例规则端口 = 拒绝拉起），防止端口翻转串台
 - 所有 store key 强制带 instance（`cloud_ip_{i}` / `coord_master_ip_{i}` 等），同机同 IP 下 key 不带 instance 无法区分
 
 200，201内部编码，增加配置校验防止翻转，边云master_port增加约束，端口要能规则可推导（同机多实例下该约束从"建议"升级为"必须"：N=16、D=2 时偏移量达 instance*D+dp = 31，master_port 基值须预留足够偏移空间且不与机器上其他服务重叠）
 
-**cloud_ip store 补充（启动期核实新增）**：不只是端口撞--N 个云 passive core 会写**同一个 key**，last-writer-wins，边侧 HCCL rendezvous 连到错误实例。key 必须带 instance（如 `cloud_ip_{i}`），边侧按实例分别取 IP/建 rendezvous。代码事实：云侧现写死 key `cloud_ip`、port = `master_port+1+dp_rank`（passive_core.py:1017-1028）；边侧按 dp_rank host 对应 store（patch_engine_core.py:171-178）。**同机多实例下该缺口双重命中**：4 个同机实例同 IP 写同 key + 同 port，两维度都必须加 instance 偏移（port = `master_port+1+ (instance*D+dp_rank)`，key = `cloud_ip_{instance}`）。
+**cloud_ip store 补充（启动期核实新增；该通道已按 §2.2.2 决策删除，以下分析作为缺口识别记录保留）**：不只是端口撞--N 个云 passive core 会写**同一个 key**，last-writer-wins，边侧 HCCL rendezvous 连到错误实例。key 必须带 instance（如 `cloud_ip_{i}`），边侧按实例分别取 IP/建 rendezvous。代码事实：云侧现写死 key `cloud_ip`、port = `master_port+1+dp_rank`（passive_core.py:1017-1028）；边侧按 dp_rank host 对应 store（patch_engine_core.py:171-178）。**同机多实例下该缺口双重命中**：4 个同机实例同 IP 写同 key + 同 port，两维度都必须加 instance 偏移（port = `master_port+1+ (instance*D+dp_rank)`，key = `cloud_ip_{instance}`）--删除通道后该问题整体不存在。
 
 ### 2.3 边侧模式
 
@@ -481,16 +516,16 @@ dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均�
 |---|----|------|------|
 | ~~1~~ | ~~配置推导破坏~~ | 已消解 | 原「node_rank 数服务器不数实例」缺口由 §2.1 逻辑 node-rank 规则消解：无需恢复 `--cloud-instance-num` / 显式 instance-id，同机实例 = 不同 node-rank 独立拉起 + 卡切片。遗留：拉起脚本/编排器须支持一机多实例拉起（node_rank->物理机映射由部署侧维护，不进 vllm 配置面） |
 | 2 | **同机端口/store 偏移（硬前提，必做）** | 拉起失败 | 跨服务器同端口可靠 IP 区分，**同服务器同 IP 必撞**：§2.2 全通道 instance 偏移 + 拉起期端口规则校验（强制）；cloud_ip key/port 双维度带 instance（passive_core.py:1017-1028） |
-| 3 | **host 资源竞争（K=4 时量化）** | 性能 | 同机 K 个实例：模型权重加载 ×K（qwen3.5 2 卡实例权重 host RAM ×4）、worker 进程/线程 ×4、CPU 竞争；**边↔云网络出口共享**（4 实例 hidden isend/irecv + ZMQ 控制面挤同一网口）-> 数据面带宽评估口径从 per-instance 改 **per-server 聚合**：每服务器聚合带宽须 ≥ 4×单实例 hidden 流量，否则多实例重叠收益被带宽竞争吃掉（千兆/万兆口下 qwen3.5 4 实例聚合是带宽评估重点，实现期实测） |
+| 3 | **host 资源竞争（K=4 时量化）** | 性能 | 同机 K 个实例：模型权重加载 ×K（qwen3.6-27b 2 卡实例权重 host RAM ×4）、worker 进程/线程 ×4、CPU 竞争；**边↔云网络出口共享**（4 实例 hidden isend/irecv + ZMQ 控制面挤同一网口）-> 数据面带宽评估口径从 per-instance 改 **per-server 聚合**：每服务器聚合带宽须 ≥ 4×单实例 hidden 流量，否则多实例重叠收益被带宽竞争吃掉（千兆/万兆口下 qwen3.6-27b 4 实例聚合是带宽评估重点，实现期实测） |
 | 4 | **相关性故障（故障域=服务器）** | 可用性 | 一服务器挂 = 该机 K 实例**同时**挂：N=8（2 服务器 × 4 实例）实际只有 2 个故障域，一机挂即半数实例挂 -> v1「任一实例挂=整体挂」下整体挂；可用性 = 服务器级可用性，多实例不增加故障点也不分散。逃生手段（§1.4 遗留）：v1 无 failover，实例级故障定位需先区分「单实例挂（进程级）」vs「整机挂（K 实例齐挂）」--后者恢复=整服务器重拉 |
 | 5 | **启动竞争** | 启动时长 | 同机 K 实例同时权重加载/profile_run/warmup（CPU/内存带宽/网口竞争），启动变慢甚至超时。处理：**同机实例错峰拉起**（编排层：实例 i 延后 i×错峰间隔，或权重加载完成后再放行下一实例）+ §3.10 逐实例串行握手；代价 = 启动时长 ∝ 同机实例数（K=4 时约 4× 单实例关键路径，可部分并行：权重加载与上一实例 profile 重叠） |
 | 6 | **运维/观测混淆** | 可用性 | 同机日志、进程命名、metrics **强制带 instance 标签**（instance_id 进日志前缀/进程 title/metrics label），否则同机 K 实例输出无法区分；拉起脚本进程命名建议 `vllm-cloud-inst{i}` |
 
 **结论（2026-08 更新）**：形态一（每服务器 1 实例）与形态二（每服务器多实例）**均 v1 支持**。原硬缺口 #1（配置推导）由 §2.1「node_rank = 逻辑实例」消解，零新增配置项；剩余必做项 = #2 同机端口偏移强制校验（§2.2）、#5 启动错峰（§3.10）、#6 instance 标签强制；#3 带宽（per-server 聚合口径）与 #4 故障域（=服务器）为评估/运维口径变更，非功能缺口。卡静态划分（不共卡）仍是前提，共卡（实例间分时复用同卡）不在考虑范围。
 
-#### 形态三：qwen3.5 典型形态（边 2 卡 + 8 卡服务器 × 4 实例 tp2，2026-08 新增）
+#### 形态三：qwen3.6-27b 典型形态（边 2 卡 + 8 卡服务器 × 4 实例 tp2，2026-08 新增）
 
-qwen3.5 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务器部署 4 实例。
+qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务器部署 4 实例。
 
 ```
 边侧服务器 (node_rank 0, 2卡)
@@ -518,7 +553,7 @@ qwen3.5 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务器�
 - 配置：边 `--nnodes 5 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 8`；云服务器A 上 4 实例分别 `--node-rank 1..4` + 各自 `ASCEND_RT_VISIBLE_DEVICES` 切片（§2.1 同机多实例拉起示例）
 - world = 2+8 = 10；G2 共 4 个（各 2+2 rank，边 2 卡整体进全部 G2）
 - 扩展到 2 台 8 卡服务器：N=8、world=18、nnodes=9（物理机 3 台）；**N=8 进入容量临界区**（edge/N ÷ cloud ≈ 1.02×，§6.3），边侧资源扩展为前置条件
-- 该形态是 qwen3.5 的**默认部署形态**：形态二（16 卡 × 2×tp8）退居非典型；§2.6 全部同机多实例结论（支持项 7 条 / 处理项 5 条）对本形态同等适用，K=4 使 #3 host 竞争、#5 启动错峰的影响翻倍（4 实例权重加载 ×4、启动关键路径 ∝4）
+- 该形态是 qwen3.6-27b 的**默认部署形态**：形态二（16 卡 × 2×tp8）退居非典型；§2.6 全部同机多实例结论（支持项 7 条 / 处理项 5 条）对本形态同等适用，K=4 使 #3 host 竞争、#5 启动错峰的影响翻倍（4 实例权重加载 ×4、启动关键路径 ∝4）
 
 #### 汇总对比（§2.6）
 
@@ -526,8 +561,8 @@ qwen3.5 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务器�
 |------|---|------------|---|-------|---------|----------|-----------|------|
 | 一：2实例 tp16 | 2 | 1 | 16 | 34 | 3 | 2/2 卡 | ✓ | 标准形态，零新增 |
 | 二：4实例 tp8 | 4 | 2 | 8 | 34 | 3 | 2/2 卡 | ✓（一机多 node-rank） | 同机多实例，v1 支持 |
-| 三a：4实例(1服务器) tp2 | 4 | 4 | 2 | 10 | 2 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.5 单服务器形态；同机压力最大（K=4） |
-| 三b：8实例(2服务器) tp2 | 8 | 4 | 2 | 18 | 3 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.5 中间形态；N=8 容量临界（§6.3） |
+| 三a：4实例(1服务器) tp2 | 4 | 4 | 2 | 10 | 2 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.6-27b 单服务器形态；同机压力最大（K=4） |
+| 三b：8实例(2服务器) tp2 | 8 | 4 | 2 | 18 | 3 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.6-27b 中间形态；N=8 容量临界（§6.3） |
 | 三c：16实例(4服务器) tp2 | 16 | 4 | 2 | 34 | 5 | 2/2 卡 | ✓（一机多 node-rank） | **N 上限满配形态**；翻转 edge-bound（云利用率 ~51%，§6.3），边侧资源扩展为硬前置 |
 
 ---
@@ -580,7 +615,7 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 - `InstanceDispatcher` 决策 **HEAD（FIRST）batch 喂哪个实例**
 - **TAIL（LAST）batch 的实例 = HEAD 下发时已 pin 的 instance**（edge 自投递 TAIL 的 SO，不依赖云返回；`depends_on={COMM_RECV(c2e)}`）。「as-arrived」性质保留：TAIL 处理顺序由「recv fence 完成」驱动，仍是云返回到达序，只是从控制面（POST_OUT）换成数据面（recv 完成）；2DP lockstep = edge 2DP 各自 `COMM_RECV` 的 fence 都 ready
 
-> **POST_OUT 删除**：TAIL 自投递后，云侧 `_drain_worker_completion_acks` / `_maybe_publish_post_out` 的 PL 发布不再需要，§3.7 ZMQ 通道从双向收敛为**单向 PRE_OUT**。
+> **2026-08 定案**：TAIL 自投递 + recv fence **采纳**（上文 as-arrived 换驱动源的描述即为落地目标）；**POST_OUT 通道保留**（原"通道删除"提案关闭）--`_maybe_publish_post_out` 的 PL/DL SO 回传取消，剩余载荷 = `_drain_worker_completion_acks` 一族完成 ack 控制信号（云 worker 推理完成 + isend 已发起；明细落地时定）。通道形态（b 共用 PRE_OUT 的 ROUTER/DEALER / c 独立）见 §3.7.1。
 
 子点（v1）：bt 提议 scope 用 dummy 兜底（leader 策略挑两 DP 都有工作的实例最小化 dummy）；精化（两阶段 all_reduce / leader 连 bt 一起决策）留作后续。
 
@@ -616,9 +651,77 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 
 多实例直接实例化 N×D 个 channel = 2×N×D 个 I/O-wait 后台线程，小 N×D 下可接受、per-channel 隔离、零重构。端口编码扩为 `+ (instance*D + dp_rank)*2`。
 
+**ZMQ 端口数结论（2026-08 核实）**：现状每 dp_rank 占 2 端口（PRE_OUT + POST_OUT 一对，PUSH/PULL 单向 socket 一方向一端口，`{pre/post}_out_port + dp_rank*2` 成对分配，patch_engine_core.py:181-194 / passive_core.py:1037-1045 云侧镜像）。**不做 socket 层合并**（ZMQ PAIR 单端口双向需重构线程模型--socket 非线程安全，pub/sub 双线程须并成单 poller；CLIENT/SERVER 有每 peer 在飞限制，不适配流式下发），而是**若 §3.4 的 POST_OUT 删除提案定案**：TAIL 自投递后云->边控制面回传整条删除，每 (instance,dp) 收敛为 **PRE_OUT 单端口**，编码从 `+ (instance*D+dp)*2`（步长 2）变 `+ (instance*D+dp)`（步长 1）--N=16、D=2 满配下 62 -> 31 端口，master_port 偏移空间压力减半。**POST_OUT 删除当前待定（未定案前维持 2 端口/对）**，删除的连带收益与代价见 §2.2.2。
+
 **N 扩到 8/16 的线程/host 评估（2026-08 补）**：边侧 2×N×D 线程（N=8、D=2 -> 32 个，I/O-wait 型，CPU 占用低，仍可接受）；同机共置下云侧一台服务器 K 个 executor 各自带线程/进程（K=4 时 4 套 PassiveEC+executor+worker 进程树），host 进程数与 CPU 竞争见 §2.6 处理项 #3/#5。
 
-后续若 N×D 变大：recv 可压成一个 ZMQ Poller 线程（安全非阻塞），send 不宜简单压成一个（PUSH 满时阻塞、scheduler_output 不能丢，慢云会堵全部），保留 per-channel/per-instance。
+**（已被 §3.7.1/§3.7.2 形态 b 取代，2026-08）**旧结论（send 不宜压成一路：PUSH 满阻塞、慢云堵全部）不再成立：ROUTER send NOBLOCK + per-identity 队列使 EAGAIN 只滞留该实例队列、不阻塞 actor、不串台；单 actor + per-identity 有界队列即终态，线程模型见 §3.7.2。
+
+### 3.7.1 PRE_OUT 单端口多云（2026-08 部署要求，已定）
+
+**部署要求（两条，均已定）**：(1) pre_out_port / post_out_port **显示配置、无默认值**（缺失 fail-fast，拉起期校验 bind 可用性）；(2) 多实例下边侧 **pre_out_port 只配一个**，不随实例数增长配置，N×D 个云实例全部 connect 到该端口，边仍**定向**给各 (instance,dp) 发 scheduler_output。POST_OUT 的对等约束**待分析**（见本节末）。
+
+**现状**：边 PUSH bind `tcp://*:{pre_out_port + dp_rank*2}`（N×D 个 bind 端口）、云 PULL connect（passive_core.py:1037-1050 云侧、patch_engine_core.py:181-194 边侧镜像）；TCP 连接方向本就是云 -> 边，本变更只是把 N×D 个 bind 收敛为 1 个，**关键在单 bind 多 peer 后 ZMQ 分发语义必须重选**。
+
+**socket 选型（三选一，结论 = C）**：
+
+| 方案 | 单 bind 多 peer 语义 | 定向性 | 背压/可靠性 | 结论 |
+|------|--------------------|--------|------------|------|
+| A. PUSH/PULL 维持现状类型 | 逐消息**轮询负载均衡**（fair-queue，跳过 HWM 满的 pipe），每条消息发恰好一个 peer、由 ZMQ 选中 | **无**：调度器对实例的指派失效（给实例 0 的 batch 可能落到实例 3），与 per-instance batch/recv fence/KV 亲和正面冲突 | HWM 满跳过不阻塞；但定向性丢失 | **否决**（除非调度模型改"实例池化、消息自包含、任意实例可执行"，属调度架构重写） |
+| B. PUB/SUB（云 SUB 按 instance 订阅前缀） | publisher 侧 per-pipe 订阅过滤，不匹配不写入该 pipe，**带宽不放大** | 有（topic 定向） | **PUB mute 静默丢弃**（慢实例 HWM 满即丢 scheduler_output -> 请求黑洞），须 app 层确认+重传 | **否决**（违反 §3.7 "scheduler_output 不能丢"） |
+| C. **ROUTER/DEALER** | 边 ROUTER bind 单端口，云 DEALER connect（TCP 方向不变） | **精确**：`send_multipart([identity, payload])`，identity = `instance*D+dp_rank`（DEALER 显式 identity 或连接后注册帧建路由表） | `ZMQ_ROUTER_MANDATORY`：对端不可达/HWM 满 send 报 **EAGAIN 不静默丢**，边侧对该实例队列阻塞/重试 = **per-instance 独立背压**，慢实例只堵自己不串台 | **推荐/采纳** |
+
+**C 方案落地点**：
+
+- 云侧：PULL -> DEALER + connect 地址变单端口；DEALER 收到的消息 identity 帧被剥掉，payload 格式与现状一致（消息面无感）；**线程面须改单 actor**（§3.7.2）
+- 边侧：PUSH -> ROUTER；注册/心跳 recv + scheduler_output send 共用一个 socket，**非线程安全 -> 单 poller/actor 线程**（与上文"recv 压成一个 poller"方向一致）；per-instance pickle 可保留并行，末级单发送线程串行 send + EAGAIN 重试
+- readiness：现状 `IMMEDIATE=1 + wait_until_ready` 换成"注册帧确认"（实例就位 = 边路由表收到该 identity），与 G0 启动 barrier（§2.1/§3.10）衔接
+- 重连：DEALER 显式 identity 断线重连保持同一路由（ROUTER 重关联 pipe）；**边重启则路由表清空**，靠注册帧重建；mandatory 下 unroutable 报错细节（EAGAIN vs EHOSTUNREACH）实现期核实
+- 连带收益：边侧 PRE_OUT 从 2×N×D 端口/线程收敛为 1 端口 + 1 actor（§3.7 线程结论同步改写）；同机共置下 PRE_OUT 云侧只 connect 不 bind，**该通道的端口偏移前提整条消解**（§2.2）
+
+**POST_OUT 对等约束（2026-08 定案）**：§3.4 **TAIL 自投递 + recv fence 采纳、POST_OUT 通道保留**（原删除提案关闭），**通道形态已定 b（共用 PRE_OUT 的 ROUTER/DEALER 双向 socket，下表保留作选型依据记录）**。TAIL SO 回传改边自投递后，POST_OUT 剩余载荷 = 完成 ack 类控制信号（云 worker 推理完成 + isend 已发起，`_drain_worker_completion_acks` 一族；轻流量，明细 §3.4 落地时定）。方向 = N 云 -> 1 边多对一汇聚。
+
+| 候选 | 形态 | 端口 | 要点 |
+|------|------|------|------|
+| b. **共用 PRE_OUT 的 ROUTER/DEALER（双向，推荐）** | ROUTER/DEALER 全双工异步对：DEALER 同一连接上收（PRE_OUT）+ 发（POST_OUT ack），ROUTER 收到的消息自动带 [identity/payload] 帧，边的来源解复免费解决（汇聚方向无需任何解复头） | **1（两方向合计）** | 剩余载荷轻（ack 类）恰好适配搭便车；TCP 全双工 + ZMQ 每 pipe 收发独立 = 方向级流控独立（云慢收不堵云发、边慢收只反压云发送方向）；**代价：云侧线程模型也要改**（现状 PUSH/PULL 两 socket 两线程 -> 单 DEALER 非线程安全，云侧也须单 actor/加锁，上文"云侧近乎无感"在此形态下不成立）；两侧 actor 循环 recv 先排干、send NOBLOCK+EAGAIN 重试；断线/重连/drain 双流耦合；**cloud_ip store 连带删除 + post_out_port 配置项整个取消**（云不 bind 任何端口、边不需知云 IP） |
+| c. 独立通道 | 第二对 socket：PUSH(云 connect)/PULL(边 bind) 单端口多对一汇聚（无路由问题，消息带 (instance,dp) 头解复），或维持 per-(instance,dp) | 1+1 或 1+N×D | 现状 bind/connect 方向反转（现状 = 云 bind POST_OUT、边 connect，靠 cloud_ip store 发现端点，passive_core.py:1006-1029）；反转后边不需知云 IP，cloud_ip store 同样可删；云侧线程模型维持现状（收发仍两 socket） |
+
+**已选 b（2026-08 定案）**：POST_OUT 收敛为轻量 ack 后，独立通道的隔离收益（独立 HWM / 独立 teardown）小于 b 的端口+配置+发现三重收益；b 的主要代价（云侧 actor 改造）与边侧改造同构，边际成本低。收发线程模型（单实例/多实例）见 §3.7.2。
+
+### 3.7.2 形态 b 收发线程模型（2026-08 定案）
+
+现状基线：每 `PPSchedulerZmqChannel` = 1 pub 线程（pickle + PUSH send，`queue.Queue(1000)` + `put_nowait`）+ 1 sub 线程（poll + recv + unpickle），`publish()`/`consume_new_outputs()` 均非阻塞，调度线程从不阻塞在 ZMQ 上（passive_core.py:124-228）；**边侧每个 dp_rank EngineCore 进程各 bind 各的端口**（`pre_out_port+dp*2`，patch_engine_core.py:186-192）。
+
+**云侧（单实例与多实例同构，每 (instance,dp) 一个 PassiveEC 进程）**：
+
+- 现状 2 线程（pub: POST_OUT PUSH bind / sub: PRE_OUT PULL connect）-> **1 actor 线程 + 单 DEALER**（`IDENTITY = instance*D+dp_rank`，connect 边单端口）
+- actor 循环：poll -> **recv 先排干**（scheduler_output 入 inbox，`consume_new_outputs` 语义不变）-> out 队列排干 send **NOBLOCK**（首帧 HELLO，运行期完成 ack；EAGAIN 留队重试）
+- ack 生产（`_drain_worker_completion_acks` 一族，TAIL 自投递后 POST_OUT 剩余载荷）在 PassiveEC 主循环 put_nowait，与现状 publish() 调用点同构
+- 多实例 = 每实例重复，进程间无共享无协调；线程总量 **2×N×D -> N×D**（N=16/D=2：64 -> 32，摊在 4 台服务器）
+
+**边侧（关键差异：单 bind 端口只能归属一个进程，D>1 存在 fan-in）**：
+
+- 现状每 dp_rank 进程各 bind 各端口互不干扰；单端口化后 ROUTER 必须收敛到**单一进程**
+- 方案：**actor 落在 leader（dp0 EngineCore 进程，调度层所在，§3.4）**：
+  - actor 线程持有 ROUTER（bind 单 pre_out_port）：recv 排干（HELLO -> readiness 表 / ack -> inbox 按 identity 记来源）+ **per-identity out 队列**发送（NOBLOCK；EAGAIN = 慢实例留队重试；EHOSTUNREACH = 未就绪入队等待 / 已就绪后失联 = v1 故障模型整体挂，fail-fast）
+  - follower（dp1..）进程内薄转发客户端（localhost/IPC connect leader 内层 socket），`_maybe_publish_pre_out` 的 publish() 落点不变，多一跳本机 hop（相对跨机网络可忽略）
+  - D=1（embedding_only）无 follower、无内层 hop，退化 = 单进程 1 actor
+- 线程数：现状 2×N×D -> **1（ROUTER actor）+ (D-1)（follower 转发）**；N=16/D=2：64 -> 2
+- pickle/序列化随 actor 收敛单点：v1 每步 per-(instance,dp) 一条 SO、小对象，单线程可承载；若 N×D 增大出现 CPU 瓶颈，加 pickle 工作池（产出 bytes 入 per-identity 队列），actor 只做 send
+
+**背压（修订 §3.7 旧结论）**：
+
+- 旧（send 不宜压成一路：PUSH 满阻塞、慢云堵全部）**不成立**：ROUTER send NOBLOCK，EAGAIN 只滞留该 identity 队列，actor 不阻塞、其他实例不受影响
+- per-identity 有界队列（沿用 1000 量级）深度进 `InstanceLoadStats`（§3.5），过载防线 = 调度层绕开慢实例（transport 不丢、不全局阻塞）；队列满 = 高水位告警而非丢
+- 旧 per-channel `queue.Queue(1000)` 的隔离性由 per-identity 队列等价继承
+
+**readiness / 重连 / 顺序**：
+
+- HELLO 帧替代 `IMMEDIATE=1 + wait_until_ready`；对齐 G0 barrier：全部 N×D 个 HELLO 到齐才放行调度（§3.10 启动顺序）
+- DEALER 显式 IDENTITY 断线重连保持身份，actor 侧 pipe 自动重关联；边重启后云自动重连 + 重发 HELLO 重建 readiness 表
+- per-identity pipe FIFO：per-(instance,dp) 消息顺序与现状 per-channel 等价
+
+**1:1 退化**：N=1/D=1 即 identity 集合 = {0}、无 follower hop、无负载绕开逻辑，与 1:N 同一代码路径（部署差异只在 identity 数量）。
 
 ### 3.8 控制通道可靠性
 
@@ -1040,27 +1143,29 @@ dummy 走 instance i 的 channel 池（§4.4 per-(instance,dp) 池隔离）。co
 
 **共享下 headroom 口径**：edge_kv_headroom 是 per-dp 全局量（非 per-instance）、cloud_kv_headroom 才 per-instance（实例选择看云侧 room、dp 选择 + 边侧准入看 per-dp edge room）。**分区下两者都 per-instance**（InstanceLoadStats 原 per-instance 结构即正确）。
 
-### 6.3 容量 sizing（已核实；N 范围更新 2026-08：典型 4~8、上限 16）
+### 6.3 容量 sizing（已核实；N 范围更新 2026-08：按模型口径，qwen3.6-27b 上限 16）
 
 分区下边侧向每实例 PP group（G2）报 `per_dp_num_blocks / N`，per-instance min = min(edge/N, cloud_i)；min 机制是 per-PP-group（多实例 G2 天然支持 per-instance，机制不破坏）。
 
-实测 R = 边/云 num_blocks 比：
+实测 R = 边/云 num_blocks 比（**每模型 N 上限不同，§1.4 部署矩阵**；翻转分析只对能达到 N* 的模型实际生效）：
 
-| 模型 | 首/尾层 | 边 num_blocks | 云 num_blocks | R | N=4 | N=8 | N=16 |
-|------|---------|---------------|---------------|---|-----|-----|------|
-| qwen3.5(=qwen3.6) | 首1尾1 | 16524 | 2024 | 8.16 | 2.04× | **1.02×（临界）** | **0.51×（翻转）** |
-| DS | 首3尾1 | 142728 | 8127 | 17.56 | 4.39× | 2.20× | 1.10×（临界） |
+| 模型 | 首/尾层 | 边 num_blocks | 云 num_blocks | R（=N*） | 该模型 N 上限 | 实际可达翻转区？ |
+|------|---------|---------------|---------------|----------|---------------|------------------|
+| qwen3.6-27b（C=2） | 首1尾1 | 16524 | 2024 | 8.16 | **16** | **是：N=8 临界（1.02×）、N=16 翻转（0.51×）** |
+| deepseek-v4-flash-w8a8（C=8） | 首3尾1 | 142728 | 8127 | 17.56 | 4（8卡/实例，每服务器 1 实例） | 否：N=4 时 4.39×，远低于翻转点 |
+| kimi25_w4a8_static_m6（C=16） | 待实测 | 待实测 | 待实测 | 待实测 | 2（实例跨 2 服务器） | 否：N=2 任意 R 下均安全 |
 
-翻转点 N* = R。**2026-08 更新结论（N 范围扩到 16 后原「实例上限 4 远低于翻转点」不再成立）**：
+翻转点 N* = R。**2026-08 更新结论（容量临界/翻转是 qwen3.6-27b 特有问题）**：
 
-- **N ≤ 4**：edge/N > 云，cloud-bound 不翻转、无容量损失（原结论不变）
-- **N = 8（qwen3.5 默认形态，2 服务器 × 4 实例，§2.6 形态三）**：edge/N ÷ cloud = 16524/8/2024 ≈ **1.02×，进入临界区**--余量为 2%，任何口径偏差（gpu_memory_utilization 微调、buffer 漂移、§6.3 表口径不一致）都会翻转为 edge-bound，min 被 edge/N 钳制。**N=8 落地前置条件：按 2 卡实例口径重实测 R 并确认 > 8.16（现表为既有口径实测，2 卡 tp2 实例的云侧 num_blocks 需重测），否则须扩边侧资源或降 N**
-- **N = 16**：翻转 edge-bound（edge/16 = 1032 < 2024），每实例值被钳到 edge/N，**云侧容量利用率仅 ~51%**（云空闲 KV 不可借给其他实例，§6.1 分区不可借）。N=16 只在边侧资源同步扩展（§1.4）使 R 同比提升时可用
-- DS 首3尾1 边侧余量厚，同样形态下翻转点 N*≈17.6，N=16 仍临界安全
+- **qwen3.6-27b、N ≤ 4**：edge/N > 云，cloud-bound 不翻转、无容量损失（原结论不变）
+- **qwen3.6-27b、N = 8（形态三b，2 服务器 × 4 实例，§2.6 形态三）**：edge/N ÷ cloud = 16524/8/2024 ≈ **1.02×，进入临界区**--余量为 2%，任何口径偏差（gpu_memory_utilization 微调、buffer 漂移、§6.3 表口径不一致）都会翻转为 edge-bound，min 被 edge/N 钳制。**N=8 落地前置条件：按 2 卡实例口径重实测 R 并确认 > 8.16（现表为既有口径实测，2 卡 tp2 实例的云侧 num_blocks 需重测），否则须扩边侧资源或降 N**
+- **qwen3.6-27b、N = 16（满配，形态三c）**：翻转 edge-bound（edge/16 = 1032 < 2024），每实例值被钳到 edge/N，**云侧容量利用率仅 ~51%**（云空闲 KV 不可借给其他实例，§6.1 分区不可借）。N=16 只在边侧资源同步扩展（§1.4，目标算力比 2:32 不变下边侧 KV 扩容）使 R 同比提升时可用
+- **DS（8 卡实例）**：N 上限 4（每服务器 1 实例、无共置），4.39× 余量厚，**翻转点 17.56 在其 N 范围外，容量问题不存在**；DS 的多实例代价在 per-server host 资源（每机单实例，无共置竞争）与 4 台服务器 4 故障域
+- **kimi（16 卡实例，跨 2 服务器）**：N ≤ 2，容量安全；设计关注点在实例内跨机 tp 通信带宽（§2.1 云双机不占额外 node-rank）而非 KV 翻转
 
 dp=2 不影响 R（边云 per-dp 同除）。
 
-分区下每实例 (edge/N − cloud) 私有闲置不可借，但 cloud-bound 下云是瓶颈本用不上、均衡请求无影响；**翻转后（N > R）闲置方向反转（云侧闲置），此时 §6.2 共享池对边侧虽无增益，但应重新评估 per-instance 准入配额与实际负载均衡的匹配，避免长尾实例打满 edge/N 而其他实例闲置**。qwen3.5 余量最薄（若 16524/2024 口径不一致最坏 1.02× 临界，建议确认同口径--N=8 下该确认从"建议"升级为"必做"）。
+分区下每实例 (edge/N − cloud) 私有闲置不可借，但 cloud-bound 下云是瓶颈本用不上、均衡请求无影响；**翻转后（N > R）闲置方向反转（云侧闲置），此时 §6.2 共享池对边侧虽无增益，但应重新评估 per-instance 准入配额与实际负载均衡的匹配，避免长尾实例打满 edge/N 而其他实例闲置**。qwen3.6-27b 余量最薄（若 16524/2024 口径不一致最坏 1.02× 临界，建议确认同口径--N=8 下该确认从"建议"升级为"必做"）。
 
 ### 6.4 prefill_inflight_limit 作用域（per-(instance,dp)）
 
@@ -1117,7 +1222,7 @@ dp=2 不影响 R（边云 per-dp 同除）。
 | #4 | coord/balance_gather 精化 | v1 整体 intended dummy 兜底；精化两阶段 all_reduce 根治跨实例 Rule1/2 误伤（优化效率非纠正确性） |
 | - | batch_queue_size 调优 | 当前 = pp_size = 2，重叠深度 = 1；放大重叠需调大，代价 inflight/内存/KV 压力 |
 | - | 边侧 KV 共享池 | 实测分区不够时启用（§6.2），最大风险 = vllm KVCacheManager per-EngineCore 设计 -> 跨实例共享是深度改动 |
-| - | 2 卡实例口径 R 重实测（2026-08） | §6.3 现表为既有口径实测；qwen3.5 2 卡 tp2 实例云侧 num_blocks 需重测，N=8 临界判定依赖该值 |
+| - | 2 卡实例口径 R 重实测（2026-08） | §6.3 现表为既有口径实测；qwen3.6-27b 2 卡 tp2 实例云侧 num_blocks 需重测，N=8 临界判定依赖该值 |
 | - | per-server 聚合带宽实测（2026-08） | 同机 K 实例 hidden isend/irecv + ZMQ 挤同一网口，K=4 聚合带宽 vs 单实例流量的实测决定多实例重叠收益上限（§2.6 处理项 #3） |
 | - | 同机错峰拉起编排（2026-08） | 编排层按 instance 序错峰 / 权重加载流水放行，profile/warmup 同机串行、跨机并行（§3.10 #6），错峰参数待实测定 |
 
@@ -1135,7 +1240,7 @@ dp=2 不影响 R（边云 per-dp 同除）。
 | **同机 host 资源/带宽竞争（2026-08 新增）** | **性能（评估口径变更）** | 权重 ×K、网口出口共享：数据面带宽评估口径改 per-server 聚合，多实例重叠收益可能被带宽竞争吃掉（§2.6 处理项 #3） |
 | **相关性故障域=服务器（2026-08 新增）** | **可用性（故障模型）** | 一机挂 = 该机 K 实例齐挂，N=8 实际仅 2 个故障域；v1 无 failover 整体挂（§2.6 处理项 #4） |
 | **同机启动竞争（2026-08 新增）** | **启动时长** | 同机 K 实例错峰拉起，启动关键路径 ∝ K（§3.10 #6） |
-| **N ≥ 8 容量临界/翻转（2026-08 新增）** | **容量（前置条件）** | qwen3.5 R≈8.16：N=8 临界（1.02×）、N=16 翻转 edge-bound（云利用率 ~51%）；N≥8 须 2 卡实例口径重实测 R + 边侧资源扩展（§6.3） |
+| **N ≥ 8 容量临界/翻转（2026-08 新增）** | **容量（前置条件）** | qwen3.6-27b R≈8.16：N=8 临界（1.02×）、N=16 翻转 edge-bound（云利用率 ~51%）；N≥8 须 2 卡实例口径重实测 R + 边侧资源扩展（§6.3） |
 
 ---
 
