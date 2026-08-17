@@ -1496,9 +1496,22 @@ class NPUWorker(WorkerBase):
             f"hidden_channel: {HiddenChannelType.DECODE.value}"
         )
         assert tensor_dict is not None
-        return self.model_runner._run_edge_cloud_draft_last_segment(
+        logger.info(
+            "[DRAFT-TAIL-DIAG] RECV_DONE task=%s step=%s batch_type=%s",
+            scheduler_output.draft_task_id,
+            scheduler_output.draft_step_idx,
+            scheduler_output.batch_type,
+        )
+        output = self.model_runner._run_edge_cloud_draft_last_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
         )
+        logger.info(
+            "[DRAFT-TAIL-DIAG] WORKER_RETURN task=%s step=%s batch_type=%s",
+            scheduler_output.draft_task_id,
+            scheduler_output.draft_step_idx,
+            scheduler_output.batch_type,
+        )
+        return output
 
     def _execute_model_legacy(
         self,
