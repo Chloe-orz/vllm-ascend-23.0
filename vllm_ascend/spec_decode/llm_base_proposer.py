@@ -49,8 +49,13 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.edge_cloud_comm import (
+    BatchKind,
+    CommChannelType,
+    CommRequest,
+    get_comm_service,
+)
 from vllm_ascend.distributed.parallel_state import (
-    edge_cloud_broadcast_recv_draft,
     get_lmhead_tp_group,
 )
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
@@ -2176,23 +2181,37 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 output["spec_step_idx"] = torch.tensor(
                     0, dtype=torch.int64, device="cpu"
                 )
+            positions = model_kwargs.get("positions")
+            _num_tokens = positions.shape[-1] if positions is not None else 0
             if get_pp_group().world_size == 2:
-                send_work = get_pp_group().isend_tensor_dict(
-                    {k: v.contiguous() if isinstance(v, torch.Tensor) else v
-                     for k, v in output.items()}
-                )
-                for handle in send_work:
-                    handle.wait()
+                get_comm_service().submit_send(
+                    CommRequest(
+                        channel=CommChannelType.DECODE_UP,
+                        op="send",
+                        kind=BatchKind.DECODE_DRAFT,
+                        num_tokens=_num_tokens,
+                        tensor_dict={
+                            k: v.contiguous()
+                            if isinstance(v, torch.Tensor)
+                            else v
+                            for k, v in output.items()
+                        },
+                        wire="draft_dynamic",
+                    ))
+                # No eager wait: the future keeps the contiguous temporaries
+                # alive until the send completes.  The legacy handle.wait()
+                # here existed only to protect those temporaries.
 
             # Receive cloud segment result (all decoder layers run on cloud)
-            tensor_dict, comm_handles, comm_postprocess = (
-                edge_cloud_broadcast_recv_draft()
-            )
-            for handle in comm_handles:
-                handle.wait()
-            for postprocess in comm_postprocess:
-                postprocess()
-            intermediate = IntermediateTensors(tensor_dict)
+            recv_future = get_comm_service().submit_recv(
+                CommRequest(
+                    channel=CommChannelType.DECODE_DOWN,
+                    op="recv",
+                    kind=BatchKind.DECODE_DRAFT,
+                    num_tokens=_num_tokens,
+                    wire="draft_dynamic",
+                ))
+            intermediate = recv_future.as_intermediate_tensors()
 
             # Copy received tensors into persistent buffers so that the
             # ACLGraphWrapper-wrapped segment_e sees stable input addresses.
@@ -2215,14 +2234,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Cloud path: this should normally not be reached because cloud
             # sample_tokens returns None before calling _run_merged_draft.
             # Kept here as a fallback if the calling context changes.
-            tensor_dict, comm_handles, comm_postprocess = (
-                edge_cloud_broadcast_recv_draft()
-            )
-            for handle in comm_handles:
-                handle.wait()
-            for postprocess in comm_postprocess:
-                postprocess()
-            intermediate = IntermediateTensors(tensor_dict)
+            recv_future = get_comm_service().submit_recv(
+                CommRequest(
+                    channel=CommChannelType.DECODE_UP,
+                    op="recv",
+                    kind=BatchKind.DECODE_DRAFT,
+                    num_tokens=0,
+                    wire="draft_dynamic",
+                ))
+            intermediate = recv_future.as_intermediate_tensors()
+            # Materialize now (wait_event ordering + TP-broadcast
+            # postprocess on all ranks): the code below reads tensor
+            # contents directly (positions, spec_step_idx.item()).
+            tensor_dict = intermediate.tensors
 
             # Copy received tensors into persistent buffers so that the
             # ACLGraphWrapper-wrapped segment_c sees stable input addresses.
@@ -2313,12 +2337,22 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             assert isinstance(output, IntermediateTensors)
 
             if get_pp_group().world_size == 2:
-                send_work = get_pp_group().isend_tensor_dict(
-                    {k: v.contiguous() if isinstance(v, torch.Tensor) else v
-                     for k, v in output.items()}
-                )
-                for handle in send_work:
-                    handle.wait()
+                get_comm_service().submit_send(
+                    CommRequest(
+                        channel=CommChannelType.DECODE_DOWN,
+                        op="send",
+                        kind=BatchKind.DECODE_DRAFT,
+                        num_tokens=num_tokens,
+                        tensor_dict={
+                            k: v.contiguous()
+                            if isinstance(v, torch.Tensor)
+                            else v
+                            for k, v in output.items()
+                        },
+                        wire="draft_dynamic",
+                    ))
+                # No eager wait: the future keeps the contiguous
+                # temporaries alive until the send completes.
 
             return output["hidden_states"]
 
