@@ -4176,6 +4176,37 @@ class NPUModelRunner(GPUModelRunner):
                 max(n - max(int(v), 1), 0)
                 for n, v in zip(num_scheduled, valid_counts)
             ]
+            # [EC-DEBUG] An all-placeholder sampled row for a live,
+            # non-discarded request at stash time is the direct source of
+            # valid=0 corrections (and of the all-zero drafts that follow).
+            # Dump the full row mapping so sampler-side corruption (row
+            # really -1) can be told apart from draft-side row-selection
+            # corruption (row fine here, draft garbage downstream).
+            for _req_idx, (_req_id, _v) in enumerate(
+                zip(self.input_batch.req_ids, valid_counts)
+            ):
+                if int(_v) != 0:
+                    continue
+                _in_discard = _req_idx in set(
+                    self.discard_request_indices.np[
+                        : self.num_discarded_requests
+                    ].tolist()
+                )
+                logger.error(
+                    "[EC-DEBUG] stash saw an all-placeholder sampled row: "
+                    "task_id=%s req=%s row=%d valid_count=0 "
+                    "num_scheduled=%s in_discard=%s sampled_row=%s "
+                    "batch_req_ids=%s",
+                    task_id,
+                    _req_id,
+                    _req_idx,
+                    (
+                        scheduler_output.num_scheduled_tokens.get(_req_id)
+                    ),
+                    _in_discard,
+                    sampled_token_ids[_req_idx].tolist(),
+                    list(self.input_batch.req_ids),
+                )
         else:
             num_rejected = [
                 max(n - max(len(s), 1), 0)
