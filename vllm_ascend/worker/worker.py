@@ -1870,6 +1870,18 @@ class NPUWorker(WorkerBase):
         output = self.model_runner._run_edge_cloud_draft_last_segment(
             scheduler_output, recv_future.as_intermediate_tensors()
         )
+        logger.info(
+            "[DRAFT-TAIL-DIAG] RECV_DONE task=%s step=%s batch_type=%s",
+            scheduler_output.draft_task_id,
+            scheduler_output.draft_step_idx,
+            scheduler_output.batch_type,
+        )
+        logger.info(
+            "[DRAFT-TAIL-DIAG] WORKER_RETURN task=%s step=%s batch_type=%s",
+            scheduler_output.draft_task_id,
+            scheduler_output.draft_step_idx,
+            scheduler_output.batch_type,
+        )
         self._resume_deferred_edge_draft_head(scheduler_output)
         return output
 
