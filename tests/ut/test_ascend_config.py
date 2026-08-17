@@ -221,6 +221,8 @@ class TestAscendConfig(TestBase):
                 "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1",
                 "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "2",
                 "MSMONITOR_USE_DAEMON": "1",
+                "MSMEMSCOPE_ENABLE": "1",
+                "MSMEMSCOPE_OUTPUT_PATH": "/tmp/memscope_out",
                 "VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK": "0",
                 "VLLM_ASCEND_ENABLE_NZ": "2",
             },
@@ -233,6 +235,8 @@ class TestAscendConfig(TestBase):
         self.assertTrue(ascend_config.enable_flashcomm1)
         self.assertEqual(ascend_config.enable_flashcomm2_parallel_size, 2)
         self.assertTrue(ascend_config.msmonitor_use_daemon)
+        self.assertTrue(ascend_config.msmemscope_enable)
+        self.assertEqual(ascend_config.msmemscope_output_path, "/tmp/memscope_out")
         self.assertFalse(ascend_config.enable_transpose_kv_cache_by_block)
         self.assertEqual(ascend_config.weight_nz_mode, 2)
         mock_info_once.assert_any_call(

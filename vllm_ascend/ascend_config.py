@@ -200,6 +200,18 @@ class AscendConfig:
             "MSMONITOR_USE_DAEMON",
             ascend_envs.MSMONITOR_USE_DAEMON,
         )
+        self.msmemscope_enable = self._get_config_value(
+            additional_config,
+            "msmemscope_enable",
+            "MSMEMSCOPE_ENABLE",
+            ascend_envs.MSMEMSCOPE_ENABLE,
+        )
+        self.msmemscope_output_path = self._get_config_value(
+            additional_config,
+            "msmemscope_output_path",
+            "MSMEMSCOPE_OUTPUT_PATH",
+            ascend_envs.MSMEMSCOPE_OUTPUT_PATH,
+        )
         self.enable_transpose_kv_cache_by_block = self._get_config_value(
             additional_config,
             "enable_transpose_kv_cache_by_block",

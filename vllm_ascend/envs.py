@@ -80,6 +80,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
+    # Whether to enable msMemScope Python API to collect NPU memory events
+    # during vllm-ascend worker startup. msMemScope hooks aclrtMalloc at the
+    # CANN/acl layer so it captures HCCL comm buffers that bypass PyTorch's
+    # caching allocator, making it suitable for diagnosing communication
+    # memory usage at service startup. Before enabling, install msMemScope
+    # and run `source msmemscope --load-api-env` to set up LD_PRELOAD /
+    # LD_LIBRARY_PATH (must be done before launching vLLM).
+    "MSMEMSCOPE_ENABLE": lambda: bool(int(os.getenv("MSMEMSCOPE_ENABLE", "0"))),
+    # Output directory for msMemScope dump files. Defaults to
+    # "memscopeDumpResults" (the msMemScope default).
+    "MSMEMSCOPE_OUTPUT_PATH": lambda: os.getenv("MSMEMSCOPE_OUTPUT_PATH", None),
     # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.
     # This option is enabled by default. MLAPO can improve performance, but
     # it will consume more NPU memory. If reducing NPU memory usage is a higher priority

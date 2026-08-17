@@ -16,6 +16,14 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from vllm_ascend.profiler.msmemscope_profiler import (
+    MsMemScopeProfiler,
+    get_ms_memscope_profiler,
+)
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 
-__all__ = ["TorchNPUProfilerWrapper"]
+__all__ = [
+    "MsMemScopeProfiler",
+    "TorchNPUProfilerWrapper",
+    "get_ms_memscope_profiler",
+]

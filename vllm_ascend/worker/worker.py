@@ -545,6 +545,20 @@ class NPUWorker(WorkerBase):
 
         if get_ascend_device_type() == AscendDeviceType.A5:
             setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
+        # Start msMemScope if enabled. Must run
+        # `source msmemscope --load-api-env` before launching vLLM so that
+        # LD_PRELOAD / LD_LIBRARY_PATH are set at process start. msMemScope
+        # hooks aclrtMalloc at the CANN/acl layer, so it captures HCCL
+        # comm buffers that bypass PyTorch's caching allocator — exactly
+        # what torch.npu.memory_allocated() cannot see. Starting here
+        # captures all subsequent allocations (CANN context baseline,
+        # WORLD comm, hidden channel comms, weights, KV cache, warmup).
+        from vllm_ascend.profiler.msmemscope_profiler import get_ms_memscope_profiler
+        ms_memscope = get_ms_memscope_profiler()
+        if get_ascend_config().msmemscope_enable:
+            ms_memscope.start(
+                output_path=get_ascend_config().msmemscope_output_path,
+            )
 
         # take current memory snapshot
         if vllm_version_is("0.23.0"):
@@ -578,8 +592,12 @@ class NPUWorker(WorkerBase):
                 f"({visible_device_count})."
             )
 
-        # Initialize the distributed environment.
-        self._init_worker_distributed_environment()
+        # Initialize the distributed environment. This is where the WORLD
+        # process group's HCCL comm is lazily created on the first
+        # collective (broadcast / allreduce), so mark the range for
+        # msMemScope to attribute the comm-buffer allocation to it.
+        with ms_memscope.mark("distributed_init"):
+            self._init_worker_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
@@ -1658,7 +1676,9 @@ class NPUWorker(WorkerBase):
 
             context = nullcontext()  # type: ignore
 
-        with context, set_current_vllm_config(self.vllm_config):
+        from vllm_ascend.profiler.msmemscope_profiler import get_ms_memscope_profiler
+
+        with get_ms_memscope_profiler().mark("load_model"), context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
         if self.vllm_config.weight_transfer_config is not None:
@@ -1693,9 +1713,17 @@ class NPUWorker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
-        for size in sorted(warmup_sizes, reverse=True):
-            logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size)
+        from vllm_ascend.profiler.msmemscope_profiler import get_ms_memscope_profiler
+        ms_memscope = get_ms_memscope_profiler()
+
+        # Dummy runs trigger lazy creation of every HCCL comm (hidden
+        # channels, TP/PP groups) on first collective use — the main
+        # source of communication memory at startup. Mark the range so
+        # msMemScope can attribute the comm-buffer allocations to it.
+        with ms_memscope.mark("warmup"):
+            for size in sorted(warmup_sizes, reverse=True):
+                logger.info("Compile and warming up model for size %d", size)
+                self.model_runner._dummy_run(size)
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
@@ -1754,6 +1782,15 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+        # Stop msMemScope after warmup. By this point every HCCL comm has
+        # been lazily created (via dummy runs) and the model + KV cache are
+        # materialized, so the startup memory footprint is fully captured.
+        # The dump file (memscope_dump_{timestamp}.csv / .db) is written on
+        # stop(). If collection was never started this is a no-op.
+        ms_memscope.snapshot(name="after_warmup")
+        ms_memscope.stop()
+
         return CompilationTimes(
             language_model=self.vllm_config.compilation_config.compilation_time,
             # `encoder_compilation_time` was added after v0.19.1 (vLLM #39240); fall
