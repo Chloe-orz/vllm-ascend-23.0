@@ -2249,6 +2249,15 @@ class NPUModelRunner(GPUModelRunner):
                 continue
             dst = buffers[key][:copy_len]
             recv_len = min(value.shape[0], copy_len)
+            logger.info(
+                "[DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=%s key=%s "
+                "recv_len=%d copy_len=%d shape=%s",
+                self.edge_cloud_cfg.role,
+                key,
+                recv_len,
+                copy_len,
+                tuple(value.shape),
+            )
             if recv_len:
                 # Use synchronous copy on the NPU to avoid async hangs that
                 # have been observed on the cloud side when non_blocking=True
@@ -2257,6 +2266,11 @@ class NPUModelRunner(GPUModelRunner):
             if recv_len < copy_len:
                 dst[recv_len:].zero_()
             synced[key] = dst
+            logger.info(
+                "[DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=%s key=%s",
+                self.edge_cloud_cfg.role,
+                key,
+            )
 
         return IntermediateTensors(synced)
 
@@ -2330,6 +2344,16 @@ class NPUModelRunner(GPUModelRunner):
             num_draft_tokens = len(draft_token_ids)
             if num_draft_tokens <= 0 or req_id not in active_req_ids:
                 continue
+            previous = self._cloud_expected_request_corrections.get(req_id)
+            logger.info(
+                "[CORRECTION-DIAG] EXPECT_REGISTER req=%s task=%s "
+                "generation=%d num_draft=%d previous=%s",
+                req_id,
+                task_id,
+                generation,
+                num_draft_tokens,
+                previous,
+            )
             self._cloud_expected_request_corrections[req_id] = (
                 CloudExpectedRequestCorrection(
                     task_id=task_id,
@@ -2369,6 +2393,13 @@ class NPUModelRunner(GPUModelRunner):
         }
         if not participating:
             return False
+
+        logger.info(
+            "[CORRECTION-DIAG] CONSUME_BEGIN batch_type=%s "
+            "participating=%s",
+            scheduler_output.batch_type,
+            participating,
+        )
 
         resolved: list[
             tuple[str, int, CloudPendingRequestCorrection]
@@ -2420,6 +2451,18 @@ class NPUModelRunner(GPUModelRunner):
         # mismatch cannot leave CPU and GPU correction paths mixed.
         for req_id, req_index, correction in resolved:
             actual = correction.actual_num_computed_tokens
+            logger.info(
+                "[CORRECTION-DIAG] CONSUME_APPLY req=%s task=%s "
+                "generation=%d num_draft=%d optimistic=%d actual=%d "
+                "accepted=%d",
+                req_id,
+                correction.task_id,
+                correction.generation,
+                correction.num_draft_tokens,
+                correction.optimistic_num_computed_tokens,
+                actual,
+                correction.num_accepted_tokens,
+            )
             self.input_batch.num_computed_tokens_cpu[req_index] = actual
             req_state = self.requests.get(req_id)
             if req_state is not None:
@@ -2525,6 +2568,13 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 req_state = self.requests.get(req_id)
                 if req_state is not None:
+                    logger.warning(
+                        "[CORRECTION-DIAG] ORPHAN_CLEAR batch_type=%s "
+                        "req=%s previous_num_draft=%d",
+                        scheduler_output.batch_type,
+                        req_id,
+                        num_draft,
+                    )
                     req_state.prev_num_draft_len = 0
 
         # A PD-interleaved tail updates only a subset of the running requests.
@@ -4498,12 +4548,43 @@ class NPUModelRunner(GPUModelRunner):
         assert self.drafter is not None and self.drafter.model is not None
         if self.speculative_config.method == "eagle3":
             if get_ascend_config().enable_reduce_sample:
-                return self.drafter.compute_draft_token_ids(hidden_states)
+                logger.info(
+                    "[DRAFT-TAIL-DIAG] REDUCE_SAMPLE_BEGIN step=%d shape=%s",
+                    draft_step_idx,
+                    tuple(hidden_states.shape),
+                )
+                draft_token_ids = self.drafter.compute_draft_token_ids(
+                    hidden_states
+                )
+                logger.info(
+                    "[DRAFT-TAIL-DIAG] REDUCE_SAMPLE_DONE step=%d",
+                    draft_step_idx,
+                )
+                return draft_token_ids
+            logger.info(
+                "[DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=%d shape=%s",
+                draft_step_idx,
+                tuple(hidden_states.shape),
+            )
             logits = self.drafter.model.compute_logits(hidden_states)
+            logger.info(
+                "[DRAFT-TAIL-DIAG] LM_HEAD_DONE step=%d",
+                draft_step_idx,
+            )
             assert logits is not None
             if lmhead_tp_enable():
                 logits = logits[: hidden_states.shape[0]]
-            return logits.argmax(dim=-1)
+            logger.info(
+                "[DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=%d shape=%s",
+                draft_step_idx,
+                tuple(logits.shape),
+            )
+            draft_token_ids = logits.argmax(dim=-1)
+            logger.info(
+                "[DRAFT-TAIL-DIAG] ARGMAX_DONE step=%d",
+                draft_step_idx,
+            )
+            return draft_token_ids
         mtp_model = self.drafter.model
         if hasattr(mtp_model, "compute_logits"):
             try:
@@ -4584,16 +4665,37 @@ class NPUModelRunner(GPUModelRunner):
                 req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
             )
         draft_step_idx = int(scheduler_output.draft_step_idx or 0)
+        logger.info(
+            "[DRAFT-TAIL-DIAG] ENTER task=%s step=%d req_ids=%s "
+            "pending_contexts=%d",
+            task_id,
+            draft_step_idx,
+            context["req_ids"],
+            len(self._pending_edge_cloud_draft_contexts),
+        )
         positions = context.get("current_draft_positions")
         if positions is None:
             positions = intermediate_tensors.tensors.get("positions")
         if positions is None:
             raise RuntimeError("DRAFT_LAST missing positions")
         num_tokens = positions.shape[-1] if self.uses_mrope else positions.shape[0]
+        logger.info(
+            "[DRAFT-TAIL-DIAG] SYNC_BEGIN task=%s step=%d "
+            "num_tokens=%d keys=%s",
+            task_id,
+            draft_step_idx,
+            num_tokens,
+            tuple(intermediate_tensors.tensors),
+        )
         intermediate_tensors = (
             self._sync_edge_cloud_draft_intermediate_tensors(
                 num_tokens, intermediate_tensors
             )
+        )
+        logger.info(
+            "[DRAFT-TAIL-DIAG] SYNC_DONE task=%s step=%d",
+            task_id,
+            draft_step_idx,
         )
         segment = self._edge_cloud_draft_segments["e"]
         # DRAFT_LAST is dispatched independently as well, so it needs the
@@ -4611,9 +4713,19 @@ class NPUModelRunner(GPUModelRunner):
             # see _run_mtp_edge_first_segment): warmup calls segment "e"
             # with only positions + intermediate_tensors, and the last
             # segment (final norm) does not consume spec_step_idx anyway.
+            logger.info(
+                "[DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=%s step=%d",
+                task_id,
+                draft_step_idx,
+            )
             segment_output = segment(
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
+            )
+            logger.info(
+                "[DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=%s step=%d",
+                task_id,
+                draft_step_idx,
             )
         if self.speculative_config.method == "eagle3":
             if not (
@@ -4650,12 +4762,32 @@ class NPUModelRunner(GPUModelRunner):
             logits_hidden_states = last_hidden_states
             next_hidden_states = hidden_states
             step_positions = positions
+        logger.info(
+            "[DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=%s step=%d",
+            task_id,
+            draft_step_idx,
+        )
         draft_token_ids = self._compute_edge_cloud_draft_token_ids(
             logits_hidden_states, draft_step_idx
+        )
+        logger.info(
+            "[DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=%s step=%d",
+            task_id,
+            draft_step_idx,
+        )
+        logger.info(
+            "[DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=%s step=%d",
+            task_id,
+            draft_step_idx,
         )
         context["last_draft_hidden_states"] = next_hidden_states.clone()
         context["last_draft_positions"] = step_positions.clone()
         context["last_draft_token_ids"] = draft_token_ids.clone()
+        logger.info(
+            "[DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=%s step=%d",
+            task_id,
+            draft_step_idx,
+        )
         draft_steps = context.setdefault("draft_token_id_steps", [])
         if len(draft_steps) != draft_step_idx:
             raise RuntimeError(
@@ -4769,6 +4901,14 @@ class NPUModelRunner(GPUModelRunner):
         )
         if completed_draft_token_ids is not None:
             output.edge_cloud_draft_token_ids = completed_draft_token_ids
+        logger.info(
+            "[DRAFT-TAIL-DIAG] RETURN task=%s step=%d next_step=%d "
+            "context_retained=%s",
+            task_id,
+            draft_step_idx,
+            next_step_idx,
+            task_id in self._pending_edge_cloud_draft_contexts,
+        )
         return output
 
     def _copy_draft_token_ids_to_cpu(
@@ -6823,6 +6963,15 @@ class NPUModelRunner(GPUModelRunner):
             or position_state is None
             or generation is None
         ):
+            logger.warning(
+                "[CORRECTION-DIAG] RECORD_METADATA_MISSING task=%s step=%s "
+                "has_target=%s has_position=%s generation=%s",
+                task_id,
+                scheduler_output.draft_step_idx,
+                target_output is not None,
+                position_state is not None,
+                generation,
+            )
             return 0
 
         req_ids = position_state.req_ids
@@ -6860,7 +7009,32 @@ class NPUModelRunner(GPUModelRunner):
             if expected.task_id == task_id
         }
         if not expected_by_req:
+            expected_tasks = [
+                (req_id, expected.task_id, expected.generation)
+                for req_id, expected in (
+                    self._cloud_expected_request_corrections.items()
+                )
+            ]
+            logger.warning(
+                "[CORRECTION-DIAG] RECORD_NO_EXPECTED task=%s "
+                "generation=%d step=%s req_ids=%s current_expected=%s",
+                task_id,
+                generation,
+                scheduler_output.draft_step_idx,
+                req_ids,
+                expected_tasks,
+            )
             return 0
+
+        logger.info(
+            "[CORRECTION-DIAG] RECORD_BEGIN task=%s generation=%d "
+            "step=%s req_ids=%s expected_reqs=%s",
+            task_id,
+            generation,
+            scheduler_output.draft_step_idx,
+            req_ids,
+            tuple(expected_by_req),
+        )
 
         resolved: list[tuple[str, CloudPendingRequestCorrection]] = []
         for req_id, expected in expected_by_req.items():
@@ -6941,6 +7115,18 @@ class NPUModelRunner(GPUModelRunner):
             self._cloud_actual_num_computed_by_req[req_id] = (
                 generation,
                 pending.actual_num_computed_tokens,
+            )
+            logger.info(
+                "[CORRECTION-DIAG] RECORD_PUBLISH req=%s task=%s "
+                "generation=%d num_draft=%d optimistic=%d actual=%d "
+                "accepted=%d",
+                req_id,
+                pending.task_id,
+                pending.generation,
+                pending.num_draft_tokens,
+                pending.optimistic_num_computed_tokens,
+                pending.actual_num_computed_tokens,
+                pending.num_accepted_tokens,
             )
         return len(resolved)
 
