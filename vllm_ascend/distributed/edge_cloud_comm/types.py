@@ -66,9 +66,9 @@ class CommRequest:
     op: Literal["send", "recv"]
     kind: BatchKind
     num_tokens: int
-    # send: tensors to transmit (owned by the caller; the returned future
-    # keeps them alive until the send completes).  recv: None — buffers are
-    # pre-allocated by the comm layer on the channel stream.
+    # send: tensors to transmit (snapshotted into communication-owned
+    # buffers at submit time). recv: None — buffers are pre-allocated by the
+    # comm layer on the channel stream.
     tensor_dict: dict[str, Any] | None = None
     # Physical wire channel assigned by the scheduler
     # (SchedulerOutput.hidden_channel).  None -> default transport for the
@@ -87,7 +87,7 @@ class CommRequest:
     #   "plain": channel-less PP wire (edge_cloud_isend_tensor_dict with
     #       channel=None -> default device group, caller's current
     #       stream), used by the shared-model edge worker's head send.
-    #       Identical to "hidden" on the recv side.
+    #       The matching recv also selects channel=None/default PP group.
     wire: Literal["hidden", "draft", "draft_dynamic", "plain"] | None = None
     # Explicit peer rank in the PP group; None -> next (send) / previous
     # (recv) rank.

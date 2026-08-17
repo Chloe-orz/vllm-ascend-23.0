@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from vllm.logger import logger
@@ -32,9 +33,6 @@ from vllm_ascend.distributed.edge_cloud_comm.types import (
     CommResult,
     CommStatus,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 class _CommSyncedIntermediateTensors(AsyncIntermediateTensors):
@@ -49,7 +47,7 @@ class _CommSyncedIntermediateTensors(AsyncIntermediateTensors):
     def __init__(
         self,
         tensors: dict[str, torch.Tensor],
-        done_event: "torch.npu.Event | None",
+        done_event: torch.npu.Event | None,
         comm_postprocess: list[Callable[[], None]] | None,
     ) -> None:
         super().__init__(
@@ -78,17 +76,17 @@ class CommFuture:
     * ``as_intermediate_tensors()`` — recv only: bridge into the existing
       lazy-consumption path of the model runner.
 
-    For send requests the future owns the source tensors
-    (``_keepalive``) until completion: the caching allocator must not hand
-    the block to the next batch while the HCCL internal stream may still
-    be reading it.  This replaces the legacy ``_wait_pp_send_work``.
+    For send requests the future owns a communication-layer payload copy
+    (``_keepalive``) until completion.  The producer may therefore replay a
+    graph or reuse its staging buffers without overwriting data that HCCL is
+    still reading.
     """
 
     def __init__(
         self,
         request: CommRequest,
         handles: list[Any],
-        done_event: "torch.npu.Event | None",
+        done_event: torch.npu.Event | None,
         tensor_dict: dict[str, Any] | None,
         postprocess: list[Callable[[], None]],
         keepalive: Any,
@@ -185,8 +183,7 @@ class CommFuture:
         """Transition to a terminal state exactly once; fire callbacks.
 
         Called by the channel reaper (head-of-line query) and by
-        ``wait()``.  Releases the send-buffer keepalive so the block
-        returns to the caching allocator.
+        ``wait()``. Releases the communication-owned send-buffer keepalive.
         """
         with self._lock:
             if self._status is not CommStatus.PENDING:

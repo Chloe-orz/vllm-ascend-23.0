@@ -11,11 +11,13 @@ interface reserved for event-driven tail scheduling.
 from __future__ import annotations
 
 import threading
-from typing import Protocol, runtime_checkable
+import time
+from dataclasses import replace
+from typing import Any, Protocol, runtime_checkable
 
 from vllm.logger import logger
-from vllm.v1.core.sched.output import HiddenChannelType
 
+from vllm_ascend.distributed import parallel_state as ps
 from vllm_ascend.distributed.edge_cloud_comm.channel import CommChannel
 from vllm_ascend.distributed.edge_cloud_comm.future import CommFuture
 from vllm_ascend.distributed.edge_cloud_comm.mapping import default_transport
@@ -47,22 +49,26 @@ class SchedulerCommSink(Protocol):
 class EdgeCloudCommService:
     """Process-wide singleton.  All public methods are thread-safe."""
 
-    _instance: "EdgeCloudCommService | None" = None
+    _instance: EdgeCloudCommService | None = None
     _instance_lock = threading.Lock()
 
     @classmethod
-    def instance(cls) -> "EdgeCloudCommService":
+    def instance(cls) -> EdgeCloudCommService:
         with cls._instance_lock:
             if cls._instance is None:
                 cls._instance = cls()
             return cls._instance
 
     def __init__(self) -> None:
-        # Keyed by transport (wire identity), not logical channel type:
-        # HCCL P2P FIFO matching is per (device group, peer).
-        self._channels: dict[HiddenChannelType, CommChannel] = {}
+        # HCCL ordering is per physical (process group, peer), not merely per
+        # logical HiddenChannelType.  In particular shared-model virtual
+        # workers use one transport with different explicit peers.
+        self._channels: dict[tuple[Any, int], CommChannel] = {}
         self._lock = threading.Lock()
+        self._submission_condition = threading.Condition(self._lock)
+        self._active_submissions = 0
         self._sinks: list[SchedulerCommSink] = []
+        self._shutting_down = False
 
     # ------------------------------------------------------------------ #
     # Submission                                                          #
@@ -70,7 +76,7 @@ class EdgeCloudCommService:
 
     def submit_send(self, request: CommRequest) -> CommFuture:
         assert request.op == "send", "submit_send requires op='send'"
-        return self._channel_for(request).submit(request)
+        return self._submit(request)
 
     def submit_recv(self, request: CommRequest) -> CommFuture:
         """Submit a recv.  The irecv is posted immediately — "early" is a
@@ -78,7 +84,7 @@ class EdgeCloudCommService:
         or scheduler, via the reserved 8.3-1 interface) simply holds the
         returned future until the consume point."""
         assert request.op == "recv", "submit_recv requires op='recv'"
-        return self._channel_for(request).submit(request)
+        return self._submit(request)
 
     # ------------------------------------------------------------------ #
     # Completion driving                                                  #
@@ -117,33 +123,100 @@ class EdgeCloudCommService:
     # Lifecycle                                                           #
     # ------------------------------------------------------------------ #
 
-    def shutdown(self) -> None:
-        with self._lock:
+    def shutdown(self, timeout: float | None = None) -> None:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._submission_condition:
+            if self._shutting_down:
+                return
+            self._shutting_down = True
+            while self._active_submissions:
+                remaining = (
+                    None
+                    if deadline is None
+                    else deadline - time.monotonic()
+                )
+                if remaining is not None and remaining <= 0:
+                    self._shutting_down = False
+                    raise TimeoutError(
+                        "edge-cloud comm shutdown timed out waiting for "
+                        "active submissions"
+                    )
+                self._submission_condition.wait(timeout=remaining)
             channels = list(self._channels.values())
+        try:
+            for channel in channels:
+                remaining = (
+                    None
+                    if deadline is None
+                    else max(0.0, deadline - time.monotonic())
+                )
+                for future in channel.shutdown(timeout=remaining):
+                    self._notify_sinks(future)
+        except BaseException:
+            with self._lock:
+                self._shutting_down = False
+            raise
+        with self._lock:
             self._channels.clear()
             self._sinks.clear()
-        for channel in channels:
-            for future in channel.reap():
-                pass  # drain completed
+            self._shutting_down = False
         logger.info("[edge-cloud-comm] service shut down")
 
     # ------------------------------------------------------------------ #
     # Internal                                                            #
     # ------------------------------------------------------------------ #
 
-    def _channel_for(self, request: CommRequest) -> CommChannel:
+    def _submit(self, request: CommRequest) -> CommFuture:
+        channel, request = self._channel_for(request, reserve=True)
+        try:
+            return channel.submit(request)
+        finally:
+            with self._submission_condition:
+                self._active_submissions -= 1
+                self._submission_condition.notify_all()
+
+    def _channel_for(
+        self, request: CommRequest, *, reserve: bool = False
+    ) -> tuple[CommChannel, CommRequest]:
         transport = request.transport or default_transport(request.channel)
+        request = replace(request, transport=transport)
+        pp_group = ps.get_pp_group()
+        peer = request.src_dst
+        if peer is None:
+            rank = pp_group.rank_in_group
+            if request.op == "send":
+                peer = (rank + 1) % pp_group.world_size
+            else:
+                peer = (rank - 1) % pp_group.world_size
+
+        wire = CommChannel.wire_for_request(request)
+        if pp_group.world_size <= 1 or wire in ("plain", "draft_dynamic"):
+            device_group = pp_group.device_group
+        elif wire in ("hidden", "draft"):
+            device_group = ps._get_edge_cloud_hidden_channel_device_group(
+                pp_group, channel=transport
+            )
+        else:
+            raise ValueError(f"Unsupported edge-cloud wire type: {wire!r}")
+        key = (device_group, peer)
         with self._lock:
-            channel = self._channels.get(transport)
+            if self._shutting_down:
+                raise RuntimeError("edge-cloud comm service is shutting down")
+            channel = self._channels.get(key)
             if channel is None:
-                channel = CommChannel(request.channel, transport)
-                self._channels[transport] = channel
+                channel = CommChannel(request.channel)
+                self._channels[key] = channel
                 logger.info(
-                    "[edge-cloud-comm] created channel %s (transport=%s)",
+                    "[edge-cloud-comm] created channel %s "
+                    "(transport=%s peer=%s wire=%s)",
                     request.channel.value,
                     transport,
+                    peer,
+                    wire,
                 )
-        return channel
+            if reserve:
+                self._active_submissions += 1
+        return channel, request
 
     def _notify_sinks(self, future: CommFuture) -> None:
         with self._lock:

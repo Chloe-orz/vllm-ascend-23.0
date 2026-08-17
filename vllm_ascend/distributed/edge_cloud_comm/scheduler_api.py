@@ -46,7 +46,6 @@ from vllm_ascend.distributed.edge_cloud_comm.types import (
     CommChannelType,
     CommRequest,
     CommResult,
-    CommStatus,
 )
 
 # ------------------------------------------------------------------ #
@@ -56,12 +55,12 @@ from vllm_ascend.distributed.edge_cloud_comm.types import (
 
 def build_recv_request(
     *,
-    batch_type: "Any",
+    batch_type: Any,
     num_tokens: int,
-    transport: "HiddenChannelType | None" = None,
+    transport: HiddenChannelType | None = None,
     sp_chunk: bool = False,
     include_mrope: bool = True,
-    src_dst: "int | None" = None,
+    src_dst: int | None = None,
     prefill_phase_draft: bool = False,
 ) -> CommRequest:
     """Canonical recv-request builder (same-process schedulers and the
@@ -82,11 +81,10 @@ def build_recv_request(
     )
 
 
-
 def make_recv_hint(
     *,
     head_token: str,
-    hidden_channel: "HiddenChannelType | None",
+    hidden_channel: HiddenChannelType | None,
     num_tokens: int,
     has_mrope: bool = True,
 ) -> dict[str, Any]:
@@ -108,7 +106,7 @@ def make_recv_hint(
 
 def recv_request_from_hint(
     hint: dict[str, Any], *, sp_chunk: bool
-) -> "tuple[CommRequest | None, str | None]":
+) -> tuple[CommRequest | None, str | None]:
     """Parse and validate a recv-hint into a CommRequest.
 
     Hints always describe the prefill hidden recv (PREFILL_UP); the
