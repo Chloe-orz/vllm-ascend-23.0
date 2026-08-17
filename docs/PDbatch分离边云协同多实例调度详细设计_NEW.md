@@ -151,6 +151,43 @@
 
 ### 2.2 端口 / 通信 store 编码扩展
 
+#### 2.2.1 各通道功能说明（2026-08 补充，均经代码核实）
+
+边云之间共 6 类通道，按「启动期一次性握手 / 启动期 method 链 / 运行期持续通信」分三类：
+
+**A. 运行期持续通信（2 类）**
+
+| 通道 | 参与者 / 方向 | 功能 | 代码锚点 |
+|------|--------------|------|---------|
+| **ZMQ port（PRE_OUT / POST_OUT 对）** | 边 EngineCore ↔ 云 PassiveEC，每 dp_rank 一对 | PD 段级 `SchedulerOutput` 传输通道（`PPSchedulerZmqChannel`）：边经 **PRE_OUT** 发首段（PF/DF：首层调度指令 + head_token，云据此改写为 PL/DL 前执行中间层）；云经 **POST_OUT** 回尾段（PL/DL，本设计删除，§3.4，收敛为单向 PRE_OUT）。PUSH/PULL + 后台 pub/sub 线程 + `queue.Queue(1000)` 桥接，scheduler 线程不阻塞在 ZMQ 上；`IMMEDIATE=1` + warmup 消息防 2P1D 首消息丢失死锁 | passive_core.py:302-324（双端镜像构造）、:1037-1045（云侧端口 `pd_config.post/pre_out_port + dp_rank*2`）；patch_engine_core.py:181-194（边侧同偏移 + cloud_addr 自动发现） |
+| **gloo coord group（master_port+201）** | 云实例内 DP0 ↔ DP1（云到云直连，边不在组） | 实例内跨 DP 协调通信域：云侧 EP all-toall 配对所需的跨 DP batch_type 协调 / 中间层段同步走此 gloo 组；双机部署时云 DP0 host、DP1 connect（单机 dp 同进程组内走本机） | passive_core.py:1096-1112（DP1 侧 connect）；IP 发现见下行 IP-exchange store |
+
+**B. 启动期一次性握手（2 类，one-shot，用完即删）**
+
+| 通道 | 参与者 / 方向 | 功能 | 代码锚点 |
+|------|--------------|------|---------|
+| **cloud_ip store（master_port+1+dp_rank，key=`cloud_ip`）** | 边 host（world_size=2），云写 / 边读 | 云节点可达 IP 上报：每 dp_rank 独立端口（防 EADDRINUSE），云连接仅与其配对的边 DP rank 的 store，写 `get_ip()`；边读到后构造 POST_OUT 的 connect endpoint（`tcp://{cloud_addr}:{post_out_port}`），**免去 CLI 显式传云 IP**。多实例下 key/port 双撞（§2.2 末） | passive_core.py:1006-1029（云侧写）；patch_engine_core.py:165-179（边侧 host + get 后 del） |
+| **IP-exchange store（master_port+200，key=`coord_master_ip`）** | 边 DP0 host（wait_for_workers=False），云 DP0 写 / 云 DP1 读 | 云双机 coord 组 IP 发现（**边只做 IP broker，不进组**）：云 DP1 从边 DP0 的 store 取到云 DP0 的可达 IP，才能 connect master_port+201 的 gloo coord 组。仅 dp>1 且 MoE 时创建；非集合通信（set/get），不阻塞云启动 | patch_engine_core.py:137-163（边 host）；passive_core.py:1100-1112（云 set/get） |
+
+**C. 启动期 + 运行期控制面（2 类）**
+
+| 通道 | 参与者 / 方向 | 功能 | 代码锚点 |
+|------|--------------|------|---------|
+| **rpc_broadcast_mq / peer_worker_response_mq** | 边 executor（leader，connect_ip=master_addr）↔ 云 worker | 跨节点 `collective_rpc` 的 ZMQ 广播/回收对：**启动期 method 链全走此通道**（get_kv_cache_specs -> determine_available_memory（profile_run）-> get_kv_cache_configs -> initialize_from_config -> warmup，§3.10），运行期条件 rpc（update_max_model_len 等）同样 fan-out；边广播请求，云 worker 执行，结果按 rank 经 peer_worker_response_mqs 回收到边 | patch_multiproc_executor.py:87-101（边 leader 创建，connect master_addr）、:202-217（response_mqs 按全局 rank 组装）、:226-247（wait_until_ready 顺序死锁先例注释） |
+| **边侧 PD TCPStore（master_port，HCCL rendezvous store）** | 边 rank0 host，全部云 worker connect | torch.distributed 世界组初始化 store（`master_addr:master_port`）：G0 世界组及所有子组（G2-G5 `new_group`）的 HCCL/gloo rendezvous 均经此 store 的 prefix key 完成；**单 store 服务单实例**，多实例需 per-instance store/key（N 个实例各自 rendezvous，§4.2 G2）。启动顺序链：cloud_ip 握手 -> 边此 store 就绪 -> 云 distributed init（顺序敏感，有死锁先例注释） | patch_multiproc_executor.py:236-240（顺序链注释）；cloud_ip -> 本 store 的先后依赖见 passive_core.py:1009-1011（"avoid colliding with the NCCL rendezvous store on master_port"） |
+
+**启动顺序依赖链（1:1 现状，多实例逐实例复制，§3.10）**：
+
+```
+云 PassiveEC 起 -> 写 cloud_ip（master_port+1+dp）
+    -> 边读 cloud_ip、host PD TCPStore（master_port）
+    -> 云 worker distributed init（连 store，HCCL rendezvous）+ _init_message_queues
+    -> rpc_broadcast_mq / response_mq wait_until_ready
+    -> 启动 method 链（profile/KV/warmup）-> 运行期（PRE_OUT 单向 + coord group + 数据面 isend/irecv）
+```
+
+（另有一类同机通道 cloud_recv_hint_mq / §5.2.3 新增 recv_done_mq：进程内/同机 MessageQueue，不占跨机端口，不在本表范围。）
+
 现有所有按 dp_rank 编码的端口/store，N 实例下会撞端口，需加 **instance 偏移**（与 ZMQ `instance*D+dp` 同类改动）：
 
 | 通道 | 现有编码 | 多实例编码 |
@@ -490,7 +527,8 @@ qwen3.5 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务器�
 | 一：2实例 tp16 | 2 | 1 | 16 | 34 | 3 | 2/2 卡 | ✓ | 标准形态，零新增 |
 | 二：4实例 tp8 | 4 | 2 | 8 | 34 | 3 | 2/2 卡 | ✓（一机多 node-rank） | 同机多实例，v1 支持 |
 | 三a：4实例(1服务器) tp2 | 4 | 4 | 2 | 10 | 2 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.5 单服务器形态；同机压力最大（K=4） |
-| 三b：8实例(2服务器) tp2 | 8 | 4 | 2 | 18 | 3 | 2/2 卡 | ✓（一机多 node-rank） | **qwen3.5 默认形态**；N=8 容量临界（§6.3），带宽/启动错峰压力最大 |
+| 三b：8实例(2服务器) tp2 | 8 | 4 | 2 | 18 | 3 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.5 中间形态；N=8 容量临界（§6.3） |
+| 三c：16实例(4服务器) tp2 | 16 | 4 | 2 | 34 | 5 | 2/2 卡 | ✓（一机多 node-rank） | **N 上限满配形态**；翻转 edge-bound（云利用率 ~51%，§6.3），边侧资源扩展为硬前置 |
 
 ---
 
