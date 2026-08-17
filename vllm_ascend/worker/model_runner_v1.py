@@ -3573,6 +3573,15 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.input_batch.prev_sampled_token_ids = prev_buf
 
+        # 诊断并规避多请求 PD 穿插下的跨流读写竞争：上一轮会在独立
+        # copy stream 上异步读取 valid_sampled_token_count_gpu，当前轮则
+        # 可能复用并改写同一块 NPU 缓冲区。写入前等待 D2H 事件完成，
+        # 防止 CPU 读到被下一批请求部分覆盖的 accepted-token 数量。
+        # 若该同步能消除偶发精度异常，最终方案应改为独立/双缓冲，避免
+        # 在 decode 热路径长期保留同步开销。
+        if self.valid_sampled_token_count_event is not None:
+            self.valid_sampled_token_count_event.synchronize()
+
         count_gpu = self.valid_sampled_token_count_gpu
         if count_gpu is None or count_gpu.shape[0] < num_reqs:
             count_gpu = torch.zeros(
