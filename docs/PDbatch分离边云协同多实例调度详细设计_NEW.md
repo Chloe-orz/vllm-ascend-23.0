@@ -73,20 +73,21 @@
 
 ### 1.3 收益约束
 
-- 边侧算力是天花板：N 越大，边侧首/尾处理越成瓶颈，N 上限受边侧算力约束（实例上限约 4，远低于容量翻转点，见 §6.3）
-- inflight 约束：2P1D 下每 (instance,dp) 2 个 prefill 在飞，边侧共 4N 个 prefill 在飞
+- 边侧算力是天花板：N 越大，边侧首/尾处理越成瓶颈，N 上限受边侧算力约束
+- **N 范围（更新，2026-08）**：qwen3.6 典型配置 2 卡/实例，8 卡 A2 服务器可部署 4 实例（§2.6 形态二），N 典型 4~8、上限 16（§1.4）。**N ≥ 8 进入容量临界区**（edge/N ≈ cloud，翻转点 N* = R ≈ 8.16，见 §6.3），边侧 KV/算力资源需随 N 扩展（§1.4 遗留问题）或启用 §6.2 共享池
+- inflight 约束：2P1D 下每 (instance,dp) 2 个 prefill 在飞，边侧共 4N 个 prefill 在飞（N=8 时 32 个在飞，边侧压力评估见 §6.4）
 - 边侧 KV 约束：per-instance 分区下每 (instance,dp) 分到 per_dp_num_blocks/N，须覆盖 2 inflight prefill 的 KV
 
 
 ### 1.4 场景范围
 1、多实例支持mtp 等特性；多实例叠加多dp（云双机）设计要考虑
-2、模型：边云支持模型，优先qwen3.6-27b
+2、模型：边云支持模型，优先qwen3.6（=qwen3.6-27b，同一模型沿用 §6.3 实测数字）
 3、基于HCCL通信域，不支持在线动态加入退出，某个云实例故障，多实例故障
 4、不支持云异构，云实例同构（卡型 / gpu_memory_utilization / 模型与 dp·tp 配置一致）
+5、**云侧一台服务器部署多个实例（2026-08 新增，必选场景）**：qwen3.6 计算基线是 2 卡，云侧实例 2 卡，8 卡 A2 推理服务器部署 4 实例（§2.6 形态二，由"v1 不支持"改为 v1 支持）；实例数最大 16（= 4 服务器 × 4 实例），边侧资源要基于实例数扩展（N ≥ 8 容量临界分析见 §6.3）
 
-问题：qwen3.6-27b -计算基线是2卡，云侧实例2卡，实例数最大16，边侧资源要基于实例数扩展
 问题：
-1、一个实例挂死，多实例挂死，-- 逃生手段
+1、一个实例挂死，多实例挂死，-- 逃生手段；**同机共置下一台服务器挂 = 该机 K 个实例同时挂（相关性故障，故障域=服务器，见 §2.6）**
 2、后续可靠性方案 考虑
 
 问题
@@ -111,6 +112,8 @@
 - 每实例 npu 数 = `cloud-npu-count / N`（云总 npu 不变）
 - 校验：`cloud-npu-count % N == 0`（整除断言）；边必须 node_rank 0；云 node_rank ∈ [1, N]
 - **节点维度 = 实例维度，不数物理机**：nnodes 数的是「边 + 每实例一个 node-rank」。实例内云多机（dp 云双机）**不占额外 node-rank**，用现有 dp 配置表达：`--data-parallel-size 2 --data-parallel-size-local 1` + 每机 `--data-parallel-start-rank 0/1`（1:1 dp=2 云双机现状即如此：nnodes 仍为 2，边 node-rank 0、云双机都是 node-rank 1，靠 start-rank 区分）。推导规则对单机/双机实例**全部成立**，无需显式实例配置
+- **一物理机多逻辑 node-rank（同机多实例，2026-08 新增）**：反向同理--一台物理服务器可承载 **K 个逻辑 node-rank**（= K 个实例）。8 卡服务器部署 4 个 2 卡实例 = 4 次独立拉起，node_rank 1..4，各自 `ASCEND_RT_VISIBLE_DEVICES` 静态卡切片（0,1 / 2,3 / 4,5 / 6,7），**卡按实例静态划分、不共卡**（共卡分时复用不在考虑范围）。`instance_id = node_rank-1` 推导规则零改动成立，§2.6 形态二的「配置推导破坏」缺口由此消解
+- 校验补充（同机多实例）：同一物理服务器上各实例卡切片**不重叠**（拉起脚本/部署侧保证，切片信息不进 vllm 配置面）；同机实例端口/store 偏移校验见 §2.2
 
 | 侧 | 拉起配置（N=4 示例） |
 |----|----------------------|
@@ -133,6 +136,17 @@
 - 边 = rank0 master，一次 rendezvous + 启动 barrier（全部实例就位才放行，任一实例未起整体阻塞，见 §3.10）
 - pp 语义不变：每实例仍"边 pp0 + 云 pp1"两段借用，G2 per-instance（§4.2）
 - 现状 1:1 即 `--nnodes 2 --node-rank 0/1`（N = 2-1 = 1，instance_id = 0，退化为现有行为），多实例是该编排的自然扩展（node 数变化，无新配置面）
+- **同机多实例拉起示例（边 2 卡 + 1 台 8 卡服务器 × 4 实例，N=4，典型形态见 §2.6 形态三）**：
+
+| 侧 | 拉起配置（N=4，qwen3.6 2 卡/实例） |
+|----|----------------------|
+| 边 | `--nnodes 5 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 8` |
+| 云服务器A 实例0 | `--nnodes 5 --node-rank 1 --cloud-npu-count 8` + `ASCEND_RT_VISIBLE_DEVICES=0,1` |
+| 云服务器A 实例1 | `--nnodes 5 --node-rank 2 --cloud-npu-count 8` + `ASCEND_RT_VISIBLE_DEVICES=2,3` |
+| 云服务器A 实例2 | `--nnodes 5 --node-rank 3 --cloud-npu-count 8` + `ASCEND_RT_VISIBLE_DEVICES=4,5` |
+| 云服务器A 实例3 | `--nnodes 5 --node-rank 4 --cloud-npu-count 8` + `ASCEND_RT_VISIBLE_DEVICES=6,7` |
+
+  同一物理机上 4 个实例各自独立拉起（4 个进程组/4 套 deployment），node_rank 即实例 id；world = 2+8 = 10。**rendezvous 语义注意**：torchrun/编排器的"node"须按逻辑节点理解--同一物理机上的多个实例以不同 node-rank 加入同一 rendezvous（边 master_addr），编排器需支持一机多 agent（或用每实例独立拉起脚本实现），实现期核实拉起工具对该模式的支持。
 
 
 ### 2.2 端口 / 通信 store 编码扩展
@@ -150,9 +164,14 @@
 
 云侧镜像不变（各实例独立 deployment，按 §2.1 推导的 instance_id 入自己子组，本就隔离）。
 
-200，201内部编码，增加配置校验防止翻转，边云master_port增加约束，端口要能规则可推导
+**同机多实例 = 偏移硬前提（2026-08 升级）**：跨服务器时同端口可靠 IP 区分，**同一服务器上多实例同 IP**，§2.2 全部通道（ZMQ / gloo coord / IP-exchange / cloud_ip store / PD TCPStore）**不偏移必然撞、且无法靠 IP 兜底**。原 §2.6 形态二风险 #2 从"多实例风险"升级为同机部署的硬性前提，实现上必须：
 
-**cloud_ip store 补充（启动期核实新增）**：不只是端口撞--N 个云 passive core 会写**同一个 key**，last-writer-wins，边侧 HCCL rendezvous 连到错误实例。key 必须带 instance（如 `cloud_ip_{i}`），边侧按实例分别取 IP/建 rendezvous。
+- 偏移对同机场景**强制校验**：拉起期按 `instance*D + dp_rank` 规则推导端口并检查可用性（被占且非本实例规则端口 = 拒绝拉起），防止端口翻转串台
+- 所有 store key 强制带 instance（`cloud_ip_{i}` / `coord_master_ip_{i}` 等），同机同 IP 下 key 不带 instance 无法区分
+
+200，201内部编码，增加配置校验防止翻转，边云master_port增加约束，端口要能规则可推导（同机多实例下该约束从"建议"升级为"必须"：N=16、D=2 时偏移量达 instance*D+dp = 31，master_port 基值须预留足够偏移空间且不与机器上其他服务重叠）
+
+**cloud_ip store 补充（启动期核实新增）**：不只是端口撞--N 个云 passive core 会写**同一个 key**，last-writer-wins，边侧 HCCL rendezvous 连到错误实例。key 必须带 instance（如 `cloud_ip_{i}`），边侧按实例分别取 IP/建 rendezvous。代码事实：云侧现写死 key `cloud_ip`、port = `master_port+1+dp_rank`（passive_core.py:1017-1028）；边侧按 dp_rank host 对应 store（patch_engine_core.py:171-178）。**同机多实例下该缺口双重命中**：4 个同机实例同 IP 写同 key + 同 port，两维度都必须加 instance 偏移（port = `master_port+1+ (instance*D+dp_rank)`，key = `cloud_ip_{instance}`）。
 
 ### 2.3 边侧模式
 
@@ -352,7 +371,7 @@
 
 与 §2.4（边 2 卡）的核心差异：E=2/TP2 或 per-rank 双 rank -> E=1 单 rank；G2 从「边全部 rank 进每实例」变为「边 1 rank 进每实例」（形态二/三 G2 数从 N×D 降为 N，dp 维度在 channel 切分层消化）；形态二/三的边侧 tail 无跨 2DP EP all-toall（EP=1，leader 代算），worker 层异步重叠约束更宽松（§5.3）。
 
-### 2.6 部署形态（边 2 卡，云 2 服务器 × 16 卡，dp=1）--含每服务器多实例（新场景）
+### 2.6 部署形态（边 2 卡，云 2 服务器 × 16 卡，dp=1）--含每服务器多实例（2026-08 起为必选场景）
 
 dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均为 2+32 = 34。
 
@@ -378,7 +397,7 @@ dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均�
 - 配置：`--nnodes 3 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 32`；云各服务器 `--node-rank 1/2`
 - **§2.1 推导规则适用**（N=3-1=2）；与 §2.4 形态一完全同构（只是 C=8->16），无新增项，**v1 支持**
 
-#### 形态二：4 实例（每服务器 2 实例，tp8）--每服务器多实例，此前未考虑
+#### 形态二：4 实例（每服务器 2 实例，tp8）--每服务器多实例，v1 支持（2026-08 升级）
 
 ```
 边侧服务器 (node_rank 0, 2卡)
@@ -389,19 +408,23 @@ dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均�
    │G2_0   │G2_1     │G2_2   │G2_3        <- 4 个 PP 子组（各 2+8 rank）
    ▼       ▼         ▼       ▼
 ┌──────────────────────────┐  ┌──────────────────────────┐
-│云服务器1 (16卡, node_rank 1)│  │云服务器2 (16卡, node_rank 2)│
-│ 实例0: 卡0-7,  tp8         │  │ 实例2: 卡0-7,  tp8         │
-│   rank 2-9                │  │   rank 18-25              │
-│ 实例1: 卡8-15, tp8         │  │ 实例3: 卡8-15, tp8         │
-│   rank 10-17              │  │   rank 26-33              │
-│ （同机 2 实例，卡静态划分）  │  │                          │
+│云服务器1 (16卡)           │  │云服务器2 (16卡)           │
+│ 实例0: 卡0-7,  tp8        │  │ 实例2: 卡0-7,  tp8        │
+│   node_rank 1, rank 2-9   │  │   node_rank 3, rank18-25  │
+│   VISIBLE_DEVICES=0-7     │  │   VISIBLE_DEVICES=0-7     │
+│ 实例1: 卡8-15, tp8        │  │ 实例3: 卡8-15, tp8        │
+│   node_rank 2, rank10-17  │  │   node_rank 4, rank26-33  │
+│   VISIBLE_DEVICES=8-15    │  │   VISIBLE_DEVICES=8-15    │
+│ （同机 2 实例，卡静态划分，  │  │                          │
+│   各自独立拉起）           │  │                          │
 └──────────────────────────┘  └──────────────────────────┘
 ```
 
-- instance_id = (node_rank-1)×2 + 服务器内实例序（0/1）；world = 34
-- **§2.1 推导规则失效**：node_rank 数的是服务器（nnodes-1 = 2 ≠ N = 4），同服务器两实例 node_rank 相同，`instance_id = node_rank-1` 无法区分
+- **实例编码 = node_rank 即逻辑实例**（§2.1 新增规则）：同一物理服务器上 2 个实例各自独立拉起，node_rank 1/2（服务器1）与 3/4（服务器2）；`instance_id = node_rank-1`、`N = nnodes-1 = 4` 推导规则**零改动成立**
+- 卡静态划分：实例0 用卡 0-7、实例1 用卡 8-15（`ASCEND_RT_VISIBLE_DEVICES` 切片），不共卡
+- world = 34；nnodes=5 数「边 + 4 个逻辑节点」（物理机 3 台 < nnodes 5，节点维度=实例维度在两个方向上成立：一实例跨多机不占额外交 rank、一机多实例各占一个 node_rank）
 
-#### 形态二支持项 / 不支持项分析
+#### 形态二支持项 / 新增处理项分析（2026-08 更新：v1 支持）
 
 **支持项（逻辑设计天然兼容，共置不引入正确性问题）**：
 
@@ -413,19 +436,61 @@ dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均�
 | 4 | 调度 / KV 分区 / prefill_inflight per-(instance,dp) 独立 | §3.1/§6.1/§6.4 与物理位置无关 |
 | 5 | NPU 算力/显存无竞争（**前提：卡按实例静态划分**，实例0 卡0-7、实例1 卡8-15，不共卡） | profile/KV 分配各自 8 卡 |
 | 6 | ZMQ 控制面 per-instance channel 可同机共存（端口偏移后） | §2.2/§3.7 |
+| 7 | **实例配置推导成立（原硬缺口 #1 已消解）** | §2.1 新增「一物理机多逻辑 node-rank」：同机实例各自独立拉起、node_rank 即 instance_id，推导规则零改 |
 
-**不支持项（v1 缺口，需新增处理）**：
+**新增处理项（v1 必做，原「不支持项」）**：
 
 | # | 项 | 性质 | 说明 |
 |---|----|------|------|
-| 1 | **配置推导破坏（硬缺口）** | 配置面 | node_rank 数服务器不数实例：N=4 推不出、同机两实例 node_rank 相同。需恢复显式实例配置：`--cloud-instance-num 4` + 服务器内实例索引（显式 `--instance-id`，或约束「每服务器单次拉起 16 进程」按 local rank 段推导 0-7/8-15）。连带 §2.1 的 `cloud-npu-count/N` 校验也要用显式 N |
-| 2 | **同机端口/store 必须偏移（硬前提）** | 拉起失败 | 跨服务器同端口可靠 IP 区分，**同服务器必须** §2.2 instance 偏移（ZMQ/gloo/IP-exchange/PD TCPStore 全部）；cloud_ip key 两实例同机同 IP，不带 instance 无法区分 |
-| 3 | **host 资源竞争（新风险）** | 性能 | 同机两实例：模型权重加载 ×2（host RAM）、worker 进程/线程 ×2、CPU 竞争；**边↔云网络出口共享**（两实例 hidden isend/irecv + ZMQ 控制面挤同一网口）-> 数据面带宽评估口径须从 per-instance 改 **per-server 聚合**，多实例重叠收益部分被带宽竞争吃掉 |
-| 4 | **相关性故障（故障模型恶化）** | 可用性 | 一服务器挂 = 2 实例**同时**挂：N=4 名义实例实际只有 2 个故障域；v1「任一实例挂=整体挂」下整体可用性 = 2 服务器的可用性，多实例不增加故障点也不分散 |
-| 5 | **启动竞争** | 启动时长 | 同机两实例同时 profile_run / warmup（CPU/内存带宽/网口竞争），启动变慢；§3.10 逐实例串行握手可缓解但进一步拉长启动 |
-| 6 | **运维/观测混淆** | 可用性 | 同机日志、进程命名、metrics 需强制带 instance 标签，否则两实例输出无法区分 |
+| ~~1~~ | ~~配置推导破坏~~ | 已消解 | 原「node_rank 数服务器不数实例」缺口由 §2.1 逻辑 node-rank 规则消解：无需恢复 `--cloud-instance-num` / 显式 instance-id，同机实例 = 不同 node-rank 独立拉起 + 卡切片。遗留：拉起脚本/编排器须支持一机多实例拉起（node_rank->物理机映射由部署侧维护，不进 vllm 配置面） |
+| 2 | **同机端口/store 偏移（硬前提，必做）** | 拉起失败 | 跨服务器同端口可靠 IP 区分，**同服务器同 IP 必撞**：§2.2 全通道 instance 偏移 + 拉起期端口规则校验（强制）；cloud_ip key/port 双维度带 instance（passive_core.py:1017-1028） |
+| 3 | **host 资源竞争（K=4 时量化）** | 性能 | 同机 K 个实例：模型权重加载 ×K（qwen3.5 2 卡实例权重 host RAM ×4）、worker 进程/线程 ×4、CPU 竞争；**边↔云网络出口共享**（4 实例 hidden isend/irecv + ZMQ 控制面挤同一网口）-> 数据面带宽评估口径从 per-instance 改 **per-server 聚合**：每服务器聚合带宽须 ≥ 4×单实例 hidden 流量，否则多实例重叠收益被带宽竞争吃掉（千兆/万兆口下 qwen3.5 4 实例聚合是带宽评估重点，实现期实测） |
+| 4 | **相关性故障（故障域=服务器）** | 可用性 | 一服务器挂 = 该机 K 实例**同时**挂：N=8（2 服务器 × 4 实例）实际只有 2 个故障域，一机挂即半数实例挂 -> v1「任一实例挂=整体挂」下整体挂；可用性 = 服务器级可用性，多实例不增加故障点也不分散。逃生手段（§1.4 遗留）：v1 无 failover，实例级故障定位需先区分「单实例挂（进程级）」vs「整机挂（K 实例齐挂）」--后者恢复=整服务器重拉 |
+| 5 | **启动竞争** | 启动时长 | 同机 K 实例同时权重加载/profile_run/warmup（CPU/内存带宽/网口竞争），启动变慢甚至超时。处理：**同机实例错峰拉起**（编排层：实例 i 延后 i×错峰间隔，或权重加载完成后再放行下一实例）+ §3.10 逐实例串行握手；代价 = 启动时长 ∝ 同机实例数（K=4 时约 4× 单实例关键路径，可部分并行：权重加载与上一实例 profile 重叠） |
+| 6 | **运维/观测混淆** | 可用性 | 同机日志、进程命名、metrics **强制带 instance 标签**（instance_id 进日志前缀/进程 title/metrics label），否则同机 K 实例输出无法区分；拉起脚本进程命名建议 `vllm-cloud-inst{i}` |
 
-**结论**：形态一（每服务器 1 实例）**v1 支持**（零新增）；形态二（每服务器多实例）**v1 不支持**，核心硬缺口是 #1 配置推导（需恢复显式实例配置）+ #2 同机端口偏移强制化；若后续要支持，最小改动清单 = ①恢复 `--cloud-instance-num` + 服务器内实例索引（显式 instance-id 或 local rank 段推导）②§2.2 偏移对同机场景强制校验 ③启动编排同机实例错峰 ④数据面带宽与故障域评估口径改 per-server。卡静态划分（不共卡）是前提，共卡（实例间分时复用同卡）不在考虑范围。
+**结论（2026-08 更新）**：形态一（每服务器 1 实例）与形态二（每服务器多实例）**均 v1 支持**。原硬缺口 #1（配置推导）由 §2.1「node_rank = 逻辑实例」消解，零新增配置项；剩余必做项 = #2 同机端口偏移强制校验（§2.2）、#5 启动错峰（§3.10）、#6 instance 标签强制；#3 带宽（per-server 聚合口径）与 #4 故障域（=服务器）为评估/运维口径变更，非功能缺口。卡静态划分（不共卡）仍是前提，共卡（实例间分时复用同卡）不在考虑范围。
+
+#### 形态三：qwen3.5 典型形态（边 2 卡 + 8 卡服务器 × 4 实例 tp2，2026-08 新增）
+
+qwen3.5 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务器部署 4 实例。
+
+```
+边侧服务器 (node_rank 0, 2卡)
+┌──────────────────────────────┐
+│ 边卡0 [rank0] ┐ 边内 TP=2     │
+│ 边卡1 [rank1] ┘               │
+└──────────────────────────────┘
+   │G2_0  │G2_1  │G2_2  │G2_3      <- 4 个 PP 子组（各 2+2 rank）
+   ▼      ▼      ▼      ▼
+┌──────────────────────────────┐
+│云服务器A (8卡, 4 实例)         │
+│ 实例0: 卡0-1,  node_rank 1    │
+│   rank 2-3,  VISIBLE=0,1     │
+│ 实例1: 卡2-3,  node_rank 2    │
+│   rank 4-5,  VISIBLE=2,3     │
+│ 实例2: 卡4-5,  node_rank 3    │
+│   rank 6-7,  VISIBLE=4,5     │
+│ 实例3: 卡6-7,  node_rank 4    │
+│   rank 8-9,  VISIBLE=6,7     │
+│ （同机 4 实例，卡静态划分，     │
+│   各自独立拉起+错峰启动）      │
+└──────────────────────────────┘
+```
+
+- 配置：边 `--nnodes 5 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 8`；云服务器A 上 4 实例分别 `--node-rank 1..4` + 各自 `ASCEND_RT_VISIBLE_DEVICES` 切片（§2.1 同机多实例拉起示例）
+- world = 2+8 = 10；G2 共 4 个（各 2+2 rank，边 2 卡整体进全部 G2）
+- 扩展到 2 台 8 卡服务器：N=8、world=18、nnodes=9（物理机 3 台）；**N=8 进入容量临界区**（edge/N ÷ cloud ≈ 1.02×，§6.3），边侧资源扩展为前置条件
+- 该形态是 qwen3.5 的**默认部署形态**：形态二（16 卡 × 2×tp8）退居非典型；§2.6 全部同机多实例结论（支持项 7 条 / 处理项 5 条）对本形态同等适用，K=4 使 #3 host 竞争、#5 启动错峰的影响翻倍（4 实例权重加载 ×4、启动关键路径 ∝4）
+
+#### 汇总对比（§2.6）
+
+| 形态 | N | 每服务器实例 | C | world | 物理机数 | 边卡利用 | §2.1 推导 | 备注 |
+|------|---|------------|---|-------|---------|----------|-----------|------|
+| 一：2实例 tp16 | 2 | 1 | 16 | 34 | 3 | 2/2 卡 | ✓ | 标准形态，零新增 |
+| 二：4实例 tp8 | 4 | 2 | 8 | 34 | 3 | 2/2 卡 | ✓（一机多 node-rank） | 同机多实例，v1 支持 |
+| 三a：4实例(1服务器) tp2 | 4 | 4 | 2 | 10 | 2 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.5 单服务器形态；同机压力最大（K=4） |
+| 三b：8实例(2服务器) tp2 | 8 | 4 | 2 | 18 | 3 | 2/2 卡 | ✓（一机多 node-rank） | **qwen3.5 默认形态**；N=8 容量临界（§6.3），带宽/启动错峰压力最大 |
 
 ---
 
@@ -513,6 +578,8 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 
 多实例直接实例化 N×D 个 channel = 2×N×D 个 I/O-wait 后台线程，小 N×D 下可接受、per-channel 隔离、零重构。端口编码扩为 `+ (instance*D + dp_rank)*2`。
 
+**N 扩到 8/16 的线程/host 评估（2026-08 补）**：边侧 2×N×D 线程（N=8、D=2 -> 32 个，I/O-wait 型，CPU 占用低，仍可接受）；同机共置下云侧一台服务器 K 个 executor 各自带线程/进程（K=4 时 4 套 PassiveEC+executor+worker 进程树），host 进程数与 CPU 竞争见 §2.6 处理项 #3/#5。
+
 后续若 N×D 变大：recv 可压成一个 ZMQ Poller 线程（安全非阻塞），send 不宜简单压成一个（PUSH 满时阻塞、scheduler_output 不能丢，慢云会堵全部），保留 per-channel/per-instance。
 
 ### 3.8 控制通道可靠性
@@ -536,17 +603,18 @@ per-channel ZMQ（每 channel 独立 `queue.Queue(1000)` + 独立 pub/sub 线程
 5. `compile_or_warm_up_model()` / warmup
 6. 握手：`wait_for_ready` + `response_mq.wait_until_ready()`（cloud_ip TCPStore 顺序敏感，1:1 已有顺序死锁先例注释 patch_multiproc_executor.py:232-244）
 
-**多实例（N=4）风险与要求**：
+**多实例（N 典型 4~8、上限 16，含同机共置）风险与要求**：
 
 | # | 风险 | 性质 | 处理 |
 |---|------|------|------|
-| 1 | 端口/store key 撞车 + cloud_ip key last-writer-wins（4 个 passive core 写同一 key，边 HCCL rendezvous 连错实例） | 拉起失败/串台 | §2.2 instance 偏移（**硬前提**，不改拉不起） |
+| 1 | 端口/store key 撞车 + cloud_ip key last-writer-wins（N 个 passive core 写同一 key，边 HCCL rendezvous 连错实例）；**同机共置下同 IP 双重命中** | 拉起失败/串台 | §2.2 instance 偏移 + 拉起期端口规则校验（**硬前提**，不改拉不起） |
 | 2 | collect 全量等待：determine_available_memory / initialize_from_config / warmup 需收齐 N·D·C 个 ack，任一实例未起/挂 -> 边卡死，无 per-instance 超时 | 可用性（v1 接受） | v1 故障模型"任一实例挂=整体挂"在启动期同样成立；启动时间 = 最慢实例 + N 倍 collect 串行回收（profile_run 实例间并行） |
 | 3 | 顺序依赖链 ×N：cloud_ip -> 边 TCPStore -> HCCL rendezvous -> 云 `_init_message_queues` 每实例一条，任一 wait 提前 = 全组死锁 | 死锁面变宽 | 启动编排改「逐实例串行握手、全部就绪后再全局 barrier」，解耦 N 条链 |
 | 4 | response ack 现按 rank 顺序匹配；多实例需按 **(instance, rank) 分组回收**，否则乱序错配 | 正确性（实现要求） | collect 按 instance 分组 |
 | 5 | profile/warmup 控制面通信量 ×N（实例间执行并行，瓶颈在边回收）；条件 rpc（update_max_model_len）全实例 fan-out 语义无碍 | 轻微 | 接受 |
+| 6 | **同机实例启动竞争（2026-08 新增）**：同一服务器 K 个实例同时权重加载/profile_run/warmup，host RAM（权重 ×K）、CPU、内存带宽、网口同时竞争，启动变慢甚至 OOM/超时 | 启动时长/拉起失败 | **同机实例错峰拉起**：编排层按 instance 序错峰（实例 i 延后 i×间隔，或「权重加载完成 -> 放行下一实例」流水）；profile/warmup 阶段同机实例**串行**、跨服务器实例仍并行；代价 = 启动关键路径 ∝ 同机实例数 K（§2.6 处理项 #5） |
 
-**结论**：collective_rpc 广播 + response 回收机制天然支持更多 rank，启动期改动集中在三处：§2.2 端口/store 偏移（硬前提）、启动编排逐实例串行握手（缓解 #2/#3）、§6.6 num_blocks 汇聚口径（边不进全局 min）。
+**结论**：collective_rpc 广播 + response 回收机制天然支持更多 rank，启动期改动集中在四处：§2.2 端口/store 偏移 + 校验（硬前提）、启动编排逐实例串行握手（缓解 #2/#3）、同机实例错峰拉起（#6，编排层，不进 vllm 配置面）、§6.6 num_blocks 汇聚口径（边不进全局 min）。
 
 ### 3.11 请求调度到实例：架构实现框图（可插拔策略）
 
@@ -607,6 +675,13 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - 启动 barrier 全实例就位 == "任一实例挂 = 整个服务挂"
 
 后果：①rank 公式/group 派生重写（交错 `i*(1+C)` -> 前边+按实例）；②PP 路由按 instance 选 G2 子组；③边 rank 进 per-instance PP 子组，跨实例时分复用。
+
+**代码缺口（启动期核实，2026-08 补）**：
+
+- 云侧 executor 的全局 rank 起点现**硬编码**单实例：`global_start_rank = edge_npu_count`（patch_multiproc_executor.py:161-165），`_is_driver_worker` 同样只认 `rank == edge_npu_count`（:281-288）。多实例必须改为 `E + i·D·C + j·C`（i = instance_id = node_rank-1、j = dp start-rank），这是 §4.1 rank 公式落地的**第一改动点**
+- 现有 group 派生按 dp 实例交错 `instance0_edge, instance0_cloud, instance1_edge, ...`（vllm/distributed/parallel_state.py:1988-2109、vllm_ascend MC2 同构 parallel_state.py:572-605），即上文①的重写对象
+- `edge_npu_count/cloud_npu_count` 现为 DP 实例总量口径、`__post_init__` 除以 dp_size 成 per-DP 值（config/parallel.py:200-233）；多实例下 cloud-npu-count 语义扩为 N·D·C 总量，post_init 除法口径需连带调整
+- **同机共置不影响本节任何派生**：G0-G5 全部是逻辑 rank 区间划分，与 rank 落在哪台物理服务器无关（§2.6 支持项 #1）；instance -> 物理服务器映射由拉起脚本维护，不进 group 派生
 
 ### 4.2 group 派生（G0–G5）
 
@@ -927,20 +1002,27 @@ dummy 走 instance i 的 channel 池（§4.4 per-(instance,dp) 池隔离）。co
 
 **共享下 headroom 口径**：edge_kv_headroom 是 per-dp 全局量（非 per-instance）、cloud_kv_headroom 才 per-instance（实例选择看云侧 room、dp 选择 + 边侧准入看 per-dp edge room）。**分区下两者都 per-instance**（InstanceLoadStats 原 per-instance 结构即正确）。
 
-### 6.3 容量 sizing（已核实）
+### 6.3 容量 sizing（已核实；N 范围更新 2026-08：典型 4~8、上限 16）
 
 分区下边侧向每实例 PP group（G2）报 `per_dp_num_blocks / N`，per-instance min = min(edge/N, cloud_i)；min 机制是 per-PP-group（多实例 G2 天然支持 per-instance，机制不破坏）。
 
 实测 R = 边/云 num_blocks 比：
 
-| 模型 | 首/尾层 | 边 num_blocks | 云 num_blocks | R | N=4 时 edge/N ÷ 云 |
-|------|---------|---------------|---------------|---|--------------------|
-| qwen3.6 | 首1尾1 | 16524 | 2024 | 8.16 | 2.04× |
-| DS | 首3尾1 | 142728 | 8127 | 17.56 | 4.39× |
+| 模型 | 首/尾层 | 边 num_blocks | 云 num_blocks | R | N=4 | N=8 | N=16 |
+|------|---------|---------------|---------------|---|-----|-----|------|
+| qwen3.5(=qwen3.6) | 首1尾1 | 16524 | 2024 | 8.16 | 2.04× | **1.02×（临界）** | **0.51×（翻转）** |
+| DS | 首3尾1 | 142728 | 8127 | 17.56 | 4.39× | 2.20× | 1.10×（临界） |
 
-翻转点 N* = R，实例上限 4 远低于翻转点，N=4 时 edge/N 仍 > 云 -> **cloud-bound 不翻转、无容量损失**。dp=2 不影响 R（边云 per-dp 同除）。
+翻转点 N* = R。**2026-08 更新结论（N 范围扩到 16 后原「实例上限 4 远低于翻转点」不再成立）**：
 
-分区下每实例 (edge/N − cloud) 私有闲置不可借，但 cloud-bound 下云是瓶颈本用不上、均衡请求无影响。qwen3.6 余量最薄（若 16524/2024 口径不一致最坏 1.02× 临界，建议确认同口径）。
+- **N ≤ 4**：edge/N > 云，cloud-bound 不翻转、无容量损失（原结论不变）
+- **N = 8（qwen3.5 默认形态，2 服务器 × 4 实例，§2.6 形态三）**：edge/N ÷ cloud = 16524/8/2024 ≈ **1.02×，进入临界区**--余量为 2%，任何口径偏差（gpu_memory_utilization 微调、buffer 漂移、§6.3 表口径不一致）都会翻转为 edge-bound，min 被 edge/N 钳制。**N=8 落地前置条件：按 2 卡实例口径重实测 R 并确认 > 8.16（现表为既有口径实测，2 卡 tp2 实例的云侧 num_blocks 需重测），否则须扩边侧资源或降 N**
+- **N = 16**：翻转 edge-bound（edge/16 = 1032 < 2024），每实例值被钳到 edge/N，**云侧容量利用率仅 ~51%**（云空闲 KV 不可借给其他实例，§6.1 分区不可借）。N=16 只在边侧资源同步扩展（§1.4）使 R 同比提升时可用
+- DS 首3尾1 边侧余量厚，同样形态下翻转点 N*≈17.6，N=16 仍临界安全
+
+dp=2 不影响 R（边云 per-dp 同除）。
+
+分区下每实例 (edge/N − cloud) 私有闲置不可借，但 cloud-bound 下云是瓶颈本用不上、均衡请求无影响；**翻转后（N > R）闲置方向反转（云侧闲置），此时 §6.2 共享池对边侧虽无增益，但应重新评估 per-instance 准入配额与实际负载均衡的匹配，避免长尾实例打满 edge/N 而其他实例闲置**。qwen3.5 余量最薄（若 16524/2024 口径不一致最坏 1.02× 临界，建议确认同口径--N=8 下该确认从"建议"升级为"必做"）。
 
 ### 6.4 prefill_inflight_limit 作用域（per-(instance,dp)）
 
@@ -950,6 +1032,8 @@ dummy 走 instance i 的 channel 池（§4.4 per-(instance,dp) 池隔离）。co
 - 多实例 N：每 (instance,dp) 各 2 = 共 2×N×D = **4N**（dp=2，每实例 4），与 channel 2/dp（prefill_per_dp=2）匹配、自洽
 
 后果：边侧首层 4N 个 prefill 在飞（边侧算力天花板对 N 的约束）；边侧 KV 分区 `per_dp_num_blocks/N` 须覆盖**每 (instance,dp) 2 inflight prefill** KV（非整个实例 4）。分区 sizing 与 inflight 作用域耦合。
+
+**N 扩到 8/16 的边侧压力（2026-08 补）**：N=8 时边侧 32 个 prefill 在飞、N=16 时 64 个--边侧首层算力与 KV 准入压力线性放大，多实例重叠收益的兑现前提是边侧首/尾处理吞吐 ≥ N 流喂入速率（§1.2/§1.3 边侧天花板）；实测时以边侧 head/tail 利用率为准评估 N 的实际收益上限，超出后继续加实例只增加在飞与内存压力而无吞吐增益。
 
 > 计算/通信分离下，`prefill_inflight_limit` 的信用释放点从「PL 返回」提前到「recv 完成」（§4.4），信用回路短一个 RTT，但 inflight 上限值本身不变（per-(instance,dp)=2）。
 
@@ -995,6 +1079,9 @@ dummy 走 instance i 的 channel 池（§4.4 per-(instance,dp) 池隔离）。co
 | #4 | coord/balance_gather 精化 | v1 整体 intended dummy 兜底；精化两阶段 all_reduce 根治跨实例 Rule1/2 误伤（优化效率非纠正确性） |
 | - | batch_queue_size 调优 | 当前 = pp_size = 2，重叠深度 = 1；放大重叠需调大，代价 inflight/内存/KV 压力 |
 | - | 边侧 KV 共享池 | 实测分区不够时启用（§6.2），最大风险 = vllm KVCacheManager per-EngineCore 设计 -> 跨实例共享是深度改动 |
+| - | 2 卡实例口径 R 重实测（2026-08） | §6.3 现表为既有口径实测；qwen3.5 2 卡 tp2 实例云侧 num_blocks 需重测，N=8 临界判定依赖该值 |
+| - | per-server 聚合带宽实测（2026-08） | 同机 K 实例 hidden isend/irecv + ZMQ 挤同一网口，K=4 聚合带宽 vs 单实例流量的实测决定多实例重叠收益上限（§2.6 处理项 #3） |
+| - | 同机错峰拉起编排（2026-08） | 编排层按 instance 序错峰 / 权重加载流水放行，profile/warmup 同机串行、跨机并行（§3.10 #6），错峰参数待实测定 |
 
 ### 7.3 风险性质汇总
 
@@ -1005,6 +1092,12 @@ dummy 走 instance i 的 channel 池（§4.4 per-(instance,dp) 池隔离）。co
 | NPU event record stream | **正确性** | 必须在 `_HC_STREAM_RECV`（irecv stream）record，否则不反映 irecv 完成 |
 | 2DP event 就绪同步 | **正确性** | 实例 i dp0/dp1 hidden 云 2DP isend 可能不同时到，等 2DP 都「recv done」齐 |
 | 边侧 KV 跨实例共享 | **深度改动（最大风险）** | per-EngineCore 设计、并发安全、block_table 跨实例簿记、公平/饥饿、爆炸半径、驱逐跨实例、prefix caching 跨实例 |
+| **同机端口/store 撞车（2026-08 新增）** | **拉起失败/串台（硬前提）** | 同机多实例同 IP，§2.2 全通道 instance 偏移 + 拉起期校验必须，不改拉不起（§2.6 处理项 #2） |
+| **云侧 global_start_rank 硬编码（2026-08 新增）** | **正确性（代码缺口）** | 现硬编码 `edge_npu_count` 单实例（patch_multiproc_executor.py:161-165），多实例须改 `E+i·D·C+j·C`，不改则同机实例 rank 全部重叠（§4.1 代码缺口） |
+| **同机 host 资源/带宽竞争（2026-08 新增）** | **性能（评估口径变更）** | 权重 ×K、网口出口共享：数据面带宽评估口径改 per-server 聚合，多实例重叠收益可能被带宽竞争吃掉（§2.6 处理项 #3） |
+| **相关性故障域=服务器（2026-08 新增）** | **可用性（故障模型）** | 一机挂 = 该机 K 实例齐挂，N=8 实际仅 2 个故障域；v1 无 failover 整体挂（§2.6 处理项 #4） |
+| **同机启动竞争（2026-08 新增）** | **启动时长** | 同机 K 实例错峰拉起，启动关键路径 ∝ K（§3.10 #6） |
+| **N ≥ 8 容量临界/翻转（2026-08 新增）** | **容量（前置条件）** | qwen3.5 R≈8.16：N=8 临界（1.02×）、N=16 翻转 edge-bound（云利用率 ~51%）；N≥8 须 2 卡实例口径重实测 R + 边侧资源扩展（§6.3） |
 
 ---
 
