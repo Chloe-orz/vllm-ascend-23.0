@@ -3446,23 +3446,40 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_event.record()
 
         if self.use_async_spec_decode:
-            # Stash for GPU-side correction in _prepare_inputs.
+            # Stash for GPU-side correction in _prepare_inputs.  Snapshot the
+            # PREVIOUS counts BEFORE overwriting: the append below must index
+            # the old buffer's rows, not the freshly overwritten current-batch
+            # tensor (indexing the new tensor with old row numbers reads
+            # garbage / goes out of bounds and poisons the preserved
+            # requests' num_computed correction).
+            prev_counts_gpu = getattr(self, "valid_sampled_token_count_gpu", None)
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count  # type: ignore[no-redef]
+        else:
+            prev_counts_gpu = None
         # [ascend fix] Append the preserved requests' prev-token rows (and
         # their counts) so the merged map indices from _bookkeeping_sync stay
         # valid -- row order must match _spec_prev_stale_old_rows.
         prev_buf = self.input_batch.prev_sampled_token_ids
         new_buf = next_token_ids.unsqueeze(1)
         if stale_old_rows and prev_buf is not None:
+            if max(stale_old_rows) >= prev_buf.shape[0]:
+                # Pairing between the bookkeeping merge and this append broke
+                # (e.g. non-padded draft path skipped _copy_valid_sampled_token_count).
+                # Loud failure instead of silent garbage indices.
+                raise RuntimeError(
+                    f"[EC] spec prev merge: stale row {max(stale_old_rows)} "
+                    f"out of prev buffer bounds {prev_buf.shape[0]}")
             old_rows_t = torch.as_tensor(
                 stale_old_rows, dtype=torch.long, device=prev_buf.device
             )
             new_buf = torch.cat([new_buf, prev_buf[old_rows_t]], dim=0)
-            if self.use_async_spec_decode and getattr(
-                self, "valid_sampled_token_count_gpu", None
-            ) is not None:
+            if self.use_async_spec_decode and prev_counts_gpu is not None:
+                if max(stale_old_rows) >= prev_counts_gpu.shape[0]:
+                    raise RuntimeError(
+                        f"[EC] spec prev merge: stale row {max(stale_old_rows)} "
+                        f"out of prev counts_gpu bounds {prev_counts_gpu.shape[0]}")
                 self.valid_sampled_token_count_gpu = torch.cat(
-                    [valid_sampled_tokens_count, self.valid_sampled_token_count_gpu[old_rows_t]],
+                    [valid_sampled_tokens_count, prev_counts_gpu[old_rows_t]],
                     dim=0,
                 )
         self._spec_prev_stale_old_rows = None
