@@ -3418,6 +3418,17 @@ class NPUModelRunner(GPUModelRunner):
         if self.valid_sampled_token_count_event is None:
             return
 
+        # [ascend fix] Rows of alive requests preserved by the spec-branch
+        # prev-map merge in _bookkeeping_sync (which cannot build the new
+        # buffer itself because next_token_ids only exists here).  Snapshot
+        # the previous counts BEFORE the per-row overwrite below clobbers
+        # them, so preserved rows keep their own counts.
+        stale_old_rows = getattr(self, "_spec_prev_stale_old_rows", None)
+        counts_cpu = self.valid_sampled_token_count_cpu
+        prev_counts_snapshot = None
+        if stale_old_rows and counts_cpu is not None:
+            prev_counts_snapshot = counts_cpu.clone()
+
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
         default_stream = torch.npu.current_stream()
@@ -3427,12 +3438,35 @@ class NPUModelRunner(GPUModelRunner):
             counts_cpu = self.valid_sampled_token_count_cpu
             assert counts_cpu is not None
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
+            if prev_counts_snapshot is not None:
+                counts_np = counts_cpu.numpy()
+                counts_np[next_token_ids.shape[0]: next_token_ids.shape[0] + len(stale_old_rows)] = (
+                    prev_counts_snapshot.numpy()[np.array(stale_old_rows, dtype=np.int64)]
+                )
             self.valid_sampled_token_count_event.record()
 
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
-            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
-        self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+            self.valid_sampled_token_count_gpu = valid_sampled_tokens_count  # type: ignore[no-redef]
+        # [ascend fix] Append the preserved requests' prev-token rows (and
+        # their counts) so the merged map indices from _bookkeeping_sync stay
+        # valid -- row order must match _spec_prev_stale_old_rows.
+        prev_buf = self.input_batch.prev_sampled_token_ids
+        new_buf = next_token_ids.unsqueeze(1)
+        if stale_old_rows and prev_buf is not None:
+            old_rows_t = torch.as_tensor(
+                stale_old_rows, dtype=torch.long, device=prev_buf.device
+            )
+            new_buf = torch.cat([new_buf, prev_buf[old_rows_t]], dim=0)
+            if self.use_async_spec_decode and getattr(
+                self, "valid_sampled_token_count_gpu", None
+            ) is not None:
+                self.valid_sampled_token_count_gpu = torch.cat(
+                    [valid_sampled_tokens_count, self.valid_sampled_token_count_gpu[old_rows_t]],
+                    dim=0,
+                )
+        self._spec_prev_stale_old_rows = None
+        self.input_batch.prev_sampled_token_ids = new_buf
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
@@ -7063,22 +7097,49 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
                 self.input_batch.prev_req_id_to_index = new_prev_map
             else:
+                # [ascend fix] Edge-cloud: tail segments sample only a SUBSET
+                # of the running requests, so a wholesale replace drops the
+                # pending sampled tokens of alive-but-absent requests (H1:
+                # PL(C) sampling between DL(A,B) and DF'(A,B,C) destroys A/B's
+                # pending tokens).  Merge instead: keep entries for alive
+                # requests not in this sampling batch and point them at rows
+                # that _copy_valid_sampled_token_count appends to the new prev
+                # buffer -- the row order in _spec_prev_stale_old_rows must
+                # match the append order there.
                 new_prev_map = {
                     req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
                 }
-                # [EC-DBG] spec 分支整体替换 prev map（无 merge），探测多请求下
-                # 仍在存活请求的被丢弃 pending token（H1 假设）。
-                _prev_dropped = [
-                    r
-                    for r in (self.input_batch.prev_req_id_to_index or {})
-                    if r not in new_prev_map and r in self.requests
-                ]
-                if _prev_dropped:
+                prev_map = self.input_batch.prev_req_id_to_index or {}
+                # Only merge when the spec prev-token pipeline is active
+                # (otherwise _copy_valid_sampled_token_count returns early
+                # and never appends the rows the merged indices point to).
+                # NOTE: discarded (rollback) requests are excluded from
+                # new_prev_map on purpose and must NOT be preserved either --
+                # their already-consumed prev token would be fed twice; they
+                # recover their input from the wire path instead.
+                invalid_req_ids = {
+                    self.input_batch.req_ids[i] for i in invalid_req_indices_set
+                }
+                stale = []
+                if self.valid_sampled_token_count_event is not None:
+                    stale = [
+                        (req_id, old_idx)
+                        for req_id, old_idx in prev_map.items()
+                        if req_id not in new_prev_map
+                        and req_id in self.requests
+                        and req_id not in invalid_req_ids
+                    ]
+                if stale:
+                    offset = len(self.input_batch.req_ids)
+                    for j, (req_id, _old_idx) in enumerate(stale):
+                        new_prev_map[req_id] = offset + j
                     logger.warning(
-                        "[EC-DBG] SPEC-PREV-DROP: alive reqs %s lose pending "
-                        "prev tokens (new batch=%s, batch_type=%s)",
-                        _prev_dropped, list(new_prev_map.keys()),
-                        getattr(scheduler_output, "batch_type", None))
+                        "[EC-DBG] SPEC-PREV-MERGE: preserved pending prev "
+                        "tokens for alive reqs %s (batch=%s)",
+                        [r for r, _ in stale],
+                        [r for r in new_prev_map],
+                    )
+                self._spec_prev_stale_old_rows = [old_idx for _, old_idx in stale]
                 self.input_batch.prev_req_id_to_index = new_prev_map
 
         # Cache the sampled tokens in the model runner, so that the scheduler
