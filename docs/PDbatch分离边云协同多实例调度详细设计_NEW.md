@@ -191,8 +191,8 @@
 **启动顺序依赖链（1:1 现状，多实例逐实例复制，§3.10）**：
 
 ```
-云 PassiveEC 起 -> DEALER connect 边 pre_out_port + 发 HELLO（IDENTITY = instance*D+dp）
-    -> 边 host PD TCPStore（master_port），LEADER ROUTER actor 收 HELLO 建 readiness 表
+云 PassiveEC 起 -> DEALER connect 边 {pre_out_ports[dp_rank]} + 发 HELLO（IDENTITY = instance_id）
+    -> 边 host PD TCPStore（master_port），各 dp 的 ROUTER actor 收本 dp 的 HELLO 建 readiness 表
     -> 云 worker distributed init（连 store，HCCL rendezvous）+ _init_message_queues
     -> rpc_broadcast_mq / response_mq wait_until_ready
     -> 启动 method 链（profile/KV/warmup）-> 运行期（单 socket 双向：PRE_OUT 下发 + POST_OUT 完成 ack；coord group + 数据面 isend/irecv；IP-exchange 显式配置、cloud_ip store 已删）
@@ -212,7 +212,7 @@
 ```
 启动期：PD TCPStore（master_port，HCCL rendezvous，边 host / 云 connect master_addr）
         + rpc_broadcast_mq / peer_worker_response_mq（method 链）
-运行期：ZMQ 单端口 ROUTER/DEALER（边 bind pre_out_port，云 DEALER connect：PRE_OUT 下发 + POST_OUT 完成 ack 回传双向，§3.7.1/§3.7.2）
+运行期：ZMQ ROUTER/DEALER（边每 dp bind 显式配置的 `pre_out_ports[dp]`，云 (i,dp) DEALER connect 对应端口：PRE_OUT 下发 + POST_OUT 完成 ack 回传双向，§3.7.1/§3.7.2）
         + gloo coord group（+201，云到云直连，IP 显式配置）
 数据面：HCCL isend/irecv（不占 TCP 端口）
 ```
@@ -227,7 +227,7 @@
 
 | 通道 | 现有编码 | 多实例编码 |
 |------|----------|------------|
-| ZMQ port | `base + dp_rank*2` | **PRE_OUT（部署要求已定，2026-08）：边侧单端口**、不随 N/D 增长，显示配置无默认值；方案 = 边 ROUTER bind 单端口 / 云 DEALER connect（显式 identity = `instance*D+dp_rank`，`ZMQ_ROUTER_MANDATORY` 报 EAGAIN 不静默丢，per-instance 背压，分析见 §3.7.1）。POST_OUT **已定保留、形态已定 b**（2026-08，§3.4/§3.7.1）：与 PRE_OUT 共用同一 ROUTER/DEALER socket（全双工，剩余载荷 = 完成 ack 类轻信号），**两方向合计 1 端口、post_out_port 配置项取消、cloud_ip store 连带删**。N=16/D=2 满配端口数 62 -> 1 |
+| ZMQ port | `base + dp_rank*2` | **PRE_OUT（部署要求已定，2026-08）：边侧单端口**、不随 N/D 增长，显示配置无默认值；方案 = 边 ROUTER bind 单端口 / 云 DEALER connect（显式 identity = `instance*D+dp_rank`，`ZMQ_ROUTER_MANDATORY` 报 EAGAIN 不静默丢，per-instance 背压，分析见 §3.7.1）。POST_OUT **已定保留、形态已定 b**（2026-08，§3.4/§3.7.1）：与 PRE_OUT 按 dp 共用同一 ROUTER/DEALER socket（全双工，剩余载荷 = 完成 ack 类轻信号），**端口 = D 个显示值（`pre_out_ports[dp_rank]` 显式列表、不推导；随 D 增长、不随 N）、post_out_port 配置项取消、cloud_ip store 连带删**。N=16/D=2 满配端口数 62 -> 2（D=4 则 4） |
 | IP-exchange store | `master_port+200` (按 dp_rank) | **删除**（云双机 coord IP 改显式配置，已定，§2.2.2） |
 | gloo coord group | `master_port+201` (云到云) | 每实例独立 gloo 组，保留；对端 IP 改显式配置（已定，§2.2.2），端口仍加 instance 偏移 |
 | cloud_ip store | `master_port+1+dp_rank` | **删除（已定，§3.7.1 形态 b）**：POST_OUT 共用 PRE_OUT 的 ROUTER/DEALER，云不 bind 任何端口、边不需知云 IP，key/port 双偏移问题随之消失 |
@@ -236,7 +236,7 @@
 
 云侧镜像不变（各实例独立 deployment，按 §2.1 推导的 instance_id 入自己子组，本就隔离）。
 
-**同机多实例 = 偏移硬前提（2026-08 升级；形态 b 后偏移面收窄）**：跨服务器时同端口可靠 IP 区分，**同一服务器上多实例同 IP**。2026-08 通道收敛后仍在偏移面上的只剩 **gloo coord（+201）与 rpc_broadcast_mq / peer_worker_response_mq**（ZMQ 已单端口化、IP-exchange/cloud_ip store 已删、PD TCPStore 单 store 零偏移）；这两类**不偏移必然撞、且无法靠 IP 兜底**。原 §2.6 形态二风险 #2 从"多实例风险"升级为同机部署的硬性前提，实现上必须：
+**同机多实例 = 偏移硬前提（2026-08 升级；形态 b 后偏移面收窄）**：跨服务器时同端口可靠 IP 区分，**同一服务器上多实例同 IP**。2026-08 通道收敛后仍在偏移面上的只剩 **gloo coord（+201）与 rpc_broadcast_mq / peer_worker_response_mq**（ZMQ 端口 per-dp 显式配置不随 N、IP-exchange/cloud_ip store 已删、PD TCPStore 单 store 零偏移）；这两类**不偏移必然撞、且无法靠 IP 兜底**。原 §2.6 形态二风险 #2 从"多实例风险"升级为同机部署的硬性前提，实现上必须：
 
 - 偏移对同机场景**强制校验**：拉起期按 `instance*D + dp_rank` 规则推导端口并检查可用性（被占且非本实例规则端口 = 拒绝拉起），防止端口翻转串台
 - 所有 store key 强制带 instance（`cloud_ip_{i}` / `coord_master_ip_{i}` 等），同机同 IP 下 key 不带 instance 无法区分
@@ -251,12 +251,12 @@
 
 | 信息 | 取值 / 来源 | 单实例（N=1,D=1） | 多实例 |
 |------|------------|------------------|--------|
-| PRE_PORT（全局唯一 ZMQ 端口） | **显示配置，必填、无默认**（部署要求，§3.7.1）；边 bind `tcp://*:PRE_PORT`，云 connect | 1 个 | 仍是 1 个（**不随 N/D 增长**；post_out_port 配置项已取消） |
-| 边 IP（云 connect 目标） | `master_addr`（现有配置，= PD TCPStore host、边 rank0 所在机） | 同左 | 同左 |
+| pre_out_ports（ZMQ 端口列表） | **显式配置，必填、无默认、不做推导**（部署要求，§3.7.1）：`[p0..p_{D-1}]` 按 dp_rank 序、边云共享同一列表、长度=D、值唯一：边 dpX **bind** `tcp://*:p_X`（`*`=本机所有网卡），云 (i,dpX) **connect** `tcp://master_addr:p_X`（整体为边 dpX 的 IP:端口，非云本地） | 1 个（dp0） | D 个显示值（**随 D 增长、不随 N**；dp=4 即 4 个；post_out_port 配置项已取消） |
+| 边 IP（仅出现在云的 connect 目标里） | `master_addr`（现有配置，= PD TCPStore host、边 rank0 所在机；**边云共享同一配置值**，现状 1:1 云侧即用它 connect PRE_OUT，passive_core.py:1040） | 同左 | 同左 |
 | 云 IP / 云端口 | **无**：云不 bind 任何端口，边不需知云 IP（cloud_ip store 已删，§2.2.2） | 同左 | 同左（同机共置/跨机无差别） |
-| DEALER IDENTITY | **静态推导** `instance*D + dp_rank`，instance = node_rank-1（§2.1，无新增配置） | `"0"` | `"0"` .. `"N×D-1"`；**同机多实例同 IP 连同一端口，仅靠 IDENTITY 区分**（无端口偏移、无 IP 兜底需求） |
-| readiness | HELLO 首帧（connect 后云发，ROUTER 收向自动带 [id\|"HELLO"]）；全部到齐才放行调度（G0 barrier，§3.10） | 1 个 HELLO | N×D 个 HELLO |
-| 边内 fan-in（仅边侧） | follower(dp1..) -> leader 的 **localhost/IPC 转发**（不占跨机端口，§3.7.2） | 无（D=1 无 follower） | D=2 时 1 条 |
+| DEALER IDENTITY | **静态推导** `instance_id`（= node_rank-1，§2.1，无新增配置）；dp 已由端口区分，identity 无需编码 dp，跨 socket 的 (dp, instance) 二元组全局唯一 | `"0"` | 每个 dp 的 ROUTER 内 `"0"`..`"{N-1}"`；**同机多实例同 IP 连同组端口，仅靠 IDENTITY 区分**（无 instance 端口偏移、无 IP 兜底需求） |
+| readiness | HELLO 首帧（connect 后云发，ROUTER 收向自动带 [id\|"HELLO"]）；全部到齐才放行调度（G0 barrier，§3.10） | 1 个 HELLO | 每个 dp ROUTER 各收 N 个（全局 N×D） |
+| 边内结构（仅边侧） | 每 dp 进程独立 ROUTER，**无 fan-in、无 IPC 转发**（§3.7.2 修订）；跨 dp 的 ack/负载统计经既有 inner-DP gloo 组汇入 leader | 单进程单 ROUTER | D 个 ROUTER（每 dp 进程一个） |
 
 **图 1：单实例（N=1, D=1；identity 集合 = {"0"}）**
 
@@ -270,8 +270,8 @@
 │         ▼                       │              │         ▼                       │
 │  ┌───────────────────────────┐  │              │  ┌───────────────────────────┐  │
 │  │ ROUTER actor（1 线程）     │  │              │  │ DEALER actor（1 线程）     │  │
-│  │ bind tcp://*:PRE_PORT     │◄─┼──────────────┼──┤ connect                   │  │
-│  │ · readiness 表            │─►│──────────────┼──►│ tcp://master_addr:PRE    │  │
+│  │ bind tcp://*:PORTS[0]    │◄─┼──────────────┼──┤ connect                   │  │
+│  │ · readiness 表            │─►│──────────────┼──►│ tcp://master_addr:PORTS[0]│  │
 │  │ · ack inbox（按 id 记源）  │  │              │  │ IDENTITY = "0"           │  │
 │  │ · per-id out 队列（有界）  │  │              │  │ · inbox→consume_new_out.. │  │
 │  └───────────────────────────┘  │              │  │ · out 队列（HELLO/ACK）   │  │
@@ -279,40 +279,45 @@
 └─────────────────────────────────┘              └─────────────────────────────────┘
 
   TCP 连接：唯一 1 条，云发起 connect，全双工（两个方向共用）
+  注：云侧 connect 目标 master_addr:PORTS[0] 整体是【边的地址】（IP=边机，端口=边 bind 的端口），云本地不 bind
   ① HELLO          云→边  [id="0"|"HELLO"]     （readiness 注册）
   ② scheduler_out  边→云  ["0"|SO]             （identity envelope，DEALER 侧帧被剥掉，payload 同现状）
   ③ 完成 ACK       云→边  ["0"|ACK]            （TAIL 自投递后 POST_OUT 剩余载荷，§3.4）
   顺序：per-id pipe FIFO；per-id 队列满 = EAGAIN 留队重试（不丢、不阻塞 actor）
 ```
 
-**图 2：多实例（示例：边 D=2；云服务器 A 同机共置 2 实例 × D=2 + 云服务器 B 1 实例 × D=2，N=3；identity 0..5）**
+**图 2：多实例（示例：边 D=2，每 dp 一个 ROUTER；云服务器 A 同机共置 2 实例 × D=2 + 云服务器 B 1 实例 × D=2，N=3）**
 
 ```
-     边（master_addr 机，D=2）                                   云侧
-┌───────────────────────────────────┐
-│ EngineCore(dp0) = leader          │        云服务器 A（IP_A，同机共置实例0/实例1）
-│  ┌─────────────────────────────┐  │
-│  │ ROUTER actor（1 线程）        │  │   ┌────────────────────────────────────────┐
-│  │ bind tcp://*:PRE_PORT       │◄─┼───┼─ IP_A 实例0.dp0   DEALER id="0" ──────┤
-│  │ · readiness 表（N×D 个 id）  │◄─┼───┼─ IP_A 实例0.dp1   DEALER id="1" ──────┤
-│  │ · ack inbox（按 id 记来源）  │◄─┼───┼─ IP_A 实例1.dp0   DEALER id="2" ──────┤
-│  │ · out 队列 × N×D（独立有界） │◄─┼───┼─ IP_A 实例1.dp1   DEALER id="3" ──────┤
-│  └─────────────────────────────┘  │   └────────────────────────────────────────┘
-│          ▲ publish(): put_nowait │         全部 connect tcp://master_addr:PRE_PORT
-│ EngineCore(dp1) = follower        │        云服务器 B（IP_B，实例2）
-│  · _maybe_publish_pre_out 落点不变│   ┌────────────────────────────────────────┐
-│  · 薄转发客户端 ─localhost/IPC─►  │◄──┼─ IP_B 实例2.dp0   DEALER id="4" ──────┤
-│    （不占跨机端口，§3.7.2）        │◄──┼─ IP_B 实例2.dp1   DEALER id="5" ──────┤
-└───────────────────────────────────┘   └────────────────────────────────────────┘
+     边（master_addr 机，D=2；每 dp 进程各一个 ROUTER，端口按 dp 推导）
+┌──────────────────────────────────────┐
+│ EngineCore(dp0)：ROUTER actor（1 线程）│        云服务器 A（IP_A，同机共置实例0/实例1）
+│   bind tcp://*:PORTS[0]               │   ┌──────────────────────────────────────────────┐
+│   · readiness 表（本 dp 的 N 个 id）   │◄──┼─ IP_A 实例0.dp0   DEALER id="0" ────────────┤
+│   · ack inbox（按 id 记来源）          │◄──┼─ IP_A 实例1.dp0   DEALER id="1" ────────────┤
+│   · out 队列 × N（id = instance）      │─►─┼─ 两者 connect tcp://master_addr:PORTS[0] ────┤
+│   · ack -> dp0 负载统计                │   └──────────────────────────────────────────────┘
+└──────────────────────────────────────┘            ^ 目标 = 边 dp0 的地址（非云本地；云不 bind）
+┌──────────────────────────────────────┐        云服务器 B（IP_B，实例2）
+│ EngineCore(dp1)：ROUTER actor（1 线程）│   ┌──────────────────────────────────────────────┐
+│   bind tcp://*:PORTS[1]               │◄──┼─ IP_B 实例2.dp0   DEALER id="2" ────────────┤
+│   （结构同 dp0，只服务各实例的 dp1）     │   │   connect tcp://master_addr:PORTS[0]          │
+│   · ack -> dp1 负载统计                │   └──────────────────────────────────────────────┘
+└──────────────────────────────────────┘   （IP_A 实例0.dp1/实例1.dp1 与 IP_B 实例2.dp1 同理
+                                              connect PORTS[1]，id 分别 "0"/"1"/"2"）
 
-  端口：边仅 bind 1 个 PRE_PORT；云不 bind 任何端口；N/D 增长只增加 DEALER 数量
-  连接：N×D 条全双工 TCP（每 DEALER 各自 connect 云→边发起）；DEALER 显式 IDENTITY 断线重连保持身份
-  同机共置（IP_A 上 4 个 DEALER）：同 IP 连同一端口，仅靠 IDENTITY 区分——原 per-(instance,dp) 端口偏移
-        与 cloud_ip store key 偏移两类问题在此通道上整体不存在（§2.2.2 / §3.7.1）
-  消息：HELLO(id)/ACK(id) 云→边（ROUTER 收向自动带 id 帧，来源解复免费）；
-        [id|SO] 边→云按 id 定向路由（MANDATORY：EAGAIN=慢实例留队重试不串台，EHOSTUNREACH=未就绪/失联）
+  端口：边共 D 个显示值（PORTS = pre_out_ports 显式列表、不推导；随 D 增长、不随 N）；云不 bind 任何端口
+  连接：N×D 条全双工 TCP，云 (i,dpX) connect 到 PORTS[dpX] 的边 dpX ROUTER，与配对边 dp 直连、无中继；
+        DEALER 显式 IDENTITY 断线重连保持身份
+  IDENTITY：每个 ROUTER 内 = instance_id（dp 已由端口区分）；同机共置（IP_A 上 4 个 DEALER）分属两组端口、
+        每组 2 个 id，仍无需 instance 端口偏移与 IP 兜底（§2.2.2 / §3.7.1）
+  跨 dp 汇聚：各 dp ROUTER 收到的 ack/负载统计经既有 inner-DP gloo 组（§3.4 all_reduce 同路）汇入 leader
+        的 InstanceDispatcher，不新增通道
+  消息：HELLO(id)/ACK(id) 云->边（ROUTER 收向自动带 id 帧，来源解复免费）；
+        [id|SO] 边->云按 id 定向路由（MANDATORY：EAGAIN=慢实例留队重试不串台，EHOSTUNREACH=未就绪/失联）
   背压：per-id 队列深度进 InstanceLoadStats（§3.5），调度层绕开慢实例；transport 不丢、不全局阻塞
 ```
+
 
 （线程/actor 内部结构、背压与 readiness 细节见 §3.7.2；socket 选型依据见 §3.7.1。）
 
@@ -726,11 +731,11 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 
 **N 扩到 8/16 的线程/host 评估（2026-08 补）**：边侧 2×N×D 线程（N=8、D=2 -> 32 个，I/O-wait 型，CPU 占用低，仍可接受）；同机共置下云侧一台服务器 K 个 executor 各自带线程/进程（K=4 时 4 套 PassiveEC+executor+worker 进程树），host 进程数与 CPU 竞争见 §2.6 处理项 #3/#5。
 
-**（已被 §3.7.1/§3.7.2 形态 b 取代，2026-08）**旧结论（send 不宜压成一路：PUSH 满阻塞、慢云堵全部）不再成立：ROUTER send NOBLOCK + per-identity 队列使 EAGAIN 只滞留该实例队列、不阻塞 actor、不串台；单 actor + per-identity 有界队列即终态，线程模型见 §3.7.2。
+**（已被 §3.7.1/§3.7.2 形态 b 取代，2026-08）**旧结论（send 不宜压成一路：PUSH 满阻塞、慢云堵全部）不再成立：ROUTER send NOBLOCK + per-identity 队列使 EAGAIN 只滞留该实例队列、不阻塞 actor、不串台；每 dp 一 actor + per-identity 有界队列即终态，线程模型见 §3.7.2。
 
 ### 3.7.1 PRE_OUT 单端口多云（2026-08 部署要求，已定）
 
-**部署要求（两条，均已定）**：(1) pre_out_port / post_out_port **显示配置、无默认值**（缺失 fail-fast，拉起期校验 bind 可用性）；(2) 多实例下边侧 **pre_out_port 只配一个**，不随实例数增长配置，N×D 个云实例全部 connect 到该端口，边仍**定向**给各 (instance,dp) 发 scheduler_output。POST_OUT 的对等约束**待分析**（见本节末）。
+**部署要求（两条，均已定）**：(1) pre_out_port / post_out_port **显示配置、无默认值**（缺失 fail-fast，拉起期校验 bind 可用性）；(2) 边侧端口配置**不随实例数 N 增长**（2026-08 修订：初版"只配一个"作废），**按 dp 显式配置、不做规则推导**：`pre_out_ports = [p0..p_{D-1}]`（按 dp_rank 序的显示列表，边云共享、必填无默认、长度=D、值唯一，dp=4 即 4 个显示值）；边 dpX bind `p_X`，云 (instance,dpX) connect `master_addr:p_X`，边仍**定向**给各实例发 scheduler_output。
 
 **现状**：边 PUSH bind `tcp://*:{pre_out_port + dp_rank*2}`（N×D 个 bind 端口）、云 PULL connect（passive_core.py:1037-1050 云侧、patch_engine_core.py:181-194 边侧镜像）；TCP 连接方向本就是云 -> 边，本变更只是把 N×D 个 bind 收敛为 1 个，**关键在单 bind 多 peer 后 ZMQ 分发语义必须重选**。
 
@@ -745,7 +750,7 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 **C 方案落地点**：
 
 - 云侧：PULL -> DEALER + connect 地址变单端口；DEALER 收到的消息 identity 帧被剥掉，payload 格式与现状一致（消息面无感）；**线程面须改单 actor**（§3.7.2）
-- 边侧：PUSH -> ROUTER；注册/心跳 recv + scheduler_output send 共用一个 socket，**非线程安全 -> 单 poller/actor 线程**（与上文"recv 压成一个 poller"方向一致）；per-instance pickle 可保留并行，末级单发送线程串行 send + EAGAIN 重试
+- 边侧：PUSH -> ROUTER（**每 dp 一个**，bind 各自显式配置的 `pre_out_ports[dp_rank]`，§3.7.2）；注册/心跳 recv + scheduler_output send 共用一个 socket，**非线程安全 -> 每 dp 一个 actor 线程**；per-instance pickle 可保留并行，actor 内 send NOBLOCK + EAGAIN 重试
 - readiness：现状 `IMMEDIATE=1 + wait_until_ready` 换成"注册帧确认"（实例就位 = 边路由表收到该 identity），与 G0 启动 barrier（§2.1/§3.10）衔接
 - 重连：DEALER 显式 identity 断线重连保持同一路由（ROUTER 重关联 pipe）；**边重启则路由表清空**，靠注册帧重建；mandatory 下 unroutable 报错细节（EAGAIN vs EHOSTUNREACH）实现期核实
 - 连带收益：边侧 PRE_OUT 从 2×N×D 端口/线程收敛为 1 端口 + 1 actor（§3.7 线程结论同步改写）；同机共置下 PRE_OUT 云侧只 connect 不 bind，**该通道的端口偏移前提整条消解**（§2.2）
@@ -759,41 +764,50 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 
 **已选 b（2026-08 定案）**：POST_OUT 收敛为轻量 ack 后，独立通道的隔离收益（独立 HWM / 独立 teardown）小于 b 的端口+配置+发现三重收益；b 的主要代价（云侧 actor 改造）与边侧改造同构，边际成本低。收发线程模型（单实例/多实例）见 §3.7.2。
 
-### 3.7.2 形态 b 收发线程模型（2026-08 定案）
+### 3.7.2 形态 b 收发线程模型（2026-08 定案；修订：边侧 per-dp ROUTER，取消 leader fan-in）
 
-现状基线：每 `PPSchedulerZmqChannel` = 1 pub 线程（pickle + PUSH send，`queue.Queue(1000)` + `put_nowait`）+ 1 sub 线程（poll + recv + unpickle），`publish()`/`consume_new_outputs()` 均非阻塞，调度线程从不阻塞在 ZMQ 上（passive_core.py:124-228）；**边侧每个 dp_rank EngineCore 进程各 bind 各的端口**（`pre_out_port+dp*2`，patch_engine_core.py:186-192）。
+**修订记录**：初版为"边侧单 bind 端口归 leader + follower localhost/IPC 转发"；定稿改为**每 dp_rank EngineCore 进程各 bind 各的 ROUTER（端口按 dp 规则推导）**--部署要求同步修订为"端口配置不随实例数 N 增长，允许按 dp 推导不同端口"。收益：消除 fan-in 与 leader 收发单点，边云两侧结构完全对称，dp=4 直接扩展（4 actor / 4 端口），无内层 hop。
+
+现状基线：每 `PPSchedulerZmqChannel` = 1 pub 线程（pickle + PUSH send，`queue.Queue(1000)` + `put_nowait`）+ 1 sub 线程（poll + recv + unpickle），`publish()`/`consume_new_outputs()` 均非阻塞，调度线程从不阻塞在 ZMQ 上（passive_core.py:124-228）；边侧每个 dp_rank EngineCore 进程各 bind 各的端口（`pre_out_port+dp*2`，patch_engine_core.py:186-192）。
 
 **云侧（单实例与多实例同构，每 (instance,dp) 一个 PassiveEC 进程）**：
 
-- 现状 2 线程（pub: POST_OUT PUSH bind / sub: PRE_OUT PULL connect）-> **1 actor 线程 + 单 DEALER**（`IDENTITY = instance*D+dp_rank`，connect 边单端口）
+- 现状 2 线程（pub: POST_OUT PUSH bind / sub: PRE_OUT PULL connect）-> **1 actor 线程 + 单 DEALER**（`IDENTITY = instance_id`，connect 目标 = `master_addr:{pre_out_ports[dp_rank]}`，端口取自显式配置列表的本 dp 项）
 - actor 循环：poll -> **recv 先排干**（scheduler_output 入 inbox，`consume_new_outputs` 语义不变）-> out 队列排干 send **NOBLOCK**（首帧 HELLO，运行期完成 ack；EAGAIN 留队重试）
 - ack 生产（`_drain_worker_completion_acks` 一族，TAIL 自投递后 POST_OUT 剩余载荷）在 PassiveEC 主循环 put_nowait，与现状 publish() 调用点同构
 - 多实例 = 每实例重复，进程间无共享无协调；线程总量 **2×N×D -> N×D**（N=16/D=2：64 -> 32，摊在 4 台服务器）
 
-**边侧（关键差异：单 bind 端口只能归属一个进程，D>1 存在 fan-in）**：
+**边侧（per-dp ROUTER，与云侧结构对称）**：
 
-- 现状每 dp_rank 进程各 bind 各端口互不干扰；单端口化后 ROUTER 必须收敛到**单一进程**
-- 方案：**actor 落在 leader（dp0 EngineCore 进程，调度层所在，§3.4）**：
-  - actor 线程持有 ROUTER（bind 单 pre_out_port）：recv 排干（HELLO -> readiness 表 / ack -> inbox 按 identity 记来源）+ **per-identity out 队列**发送（NOBLOCK；EAGAIN = 慢实例留队重试；EHOSTUNREACH = 未就绪入队等待 / 已就绪后失联 = v1 故障模型整体挂，fail-fast）
-  - follower（dp1..）进程内薄转发客户端（localhost/IPC connect leader 内层 socket），`_maybe_publish_pre_out` 的 publish() 落点不变，多一跳本机 hop（相对跨机网络可忽略）
-  - D=1（embedding_only）无 follower、无内层 hop，退化 = 单进程 1 actor
-- 线程数：现状 2×N×D -> **1（ROUTER actor）+ (D-1)（follower 转发）**；N=16/D=2：64 -> 2
-- pickle/序列化随 actor 收敛单点：v1 每步 per-(instance,dp) 一条 SO、小对象，单线程可承载；若 N×D 增大出现 CPU 瓶颈，加 pickle 工作池（产出 bytes 入 per-identity 队列），actor 只做 send
+- **每 dp_rank EngineCore 进程各 1 个 ROUTER actor（1 线程）**：bind `tcp://*:{pre_out_ports[dp_rank]}`，**只服务本 dp 的 N 个实例**；端口为**显式配置**（`pre_out_ports` 列表按 dp_rank 序，不做 base+dp 推导；显示、必填、无默认、长度=D、值唯一），D=4 即 4 个显示值
+- **IDENTITY = instance_id**（dp 已由端口区分，identity 无需再编码 dp；跨 socket 的 (dp, instance) 二元组全局唯一，日志/监控用二元组）
+- 每 dp 的 actor：recv 排干（HELLO -> 本 dp readiness 表（N 个 id）/ ack -> 本 dp 负载统计）+ **per-identity out 队列**发送（NOBLOCK/MANDATORY：EAGAIN = 慢实例留队重试；EHOSTUNREACH = 未就绪入队等待 / 已就绪后失联 = v1 故障模型整体挂，fail-fast）
+- **跨 dp 汇聚走既有通道**：dp>1 时各 dp 的 ack/负载统计经现有 inner-DP gloo 组（与 §3.4 实例分发的 all_reduce 同路）汇入 leader 的 `InstanceDispatcher`，**不新增通道、无 IPC 转发 hop**
+- 线程数：现状 2×N×D -> **D（每 dp 1 actor）**；N=16/D=2：64 -> 2；D=4：64 -> 4
+- **配置校验（拉起期 fail-fast）**：列表长度 = D、值唯一、端口可用（被占且非本 dp 显式端口 = 拒绝拉起，防同机串台）；边云列表一致性由人为保证（§2.1 既定口径）；master_port 偏移空间预留等推导类约束对本通道不再适用
+- pickle 按 dp 分散（每 actor 各自序列化，无单点）；leader 无收发依赖（只消费汇聚后的负载统计）
+
+**运行时路径（dp=2 示例，全部直连、无中继）**：
+
+```
+边->云（SO）：          边 dpX --TCP:{pre_out_ports[X]}--> 云 (i, dpX)   每 dp 与配对实例直连
+云->边（HELLO/ack）：   云 (i, dpX) --TCP:{pre_out_ports[X]}--> 边 dpX 的 ROUTER
+数据面（hidden/KV）：   边 dpX worker <--HCCL isend/irecv--> 云 (i, dpX) workers   不经 ZMQ、不经 dp0
+```
 
 **背压（修订 §3.7 旧结论）**：
 
 - 旧（send 不宜压成一路：PUSH 满阻塞、慢云堵全部）**不成立**：ROUTER send NOBLOCK，EAGAIN 只滞留该 identity 队列，actor 不阻塞、其他实例不受影响
-- per-identity 有界队列（沿用 1000 量级）深度进 `InstanceLoadStats`（§3.5），过载防线 = 调度层绕开慢实例（transport 不丢、不全局阻塞）；队列满 = 高水位告警而非丢
+- per-identity 有界队列（沿用 1000 量级）深度进 `InstanceLoadStats`（§3.5，经 inner-DP 汇聚），过载防线 = 调度层绕开慢实例（transport 不丢、不全局阻塞）；队列满 = 高水位告警而非丢
 - 旧 per-channel `queue.Queue(1000)` 的隔离性由 per-identity 队列等价继承
 
 **readiness / 重连 / 顺序**：
 
-- HELLO 帧替代 `IMMEDIATE=1 + wait_until_ready`；对齐 G0 barrier：全部 N×D 个 HELLO 到齐才放行调度（§3.10 启动顺序）
-- DEALER 显式 IDENTITY 断线重连保持身份，actor 侧 pipe 自动重关联；边重启后云自动重连 + 重发 HELLO 重建 readiness 表
+- HELLO 帧替代 `IMMEDIATE=1 + wait_until_ready`；每个 dp 的 ROUTER 各自等 N 个 HELLO，全局仍由 G0 barrier 保证（N×D 全就位才放行调度，§3.10）
+- DEALER 显式 IDENTITY 断线重连保持身份，actor 侧 pipe 自动重关联；边某 dp 进程重启后该 dp 的云 DEALER 自动重连 + 重发 HELLO（v1 故障模型下整体挂，重启语义即可）
 - per-identity pipe FIFO：per-(instance,dp) 消息顺序与现状 per-channel 等价
 
-**1:1 退化**：N=1/D=1 即 identity 集合 = {0}、无 follower hop、无负载绕开逻辑，与 1:N 同一代码路径（部署差异只在 identity 数量）。
-
+**1:1 退化**：N=1/D=1 即单端口（PORTS[0]）、单 actor、identity 集合 = {0}，与 1:N 同一代码路径（部署差异只在端口数随 D、identity 数随 N）。
 ### 3.8 控制通道可靠性
 
 per-channel ZMQ（每 channel 独立 `queue.Queue(1000)` + 独立 pub/sub 线程），实例间互不影响；丢消息恢复是 1:1 既有的 HWM=1000 + 不丢假设，非多实例新增 gap。
