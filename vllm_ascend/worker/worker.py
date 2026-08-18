@@ -904,7 +904,7 @@ class NPUWorker(WorkerBase):
         while True:
             try:
                 method, args, _kwargs, _output_rank = hint_mq.dequeue(
-                    timeout=0.01
+                    timeout=0.002
                 )
             except TimeoutError:
                 pass
@@ -923,6 +923,13 @@ class NPUWorker(WorkerBase):
                             "[early-irecv] start_early_irecv failed"
                         )
             self._report_irecv_completions()
+            # The shm MessageQueue reader busy-spins (sched_yield) for the
+            # whole dequeue timeout when traffic is recent
+            # (SpinCondition.busy_loop_s=1s), so a short timeout alone
+            # does NOT bound CPU usage -- this sleep does.  Keeps the comm
+            # thread off the GIL/driver-lock while preserving ~10ms-scale
+            # hint/watermark latency.
+            time.sleep(0.005)
 
     def _report_irecv_completions(self) -> None:
         """Report every completed registered recv on irecv_done_mq.
