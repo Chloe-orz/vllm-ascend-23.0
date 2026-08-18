@@ -1111,7 +1111,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 | 云侧 recv 缓冲 | irecv 按对端 metadata 逐张量 `torch.empty` 新分配；每台云机只承载本实例在途（≤2×D 份） | 不 ×N |
 | metadata（pickle，gloo cpu 组）/ZMQ/MQ | CPU 内存，非显存 | - |
 
-量级示例：hidden≈5k、chunk=2048 tok、bf16 -> 单份 ≈21MB；单实例 D=2 在途 4 份 ≈84MB；N=16、D=2 -> 64 份 ≈**1.3GB 边侧峰值**（边 KV 池 GB 级，占比可观）。decode/draft 尾通道每步张量 MB 级，忽略。
+量级示例：hidden≈5k、chunk=2048 tok、bf16 -> 单份 ≈21MB；单实例 D=2 在途 4 份 ≈84MB；N=16、D=2 -> 64 份 ≈**1.3GB 边侧峰值**（边 KV 池 GB 级，占比可观）。decode/draft 尾通道每步张量 MB 级，忽略。**chunk 语义（2026-08 核对）**：chunk = chunked prefill 的一个分片，一个 PF batch = 一个（请求，chunk），独占一个 head_token + prefill 通道，即"一份在途"（pd_separated_scheduler.py:1375-1391 `PrefillChunkFlight.num_scheduled_tokens`）；其上限链 = min(请求剩余 prompt, long_prefill_token_threshold, max_num_scheduled_tokens，未配时 = max_num_batched_tokens)（scheduler.py:405-418）-> **峰值在途对组 batch 配置线性敏感**：组上限 8192 时单份最坏 ≈84MB、N16/D1 在途 ≈2.6GB（2048 假设的 4 倍），规划时须按实际部署配置代入。
 
 **联动发现**：§5.1.2 方案 1 的全局水位 K（默认 2N）**同时是边侧在途显存的限幅旋钮**--边聚合在途 ≤ K×D 份 chunk 张量。显存紧张时下调 K（<2N）即压低峰值，K 的取值两难多了一个显存维度；全局视图方案（§5.1.1/§5.1.3）同理可加「跨实例总在途上限」约束（等价于 K 的硬帽）。
 
@@ -1144,6 +1144,13 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 | 1 | 3×40 = 120MB | 2×21 = 42MB | 162MB | 74% |
 | 4 | 12×40 = 480MB | 8×21 = 168MB | 648MB | 74% |
 | 16 | 48×40 = **1.92GB** | 32×21 = 672MB | **2.6GB** | 74% |
+
+**实际参数修正版（2026-08，边云部署口径：`--max-num-batched-tokens`=8192、4k1k 性能负载、并发 86、D=1）--prefill 与 decode 分开估**：
+
+- **prefill 在途**：4k prompt < 8192 组上限 -> **每请求恰一个 chunk = 4096 tok**，单份 ≈42MB（对比图 3c 的 2048/21MB 假设翻倍；若 8k prompt 打满组上限则再翻倍至 84MB/份）。N=1/4/16 -> 2/8/32 份 = **84MB / 336MB / 1.34GB**（最坏 168MB/672MB/2.7GB）
+- **decode 在途（可忽略）**：每份 = 当步 decode batch token 数 × hidden，并发 86 封顶全部实例 decode 总量 -> N=1 时 ≈0.9MB、N=16 每实例 ~5 并发聚合仍 ≤0.9MB；draft/MTP 乘深度系数也仅几 MB
+- **并发对份数的现实封顶**：在途 chunk 份数 ≤ min(2N, 并发 86 中处于 prefill 阶段的请求数)。N=1 时 2 通道对 86 排队几乎恒满（在途=上限值）；N=16 时 32 通道打满概率不高，表为**配置上限口径**
+- 边卡数据通道显存全景（4k1k/并发 86/D=1）：N=1/4/16 合计 ≈ **205MB / 816MB / 3.3GB**（域缓冲 120/480/1920MB + prefill 在途 84/336/1340MB）-> 域缓冲与在途同为 GB 级（N16），两块都要压：域缓冲调 `hccl_buffer_size`，在途随负载 prompt 长度天然变化
 
 - 两项均随 N 线性但斜率不同：域缓冲每实例 +120MB、在途每实例 +42MB（默认值下域缓冲恒为在途 ~2.8 倍，占比固定 74%）
 - **控制旋钮不同**：压域缓冲走 `hccl_buffer_size`/`P2P_HCCL_BUFFSIZE`（40MB/域 -> 2×4MB/域 时 N16 域缓冲降至 ~384MB、合计 ~1.1GB）；压在途走调度水位 K（K=8 时 N16 在途 = 8×21≈168MB）
