@@ -790,7 +790,7 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 | ZMQ ROUTER per-identity out 队列 | 是（N identity/dp） | 有界 1000 条/identity，占用随**在飞**不随 N 配置：在飞 ≤ prefill_inflight(2)+少量 decode -> 实际 MB 级；极端满队 10-100MB/identity 仅作背压告警上限（§3.7.2） |
 | InstanceLoadStats + 全局合并视图（leader） | 是 | O(N) 小结构，<100KB |
 | ready bitmap（all_reduce payload 捎带） | 是 | N bit，可忽略 |
-| HCCL channel 池（数据通道标签） | 是：N×D×3（2P1D/dp，:89-90） | 96 个 channel；若每 channel 占独立流/tag，设备侧固定开销单流几十 KB 级 ×96 ≈ 数 MB（**待实测**，含流创建上限核实） |
+| HCCL channel 池（数据通道标签） | 是：N×D×3（2P1D/dp，:89-90） | 96 个 channel；**每通信域 Device 显存 = 2×P2P_HCCL_BUFFSIZE（默认 40MB）**，且本仓建组默认带 200MB/域 hccl_buffer_size 口径（utils.py `_DEFAULT_BUFFER_SIZE`，是否叠加待实测）-> 边卡持有域数：shared-model N×3D=96 -> 仅 P2P 缓冲即 **3.84GB**；per-rank N×3=48 -> **1.92GB/卡**；云卡仅本实例 3 域 ~120MB。缓解：per-group 调小 `hccl_buffer_size`（代码通道现成）+ 下调 `P2P_HCCL_BUFFSIZE`（详见 §4.5.1） |
 | rpc_broadcast_mq / coord group / TCPStore / gloo 组 | **否**（方案一大组 MQ、单 store、§2.2 已定零扩展） | 0 |
 | 边 KV 池 | **否**（边 worker 共享池，按请求分配，不按实例切分；云 KV 在各实例 worker 内，云总量固定 32 卡） | 0 |
 | 云侧 PassiveEC / 云 scheduler | 天然 per-instance（本设计既定形态） | 不属于边 EngineCore 扩展项 |
@@ -1027,6 +1027,8 @@ per-channel ZMQ（每 channel 独立 `queue.Queue(1000)` + 独立 pub/sub 线程
 
 ## 4 数据面方案
 
+> **2026-08 核对结论**：本节方案在后续控制面决策（rpc_broadcast_mq 方案一/二、sample_tokens local_only 化、§5.1 三套实例间调度方案、TAIL 自投递 + recv fence、§3.1 队列 per-dp ROUTER 化）下**均无变动**--这些决策全部落在方法链/调度/控制通道层，与 HCCL 数据面正交。两处补充见 §4.2 边界澄清、§4.4 资源待实测。
+
 ### 4.1 全局 rank 编排
 
 边 rank 稳定在前：0（1 卡）或 0,1（2 卡 dp=2，每卡跑首+尾、各自一个 DP rank）。云按 instance_id 在边 rank 基础上续编，每实例占连续 range：
@@ -1064,6 +1066,8 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 
 **EP 拓扑关键结论**：EP all-toall 跨 data_parallel_size（D，实例内），**不跨多实例 N**（per-instance G4）。N 间无集合通信可乱序；D 内（2DP）紧耦合 EP all-toall 配对。
 
+**边界澄清（2026-08 核对）**：上表 G0–G5 均为 HCCL/数据组。§2.2.2 rpc_broadcast_mq 方案一中的 inner_dp_world gloo 大组（边 dpX + N 实例 dpX，用于 MQ handle 交换）是**控制面 cpu group**，建链走 OS 临时端口（经 TCPStore 交换端点），不属于 G0–G5，也不与「边不进实例 DP/coord 组」冲突——该约束限定的是**运行时 HCCL 集合通信**（数据面），gloo handle 交换组仅在初始化期通信。
+
 ### 4.3 PP 路由（step 2）
 
 核心 = 按 instance_id 选 G2 子组，**子组内 dst=local_rank+1 沿用 1:1 不改**（global rank+1 才落兄弟边卡，路由用 in-group local rank 不受影响）。
@@ -1087,6 +1091,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - instance 维度由 worker 侧实现：读 SchedulerOutput.instance_id 选 pp_group，在该 pp_group 上 isend(channel=hidden_channel, dst=peer)，tag 在 pp_group 内解析
 - `HiddenChannelType.init` 池大小**无 N 因子**（tag per-instance 复用，池只需覆盖 per-instance dp_size D）
 - 待实现期核实：若有全局 dict 以 HiddenChannelType 为 key 存 handle（跨 instance 撞 key）需改 key 为 (instance_id, channel_type)，目前看 tag 只是 isend 参数无全局注册表大概率零改
+- 资源修正（2026-08，指向 §3.1.1/§4.5.1）：per-rank 模式共 N×D×3 个 2-rank HCCL 子组；**每通信域占 Device 显存 2×P2P_HCCL_BUFFSIZE（默认 2×20MB）**，且本仓建组（patch_distributed.py:389 `create_hccl_pg_options`）对 pp_prefill*/pp_decode* 落 `get_default_buffer_config()` = 200MB/域口径（是否与 P2P 缓冲叠加、建域即分配还是首次通信分配，**待实测**）。边卡持有域 shared-model N×3D=96（仅 P2P 缓冲 3.84GB）、per-rank N×3=48（1.92GB/卡）-> **GB 级、随 N 线性、边卡独占，N=16 时边侧显存第一约束**。缓解：①`create_hccl_pg_options` 已支持按组名配 `hccl_buffer_size`（dp 组先例 `calculate_dp_buffer_size`），给通道组加小值（8-16）配置，一行级改动；②环境变量 `P2P_HCCL_BUFFSIZE` 下调（大张量流式分块，20MB->4~8MB 只减流水深度）
 
 ### 4.5 边↔云 HCCL isend/irecv
 
@@ -1094,6 +1099,23 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - 数据通道 = HiddenChannelManager 的 HCCL channel 池（2P1D = 2 prefill + 1 decode channel/dp），按实例复制
 - per-instance 1:1 dp 配对：边执行 dp 并行（edge_dp==D）-> 经实例 i 数据通道 -> 云实例 i 执行 dp 并行（D），边跨实例时分复用
 - edge_dp 与实例 dp 耦合（==D），新维度是 N（实例数），**不是 edge_dp 解耦**
+
+#### 4.5.1 p2p 通信显存模型（2026-08 核对）
+
+控制面决策（rpc_broadcast_mq 方案一/二、sample_tokens local_only、§5.1 三套调度、TAIL 自投递 + recv fence）均落在 CPU/控制面，**对 p2p 显存零影响**；recv-fence 释放提前（channel 绑定 COMM_RECV 完成释放）缩短在途张量生命周期，方向有利。显存模型由代码结构决定（patch_distributed.py `isend/irecv_tensor_dict_on_hidden_channel`）：
+
+| 项 | 规模 | 随 N |
+|---|---|---|
+| 固定开销：HCCL 通信域缓冲（**Device 显存**） | **每通信域 2×P2P_HCCL_BUFFSIZE（默认 40MB）**，P2P send/recv 的 SDMA/RDMA staging 双缓冲；另有本仓建组默认 200MB/域 hccl_buffer_size 口径（待实测是否叠加）。边卡持有域：shared-model N×3D=96 -> **3.84GB**；per-rank N×3=48 -> **1.92GB/卡**；云卡本实例 3 域 ~120MB。缓解=per-group 调小 hccl_buffer_size + 下调 P2P_HCCL_BUFFSIZE（§4.4） | **×N 线性，边卡独占，第一约束** |
+| **边侧在途张量（主要项）** | isend 直接发激活张量本体（无池化拷贝，record_stream 保活至 send 完成）；每 (instance,dp) `prefill_inflight_limit=2` -> 边聚合在途 ≤ **2×N×D 份 chunk hidden 张量**，每份 ≈ chunk_tokens×hidden×dtype 字节 | **×N 线性** |
+| 云侧 recv 缓冲 | irecv 按对端 metadata 逐张量 `torch.empty` 新分配；每台云机只承载本实例在途（≤2×D 份） | 不 ×N |
+| metadata（pickle，gloo cpu 组）/ZMQ/MQ | CPU 内存，非显存 | - |
+
+量级示例：hidden≈5k、chunk=2048 tok、bf16 -> 单份 ≈21MB；单实例 D=2 在途 4 份 ≈84MB；N=16、D=2 -> 64 份 ≈**1.3GB 边侧峰值**（边 KV 池 GB 级，占比可观）。decode/draft 尾通道每步张量 MB 级，忽略。
+
+**联动发现**：§5.1.2 方案 1 的全局水位 K（默认 2N）**同时是边侧在途显存的限幅旋钮**--边聚合在途 ≤ K×D 份 chunk 张量。显存紧张时下调 K（<2N）即压低峰值，K 的取值两难多了一个显存维度；全局视图方案（§5.1.1/§5.1.3）同理可加「跨实例总在途上限」约束（等价于 K 的硬帽）。
+
+**建通道是否预留该显存（2026-08 核对）**：**不预留**。`_create_one_hidden_channel`（patch_distributed.py:381-407）只调 `new_group` 建通信器（+gloo cpu 组），无任何 tensor 分配；warmup 仅 8 元素建链。发送侧在途张量是 head 段 forward 的**计算输出本体**（isend 零拷贝直发、record_stream 保活至 send 完成），接收侧 `_allocate_merged_recv_buffer` 逐次 `torch.empty`（channel stream ctx 内），非常驻池。即：该显存没有通信也存在（计算中间量），通信只延长其生命周期至对端 recv 完成。**但预算仍须按峰值留**--caching allocator 池按峰值扩、基本不缩，峰值在途（K×D 份）会固化成 allocator 池水位。边侧显存预算 = 权重 + KV 池 + 峰值在途（K×D 份）+ 固定通信开销（N×D×3 子组）。
 
 ---
 
@@ -1151,7 +1173,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - **HEAD 与 TAIL 策略解耦**：HEAD 是 per-step 决策（coord 分发，2DP 一致），TAIL 是事件驱动（recv fence 就绪序），两个策略接口独立可插拔
 - TAIL 侧任何策略必须遵守三条硬约束：实例内保序、2DP lockstep、队首不跳队--策略只能在「实例间先后」上做选择
 - 与 §3.11 状态源打通（InstanceLoadStats 复用），扩展时只加策略实现、不动分发通道
-- **2026-08 定案**：HEAD 策略 = ArrivalFIFO（原始请求全局按谁先来，替代 v1 InOrder 轮转）；TAIL 策略 = RecvReadyFirst 且 **DRL 提为全局最高优先**（详见 §5.1.1）
+- **2026-08 定案**：HEAD 策略 = ArrivalFIFO（原始请求全局按谁先来，替代 v1 InOrder 轮转）；TAIL 策略 = RecvReadyFirst 且 **DRL 提为全局最高优先**（详见 §5.1.1）；另设备选 **§5.1.2 方案 1**（两阶段：实例内单实例逻辑 + 实例间薄仲裁，首尾决策=全局 prefill 在途个数）
 
 #### 5.1.1 实例间调度次序（2026-08 定案：全局视图 + DRL 优先 + ready-first 尾 + arrival-FIFO 首段）
 
@@ -1238,6 +1260,131 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 └─────────────────┴─────────────────────────────┴─────────────────────────────────┘
 ```
 
+#### 5.1.2 实例间调度次序·方案 1（2026-08 另设：两阶段 = 实例内单实例逻辑 + 实例间薄仲裁；与 §5.1.1 并列备选）
+
+**设计原则**：per-instance 调度逻辑**零改动**直接复用单实例代码；实例间只加一层薄仲裁。不再建全局合并 waiting 索引（首段"谁先来"只需各实例 waiting 队首的 original_seq 取 min）。
+
+**关键基线锚点**（详见 §5.1.1 基线列表）：水位状态机（:901-909）**IDLE = prefill_inflight==0；HIGH = ≥prefill_inflight_limit(=2 prefill channel)；LOW 之间**，IDLE/LOW 首段优先、HIGH 尾优先。
+
+**方案 1 结构**：
+
+```
+Phase 1（实例内，并行独立，零改动）：每 (instance,dp) scheduler 按单实例逻辑
+  各自产出候选 (bt_i, SO_i, ready_ts_i / arrival_seq_i)
+Phase 2（实例间，leader dp0 单点仲裁 -> §3.4 all_reduce 分发 (instance_id, bt)）：
+  ① 收集候选集：尾集 T = {i | bt_i ∈ DRL/DL/PL 且该实例 D-dp ready}
+                首集 F = {i | bt_i ∈ PF/DF/DRF}
+  ② 首尾决策（全局水位，"像单实例一样"）：
+     G = Σ_i prefill_inflight_count_i（全局 prefill 在途个数），阈值 K
+     G ≥ K -> 选尾集；G < K -> 选首集（对应单实例 HIGH/IDLE+LOW 语义的全局化）
+  ③ 尾选择：T 内按 ready 时间最早（谁先 ready 谁先）；并列时按类型 DRL>DL>PL、
+     再并列按 instance_id（确定性 tie-break）
+  ④ 首选择：F 内按该实例 waiting 队首 original_seq 最小（谁先来谁先）
+  ⑤ 空集回退：选定集合为空 -> 取另一集合；均空 -> coord EMPTY/sleep 等云
+follower dp：不跑 Phase 2；按分发的 (instance_id,bt) 用现有 _schedule_target
+force 机制出 SO（本地候选不一致时强制对齐/出 dummy，现有 2DP winner 机制）
+```
+
+**阈值 K 的语义**：忠实泛化 = K = 2N（全局 prefill channel 总数 = Σ 每实例 limit）；K 是首尾平衡的唯一旋钮（见风险 1），v1 默认 2N、可配。
+
+**与 §5.1.1（全局视图方案）的差异**：
+- per-instance 逻辑从"泛化水位"回到**原样复用**；全局层从"合并索引+逐层扫描"变为"候选+两条规则"；
+- **R1（MTP 尾全局最高）弱化**：实例间尾选择以 ready 时间为主序，类型优先仅作并列 tie-break（实例内 DRL 优先保留）--若需恢复 R1，把 ③ 改为"类型优先、ready 时间次序"即可，规则位不变；
+- 首段不再需要全局合并索引：F 内取各实例队首 seq 的 min。
+
+**风险**：
+1. **阈值 K 两难（核心风险）**：K=2N 时全局 HIGH 难达（边吞吐受限，G 长期 < 2N）-> 尾（尤其 DRL，MTP 链）延迟、TPOT 劣化；K 调小则首段饥饿回归。缓解：K 可配 + **双向年龄兜底**（首段等待超 T1 或尾等待超 T2 强制切换），兜底不依赖 K 单点。
+2. **队头阻塞**：F 内按队首 seq 取 min，若该实例 KV 满/长 chunk 占用 -> 换下一实例（有界跳过 K_skip），不会全局卡死（比 §5.1.1 全局 FIFO 轻）。
+3. **仲裁视角不完整**：leader 只见本 dp 的 Phase-1 候选；dp1 若持有更老请求/更早 ready（簿记漂移）-> 仲裁次优。2DP lockstep 下两 dp 簿记应镜像，v1 接受 dp0 视角并**核实 dp1 候选一致性**；必要时 all_reduce 捎带 dp1 的每实例摘要（最早 seq/最早 ready ts）。
+4. **2DP lockstep**：尾 ready 必须 per-instance D-dp AND（recv fence 双 dp 都完成）；ready_ts 取两 dp 较晚者；决策只在 leader（沿用 count-drift 防线）。
+5. **MTP 链跨实例延迟**：ready 时间主序下，某实例 DRL 可能排在别家 DL 之后 -> 链式停顿；监控 per-instance tail-wait age 进 InstanceLoadStats，超龄提升 tie-break 权重或触发兜底。
+6. **跨实例状态一致性**：簿记天然 per-instance 隔离（比 §5.1.1 轻），abort 沿用现有在飞处理路径。
+7. **慢实例倾斜 / 长尾 chunk**：同 §5.1.1（dispatcher least-loaded 预防 + tail-wait age 统计）。
+
+```
+图 5：单实例 vs 多实例调度策略对照（方案 1，按场景）
+
+┌─────────────────┬─────────────────────────────┬─────────────────────────────────┐
+│ 场景             │ 单实例（现状基线）            │ 方案 1（多实例）                  │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ Phase 1         │ -（即本列逻辑）              │ 每 (instance,dp) 原样跑单实例     │
+│                 │                             │ 逻辑产出候选（零改动）            │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ 首尾决策        │ 水位：inflight==0 -> IDLE/LOW│ 全局水位：G=Σ inflight_i 对比 K  │
+│                 │ 首段优先；≥2 -> HIGH 尾优先  │ （默认 2N）；G<K 首集 / G≥K 尾集 │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ 插队例外         │ 占位 D首 + first_only 窗     │ per-instance 保留（Phase 1 内）   │
+│                 │ 最优先                      │ 候选已是含例外后的结果            │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ 尾选择          │ 尾优先级 DRL>DL>PL；         │ **实例间 = 谁先 ready 谁先**      │
+│ （DRL/DL/PL）    │ delay 窗 per-instance       │ （ready 时间主序；类型/instance_id│
+│                 │                             │ 仅并列 tie-break；delay 窗、D-dp │
+│                 │                             │ AND、DRL>DL>PL 实例内保留）      │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ 首选择          │ waiting 队首 / 链内序        │ **实例间 = 谁先来谁先**（各实例   │
+│ （PF/DF/DRF）    │                             │ waiting 队首 original_seq 取 min，│
+│                 │                             │ 到 pin 实例；有界跳过不可调度者）  │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ MTP 链不变量     │ _force_draft_last 交替      │ per-instance 不变量不变（Phase 1  │
+│                 │ （DRF 在飞禁再发 DRF）       │ 内）；channel 池按实例复制跨实例  │
+│                 │                             │ 可并发                          │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ ready 判定      │ 云返回填 3 条 ready deque    │ recv fence 按实例 D-dp AND；     │
+│                 │                             │ dp1 位经 all_reduce 捎带 bitmap  │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ 决策/分发       │ 单 scheduler 本地决策        │ Phase 1 各实例独立 + Phase 2     │
+│                 │                             │ leader 仲裁 -> all_reduce 分发， │
+│                 │                             │ follower force 对齐（现有机制）   │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ 无候选          │ EMPTY / yield               │ 空集回退另一集合；均空 coord     │
+│                 │ （is_waiting_for_remote_tail）│ EMPTY + sleep 等云              │
+├─────────────────┼─────────────────────────────┼─────────────────────────────────┤
+│ 防饿/平衡兜底    │ IDLE 时 PF 全链第一          │ K 可配 + 双向年龄兜底（首段 T1/  │
+│                 │                             │ 尾 T2 超时强制切换，不依赖 K）    │
+└─────────────────┴─────────────────────────────┴─────────────────────────────────┘
+```
+
+#### 5.1.3 实例间调度·方案 2：全局调度视图（2026-08 分析框架；**优先级不预设**，给出每个单实例策略的全局化方式与待定旋钮）
+
+**定义**：真全局单调度器--leader 持有/可见 N 组队列实体（各实例 waiting/running/尾 ready 三队列/状态机计数），每 step 直接在全局对象集上跑泛化后的策略；per-instance scheduler 退化为"SO 构造执行器"。与 §5.1.1/§5.1.2 的关系：**§5.1.1 就是方案 2 在一组特定旋钮取值下的实例化**（K1=水位泛化、K2=类型序保留、K3=全局 FIFO、K4=ready ts）；§5.1.2（方案 1）则不走全局视图（决策分布、只仲裁选哪家）。
+
+**泛化的三类模式**（每个单实例机制必属其一）：
+- **模式 A 序合并**：同类对象排队 -> 合并成全局序，需定**合并键**（arrival seq / ready ts / age）；
+- **模式 B 状态机泛化**：标量状态（计数器/水位/时间窗）-> 全局聚合量 + 阈值，需定**聚合函数 + 阈值**；
+- **模式 C 不变量保留**：per-instance 资源/链约束，**不可全局化**，只能作为全局决策的 hard filter。
+
+**逐机制映射表**（单实例机制均代码核实）：
+
+| # | 单实例机制 | 类 | 全局化形态 | 待定旋钮 | 硬约束（不可变） |
+|---|---|---|---|---|---|
+| 1 | waiting FIFO + chunked prefill | A | N 条 waiting 合并全局序（`_assign_original_seq` 已是全局计数器，天然合并键） | **K3** 首段实例选择：纯全局 FIFO vs KV/负载感知跳过（跳过上限） | chunk 续 chunk 必须 pin 原实例；请求 pin 后不迁移 |
+| 2 | running 准入门（`max_num_running_reqs - len(running)`，:914-924） | C | per-instance 容量门原样保留为过滤器 | 容量配额：每实例均分 vs 全局共享上限（§3.1.1） | 边 KV 池全局共享、running 簿记 per-instance |
+| 3 | prefill 水位状态机（inflight vs limit=2，:901-909） | B | G=Σinflight 对阈值 K；或每实例水位 + 聚合判定（AND/OR/多数） | **K1** 首尾层间优先：G 定义（Σ/max）、K 取值（2..2N/动态）、聚合语义；或干脆显式固定优先 | channel 池 per-instance 2P1D（全局 inflight 物理上限=2N） |
+| 4 | 尾类型优先级 DRL>DL>PL（:855-876） | A/C 混 | 类型序全局保留（类型主序）或退化为并列 tie-break（ready 主序） | **K2** 尾类型序 vs ready 序的主次 | 尾批不可丢弃不可取消（KV 已写） |
+| 5 | 尾实例选择（单实例无此维度） | A | 新增维度：合并键 = ready ts（D-dp AND，取较晚 dp）/ age / 负载 | **K4** 尾实例选择键 | 2DP lockstep；实例内保序 |
+| 6 | DL/DRL delay 窗（10ms，:348-355） | B | per-instance 计时保留 vs 全局错峰窗 | **K5** delay 窗全局语义 | 不破坏 first_only 衔接 |
+| 7 | MTP 链不变量（`_force_draft_last`/`_force_decode_last`/占位 D首/first_only 窗/pregenerated 严格 FIFO，:935-960/832-837） | C | 全部 per-instance 保留；"哪条链先推进"成为新自由度 | **K6** 链推进：chain-aware（防链停顿）vs 纯 ready 序 | DRF->DRL 交替、占位 D首紧跟、pregenerated FIFO |
+| 8 | decode/draft 单飞门（inflight==0 才 D首，:927-936） | C | per-instance 保留（计数不跨实例合并） | 可选：全局 decode 并发上限 | decode channel 每 dp 1 条（物理单飞） |
+| 9 | 2DP winner/force 协调（`_intended_batch_type`+`_schedule_target`） | C | 仲裁输出必须是 **(instance_id, bt)** 二元组；决策单点 leader | 分发 payload 是否捎带 dp1 摘要 | follower force 对齐；count-drift 防线；LOW 预测器/挑选器不一致核实项 |
+| 10 | EMPTY/yield（`is_waiting_for_remote_tail`） | B | 全局无候选才 EMPTY；**部分实例 wait-for-tail 不阻塞其他实例**（多实例收益点所在） | 无 | 不 self-drive dummy（coord 模式定案） |
+
+**决策信息与 2DP**：全局视图需要 dp1 侧队列摘要（各实例 waiting 队首 seq、尾 ready ts、inflight 计数）--比方案 1 的"候选 bt" richer；载体：all_reduce payload 扩展固定大小摘要（N×(seq, ts, count)，N=16 时几百字节，现有 payload 可容纳）/ 共享内存 / follower 决策重放，三选一待定。
+
+**结构性风险（与优先级取值无关）**：
+1. **复用度低**：水位/优先级/扫描逻辑全部新写全局版（方案 1 可白嫖单实例代码，方案 2 不能），回归风险集中；gating（模式 C）可原样按实例复用是唯一例外；
+2. **决策信息一致性**：dp1 摘要与 dp0 本地视图漂移 -> 仲裁基于过期信息；需摘要同步协议 + 一致性校验（比方案 1 的"核实候选一致性"更重）；
+3. 全局扫描成本：O(N×队列长度)/step，N≤16 可忽略，waiting 长尾时注意；
+4. 单点状态规模：队列实体集中 leader（§3.1.1 内存分析适用，全局并发驱动，非 N 线性）；
+5. 故障域：v1 整体挂模型下全局调度器随挂（与通道故障域一致，不新增）。
+
+**待定旋钮清单（决策入口，均不预设）**：
+- **K1** 首尾层间优先（水位泛化参数 or 显式固定优先）
+- **K2** 尾类型序主次（DRL>DL>PL 全局保留 vs ready-time 统一）
+- **K3** 首段实例选择（纯全局 FIFO vs 感知跳过）
+- **K4** 尾实例选择键（ready ts / age / 负载）
+- **K5** delay 窗全局语义（per-instance 保留 vs 全局错峰）
+- **K6** MTP 链推进自由度（chain-aware vs 纯 ready 序）
+- 附加：running 容量配额（均分 vs 全局共享）、dp1 摘要载体
 
 ### 5.2 调度层计算/通信分离（核心改造）
 
