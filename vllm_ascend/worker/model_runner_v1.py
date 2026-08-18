@@ -1260,15 +1260,6 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.sampling_done_event: torch.npu.Event | None = None
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
-        # Diagnostics for detecting reuse of the async valid-count D2H
-        # source buffer.  This state is CPU-only: it records tensor address
-        # metadata and queries the existing copy-completion event without
-        # adding synchronization, device copies, or new NPU events.
-        self._count_d2h_diag_active: bool = False
-        self._count_d2h_diag_generation: int = 0
-        self._count_d2h_diag_source_range: tuple[int, int] | None = None
-        self._count_d2h_diag_batch_type: BatchType | None = None
-        self._count_d2h_diag_req_ids: tuple[str, ...] = ()
         # Request-keyed store of pending prev-sampled state for async spec
         # decode: req_id -> (next_token, valid_count, prev_num_computed,
         # num_draft).  Written by _stash_pending_prev_sampled at every
@@ -3427,73 +3418,6 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices=logits_indices,
         )
 
-    @staticmethod
-    def _count_d2h_diag_tensor_range(
-        tensor: torch.Tensor,
-    ) -> tuple[int, int] | None:
-        """Return a contiguous tensor's device byte range without syncing."""
-        if tensor.numel() == 0 or not tensor.is_contiguous():
-            return None
-        start = tensor.data_ptr()
-        return start, start + tensor.numel() * tensor.element_size()
-
-    def _clear_count_d2h_diag(self) -> None:
-        self._count_d2h_diag_active = False
-        self._count_d2h_diag_source_range = None
-        self._count_d2h_diag_batch_type = None
-        self._count_d2h_diag_req_ids = ()
-
-    def _check_count_d2h_source_reuse(
-        self,
-        tensor: torch.Tensor,
-        *,
-        current_batch_type: BatchType | None,
-        current_req_ids: tuple[str, ...],
-        operation: str,
-    ) -> None:
-        """Log only when a write overlaps an unfinished count D2H source."""
-        if (
-            not self._count_d2h_diag_active
-            or self._count_d2h_diag_source_range is None
-            or self.valid_sampled_token_count_event is None
-        ):
-            return
-
-        current_range = self._count_d2h_diag_tensor_range(tensor)
-        if current_range is None:
-            return
-        source_start, source_end = self._count_d2h_diag_source_range
-        current_start, current_end = current_range
-        if current_start >= source_end or source_start >= current_end:
-            return
-
-        # Event.query() is non-blocking.  If the backend cannot query this
-        # event, leave inference untouched and emit no diagnostic verdict.
-        try:
-            d2h_done = self.valid_sampled_token_count_event.query()
-        except (AttributeError, RuntimeError):
-            return
-        if d2h_done:
-            self._clear_count_d2h_diag()
-            return
-
-        logger.error(
-            "[EC-DIAG][COUNT-D2H-OVERWRITE] operation=%s generation=%d "
-            "producer_batch=%s producer_reqs=%s current_batch=%s "
-            "current_reqs=%s source_range=[%#x,%#x) "
-            "write_range=[%#x,%#x) event_done=False",
-            operation,
-            self._count_d2h_diag_generation,
-            self._count_d2h_diag_batch_type,
-            self._count_d2h_diag_req_ids,
-            current_batch_type,
-            current_req_ids,
-            source_start,
-            source_end,
-            current_start,
-            current_end,
-        )
-
     def _correct_optimistic_seq_lens_cpu(self, num_reqs: int) -> None:
         """Correct ``optimistic_seq_lens_cpu`` for async spec-decode drift.
 
@@ -3514,7 +3438,6 @@ class NPUModelRunner(GPUModelRunner):
         assert self.valid_sampled_token_count_event is not None
         assert self.valid_sampled_token_count_cpu is not None
         self.valid_sampled_token_count_event.synchronize()
-        self._clear_count_d2h_diag()
         correct_optimistic_seq_lens_cpu(
             self.optimistic_seq_lens_cpu.numpy(),
             self.prev_positions.np,
@@ -3524,29 +3447,10 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def _copy_valid_sampled_token_count(
-        self,
-        next_token_ids: torch.Tensor,
-        valid_sampled_tokens_count: torch.Tensor,
-        scheduler_output: "SchedulerOutput | None" = None,
+        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
     ) -> None:
         if self.valid_sampled_token_count_event is None:
             return
-
-        batch_type = (
-            scheduler_output.batch_type
-            if scheduler_output is not None
-            else None
-        )
-        req_ids = tuple(self.input_batch.req_ids)
-        # A graph-backed output may reuse the same device storage before the
-        # previous side-stream D2H has completed.  Detect that overlap before
-        # replacing the diagnostic record with this copy's generation.
-        self._check_count_d2h_source_reuse(
-            valid_sampled_tokens_count,
-            current_batch_type=batch_type,
-            current_req_ids=req_ids,
-            operation="next_d2h_source",
-        )
 
         # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
@@ -3558,16 +3462,6 @@ class NPUModelRunner(GPUModelRunner):
             assert counts_cpu is not None
             counts_cpu[: counts.shape[0]].copy_(counts, non_blocking=True)
             self.valid_sampled_token_count_event.record()
-
-        self._count_d2h_diag_generation += 1
-        self._count_d2h_diag_source_range = (
-            self._count_d2h_diag_tensor_range(counts)
-        )
-        self._count_d2h_diag_batch_type = batch_type
-        self._count_d2h_diag_req_ids = req_ids
-        self._count_d2h_diag_active = (
-            self._count_d2h_diag_source_range is not None
-        )
 
         if self.use_async_spec_decode:
             # Stash for GPU-side correction in _prepare_inputs.
@@ -3688,17 +3582,6 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.valid_sampled_token_count_gpu = count_gpu
 
-        # count_gpu can be the same graph-backed tensor currently serving as
-        # the source of the side-stream D2H.  Query the existing event before
-        # scheduling the in-place reseed writes; do not synchronize either
-        # stream or read any device value for this diagnostic.
-        self._check_count_d2h_source_reuse(
-            count_gpu,
-            current_batch_type=scheduler_output.batch_type,
-            current_req_ids=tuple(req_ids[:num_reqs]),
-            operation="reseed",
-        )
-
         for i, req_id, (token, valid_count, prev_computed, num_draft) in matches:
             prev_buf[i].copy_(token)
             count_gpu[i].copy_(valid_count)
@@ -3716,10 +3599,6 @@ class NPUModelRunner(GPUModelRunner):
             self.valid_sampled_token_count_cpu is not None
             and self.valid_sampled_token_count_event is not None
         ):
-            # The tracked source has now either been safely reused or emitted
-            # the diagnostic above.  The following event describes copies
-            # from request-private clones, not from count_gpu.
-            self._clear_count_d2h_diag()
             counts_cpu = self.valid_sampled_token_count_cpu
             with torch.npu.stream(self.valid_sampled_token_count_copy_stream):
                 self.valid_sampled_token_count_copy_stream.wait_stream(
@@ -3850,11 +3729,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_discarded_requests,
                 )
             )
-            self._copy_valid_sampled_token_count(
-                next_token_ids,
-                valid_sampled_tokens_count,
-                scheduler_output,
-            )
+            self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
@@ -3886,11 +3761,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
                 )
-                self._copy_valid_sampled_token_count(
-                    next_token_ids,
-                    valid_sampled_tokens_count,
-                    scheduler_output,
-                )
+                self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
@@ -4439,9 +4310,7 @@ class NPUModelRunner(GPUModelRunner):
                 )
             )
             self._copy_valid_sampled_token_count(
-                next_token_ids,
-                valid_sampled_tokens_count,
-                scheduler_output,
+                next_token_ids, valid_sampled_tokens_count
             )
             context["next_token_ids"] = next_token_ids.clone()
         else:
