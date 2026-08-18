@@ -5473,11 +5473,29 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            _pd_timing = (
+                self._edge_cloud_enabled
+                and scheduler_output.batch_type in (
+                    BatchType.DECODE_FIRST, BatchType.DECODE_LAST
+                )
+            )
+            if _pd_timing:
+                logger.info(
+                    "[PD-TIMING] runner prep done batch_type=%s ts=%.4f",
+                    scheduler_output.batch_type,
+                    time.monotonic(),
+                )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors,
                 inputs_embeds, layer_slice_info=layer_slice_info,
                 **model_kwargs
             )
+            if _pd_timing:
+                logger.info(
+                    "[PD-TIMING] runner forward done batch_type=%s ts=%.4f",
+                    scheduler_output.batch_type,
+                    time.monotonic(),
+                )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
