@@ -681,13 +681,25 @@ class PassiveEngineCoreProc:
         watermarks the passive scheduler's readiness gating queries."""
         done_mq = getattr(self.executor, "irecv_done_mq", None)
         if done_mq is None:
+            if not getattr(self, "_irecv_done_mq_absent_logged", False):
+                self._irecv_done_mq_absent_logged = True
+                logger.info(
+                    "[early-irecv] PassiveEC drain: irecv_done_mq is None "
+                    "(reader not attached) — watermarks will never advance"
+                )
             return
         items = []
         while True:
             try:
                 items.append(done_mq.dequeue(timeout=0))
+            except TimeoutError:
+                break
             except Exception:
-                # TimeoutError (empty queue) or transient failure: stop.
+                if not getattr(self, "_irecv_done_dequeue_err_logged", False):
+                    self._irecv_done_dequeue_err_logged = True
+                    logger.exception(
+                        "[early-irecv] PassiveEC drain: dequeue failed"
+                    )
                 break
         if items:
             record_irecv_completions(items)

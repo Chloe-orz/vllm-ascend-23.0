@@ -287,12 +287,12 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 and self.workers
             ):
                 self.irecv_done_mq = self.workers[0].irecv_done_mq
-                if self.irecv_done_mq is not None:
-                    logger.info(
-                        "[early-irecv] irecv_done_mq reader attached on "
-                        "executor (is_edge_node=%s)",
-                        self.parallel_config.is_edge_node,
-                    )
+                logger.info(
+                    "[early-irecv] irecv_done_mq reader attach on executor "
+                    "(is_edge_node=%s): %s",
+                    self.parallel_config.is_edge_node,
+                    "OK" if self.irecv_done_mq is not None else "NONE",
+                )
             self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
             self._post_init_executor()
 
