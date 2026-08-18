@@ -688,7 +688,24 @@ def rejection_sample(
         global_vocab_size = draft_probs.shape[-1] if draft_probs is not None else vocab_size
 
         # Compute probability distribution from target logits
-        target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
+        # [FIX 507035] sample_recovered_tokens_kernel reads target_probs with
+        # SUB_BLOCK=4096-wide masked vocab tiles; a masked lane still touches
+        # DDR on Ascend and 248320 % 4096 != 0, so the last token row's final
+        # tile overreads up to 6KB past the tensor end (unmapped when the
+        # 116MB allocation ends at a segment boundary -- layout-dependent,
+        # which is why only the 41st request's size shift tripped it).
+        # Allocate storage with a SUB_BLOCK tail guard and view the real
+        # shape on top; the kernel's flat addressing is unchanged.
+        _TP_TAIL_GUARD = 4 * 1024
+        _tp_flat = torch.empty(
+            num_tokens * vocab_size + _TP_TAIL_GUARD,
+            dtype=torch.float32,
+            device=device,
+        )
+        target_probs = _tp_flat[: num_tokens * vocab_size].view(
+            num_tokens, vocab_size
+        )
+        target_probs.copy_(target_logits.softmax(dim=-1, dtype=torch.float32))
         assert target_probs.is_contiguous()
 
         # Generate uniform probabilities for rejection sampling
@@ -886,11 +903,18 @@ def sample_recovered_tokens(
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
 
-    q = torch.empty(
-        (batch_size, vocab_size),
+    # [FIX 507035] q is read by sample_recovered_tokens_kernel with
+    # SUB_BLOCK=4096-wide masked vocab tiles; on Ascend a masked lane still
+    # issues the DDR access, and 248320 % 4096 != 0, so the last row's final
+    # tile overreads up to SUB_BLOCK-1 elements past the tensor end.  Allocate
+    # the storage with a SUB_BLOCK tail guard and view the real shape on top.
+    _RECOVERED_TAIL_GUARD = 4 * 1024
+    q_flat = torch.empty(
+        batch_size * vocab_size + _RECOVERED_TAIL_GUARD,
         dtype=torch.float32,
         device=device,
     )
+    q = q_flat[: batch_size * vocab_size].view(batch_size, vocab_size)
     q.exponential_()
 
     num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
@@ -903,9 +927,15 @@ def sample_recovered_tokens(
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     if HAS_TRITON:
+        # [FIX 507035] The kernel reads `cu_ptr + req_idx - 1` and tl.where
+        # issues that load even for req_idx == 0, touching one element before
+        # the buffer (unmapped when the allocation is page-aligned).  Every
+        # other kernel in this file receives the pad_cu_for_kernel head-guard
+        # view; pass it here too.
+        cu_num_draft_tokens_k = pad_cu_for_kernel(cu_num_draft_tokens, batch_size)
         sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
             recovered_token_ids,
-            cu_num_draft_tokens,
+            cu_num_draft_tokens_k,
             draft_token_ids,
             draft_probs,
             target_probs,
