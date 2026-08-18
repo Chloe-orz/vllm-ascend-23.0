@@ -935,6 +935,14 @@ def _patched_step_with_batch_queue(self):
         self._drain_irecv_completions()
         scheduler_output = self.scheduler.schedule()
         self._ensure_pd_head_token(scheduler_output)
+        if scheduler_output.batch_type in (
+            BatchType.DECODE_FIRST, BatchType.DECODE_LAST
+        ):
+            vllm_logger.info(
+                "[PD-TIMING] engine scheduled %s ts=%.4f",
+                scheduler_output.batch_type.value,
+                _time.monotonic(),
+            )
 
         # [ascend insert] Merge worker cleanup stashed from EMPTY batches
         # BEFORE publishing to the cloud, so the published SO also carries
@@ -1023,6 +1031,14 @@ def _patched_step_with_batch_queue(self):
         self.log_iteration_details(scheduler_output),
     ):
         model_output = future.result()
+        if scheduler_output.batch_type in (
+            BatchType.DECODE_FIRST, BatchType.DECODE_LAST
+        ):
+            vllm_logger.info(
+                "[PD-TIMING] engine collected %s ts=%.4f",
+                scheduler_output.batch_type.value,
+                _time.monotonic(),
+            )
         if model_output is None:
             exec_model_fut.result()
             raise RuntimeError("unexpected error")

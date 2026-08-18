@@ -1220,6 +1220,11 @@ class NPUWorker(WorkerBase):
             scheduler_output, intermediate_tensors=None,
             layer_slice_info=layer_slice_info,
         )
+        logger.info(
+            "[PD-TIMING] edge head forward done batch_type=%s ts=%.4f",
+            scheduler_output.batch_type,
+            time.monotonic(),
+        )
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
         )
@@ -1312,6 +1317,11 @@ class NPUWorker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         edge_sp = enable_sp()
         """Edge tail segment (PL/DL): recv -> segment_e -> return output."""
+        logger.info(
+            "[PD-TIMING] edge tail enter batch_type=%s ts=%.4f",
+            scheduler_output.batch_type,
+            time.monotonic(),
+        )
         # The cloud->edge reply never carries mrope_positions (the c2e meta
         # is built with uses_mrope=False: only the edge computes M-RoPE and
         # pushes it to the cloud).  Pass include_mrope=False explicitly so
@@ -1367,6 +1377,12 @@ class NPUWorker(WorkerBase):
         is_first_slice = (
             layer_slice_info is None or layer_slice_info.is_first_slice
         )
+        if is_first_slice:
+            logger.info(
+                "[PD-TIMING] cloud middle enter batch_type=%s ts=%.4f",
+                scheduler_output.batch_type,
+                time.monotonic(),
+            )
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         # Always run _update_states for the first slice (or unsliced batch),
         # even when total_num_scheduled_tokens==0.  Some requests may not
