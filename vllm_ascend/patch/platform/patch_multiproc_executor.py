@@ -277,16 +277,26 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 response_mq.wait_until_ready()
             # [early-irecv] Attach the reverse completion-report MQ reader
             # (worker comm thread -> engine core).  Only the PP-first
-            # worker (local_rank 0 == workers[0]) creates/reports.  No
-            # wait_until_ready here: same startup-ordering constraint as
-            # the hint MQs above, and the writer only starts reporting
+            # worker (local_rank 0) creates/reports.  NOTE: self.workers is
+            # indexed by global_rank % local_world_size, so workers[0] is
+            # NOT necessarily local_rank 0 when edge_npu_count is not a
+            # multiple of the cloud world size — pick the holder instead.
+            # No wait_until_ready here: same startup-ordering constraint
+            # as the hint MQs above, and the writer only starts reporting
             # after init_device, long after this point.
             if (
                 self.parallel_config.enable_edge_cloud
                 and _pd_on
                 and self.workers
             ):
-                self.irecv_done_mq = self.workers[0].irecv_done_mq
+                self.irecv_done_mq = next(
+                    (
+                        w.irecv_done_mq
+                        for w in self.workers
+                        if w.irecv_done_mq is not None
+                    ),
+                    None,
+                )
                 logger.info(
                     "[early-irecv] irecv_done_mq reader attach on executor "
                     "(is_edge_node=%s): %s",
