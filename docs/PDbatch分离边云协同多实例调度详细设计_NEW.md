@@ -790,7 +790,7 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 | ZMQ ROUTER per-identity out 队列 | 是（N identity/dp） | 有界 1000 条/identity，占用随**在飞**不随 N 配置：在飞 ≤ prefill_inflight(2)+少量 decode -> 实际 MB 级；极端满队 10-100MB/identity 仅作背压告警上限（§3.7.2） |
 | InstanceLoadStats + 全局合并视图（leader） | 是 | O(N) 小结构，<100KB |
 | ready bitmap（all_reduce payload 捎带） | 是 | N bit，可忽略 |
-| HCCL channel 池（数据通道标签） | 是：N×D×3（2P1D/dp，:89-90） | 96 个 channel；**每通信域 Device 显存 = 2×P2P_HCCL_BUFFSIZE（默认 40MB）**，且本仓建组默认带 200MB/域 hccl_buffer_size 口径（utils.py `_DEFAULT_BUFFER_SIZE`，是否叠加待实测）-> 边卡持有域数：shared-model N×3D=96 -> 仅 P2P 缓冲即 **3.84GB**；per-rank N×3=48 -> **1.92GB/卡**；云卡仅本实例 3 域 ~120MB。缓解：per-group 调小 `hccl_buffer_size`（代码通道现成）+ 下调 `P2P_HCCL_BUFFSIZE`（详见 §4.5.1） |
+| HCCL channel 池（数据通道标签） | 是：N×D×3（2P1D/dp，:89-90） | 96 个 channel；**每通信域 Device 显存 = 2×P2P_HCCL_BUFFSIZE（默认 40MB）**（已源码核实，见 §4.5.1「源码核实」）。边卡持有域数：shared-model N×3D=96 -> **3.84GB**；per-rank N×3=48 -> **1.92GB/卡**；云卡仅本实例 3 域 ~120MB。**勿设 P2P_HCCL_BUFFSIZE=0**（会使 send/recv 落回组域按 2×200MB/域分配）；显存紧张时下调 P2P_HCCL_BUFFSIZE 或 per-group 调小 hccl_buffer_size（详见 §4.5.1） |
 | rpc_broadcast_mq / coord group / TCPStore / gloo 组 | **否**（方案一大组 MQ、单 store、§2.2 已定零扩展） | 0 |
 | 边 KV 池 | **否**（边 worker 共享池，按请求分配，不按实例切分；云 KV 在各实例 worker 内，云总量固定 32 卡） | 0 |
 | 云侧 PassiveEC / 云 scheduler | 天然 per-instance（本设计既定形态） | 不属于边 EngineCore 扩展项 |
@@ -1091,7 +1091,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - instance 维度由 worker 侧实现：读 SchedulerOutput.instance_id 选 pp_group，在该 pp_group 上 isend(channel=hidden_channel, dst=peer)，tag 在 pp_group 内解析
 - `HiddenChannelType.init` 池大小**无 N 因子**（tag per-instance 复用，池只需覆盖 per-instance dp_size D）
 - 待实现期核实：若有全局 dict 以 HiddenChannelType 为 key 存 handle（跨 instance 撞 key）需改 key 为 (instance_id, channel_type)，目前看 tag 只是 isend 参数无全局注册表大概率零改
-- 资源修正（2026-08，指向 §3.1.1/§4.5.1）：per-rank 模式共 N×D×3 个 2-rank HCCL 子组；**每通信域占 Device 显存 2×P2P_HCCL_BUFFSIZE（默认 2×20MB）**，且本仓建组（patch_distributed.py:389 `create_hccl_pg_options`）对 pp_prefill*/pp_decode* 落 `get_default_buffer_config()` = 200MB/域口径（是否与 P2P 缓冲叠加、建域即分配还是首次通信分配，**待实测**）。边卡持有域 shared-model N×3D=96（仅 P2P 缓冲 3.84GB）、per-rank N×3=48（1.92GB/卡）-> **GB 级、随 N 线性、边卡独占，N=16 时边侧显存第一约束**。缓解：①`create_hccl_pg_options` 已支持按组名配 `hccl_buffer_size`（dp 组先例 `calculate_dp_buffer_size`），给通道组加小值（8-16）配置，一行级改动；②环境变量 `P2P_HCCL_BUFFSIZE` 下调（大张量流式分块，20MB->4~8MB 只减流水深度）
+- 资源修正（2026-08，指向 §3.1.1/§4.5.1）：per-rank 模式共 N×D×3 个 2-rank HCCL 子组；**每通信域占 Device 显存 2×P2P_HCCL_BUFFSIZE（默认 2×20MB）**。建组虽带 200MB/域 hccl_buffer_size 口径（patch_distributed.py:389 -> utils.py `_DEFAULT_BUFFER_SIZE`），但**已源码核实不叠加**（send/recv 走独立 P2P 域且其 bufferSize 被覆盖为 P2P 口径；组域 200MB 惰性分配、隐藏通道组只跑 P2P 永不触发，详见 §4.5.1「源码核实」）。边卡持有域 shared-model N×3D=96（3.84GB）、per-rank N×3=48（1.92GB/卡）-> **GB 级、随 N 线性、边卡独占，N=16 时边侧显存第一约束**。缓解：①环境变量 `P2P_HCCL_BUFFSIZE` 下调（大张量流式分块，20MB->4~8MB 只减流水深度，**不能设 0**--会使 send/recv 落回组域按 2×200MB/域分配）；②`create_hccl_pg_options` 已支持按组名配 `hccl_buffer_size`（dp 组先例 `calculate_dp_buffer_size`），给通道组加小值（8-16）配置作为 P2P_HCCL_BUFFSIZE=0 场景的兜底，一行级改动
 
 ### 4.5 边↔云 HCCL isend/irecv
 
@@ -1106,7 +1106,17 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 
 | 项 | 规模 | 随 N |
 |---|---|---|
-| 固定开销：HCCL 通信域缓冲（**Device 显存**） | **每通信域 2×P2P_HCCL_BUFFSIZE（默认 40MB）**，P2P send/recv 的 SDMA/RDMA staging 双缓冲；另有本仓建组默认 200MB/域 hccl_buffer_size 口径（待实测是否叠加）。边卡持有域：shared-model N×3D=96 -> **3.84GB**；per-rank N×3=48 -> **1.92GB/卡**；云卡本实例 3 域 ~120MB。缓解=per-group 调小 hccl_buffer_size + 下调 P2P_HCCL_BUFFSIZE（§4.4） | **×N 线性，边卡独占，第一约束** |
+| 固定开销：HCCL 通信域缓冲（**Device 显存**） | **每通信域 2×P2P_HCCL_BUFFSIZE（默认 40MB）**，P2P send/recv 的 SDMA/RDMA staging 双缓冲（in+out CCL）；与建组 200MB 口径**不叠加**（源码核实，见下）。边卡持有域：shared-model N×3D=96 -> **3.84GB**；per-rank N×3=48 -> **1.92GB/卡**；云卡本实例 3 域 ~120MB。缓解=下调 P2P_HCCL_BUFFSIZE / per-group 调小 hccl_buffer_size；**勿设 P2P_HCCL_BUFFSIZE=0** | **×N 线性，边卡独占，第一约束** |
+
+**源码核实（2026-08，C:\cann torch_npu + hcomm）--200MB 与 2×20MB 不叠加，且分配为惰性**：
+
+1. **是显存、2×B 结构**：`CCLBufferManager::CreateCommCCLbuffer`（hcomm ccl_buffer_manager.cc:50-90）分配 inCCL+outCCL+扩展 = 2×B+小项，`DeviceMem::alloc` = Device 显存
+2. **P2P send 分块流过 inCCL**：`CollSendExecutor::RunLoop`（coll_send_executor.cc:130-170）每轮 `D2DMemcpyAsync(用户张量->cclInputMem)` 再发出，块大小 = inCCL 容量
+3. **send/recv 走专用 P2P 域，pg_options 200 进不去**：torch_npu ProcessGroupHCCL.cpp:2826-2835，isend/irecv 在 `HcclCommInitRootInfoConfig 存在 && P2P_HCCL_BUFFSIZE≠0 && 非 coalescing` 时建独立 2-rank P2P 域，其 `hcclBufferSize` **被硬性覆盖**为 P2P_HCCL_BUFFSIZE（默认 20，OptionsManager.cpp:492-505）
+4. **组域 200MB 惰性分配且隐藏通道组永不触发**：CCL 缓冲只在集合算子执行时创建（ReduceScatter/AllReduce 等算子内，hccl_communicator_host.cc:3757）；隐藏通道组只跑 isend/irecv -> 其 2×200MB **永不分配**。G0/TP/EP 等真跑集合的域按各自口径惰性分配
+5. **新风险（替代「叠加」风险）**：若部署设 `P2P_HCCL_BUFFSIZE=0`，专用 P2P 域不启用，send/recv 落回组域 -> 隐藏通道组自出 CCL 缓冲 = **2×200MB/域**（96 域 = 76.8GB，不可行）-> **该环境变量绝对不能设 0**；兜底=通道组 per-group 调小 hccl_buffer_size
+6. **同名域共享缓冲**：ShareCCLbufferMgr 按 (设备, bufferName) refcount 共享一块 CCL 缓冲（bufferName 为内部字段，公开 API 未暴露，默认空=不共享）
+7. 遗留实测项：各域真实占用以 NPU 整体口径验证（40MB/域）；G0/TP/EP 集合域缓冲量；下调 P2P_HCCL_BUFFSIZE 对 isend/irecv 吞吐影响
 | **边侧在途张量（主要项）** | isend 直接发激活张量本体（无池化拷贝，record_stream 保活至 send 完成）；每 (instance,dp) `prefill_inflight_limit=2` -> 边聚合在途 ≤ **2×N×D 份 chunk hidden 张量**，每份 ≈ chunk_tokens×hidden×dtype 字节 | **×N 线性** |
 | 云侧 recv 缓冲 | irecv 按对端 metadata 逐张量 `torch.empty` 新分配；每台云机只承载本实例在途（≤2×D 份） | 不 ×N |
 | metadata（pickle，gloo cpu 组）/ZMQ/MQ | CPU 内存，非显存 | - |
@@ -1155,7 +1165,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - 两项均随 N 线性但斜率不同：域缓冲每实例 +120MB、在途每实例 +42MB（默认值下域缓冲恒为在途 ~2.8 倍，占比固定 74%）
 - **控制旋钮不同**：压域缓冲走 `hccl_buffer_size`/`P2P_HCCL_BUFFSIZE`（40MB/域 -> 2×4MB/域 时 N16 域缓冲降至 ~384MB、合计 ~1.1GB）；压在途走调度水位 K（K=8 时 N16 在途 = 8×21≈168MB）
 - 两块独立相加、互不抵扣；域缓冲不在 torch allocator 统计内（见上）
-- **风险敞口**：若建组默认 200MB/域口径与 40MB 叠加生效，N16 域缓冲 = 48×240MB ≈ **11.3GB**（不可行）->「per-group 调小 hccl_buffer_size」是 N=16 的**前置必改项**而非优化项
+- **风险敞口（已源码核实改写）**：默认配置下 200MB 组域口径与 40MB P2P 域**不叠加**（P2P 域独立、组域惰性且永不触发，§4.5.1「源码核实」）；真正的敞口是**部署设 `P2P_HCCL_BUFFSIZE=0`** -> send/recv 落回组域按 2×200MB/域分配，N16 = 48×400MB ≈ 19.2GB（不可行）-> 该环境变量**绝对不能设 0**，per-group 调小 hccl_buffer_size 作兜底
 - 云卡恒为 ~162MB 与 N 无关，多实例数据通道显存压力全部集中在边卡
 
 ---
