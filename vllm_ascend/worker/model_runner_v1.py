@@ -1260,6 +1260,10 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.sampling_done_event: torch.npu.Event | None = None
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
+        # [尝试修复] 为 pending sampled-token 的恢复单独保留一块 NPU
+        # count 缓冲区。它不能与 sampler 刚产出的 count Tensor 共用，
+        # 因为后者可能仍在被独立 copy stream 异步读取。
+        self._reseed_valid_sampled_token_count_gpu: torch.Tensor | None = None
         # Request-keyed store of pending prev-sampled state for async spec
         # decode: req_id -> (next_token, valid_count, prev_num_computed,
         # num_draft).  Written by _stash_pending_prev_sampled at every
@@ -3573,23 +3577,26 @@ class NPUModelRunner(GPUModelRunner):
             )
             self.input_batch.prev_sampled_token_ids = prev_buf
 
-        # 诊断并规避多请求 PD 穿插下的跨流读写竞争：上一轮会在独立
-        # copy stream 上异步读取 valid_sampled_token_count_gpu，当前轮则
-        # 可能复用并改写同一块 NPU 缓冲区。写入前等待 D2H 事件完成，
-        # 防止 CPU 读到被下一批请求部分覆盖的 accepted-token 数量。
-        # 若该同步能消除偶发精度异常，最终方案应改为独立/双缓冲，避免
-        # 在 decode 热路径长期保留同步开销。
-        if self.valid_sampled_token_count_event is not None:
-            self.valid_sampled_token_count_event.synchronize()
-
-        count_gpu = self.valid_sampled_token_count_gpu
-        if count_gpu is None or count_gpu.shape[0] < num_reqs:
-            count_gpu = torch.zeros(
+        # [尝试修复] 上一轮的 sampler count Tensor 可能仍由独立 copy
+        # stream 执行 D2H。恢复 pending 状态时不再复用、覆盖那块 Tensor，
+        # 而是写入专用缓冲区，再交给本轮 correction kernel 使用。这样
+        # 从内存上隔离“上一轮异步读”和“当前轮写”，无需在 decode 热
+        # 路径增加 event.synchronize()，也不会因同步改变调度时序。
+        pending_count = matches[0][2][1]
+        count_gpu = self._reseed_valid_sampled_token_count_gpu
+        if (
+            count_gpu is None
+            or count_gpu.shape[0] < self.max_num_reqs
+            or count_gpu.dtype != pending_count.dtype
+            or count_gpu.device != pending_count.device
+        ):
+            count_gpu = torch.empty(
                 self.max_num_reqs,
-                dtype=matches[0][2][1].dtype,
-                device=self.device,
+                dtype=pending_count.dtype,
+                device=pending_count.device,
             )
-            self.valid_sampled_token_count_gpu = count_gpu
+            self._reseed_valid_sampled_token_count_gpu = count_gpu
+        self.valid_sampled_token_count_gpu = count_gpu
 
         for i, req_id, (token, valid_count, prev_computed, num_draft) in matches:
             prev_buf[i].copy_(token)
