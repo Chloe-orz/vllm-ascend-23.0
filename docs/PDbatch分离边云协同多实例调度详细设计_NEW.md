@@ -1092,6 +1092,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - `HiddenChannelType.init` 池大小**无 N 因子**（tag per-instance 复用，池只需覆盖 per-instance dp_size D）
 - 待实现期核实：若有全局 dict 以 HiddenChannelType 为 key 存 handle（跨 instance 撞 key）需改 key 为 (instance_id, channel_type)，目前看 tag 只是 isend 参数无全局注册表大概率零改
 - 资源修正（2026-08，指向 §3.1.1/§4.5.1）：per-rank 模式共 N×D×3 个 2-rank HCCL 子组；**每通信域占 Device 显存 2×P2P_HCCL_BUFFSIZE（默认 2×20MB）**。建组虽带 200MB/域 hccl_buffer_size 口径（patch_distributed.py:389 -> utils.py `_DEFAULT_BUFFER_SIZE`），但**已源码核实不叠加**（send/recv 走独立 P2P 域且其 bufferSize 被覆盖为 P2P 口径；组域 200MB 惰性分配、隐藏通道组只跑 P2P 永不触发，详见 §4.5.1「源码核实」）。边卡持有域 shared-model N×3D=96（3.84GB）、per-rank N×3=48（1.92GB/卡）-> **GB 级、随 N 线性、边卡独占，N=16 时边侧显存第一约束**。缓解：①环境变量 `P2P_HCCL_BUFFSIZE` 下调（大张量流式分块，20MB->4~8MB 只减流水深度，**不能设 0**--会使 send/recv 落回组域按 2×200MB/域分配）；②`create_hccl_pg_options` 已支持按组名配 `hccl_buffer_size`（dp 组先例 `calculate_dp_buffer_size`），给通道组加小值（8-16）配置作为 P2P_HCCL_BUFFSIZE=0 场景的兜底，一行级改动
+- 通信/计算分离机制核对（2026-08）：per-(channel,direction) 专用流（parallel_state.py:76-103）、send 等计算流/recv 缓冲在通道流分配、异步 handle + wait_for_comm 后处理、零拷贝 + record_stream、COMM_RECV fence 释放，**全部零改**（通道按实例复制后 key 天然 per-instance）。随 N 变化仅规模：边卡专用流数 = 通道数×2（shared-model N16/D2 = 192 流；per-rank 96 流/卡，NPU 流上限量级安全、具体值待核实）；边侧计算跨实例时间复用 + 2×N×D 份在途全靠该分离机制重叠，价值随 N 放大
 
 ### 4.5 边↔云 HCCL isend/irecv
 
@@ -1537,6 +1538,80 @@ round k+2 ...
 
 TAIL 等 hidden 期间 worker 继续 dispatch 其他 round/实例；tail 下发由 **scheduler 在 recv done 后驱动**，而非 worker poll。
 
+#### 5.2.4a 边 TAIL 通信/计算分离架构图（2026-08）
+
+```
+══════════════════════ 边 EngineCore 进程（CPU）═══════════════════════
+
+┌─────────────────────────────────────────────────────────────────────┐
+│ EngineCore 主循环                                                     │
+│                                                                      │
+│  ┌───────────────────────────┐      ┌─────────────────────────────┐ │
+│  │ PDSeparatedScheduler       │      │ recv_done drain（新增）      │ │
+│  │ × N×D（per instance,dp）   │      │ 每轮非阻塞 drain             │ │
+│  │                            │      │ recv_done_mq -> 标记        │ │
+│  │ schedule():                │◄─────│ COMPUTE(tail) ready         │ │
+│  │  COMPUTE(head)             │      │ + 填尾 ready deque          │ │
+│  │  COMM_RECV(c2e)            │      │  （3 类，带 ready 时间戳，   │ │
+│  │  COMPUTE(tail)             │      │   喂 §5.1 实例间调度）       │ │
+│  │   depends_on={COMM_RECV}   │      └─────────────────────────────┘ │
+│  └────────┬──────────────────┘                    ▲                  │
+│           │ 下发决策                                │                  │
+│           ▼                                        │                  │
+│  ┌────────────────────────────────────┐            │                  │
+│  │ 任务下发（现有引擎通道）             │            │                  │
+│  │ + 2DP lockstep 门控                 │            │                  │
+│  │   （coord all_reduce，G1 gloo）     │            │                  │
+│  └────────┬───────────────────────────┘            │                  │
+└───────────┼────────────────────────────────────────┼──────────────────┘
+            │ ① 现有·下发通道                          │ ⑥ 新增·上送通道
+            │   rpc_broadcast_mq 广播平面              │   recv_done_mq（sideband，
+            │   （本地 shm 平面；execute_model/        │   仿 cloud_recv_hint_mq 先例；
+            │     WorkerTask+SO 随批下发）             │   不复用 response_mq，避免与
+            ▼                                          │   model output future 冲突）
+══════════════════════ 边 Worker 进程（NPU 卡）═════════╪════════════════
+┌───────────┴──────────────────────────────────────────┴─────────────────┐
+│                                                                          │
+│  主循环线程（worker_busy_loop，现有）                                     │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │ ② MQ poll -> dispatch COMPUTE(head):                              │ │
+│  │     head forward（计算流）+ isend（通道 SEND 流）─── 数据面 ──► 云   │ │
+│  │ ③ dispatch COMM_RECV: execute_comm_recv（新增拆细 RPC）            │ │
+│  │     post irecv（RECV 流）+ handle.wait()（设备侧 fence，            │ │
+│  │     CPU 不阻塞）+ record NPU event -> 立即回执「已 post」          │ │
+│  │     （round barrier 放宽：只 post recv，不等 tail drain）          │ │
+│  │ ⑦ （recv done 后）dispatch COMPUTE(tail):                          │ │
+│  │     tail forward（fence 已 ready 不阻塞）+ sampler（D2H）          │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
+│                                                                          │
+│  新增·完成线程 × N×D（per (instance,dp)）     ┌──── 云实例 i ─────────┐ │
+│  ┌────────────────────────────────────────┐  │ worker isend 已发起   │ │
+│  │ ④ 监控本 (instance,dp) 的 recv NPU     │◄─┼─ HCCL 数据通道        │ │
+│  │    event：query()/synchronize()        │  │（隐藏通道，RECV 流）   │ │
+│  │ ⑤ recv 完成 -> 写 recv_done_mq ────────┼─►└───────────────────────┘ │
+│  │    + 触发 channel 释放                 │        ▲                   │
+│  │    （release_prefill 信用回路）         │  ①' isend 随 head forward  │
+│  └────────────────────────────────────────┘                           │
+└────────────────────────────────────────────────────────────────────────┘
+
+  现有·回包通道（对照，不承载 recv ready）：
+     worker ─ response_mq ──► EngineCore（model output future / RPC 回执）
+
+时序（跨 round 重叠）：
+  round k    实例i head -> isend -> COMM_RECV post ──► 完成线程开始监控
+             worker 不等，继续 ──►
+  round k+1  实例j head（边计算槽被填满）          完成线程: recv done ──⑥──► EC
+  （EC 内）   drain ready -> 调度器感知 -> 2DP lockstep 门控 -> ⑦ 下发 tail
+```
+
+要点：
+
+1. **两条通道分工明确**：下发走**现有** rpc_broadcast_mq 广播平面（SO/WorkerTask 随批，零新增下发通道）；上送走**新增** recv_done_mq sideband（不复用 response_mq，避免与 batch_queue 的 model output future 冲突，仿 `cloud_recv_hint_mq` 先例）
+2. **worker 新增两类执行单元**：主循环只做「post + 立即返回」（②③ 非阻塞）；**per-(instance,dp) 完成线程**专职监控 NPU event（④⑤），是「通信与计算分离」的线程级落点--主循环的计算/发送与 recv 等待在不同线程
+3. **scheduler 感知后的处理链**：drain ready（带时间戳）-> 尾 ready deque -> §5.1 实例间调度（DRL 全局最高 / ready-first / arrival-FIFO）-> 2DP lockstep 门控（coord all_reduce）-> 经现有下发通道发 `COMPUTE(tail)`（⑦）
+4. **channel 释放绑定在完成线程**（⑤）：recv 完成即释放该实例 prefill channel，信用回路短一个 RTT（§4.4）
+5. 云侧只有数据面参与（isend），POST_OUT ack 走 ZMQ 不在本图
+
 #### 5.2.5 2DP lockstep / 乱序 / 保序
 
 | 约束 | 机制 |
@@ -1544,6 +1619,50 @@ TAIL 等 hidden 期间 worker 继续 dispatch 其他 round/实例；tail 下发�
 | **实例内不乱序** | scheduler 的 per-(instance,dp) 就绪队列队首未就绪不跳队（保 token 序 + 云 bt 配对） |
 | **实例间乱序** | 不同 instance 的「recv done」独立回传，先 done 先下发 tail（EP all-toall per-instance 不跨 N） |
 | **2DP lockstep** | 2DP 都「recv done」才下发 `COMPUTE(tail)` batched（coord all_reduce 保证；batched 2DP 一起 forward + EP all-toall 配对，tail 逻辑零改） |
+
+#### 5.2.6 通信/计算分离 + DP 并行组合风险清单（2026-08）
+
+分离机制与 DP 并行各自的对策已分列上文；**组合叠加**的风险点如下（★ = 上文已有对策；☆ = 本节新识别，落地时须补）：
+
+**A. 时序正确性**
+
+| # | 风险 | 说明与对策 |
+|---|---|---|
+| A1 ☆ | 跨流张量生命周期的 DP 交叠 | recv 缓冲「分配流 = 首用流」不变式须在**每条通道流**上成立；多实例下 N×D 条通道流并发共用 allocator 池，任何一处 `torch.empty` 落回默认流（改代码时易犯）即可能让回收块携带其它实例通道的残留 DMA 写--不变式型风险，需 code review 检查点而非单点验证 |
+| A2 ★/☆ | fence 漏通知 | event 复用/查询语义边界会使 TAIL 停摆；已有 poll 驱动，**须补超时兜底 + 告警** |
+
+**B. 死锁/活性**
+
+| # | 风险 | 说明与对策 |
+|---|---|---|
+| B1 ★ | 通道会合错配 | warmup 防初始化期；运行期靠 channel 独占维持。多实例 channel per-instance 复制使约束局部化（风险降），但 2DP 配对侧（云 dp0/dp1 EP all-toall 紧耦合）任一侧挂起仍锁死该实例 |
+| B2 ☆ | **2DP lockstep × 慢实例放大（最高优先）** | TAIL 需两 dp fence 都 ready（D-dp AND）+ EP all-toall 紧耦合 = 三重同步点。最坏链：dp1 云返回慢 -> dp1 fence 未 ready -> dp0 已 ready 的 TAIL 等待 -> channel 不释放 -> 该实例 PF 停发。**多实例前提**：TAIL 等待不得占边侧计算槽（§5.2 事件驱动设计的关键不变量），否则跨实例传染、多实例收益归零--落地时必须验证等待路径不阻塞其它实例的 HEAD 计算 |
+| B3 ☆ | fence 依赖云侧 isend 已发起 | 云实例 hang（慢而不死）时 fence 永不 ready、channel 永不释放；需 per-instance 超时/心跳标记不健康并跳过其 ready 队列（调度层降级排除，故障域整体仍随 v1） |
+
+**C. 性能**
+
+| # | 风险 | 说明与对策 |
+|---|---|---|
+| C1 ☆ | fence 轮询 CPU 开销 × N×D | N16/D2 = 32 个 (instance,dp) fence 位 × 3 类尾队列，每 poll 查询次数随 N 线性；GIL 与 ZMQ ROUTER 线程、sample_tokens 等待交织，poll 间隔成为 TAIL 延迟下限。对策：event 聚合批量查询（per-instance 位图）或 ms 级自适应间隔 |
+| C2 ☆ | 边卡 SDMA/网口带宽竞争 | 分离使通信与计算重叠，但 N×D×3 通道流共享同一份带宽；D2D staging（42MB chunk 分块过 20MB inCCL）使搬运量加倍（用户张量->inCCL->线路）。带宽饱和时重叠退化为排队，fence ready 时间戳漂移，ready-first 调度退化为随机--需实测 N16 边卡出口带宽余量 |
+| C3 ★ | 2DP 协调固定成本 | coord all_reduce 每 step 一次；决策空间 ×N 后 payload 变大（N-bit ready bitmap），量级小但固定 |
+
+**D. DP 调度语义一致性**
+
+| # | 风险 | 说明与对策 |
+|---|---|---|
+| D1 ★ | dp1 摘要漂移 | leader 聚合依赖 dp1 捎带的 ready bitmap/队列摘要，异步漂移致决策与 dp1 实际状态不一致（§5.1.3 已列） |
+| D2 ☆ | **到达序 FIFO × per-dp 队列队头阻塞** | 原始请求按全局 original_seq 谁先来，但请求已由前端按 DP 负载 pin 进 dp0/dp1 各自 waiting 队列（内层 DP 分发零改）。两 dp 队列不均时，全局最早请求可能卡在长队列侧而短队列侧在跑后到请求--「谁先来」在 DP 维被破坏。对策：§5.1.1 S0 的 waiting 合并索引**必须覆盖 per-dp 队列**（跨 dp 指针合并），或前端分发做序保持 |
+| D3 ☆ | LOW 预测器/挑选器不一致 × DP 协调 | 基线 `_intended_batch_type` 与 `_pick_by_state` LOW 分支不一致（§5.1.1 已核实项）；2DP 下 winner bt 需 all_reduce 对齐，两侧预测器不一致会增多 dummy batch/协调抖动，多实例每实例独立判 prefill_state 进一步放大--复用 winner 机制前必须先修或核实 |
+
+**E. 资源**
+
+| # | 风险 | 说明与对策 |
+|---|---|---|
+| E1 ★ | 边卡流数 192 + event 数 ×N×D | 上限待核实；显存（域缓冲+在途）已量化（§4.5.1） |
+| E2 ☆ | allocator 池碎片 | 42MB chunk + 各尺寸 decode 张量在 32 条通道流上并发分配/回收，跨流复用易碎片化，池水位高于理论峰值--实测按 NPU 整体口径，必要时设池上限 |
+
+**优先级**：落地前必须处理 **B2**（TAIL 等待不占计算槽，否则多实例收益归零）、**B3**（per-instance 超时降级）、**D2**（DP 维 FIFO 破坏，直接影响定案语义）、**D3**（预测器不一致）；**C1/C2** 决定 N16 实际收益上限，需实测标定。
 
 ### 5.3 调度层计算/通信分离对 2DP 的协调分析（关键）
 
