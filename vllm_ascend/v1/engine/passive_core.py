@@ -55,6 +55,13 @@ from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+# Decoupled data-plane irecv coordination (implemented by the channel
+# layer owners).  Same interface contract as documented in
+# ``vllm_ascend.patch.platform.patch_engine_core``: post_irecv_hint(hint)
+# pre-posts an irecv on the local worker, is_irecv_complete(key) queries
+# the completion flag from this process.
+from vllm_ascend.distributed.edge_cloud_irecv import post_irecv_hint
+
 logger = init_logger(__name__)
 
 
@@ -580,6 +587,89 @@ class PassiveEngineCoreProc:
                 # )
                 self._maybe_publish_post_out(scheduler_output)
 
+    def _num_scheduled_spec_tokens(self) -> int:
+        """num_spec_tokens when scheduled edge-cloud draft is active.
+
+        Mirrors the edge-side ``_uses_scheduled_edge_cloud_draft`` method
+        gating: only the scheduled-draft methods (eagle3 / mtp-family on
+        qwen) produce a draft chain after every PF/DF batch, hence only
+        they need the n pre-posted draft irecvs.
+        """
+        spec = getattr(self.vllm_config, "speculative_config", None)
+        if spec is None:
+            return 0
+        method = getattr(spec, "method", None)
+        if method == "eagle3" or method in ("qwen3_5_mtp", "qwen_mtp"):
+            pass
+        elif method == "mtp":
+            hf_config = getattr(
+                self.vllm_config.model_config, "hf_config", None
+            )
+            if "qwen" not in str(
+                getattr(hf_config, "model_type", "")
+            ).lower():
+                return 0
+        else:
+            return 0
+        return int(getattr(spec, "num_speculative_tokens", 0) or 0)
+
+    def _post_irecv_hints_for_arrivals(self, arrivals) -> None:
+        """Pre-post cloud-side irecvs the moment an edge SO arrives.
+
+        For every PREFILL_FIRST / DECODE_FIRST the cloud will receive
+        (edge -> cloud):
+          1. this batch's head payload (key = head_token), and
+          2. one DRAFT_FIRST head payload per speculative step of the
+             draft chain that follows the batch
+             (key = "<head_token>:<step_idx>" — the chain's
+             draft_task_id IS the parent batch's head_token).
+
+        Posting at arrival (instead of dispatch, as CHER did) maximizes
+        the compute/transfer overlap and lets the passive scheduler gate
+        PF dispatch on irecv completion instead of letting the worker
+        block on recv.
+        """
+        for _seq, so in arrivals:
+            bt = so.batch_type
+            if bt not in (
+                BatchType.PREFILL_FIRST,
+                BatchType.DECODE_FIRST,
+            ):
+                continue
+            head_token = getattr(so, "head_token", None)
+            if not head_token:
+                continue
+            task_kind = (
+                "prefill" if bt == BatchType.PREFILL_FIRST else "decode"
+            )
+            total_tokens = so.total_num_scheduled_tokens
+            # Head payloads carry mrope when the edge stamped the SO
+            # (mirrors the CHER hint fields).
+            post_irecv_hint({
+                "key": head_token,
+                "task_kind": task_kind,
+                "num_tokens": total_tokens,
+                "has_mrope": bool(getattr(so, "has_mrope", True)),
+                "draft_step_idx": None,
+            })
+            num_spec = self._num_scheduled_spec_tokens()
+            if num_spec <= 0:
+                continue
+            # Draft step shapes (mirrors the worker's meta derivation):
+            # step 0 runs over the parent batch's full token count,
+            # later steps over one token per request.
+            num_reqs = len(so.num_scheduled_tokens)
+            for step_idx in range(num_spec):
+                post_irecv_hint({
+                    "key": f"{head_token}:{step_idx}",
+                    "task_kind": "draft",
+                    "num_tokens": (
+                        total_tokens if step_idx == 0 else num_reqs
+                    ),
+                    "has_mrope": False,
+                    "draft_step_idx": step_idx,
+                })
+
     def step(self) -> bool:
         """Single tick: poll ZMQ → pick batches → enqueue worker payloads.
 
@@ -595,7 +685,10 @@ class PassiveEngineCoreProc:
         _dt_drain = (time.monotonic() - _t0) * 1000
 
         _t0 = time.monotonic()
-        self.passive_scheduler.poll_and_classify()
+        arrivals = self.passive_scheduler.poll_and_classify()
+        # Arrival-time data-plane decoupling: pre-post irecvs for every
+        # newly arrived PF/DF head payload and its n draft head payloads.
+        self._post_irecv_hints_for_arrivals(arrivals)
         _dt_poll = (time.monotonic() - _t0) * 1000
 
         _t0 = time.monotonic()

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
-import os
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -20,6 +19,8 @@ from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+
+from vllm_ascend.distributed.edge_cloud_irecv import is_irecv_complete
 
 
 class PrefillState(enum.Enum):
@@ -89,96 +90,54 @@ _PD_LAST_TO_FIRST = {last: first for first, last in _PD_FIRST_TO_LAST.items()}
 _PREFILL_CHANNELS_PER_DP = 2
 _DECODE_CHANNELS_PER_DP = 1
 
+# Default cap on concurrent PF→PL round trips (2P pipelining).  This is a
+# pure scheduler-side counter: with key-tagged pre-posted irecvs the
+# FIFO channel pairs multiple in-flight batches by order, so the limit is
+# no longer derived from the channel pool size.
+_DEFAULT_PREFILL_INFLIGHT_LIMIT = 2
+
 
 class HiddenChannelManager:
-    """Manages data-plane hidden tensor channels for edge-cloud PD separation.
+    """Data-plane hidden tensor channel stamps for edge-cloud PD separation.
 
-    Shared-model DP ranks receive disjoint channel slices. In the per-rank
-    topology each DP has its own physical process-group world and reuses the
-    first channel slice.
+    Channels are fixed per task type: one prefill channel and one decode
+    channel per DP rank.  Key-tagged pre-posted irecvs keep multiple
+    in-flight batches paired on the same FIFO channel, so there is no
+    per-batch allocation or free-list bookkeeping.  Shared-model DP ranks
+    receive disjoint channel slices; in the per-rank topology each DP has
+    its own physical process-group world and reuses the first slice.
     """
 
     def __init__(
         self,
         dp_rank: int = 0,
-        prefill_per_dp: int = _PREFILL_CHANNELS_PER_DP,
         is_shared_model_edge: bool = False,
     ) -> None:
         if not is_shared_model_edge:
             dp_rank = 0
-        prefill_start = dp_rank * prefill_per_dp + 1
-        self._free_prefills: deque[HiddenChannelType] = deque(
-            HiddenChannelType.prefill(i)
-            for i in range(prefill_start, prefill_start + prefill_per_dp)
-        )
+        prefill_start = dp_rank * _PREFILL_CHANNELS_PER_DP + 1
+        self._prefill_channel = HiddenChannelType.prefill(prefill_start)
         self._decode_channel = HiddenChannelType.decode(dp_rank + 1)
-        self._head_token_to_channel: dict[str, HiddenChannelType] = {}
 
     # ------------------------------------------------------------------ #
-    # Prefill channel allocation / release                               #
+    # Fixed per-type channel stamps                                      #
     # ------------------------------------------------------------------ #
-    def allocate_prefill(self, head_token: str) -> HiddenChannelType:
-        """Allocate a free prefill channel for the batch identified by
-        ``head_token``. Raises if none available."""
-        if not self._free_prefills:
-            raise RuntimeError(
-                "No free prefill hidden channel available"
-            )
-        channel = self._free_prefills.popleft()
-        self._head_token_to_channel[head_token] = channel
-        logger.info(
-            "[PD] allocate_prefill: channel=%s head_token=%s free_left=%s",
-            channel.value, head_token, list(self._free_prefills),
-        )
-        return channel
+    def prefill_channel(self) -> HiddenChannelType:
+        return self._prefill_channel
 
-    def release_prefill(self, head_token: str) -> HiddenChannelType | None:
-        """Release the prefill channel previously allocated for
-        ``head_token``. Returns the freed channel (or None if not found)."""
-        channel = self._head_token_to_channel.pop(head_token, None)
-        if channel is None:
-            return None
-        self._free_prefills.append(channel)
-        logger.info(
-            "[PD] release_prefill: channel=%s head_token=%s free=%s",
-            channel.value, head_token, list(self._free_prefills),
-        )
-        return channel
-
-    def has_free_prefill(self) -> bool:
-        return bool(self._free_prefills)
-
-    # ------------------------------------------------------------------ #
-    # Decode channel (fixed per DP, no free-list)                         #
-    # ------------------------------------------------------------------ #
     def decode_channel(self) -> HiddenChannelType:
         return self._decode_channel
 
     # ------------------------------------------------------------------ #
     # Introspection                                                      #
     # ------------------------------------------------------------------ #
-    def get_channel(self, head_token: str) -> HiddenChannelType | None:
-        return self._head_token_to_channel.get(head_token)
-
-    @property
-    def in_use_prefills(self) -> list[HiddenChannelType]:
-        return [
-            channel
-            for channel in self._head_token_to_channel.values()
-            if channel.value.startswith("prefill_")
-        ]
-
     @property
     def prefill_pool(self) -> frozenset[HiddenChannelType]:
-        return frozenset(self._free_prefills) | frozenset(self.in_use_prefills)
+        return frozenset((self._prefill_channel,))
 
     @property
     def decode_pool(self) -> frozenset[HiddenChannelType]:
         return frozenset((self._decode_channel,))
-
-    @staticmethod
-    def prefill_inflight_limit() -> int:
-        return _PREFILL_CHANNELS_PER_DP
 
     @staticmethod
     def required_prefill_groups(dp_size: int) -> int:
@@ -231,10 +190,11 @@ class PDSeparatedScheduler(Scheduler):
 
         self._step_counter: int = 0
 
-        # In-flight prefill limit (head-segment batches).
+        # In-flight prefill limit (head-segment batches): a pure
+        # scheduler-side counter, decoupled from the channel pool.
         self.prefill_inflight_limit: int = getattr(
             self.scheduler_config, "pd_prefill_inflight_limit",
-            _PREFILL_CHANNELS_PER_DP,
+            _DEFAULT_PREFILL_INFLIGHT_LIMIT,
         )
         self.prefill_inflight_count: int = 0
         self.decode_or_draft_inflight_limit: int = 1
@@ -323,28 +283,16 @@ class PDSeparatedScheduler(Scheduler):
                 _pd.get("limit_prefill_batch_size", False)
             )
 
-        # [新增] DECODE_LAST 延迟调度计时器。
-        # D首 pick 后启动，D尾 在延迟到期前不可被调度。
-        self._decode_last_delay_start_ts: float | None = None
-        self._decode_last_delay_schedule_ms: int = 30
-
         # [新增] 强制调度 D尾 标记。
         # D首 调度后置 True，D尾 调度后置 False。
         # True 时禁止调度 D首，严格保证 DF -> DL 交替时序。
         self._force_decode_last: bool = False
         self._force_draft_last: bool = False
 
-        self._layer_slice_config_path: str | None = None
-        self._layer_slice_config_mtime: float = 0.0
-        self._load_layer_slice_config()
         # After scheduling a DECODE_LAST or DRAFT_LAST, briefly reserve the
         # next scheduling opportunity for DECODE_FIRST or DRAFT_FIRST only.
         self._decode_or_draft_first_only_start_ts: float | None = None
         self._decode_or_draft_first_only_window_ms: int = 10
-
-        # [MTP] DRAFT_LAST delay scheduling (mirrors decode_last_delay).
-        self._draft_last_delay_start_ts: float | None = None
-        self._draft_last_delay_schedule_ms: int = 10
 
         # Async scheduled-MTP keeps real draft token IDs in the edge worker.
         # The scheduler only needs fixed-length placeholder SchedulerOutputs,
@@ -950,7 +898,7 @@ class PDSeparatedScheduler(Scheduler):
                     "requests. Prefill work will be deferred until resources are freed."
                 )
                 self.finished_req_ids.update(so.finished_req_ids)
-            if self.drafts_last_ready and self._can_schedule_draft_last():
+            if self._has_actionable_draft_tail():
                 return self._pick_draft_last_batch()
             if self._can_schedule_draft_first():
                 return self._pick_draft_first_batch()
@@ -959,9 +907,8 @@ class PDSeparatedScheduler(Scheduler):
             # gated above, the tail must not overtake it (the worker would
             # find no suspended HeadState for it).
             if (
-                self.decodes_last_ready
+                self._has_actionable_decode_tail()
                 and not self.decodes_first_ready
-                and self._can_schedule_decode_last()
             ):
                 return self._pick_decode_last_batch()
             if self._can_schedule_decode_first():
@@ -971,16 +918,15 @@ class PDSeparatedScheduler(Scheduler):
             return self._make_empty_batch()
 
         # HIGH: Draft尾 > Draft首 > D尾 > D首 > P尾 > Empty
-        if self.drafts_last_ready and self._can_schedule_draft_last():
+        if self._has_actionable_draft_tail():
             return self._pick_draft_last_batch()
         if self._can_schedule_draft_first():
             return self._pick_draft_first_batch()
         # Same overtake guard as the IDLE branch above: a queued placeholder
         # DECODE_FIRST's self-posted tail must wait for its head.
         if (
-            self.decodes_last_ready
+            self._has_actionable_decode_tail()
             and not self.decodes_first_ready
-            and self._can_schedule_decode_last()
         ):
             return self._pick_decode_last_batch()
         if self._can_schedule_decode_first():
@@ -1002,9 +948,13 @@ class PDSeparatedScheduler(Scheduler):
                 or self.decode_or_draft_inflight_count > 0
                 or self.draft_remote_pending_count > 0
             )
-            and not self.prefills_last_ready
-            and not self.decodes_last_ready
-            and not self.drafts_last_ready
+            # A PL whose tail payload is still in flight (decoupled-irecv
+            # coordination) must not count as local actionable work —
+            # otherwise the engine tight-loops EMPTY batches while the
+            # data is arriving.  The same applies to DL/DRL tails.
+            and not self._has_actionable_prefill_tail()
+            and not self._has_actionable_decode_tail()
+            and not self._has_actionable_draft_tail()
             and not self._can_schedule_prefill_first()
             and not self._can_schedule_draft_first()
             and not self._can_schedule_decode_first()
@@ -1032,7 +982,6 @@ class PDSeparatedScheduler(Scheduler):
         return (
             self._has_prefill_work()
             and self.prefill_inflight_count < self.prefill_inflight_limit
-            and self.hidden_channel_manager.has_free_prefill()
             and effective_capacity > 0
         )
 
@@ -1130,121 +1079,6 @@ class PDSeparatedScheduler(Scheduler):
                 f"decode_or_draft_inflight: {self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}",
             )
 
-    # ------------------------------------------------------------------ #
-    # Layer-slice config loading (Edge side)                             #
-    # ------------------------------------------------------------------ #
-    def _load_layer_slice_config(self) -> None:
-        """Load decode_last_delay_schedule_ms from layer_slice_config.yaml."""
-        yaml_path = os.environ.get("VLLM_LAYER_SLICE_CONFIG")
-        if yaml_path is None:
-            yaml_path = os.path.join(
-                os.path.dirname(__file__), "layer_slice_config.yaml"
-            )
-        if not os.path.exists(yaml_path):
-            self._layer_slice_config_path = None
-            self._layer_slice_config_mtime = 0.0
-            return
-        try:
-            import yaml
-            with open(yaml_path, "r", encoding="utf-8") as f:
-                raw = yaml.safe_load(f)
-            if not isinstance(raw, dict):
-                logger.warning(
-                    "Layer-slice config %s is not a dict; ignoring.", yaml_path
-                )
-                return
-            _key = "decode_last_delay_schedule_ms"
-            if _key in raw:
-                try:
-                    self._decode_last_delay_schedule_ms = int(raw[_key])
-                    logger.info(
-                        "[PDSeparatedScheduler] %s set to %d from %s",
-                        _key, self._decode_last_delay_schedule_ms, yaml_path,
-                    )
-                except (ValueError, TypeError):
-                    logger.warning(
-                        "Invalid %s value %r in %s; keeping %d",
-                        _key, raw[_key], yaml_path,
-                        self._decode_last_delay_schedule_ms,
-                    )
-            _draft_key = "draft_last_delay_schedule_ms"
-            if _draft_key in raw:
-                try:
-                    self._draft_last_delay_schedule_ms = int(raw[_draft_key])
-                    logger.info(
-                        "[PDSeparatedScheduler] %s set to %d from %s",
-                        _draft_key, self._draft_last_delay_schedule_ms, yaml_path,
-                    )
-                except (ValueError, TypeError):
-                    logger.warning(
-                        "Invalid %s value %r in %s; keeping %d",
-                        _draft_key, raw[_draft_key], yaml_path,
-                        self._draft_last_delay_schedule_ms,
-                    )
-            self._layer_slice_config_path = yaml_path
-            self._layer_slice_config_mtime = os.path.getmtime(yaml_path)
-        except Exception:
-            logger.exception("Failed to load layer-slice config from %s", yaml_path)
-
-    def _maybe_hot_reload_layer_slice_config(self) -> None:
-        """Check whether the YAML config file has changed on disk and reload."""
-        path = self._layer_slice_config_path
-        if path is None:
-            return
-        try:
-            mtime = os.path.getmtime(path)
-        except OSError:
-            return
-        if mtime != self._layer_slice_config_mtime:
-            old_value = self._decode_last_delay_schedule_ms
-            self._load_layer_slice_config()
-            if self._decode_last_delay_schedule_ms != old_value:
-                logger.info(
-                    "[PDSeparatedScheduler] Layer-slice config hot-reloaded: "
-                    "%s=%d",
-                    "decode_last_delay_schedule_ms",
-                    self._decode_last_delay_schedule_ms,
-                )
-
-    # ------------------------------------------------------------------ #
-    # DECODE_LAST delay scheduling                                       #
-    # ------------------------------------------------------------------ #
-    def _start_decode_last_delay(self) -> None:
-        """Start the timer when DECODE_FIRST is picked.
-        DECODE_LAST cannot be scheduled until the delay expires."""
-        self._decode_last_delay_start_ts = time.monotonic()
-
-    def _can_schedule_decode_last(self) -> bool:
-        """Return True if the delay since DECODE_FIRST has elapsed."""
-        if self._decode_last_delay_start_ts is None:
-            return True
-        elapsed_ms = (time.monotonic() - self._decode_last_delay_start_ts) * 1000
-        if elapsed_ms >= self._decode_last_delay_schedule_ms:
-            self._decode_last_delay_start_ts = None
-            return True
-        # logger.info(
-        #     "[PD] DECODE_LAST delayed: elapsed=%.1f ms < limit=%d ms",
-        #     elapsed_ms, self._decode_last_delay_schedule_ms,
-        # )
-        return False
-
-    # ------------------------------------------------------------------ #
-    # DRAFT_LAST delay scheduling                                         #
-    # ------------------------------------------------------------------ #
-    def _start_draft_last_delay(self) -> None:
-        """Draft首 pick 后启动，Draft尾 在延迟到期前不可被调度。"""
-        self._draft_last_delay_start_ts = time.monotonic()
-
-    def _can_schedule_draft_last(self) -> bool:
-        """Return True if the delay since DRAFT_FIRST has elapsed."""
-        if self._draft_last_delay_start_ts is None:
-            return True
-        elapsed_ms = (time.monotonic() - self._draft_last_delay_start_ts) * 1000
-        if elapsed_ms >= self._draft_last_delay_schedule_ms:
-            self._draft_last_delay_start_ts = None
-            return True
-        return False
-
     def _pick_prefill_first_batch(self) -> SchedulerOutput:
         saved_running = self.running
         saved_chunk_prefill_first = self.chunk_prefill_first
@@ -1323,9 +1157,7 @@ class PDSeparatedScheduler(Scheduler):
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
                     scheduler_output.head_token = uuid4().hex
                     scheduler_output.hidden_channel = (
-                        self.hidden_channel_manager.allocate_prefill(
-                            scheduler_output.head_token
-                        )
+                        self.hidden_channel_manager.prefill_channel()
                     )
                     self.prefill_inflight_count += 1
                     self._register_pd_flight(scheduler_output)
@@ -1517,6 +1349,51 @@ class PDSeparatedScheduler(Scheduler):
 
         return scheduler_output  # type: ignore[return-value]
 
+    def _prefill_tail_data_ready(self, so: SchedulerOutput) -> bool:
+        """True once the pre-posted irecv for this PL's tail payload
+        (keyed by ``head_token``) has completed."""
+        token = so.head_token
+        if not token:
+            return True
+        return is_irecv_complete(token)
+
+    def _has_actionable_prefill_tail(self) -> bool:
+        """True when a queued PREFILL_LAST can actually be dispatched now."""
+        return bool(self.prefills_last_ready) and self._prefill_tail_data_ready(
+            self.prefills_last_ready[0]
+        )
+
+    def _decode_tail_data_ready(self, so: SchedulerOutput) -> bool:
+        """True once the pre-posted irecv for this DL's tail payload
+        (keyed by ``head_token``) has completed."""
+        token = so.head_token
+        if not token:
+            return True
+        return is_irecv_complete(token)
+
+    def _draft_tail_data_ready(self, so: SchedulerOutput) -> bool:
+        """True once the pre-posted irecv for this DRL's tail payload
+        (keyed by ``"<draft_task_id>:<draft_step_idx>"``) has completed.
+        The irecv was pre-posted for every speculative step when the
+        parent PF/DF batch was published."""
+        task_id = so.draft_task_id
+        step_idx = so.draft_step_idx
+        if not task_id or step_idx is None:
+            return True
+        return is_irecv_complete(f"{task_id}:{step_idx}")
+
+    def _has_actionable_decode_tail(self) -> bool:
+        """True when a queued DECODE_LAST can actually be dispatched now."""
+        return bool(self.decodes_last_ready) and self._decode_tail_data_ready(
+            self.decodes_last_ready[0]
+        )
+
+    def _has_actionable_draft_tail(self) -> bool:
+        """True when a queued DRAFT_LAST can actually be dispatched now."""
+        return bool(self.drafts_last_ready) and self._draft_tail_data_ready(
+            self.drafts_last_ready[0]
+        )
+
     def _pick_prefill_last_batch(self) -> SchedulerOutput:
         """Pop one cloud-returned SchedulerOutput from prefills_last_ready.
 
@@ -1527,6 +1404,13 @@ class PDSeparatedScheduler(Scheduler):
         ``update_from_output`` does not double-account them.
         """
         if not self.prefills_last_ready:
+            return self._make_empty_batch()
+        # Peek before popping: when the decoupled-irecv coordination is
+        # active, a PL whose tail payload has not finished arriving stays
+        # queued and this round yields an EMPTY batch instead of blocking
+        # the worker on recv.  PL is the lowest-priority pick in every
+        # state, so skipping here needs no caller-side handling.
+        if not self._prefill_tail_data_ready(self.prefills_last_ready[0]):
             return self._make_empty_batch()
         so = self.prefills_last_ready.popleft()
         assert so.batch_type == BatchType.PREFILL_LAST, (
@@ -1575,21 +1459,13 @@ class PDSeparatedScheduler(Scheduler):
         return so
 
     def _validate_prefill_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
-        token = scheduler_output.head_token
-        channel = scheduler_output.hidden_channel
-        if not token:
+        if not scheduler_output.head_token:
             raise RuntimeError("PREFILL_LAST missing head_token")
         pool = self.hidden_channel_manager.prefill_pool
-        if channel not in pool:
+        if scheduler_output.hidden_channel not in pool:
             raise RuntimeError(
                 f"PREFILL_LAST expects a prefill hidden channel from "
-                f"{pool}, got {channel}"
-            )
-        expected = self.hidden_channel_manager.get_channel(token)
-        if expected != channel:
-            raise RuntimeError(
-                f"PREFILL_LAST hidden channel mismatch: expected {expected}, "
-                f"got {channel}, head_token={token}"
+                f"{pool}, got {scheduler_output.hidden_channel}"
             )
 
     def _validate_decode_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
@@ -1687,7 +1563,6 @@ class PDSeparatedScheduler(Scheduler):
         self.decode_or_draft_inflight_count += 1
         self.draft_remote_pending_count += 1
         self._force_draft_last = True
-        self._start_draft_last_delay()
 
         logger.info(
             "[MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=%s, "
@@ -2339,7 +2214,6 @@ class PDSeparatedScheduler(Scheduler):
                     self.decode_head_inflight_count += 1
                     self._register_pd_flight(scheduler_output)
                     self._force_decode_last = True
-                    self._start_decode_last_delay()
 
                     # === Decode-first self-posting optimization ===
                     # Cloud's _maybe_publish_post_out merely replaces
@@ -2568,10 +2442,6 @@ class PDSeparatedScheduler(Scheduler):
         if scheduler_output.batch_type == BatchType.PREFILL_LAST:
             if self.prefill_inflight_count > 0:
                 self.prefill_inflight_count -= 1
-            if scheduler_output.head_token:
-                self.hidden_channel_manager.release_prefill(
-                    scheduler_output.head_token
-                )
 
             # logger.info(
             #     f"[PD] update_from_output PREFILL_LAST done, "
