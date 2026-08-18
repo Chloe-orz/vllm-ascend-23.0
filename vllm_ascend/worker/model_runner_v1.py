@@ -2391,6 +2391,44 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
+        # In an interleaved edge-cloud run, the base class's deferred
+        # speculative correction reads valid_sampled_token_count_cpu only
+        # after the next forward has been launched.  That positional buffer
+        # is shared by all batches, so another head/tail segment can overwrite
+        # it before the callback runs.  Keep the DSV4 edge path tied to the
+        # request-keyed count captured by _stash_pending_prev_sampled instead.
+        # Other models retain the upstream positional-buffer behavior.
+        edge_request_keyed_corrections: list[
+            tuple[str, int, Any, torch.Tensor]
+        ] = []
+        missing_request_keyed_count = False
+        if (
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and self._is_deepseek_v4
+            and self.use_async_spec_decode
+        ):
+            for req_id in req_data.req_ids:
+                req_state = self.requests.get(req_id)
+                if (
+                    req_state is None
+                    or not req_state.prev_num_draft_len
+                    or req_id not in self.input_batch.req_id_to_index
+                ):
+                    continue
+                pending_entry = self._pending_prev_by_req.get(req_id)
+                if pending_entry is None:
+                    missing_request_keyed_count = True
+                    continue
+                edge_request_keyed_corrections.append(
+                    (
+                        req_id,
+                        req_state.prev_num_draft_len,
+                        req_state,
+                        pending_entry[1],
+                    )
+                )
+
         track_cloud_corrections = (
             self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "cloud"
@@ -2447,6 +2485,87 @@ class NPUModelRunner(GPUModelRunner):
             # state is already corrected by request identity, so suppress it.
             result = None
             self._cloud_current_cpu_state_authoritative = True
+
+        if (
+            result is not None
+            and edge_request_keyed_corrections
+            and not missing_request_keyed_count
+        ):
+            # Start a stable, callback-local D2H copy now and wait for it only
+            # after the target forward has launched.  Unlike the shared
+            # valid_sampled_token_count_cpu buffer, both this pinned tensor
+            # and its event are captured by exactly one deferred callback, so
+            # an interleaved batch cannot replace its contents or completion
+            # signal.
+            correction_counts_gpu = torch.stack(
+                [item[3] for item in edge_request_keyed_corrections]
+            )
+            correction_counts_cpu = torch.empty(
+                len(edge_request_keyed_corrections),
+                dtype=torch.int64,
+                device="cpu",
+                pin_memory=self.pin_memory,
+            )
+            correction_counts_event = torch.npu.Event()
+            default_stream = torch.npu.current_stream()
+            copy_stream = self.valid_sampled_token_count_copy_stream
+            assert copy_stream is not None
+            with torch.npu.stream(copy_stream):
+                copy_stream.wait_stream(default_stream)
+                correction_counts_cpu.copy_(
+                    correction_counts_gpu, non_blocking=True
+                )
+                correction_counts_event.record()
+
+            use_ngram_gpu = (
+                self.speculative_config is not None
+                and self.speculative_config.use_ngram_gpu()
+            )
+
+            def correct_edge_spec_decode_token_counts(
+                corrections=edge_request_keyed_corrections,
+                counts_cpu=correction_counts_cpu,
+                counts_event=correction_counts_event,
+                counts_gpu=correction_counts_gpu,
+            ) -> None:
+                counts_event.synchronize()
+                # Keep counts_gpu alive until its asynchronous D2H copy has
+                # completed.  The local reference is otherwise intentionally
+                # unused by the CPU correction below.
+                del counts_gpu
+                valid_counts = counts_cpu.tolist()
+                for (
+                    req_id,
+                    optimistic_num_accepted,
+                    req_state,
+                    _,
+                ), valid_count in zip(corrections, valid_counts):
+                    if not 1 <= valid_count <= optimistic_num_accepted + 1:
+                        raise RuntimeError(
+                            "Invalid request-keyed sampled-token count for "
+                            f"DSV4 edge-cloud correction: req_id={req_id}, "
+                            f"valid_count={valid_count}, "
+                            "optimistic_num_accepted="
+                            f"{optimistic_num_accepted}"
+                        )
+                    num_accepted = valid_count - 1
+                    correction = optimistic_num_accepted - num_accepted
+                    req_state.num_computed_tokens -= correction
+                    cur_req_index = self.input_batch.req_id_to_index.get(
+                        req_id
+                    )
+                    if cur_req_index is None:
+                        continue
+                    self.input_batch.num_computed_tokens_cpu[
+                        cur_req_index
+                    ] -= correction
+                    if use_ngram_gpu and correction > 0:
+                        self.input_batch.num_tokens_no_spec[
+                            cur_req_index
+                        ] -= correction
+                        self.num_tokens_no_spec_gpu[cur_req_index] -= correction
+
+            result = correct_edge_spec_decode_token_counts
 
         if shelved_prev_map:
             prev_map = self.input_batch.prev_req_id_to_index
