@@ -5036,6 +5036,13 @@ class NPUModelRunner(GPUModelRunner):
             )
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                if _pd_timing:
+                    logger.info(
+                        "[PD-TIMING] runner input-prep sync acquired "
+                        "batch_type=%s ts=%.4f",
+                        scheduler_output.batch_type,
+                        time.monotonic(),
+                    )
                 if not _fast_path and not _cloud_fast_path:
                     # [EDGE-SEGMENT-E LEAK FIX] If we popped a segment_a entry
                     # but cannot take the fast path (req_ids mismatch from
@@ -5101,6 +5108,13 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         deferred_state_corrections_fn = self._update_states(
                             scheduler_output
+                        )
+                    if _pd_timing:
+                        logger.info(
+                            "[PD-TIMING] runner update_states done "
+                            "batch_type=%s ts=%.4f",
+                            scheduler_output.batch_type,
+                            time.monotonic(),
                         )
 
                     if has_ec_transfer() and get_ec_transfer().is_producer:
