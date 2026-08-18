@@ -40,14 +40,11 @@ _FLASHCOMM2_ODP: GroupCoordinator | None = None
 # ------------------------------------------------------------------ #
 # Per-channel dedicated streams for edge-cloud P2P (isend/irecv).     #
 # ------------------------------------------------------------------ #
-# Each hidden channel (PREFILL_1, PREFILL_2) gets its own NPU stream
-# so that isend/irecv on different channels don't serialize on the
-# default stream.  Without this, a guard-thread early-posted irecv on
-# prefill_2 can block a busy_loop isend on prefill_1 (both on the
-# default stream, FIFO), creating a circular deadlock at 2P request
-# boundaries:
-#   cloud  stream: [irecv hidden_P2 (prefill_2)] [isend result_P1 (prefill_1)]
-#   edge   stream: [irecv result_P1 (prefill_1)] [isend hidden_P2 (prefill_2)]
+# Each of the six directional hidden channels (prefill_up/down,
+# prefill_draft_up/down, decode_up/down) gets its own NPU stream, so
+# P2P ops of different types/directions never serialize on (or block)
+# each other.  Streams are keyed by channel *value*, so all callers
+# resolving the same logical channel land on the same stream.
 # TP-broadcast (intra-node collective) stays on the default stream --
 # it runs inside execute_model's wait_for_comm() on all TP ranks
 # synchronized; only the cross-node P2P (isend/irecv) uses the
@@ -569,35 +566,27 @@ def init_ascend_model_parallel(
             group_name="mc2",
         )
 
-        # Phase6 hidden data-plane channels are still required in edge-cloud
-        # mode.  The default PP group is PREFILL_1, the alternate PP group is
-        # DECODE_1, and extra hidden-channel groups are created for
-        # PREFILL_2..N and DECODE_2..M when dp_size > 1.
+        # Phase6 hidden data-plane channels: the six fixed directional
+        # channels (type x direction: prefill_up/down,
+        # prefill_draft_up/down, decode_up/down), each a dedicated HCCL
+        # communicator shared by all DP peers (matching is per
+        # (group, peer, direction), so DP traffic never interferes).
+        # The alternate PP group (DECODE_1) is still created for the
+        # legacy ALL_DECODE separation path.
         pp_group = get_pp_group()
         if pp_group.world_size > 1:
             pp_group.create_alternate_groups(backend)
-            if hasattr(pp_group, "create_hidden_channel_groups"):
-                dp_size = parallel_config.data_parallel_size
-                # Create extra hidden-channel groups based on dp_size.
-                if parallel_config.is_shared_model_edge:
-                    num_prefill = dp_size * 2
-                    num_decode = dp_size
-                else:
-                    num_prefill = 2
-                    num_decode = 1
+            if hasattr(pp_group, "create_six_channel_groups"):
                 logger.info(
-                    "[PD] create_hidden_channel_groups: "
-                    "dp_size=%s dp_rank=%s num_prefill=%s num_decode=%s, "
-                    "edge_npu_count=%s",
-                    dp_size,
+                    "[PD] create_six_channel_groups: "
+                    "dp_size=%s dp_rank=%s, edge_npu_count=%s",
+                    parallel_config.data_parallel_size,
                     getattr(parallel_config, "data_parallel_rank", 0),
-                    num_prefill, num_decode,
                     edge_npu_count,
                 )
-                HiddenChannelType.init(dp_size=num_decode)
-                pp_group.create_hidden_channel_groups(
-                    backend, num_prefill, num_decode,
-                )
+                HiddenChannelType.init(
+                    dp_size=parallel_config.data_parallel_size)
+                pp_group.create_six_channel_groups(backend)
             else:
                 HiddenChannelType.init(dp_size=1)
             # Pre-establish the HCCL/gloo links of every hidden channel so
@@ -995,7 +984,8 @@ def _get_edge_cloud_hidden_channel_device_group(
             )
             return pp_group.alt_device_group
         raise RuntimeError(
-            "PREFILL_2 hidden channel requires create_hidden_channel_groups()"
+            f"Unknown edge-cloud hidden channel {channel!r}: the six "
+            "directional channels require create_six_channel_groups()"
         )
 
     if use_alt_group:
@@ -1011,18 +1001,15 @@ def warmup_edge_cloud_hidden_channels(
 ) -> None:
     """Pre-establish every edge-cloud hidden-channel P2P link at startup.
 
-    The first isend/irecv on a hidden channel rendezvous the two sides
+    The first isend/irecv on a channel rendezvous the two sides
     (gloo metadata exchange + HCCL link setup) and blocks the host until
-    the peer posts the matching op.  DRAFT_FIRST is published to the cloud
-    at schedule time while PREFILL_FIRST is published only when it is
-    about to execute, so a draft batch can overtake a prefill batch on the
-    cloud side.  If both batches happen to be the first use of their
-    channels, the two sides rendezvous on *different* channels and
-    deadlock: edge TP0 blocks in the PREFILL_2 send rendezvous while the
-    cloud workers block in the DECODE draft recv.  Exchanging a tiny
-    tensor-dict on every channel in both directions here -- in a fixed
-    global order -- moves that first-use rendezvous to init time, where
-    both sides are guaranteed to arrive in the same order.
+    the peer posts the matching op.  Batches of different types are
+    published to the cloud at different times, so a first-use rendezvous
+    mid-pipeline could make the two sides arrive on *different* channels
+    and deadlock.  Exchanging a tiny tensor-dict on every one of the six
+    directional channels in both directions here -- in a fixed global
+    order -- moves that first-use rendezvous to init time, where both
+    sides are guaranteed to arrive in the same order.
     """
     pp_group = get_pp_group()
     if pp_group.world_size <= 1:
@@ -1034,79 +1021,39 @@ def warmup_edge_cloud_hidden_channels(
         )
         return
 
-    prefill_groups = getattr(pp_group, "_prefill_device_groups", None)
-    decode_groups = getattr(pp_group, "_decode_device_groups", None)
-    channel_peers: list[tuple[HiddenChannelType, int]] = []
-    if prefill_groups is not None and decode_groups is not None:
-        num_prefill = len(prefill_groups)
-        num_decode = len(decode_groups)
-        if parallel_config.is_shared_model_edge:
-            dp_size = parallel_config.data_parallel_size
-            expected_world_size = dp_size + 1
-            if pp_group.world_size != expected_world_size:
-                logger.warning(
-                    "[edge-cloud] hidden-channel warmup skipped: shared "
-                    "PP group size=%s, expected=%s",
-                    pp_group.world_size,
-                    expected_world_size,
-                )
-                return
-            if num_prefill % dp_size or num_decode % dp_size:
-                raise RuntimeError(
-                    "[edge-cloud] hidden-channel counts cannot be mapped "
-                    f"to shared DP peers: prefill={num_prefill}, "
-                    f"decode={num_decode}, dp_size={dp_size}"
-                )
-            prefill_per_dp = num_prefill // dp_size
-            decode_per_dp = num_decode // dp_size
-            for dp_rank in range(dp_size):
-                peer_rank = dp_rank + 1
-                prefill_start = dp_rank * prefill_per_dp + 1
-                decode_start = dp_rank * decode_per_dp + 1
-                channel_peers.extend(
-                    (
-                        HiddenChannelType.prefill(channel_idx),
-                        peer_rank,
-                    )
-                    for channel_idx in range(
-                        prefill_start,
-                        prefill_start + prefill_per_dp,
-                    )
-                )
-                channel_peers.extend(
-                    (
-                        HiddenChannelType.decode(channel_idx),
-                        peer_rank,
-                    )
-                    for channel_idx in range(
-                        decode_start,
-                        decode_start + decode_per_dp,
-                    )
-                )
-        else:
-            if pp_group.world_size != 2:
-                logger.warning(
-                    "[edge-cloud] hidden-channel warmup skipped: "
-                    "non-shared PP group size=%s, expected=2",
-                    pp_group.world_size,
-                )
-                return
-            channel_peers.extend(
-                (HiddenChannelType.prefill(channel_idx), 1)
-                for channel_idx in range(1, num_prefill + 1)
+    channels = [
+        HiddenChannelType(getattr(HiddenChannelType, name).value)
+        for name in HiddenChannelType.SIX_DIRECTIONAL_CHANNELS
+    ]
+    # Peer ranks: every cloud DP peer of the edge rank 0.  Non-shared
+    # topology has exactly one peer (world == 2); the shared-model
+    # topology has one peer per DP rank (world == dp_size + 1).
+    if parallel_config.is_shared_model_edge:
+        expected_world_size = parallel_config.data_parallel_size + 1
+        if pp_group.world_size != expected_world_size:
+            logger.warning(
+                "[edge-cloud] hidden-channel warmup skipped: shared "
+                "PP group size=%s, expected=%s",
+                pp_group.world_size,
+                expected_world_size,
             )
-            channel_peers.extend(
-                (HiddenChannelType.decode(channel_idx), 1)
-                for channel_idx in range(1, num_decode + 1)
-            )
+            return
+        peer_ranks = list(range(1, expected_world_size))
     else:
-        # Backward compatibility with the original three-channel layout.
-        channel_peers.append((HiddenChannelType.PREFILL_1, 1))
-        if getattr(pp_group, "prefill2_device_group", None) is not None:
-            channel_peers.append((HiddenChannelType.PREFILL_2, 1))
-        if getattr(pp_group, "alt_device_group", None) is not None:
-            channel_peers.append((HiddenChannelType.DECODE, 1))
+        if pp_group.world_size != 2:
+            logger.warning(
+                "[edge-cloud] hidden-channel warmup skipped: "
+                "non-shared PP group size=%s, expected=2",
+                pp_group.world_size,
+            )
+            return
+        peer_ranks = [1]
 
+    channel_peers = [
+        (channel, peer_rank)
+        for channel in channels
+        for peer_rank in peer_ranks
+    ]
     rank = pp_group.rank_in_group
     for channel, peer_rank in channel_peers:
         # Warm both directions in a fixed global order (edge -> cloud,
@@ -1626,7 +1573,7 @@ def edge_cloud_send_tensor_dict(
 
 def edge_cloud_send_tensor_dict_scheduled_draft(
     tensor_dict: dict[str, torch.Tensor | Any],
-    channel: HiddenChannelType = HiddenChannelType.DECODE,
+    channel: HiddenChannelType = HiddenChannelType.DECODE_UP,
     tensor_meta: ScheduledDraftTensorMeta | None = None,
     dst: int | None = None,
 ) -> list[Handle]:
@@ -1750,7 +1697,7 @@ def _broadcast_nonmerge_tensors_inplace(
 
 def edge_cloud_broadcast_recv(
     num_tokens: int,
-    channel: HiddenChannelType | None = HiddenChannelType.PREFILL_1,
+    channel: HiddenChannelType | None = HiddenChannelType.PREFILL_UP,
     sp_chunk: bool = False,
     src: int | None = None,
     include_mrope: bool = True,
@@ -2087,7 +2034,7 @@ def edge_cloud_broadcast_recv_draft(src: int | None = None) -> tuple[
 
 
 def edge_cloud_broadcast_recv_scheduled_draft(
-    channel: HiddenChannelType = HiddenChannelType.DECODE,
+    channel: HiddenChannelType = HiddenChannelType.DECODE_UP,
     tensor_meta: ScheduledDraftTensorMeta | None = None,
     src: int | None = None,
 ) -> tuple[

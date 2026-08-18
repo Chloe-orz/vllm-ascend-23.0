@@ -605,7 +605,6 @@ class _FirstRoundMarker(DeferredExecutePostprocess):
                 kind=_kind,
                 num_tokens=num_tokens,
                 tensor_dict=_gathered,
-                transport=_so.hidden_channel,
                 src_dst=dp_rank + 1,
             ))
 
@@ -650,7 +649,6 @@ class _LastRoundMarker(_BatchedExecuteMarker):
                 op="recv",
                 kind=_kind,
                 num_tokens=num_tokens,
-                transport=_so.hidden_channel,
                 sp_chunk=edge_sp,
                 src_dst=dp_rank + 1,
             ))

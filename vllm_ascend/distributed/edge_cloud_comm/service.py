@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import replace
 from typing import Any, Protocol, runtime_checkable
 
 from vllm.logger import logger
@@ -20,7 +19,7 @@ from vllm.logger import logger
 from vllm_ascend.distributed import parallel_state as ps
 from vllm_ascend.distributed.edge_cloud_comm.channel import CommChannel
 from vllm_ascend.distributed.edge_cloud_comm.future import CommFuture
-from vllm_ascend.distributed.edge_cloud_comm.mapping import default_transport
+from vllm_ascend.distributed.edge_cloud_comm.mapping import transport_for
 from vllm_ascend.distributed.edge_cloud_comm.types import (
     BatchKind,
     CommChannelType,
@@ -60,9 +59,11 @@ class EdgeCloudCommService:
             return cls._instance
 
     def __init__(self) -> None:
-        # HCCL ordering is per physical (process group, peer), not merely per
-        # logical HiddenChannelType.  In particular shared-model virtual
-        # workers use one transport with different explicit peers.
+        # HCCL ordering is per physical (process group, peer).  Each
+        # directional channel owns its communicator, and shared-model
+        # virtual workers share those communicators with different
+        # explicit peers — so the FIFO key is the pair, not the channel
+        # type alone.
         self._channels: dict[tuple[Any, int], CommChannel] = {}
         self._lock = threading.Lock()
         self._submission_condition = threading.Condition(self._lock)
@@ -178,8 +179,7 @@ class EdgeCloudCommService:
     def _channel_for(
         self, request: CommRequest, *, reserve: bool = False
     ) -> tuple[CommChannel, CommRequest]:
-        transport = request.transport or default_transport(request.channel)
-        request = replace(request, transport=transport)
+        wire = CommChannel.wire_for_request(request)
         pp_group = ps.get_pp_group()
         peer = request.src_dst
         if peer is None:
@@ -189,12 +189,12 @@ class EdgeCloudCommService:
             else:
                 peer = (rank - 1) % pp_group.world_size
 
-        wire = CommChannel.wire_for_request(request)
         if pp_group.world_size <= 1 or wire in ("plain", "draft_dynamic"):
             device_group = pp_group.device_group
         elif wire in ("hidden", "draft"):
+            # Identity resolution: the channel owns its communicator.
             device_group = ps._get_edge_cloud_hidden_channel_device_group(
-                pp_group, channel=transport
+                pp_group, channel=transport_for(request.channel)
             )
         else:
             raise ValueError(f"Unsupported edge-cloud wire type: {wire!r}")
@@ -208,9 +208,8 @@ class EdgeCloudCommService:
                 self._channels[key] = channel
                 logger.info(
                     "[edge-cloud-comm] created channel %s "
-                    "(transport=%s peer=%s wire=%s)",
+                    "(peer=%s wire=%s)",
                     request.channel.value,
-                    transport,
                     peer,
                     wire,
                 )

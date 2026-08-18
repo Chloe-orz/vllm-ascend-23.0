@@ -13,8 +13,6 @@ import enum
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
-from vllm.v1.core.sched.output import HiddenChannelType
-
 if TYPE_CHECKING:
     # Annotation only — keep this module importable from scheduler-side
     # (engine core) processes without pulling in the HCCL wire layer.
@@ -22,11 +20,20 @@ if TYPE_CHECKING:
 
 
 class CommChannelType(enum.Enum):
-    """The six logical data-plane channels: three request/response pairs.
+    """The six physical data-plane channels: type x direction.
 
-    DECODE and DECODE_DRAFT share the DECODE pair (they never co-exist in
-    flight); PREFILL_DRAFT carries the scheduled-draft round trip of the
-    prefill phase.
+    Each channel maps 1:1 to a dedicated HCCL communicator + NPU stream
+    (the ``HiddenChannelType`` value of the same name) and carries
+    exactly one task type in one direction.  P2P matching order per
+    (communicator, peer) is therefore nothing but the per-channel
+    ``CommRequest.seqno`` order — there is no cross-type or
+    cross-direction coupling anywhere, so any task type may post its
+    irecv as early as it likes.
+
+    DECODE and DECODE_DRAFT share the DECODE pair (they are
+    dependency-ordered and never co-exist in flight; they draw seqno
+    from the same per-channel counter); PREFILL_DRAFT carries the
+    scheduled-draft round trip of the prefill phase.
     """
 
     PREFILL_UP = "prefill_up"
@@ -70,10 +77,17 @@ class CommRequest:
     # buffers at submit time). recv: None — buffers are pre-allocated by the
     # comm layer on the channel stream.
     tensor_dict: dict[str, Any] | None = None
-    # Physical wire channel assigned by the scheduler
-    # (SchedulerOutput.hidden_channel).  None -> default transport for the
-    # logical channel (see mapping.default_transport).
-    transport: HiddenChannelType | None = None
+    # Per-channel sequence number assigned by the scheduler (the single
+    # ordering authority; both peers derive the same sequence for a
+    # channel).  Contract: each channel's counter starts at 0 and
+    # increments by one per request, on both peers.  When set, the
+    # channel posts the op to HCCL only once all lower seqnos have been
+    # submitted — out-of-order early submissions (e.g. a guard thread
+    # racing ahead) are buffered, so the send order and the peer's
+    # recv-post order always agree.  None opts out of sequencing (legacy
+    # submission-order behavior); do not mix sequenced and unsequenced
+    # requests on one channel.
+    seqno: int | None = None
     include_mrope: bool = True
     sp_chunk: bool = False
     # Dynamic wire schema for draft kinds (build_scheduled_draft_tensor_meta).

@@ -57,7 +57,7 @@ def build_recv_request(
     *,
     batch_type: Any,
     num_tokens: int,
-    transport: HiddenChannelType | None = None,
+    seqno: int | None = None,
     sp_chunk: bool = False,
     include_mrope: bool = True,
     src_dst: int | None = None,
@@ -74,7 +74,7 @@ def build_recv_request(
         op="recv",
         kind=kind,
         num_tokens=num_tokens,
-        transport=transport,
+        seqno=seqno,
         sp_chunk=sp_chunk,
         include_mrope=include_mrope,
         src_dst=src_dst,
@@ -92,7 +92,10 @@ def make_recv_hint(
 
     Plain pickle-friendly dict; the schema lives here so the producer
     (scheduler side) and the consumer (worker guard thread) can never
-    drift apart.
+    drift apart.  ``hidden_channel`` is a legacy pool label from the
+    old transport-pinning scheme — still emitted for schema stability,
+    ignored by the consumer (the physical wire is derived from the
+    channel alone now).
     """
     return {
         "head_token": head_token,
@@ -111,15 +114,17 @@ def recv_request_from_hint(
 
     Hints always describe the prefill hidden recv (PREFILL_UP); the
     ``sp_chunk`` flag is caller-computed because it depends on worker-side
-    model state.  Returns ``(request, head_token)``; ``request`` is None
-    (with a warning logged) for incomplete/malformed hints.
+    model state.  The legacy ``hidden_channel`` hint field (a pool label
+    from the old transport-pinning scheme) is accepted but ignored: the
+    physical wire is now derived from the channel alone.  Returns
+    ``(request, head_token)``; ``request`` is None (with a warning
+    logged) for incomplete/malformed hints.
     """
     head_token = hint.get("head_token")
     if not head_token:
         return None, None
-    channel_str = hint.get("hidden_channel")
     num_tokens = hint.get("num_tokens")
-    if channel_str is None or num_tokens is None:
+    if num_tokens is None:
         logger.warning(
             "[edge-cloud-comm] recv-hint incomplete %s, skipping.",
             {
@@ -128,21 +133,12 @@ def recv_request_from_hint(
             },
         )
         return None, head_token
-    try:
-        transport = HiddenChannelType(channel_str)
-    except Exception:
-        logger.warning(
-            "[edge-cloud-comm] recv-hint bad channel %r, skipping.",
-            channel_str,
-        )
-        return None, head_token
     return (
         CommRequest(
             channel=CommChannelType.PREFILL_UP,
             op="recv",
             kind=BatchKind.PREFILL,
             num_tokens=num_tokens,
-            transport=transport,
             sp_chunk=sp_chunk,
             include_mrope=hint.get("has_mrope", True),
         ),

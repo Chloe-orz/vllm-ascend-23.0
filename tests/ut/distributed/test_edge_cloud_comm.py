@@ -67,7 +67,7 @@ def test_submit_serializes_complete_wire_launch(monkeypatch):
     active = 0
     max_active = 0
 
-    def fake_execute(request, predecessor):
+    def fake_execute(request, predecessor, into=None):
         nonlocal active, max_active
         with state_lock:
             active += 1
@@ -199,3 +199,111 @@ def test_plain_recv_uses_default_group(monkeypatch):
     channel._wire_recv(request)
 
     assert captured["channel"] is None
+
+
+def _recv_request(*, seqno: int | None = None):
+    return CommRequest(
+        channel=CommChannelType.PREFILL_UP,
+        op="recv",
+        kind=BatchKind.PREFILL,
+        num_tokens=1,
+        seqno=seqno,
+        wire="plain",
+    )
+
+
+def test_sequenced_submit_reorders_out_of_order_arrivals(monkeypatch):
+    channel = CommChannel(CommChannelType.PREFILL_UP)
+    executed: list[int | None] = []
+
+    def fake_recv(request):
+        executed.append(request.seqno)
+        return {}, [], []
+
+    monkeypatch.setattr(channel, "_wire_recv", fake_recv)
+    monkeypatch.setattr(channel, "_bridge_and_record", lambda handles, request: None)
+
+    deferred = channel.submit(_recv_request(seqno=2))
+    # Out-of-order: held, not posted, future not bound.
+    assert executed == []
+    assert not deferred.done()
+
+    channel.submit(_recv_request(seqno=0))
+    assert executed == [0]
+    assert not deferred.done()
+
+    channel.submit(_recv_request(seqno=1))
+    # Submitting the missing predecessor drains the held request in order.
+    assert executed == [0, 1, 2]
+    assert deferred.done()
+    assert deferred.wait(timeout=1.0).status.value == "ok"
+
+
+def test_sequenced_submit_rejects_replayed_seqno(monkeypatch):
+    channel = CommChannel(CommChannelType.PREFILL_UP)
+    monkeypatch.setattr(channel, "_wire_recv", lambda request: ({}, [], []))
+    monkeypatch.setattr(channel, "_bridge_and_record", lambda handles, request: None)
+
+    channel.submit(_recv_request(seqno=0))
+    try:
+        channel.submit(_recv_request(seqno=0))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("replayed seqno was not rejected")
+
+
+def test_deferred_consumer_blocks_until_bound(monkeypatch):
+    channel = CommChannel(CommChannelType.PREFILL_UP)
+    executed = []
+
+    def fake_recv(request):
+        executed.append(request.seqno)
+        return {"x": 1}, [], []
+
+    monkeypatch.setattr(channel, "_wire_recv", fake_recv)
+    monkeypatch.setattr(channel, "_bridge_and_record", lambda handles, request: None)
+
+    deferred = channel.submit(_recv_request(seqno=1))
+    got = {}
+
+    def consumer():
+        # Blocks on binding until seqno=0 is submitted, then materializes.
+        got["tensors"] = deferred.as_intermediate_tensors().tensors
+
+    thread = threading.Thread(target=consumer)
+    thread.start()
+    time.sleep(0.05)
+    assert executed == [] and "tensors" not in got
+    channel.submit(_recv_request(seqno=0))
+    thread.join(timeout=2.0)
+    assert executed == [0, 1]
+    assert got["tensors"] == {"x": 1}
+
+
+def test_hidden_wire_resolves_identity_transport(monkeypatch):
+    # wire="hidden" recv must resolve the channel's own communicator
+    # (identity mapping): channel kwarg is the HiddenChannelType of the
+    # same value.
+    from vllm.v1.core.sched.output import HiddenChannelType
+
+    channel = CommChannel(CommChannelType.PREFILL_UP)
+    captured = {}
+
+    def recv(**kwargs):
+        captured.update(kwargs)
+        return {}, [], []
+
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.edge_cloud_comm.channel.ps.edge_cloud_broadcast_recv",
+        recv,
+    )
+    channel._wire_recv(
+        CommRequest(
+            channel=CommChannelType.PREFILL_UP,
+            op="recv",
+            kind=BatchKind.PREFILL,
+            num_tokens=4,
+        )
+    )
+    assert captured["channel"] is HiddenChannelType.PREFILL_UP
