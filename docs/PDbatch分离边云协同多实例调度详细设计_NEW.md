@@ -761,6 +761,14 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
     instance N-1 scheduler × D
 ```
 
+**2026-08 定案对齐说明（队列结构主体不变，实体按形态 b 更新）**：
+
+- **不变**：N×D per-(instance,dp) scheduler 分组、每 scheduler 各持 `HiddenChannelManager`（per-(instance,dp) 隔离）、§3.2 两级结构--与 per-dp ROUTER（§3.7.2）、§3.4 方案 c（leader 提议 + all_reduce 分发）天然对齐。
+- **变 1（队列实体归并）**：定稿 §3.1 时 PRE_OUT 为 per-instance 独立 socket + per-channel `queue.Queue(1000)`；形态 b 后 scheduler 的 SO 出队**入本 dp ROUTER 的 per-identity 有界队列**（§3.7.2，NOBLOCK+EAGAIN 背压、深度进 InstanceLoadStats）--"per-instance 队列"从"每实例一套 socket+线程+队列"收敛为"同一 ROUTER 内 per-instance 逻辑队列"，隔离性由 identity 队列等价继承。
+- **变 2（TAIL 不进 PRE_OUT 队列）**：TAIL SO 自投递（HEAD 时 pin）经 rpc_broadcast_mq 本地平面投边 worker，时序由数据面 recv fence 驱动（§5.2）--per-instance 队列只走 HEAD/中间段控制流，尾段绕开。
+- **变 3（ack 无独立队列）**：POST_OUT 完成 ack 经共用 ROUTER/DEALER 接收方向按 identity 归入对应 (instance,dp) scheduler 状态（`_drain_worker_completion_acks` 一族），不新增队列实体。
+- **不变（正交项）**：rpc_broadcast_mq 方案一（大组 MQ）是 method 链通道，execute_model/sample_tokens 均只上本地平面，与本节 scheduler 队列结构正交（§2.2.2）。
+
 ### 3.2 两级结构
 
 | 层 | 耦合 | 协调 | 集合通信 |
@@ -1091,7 +1099,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 │ coord all_reduce（方案 c）     │  │ worker / 调度层 poll         │
 │ leader(dp0) 提议 instance_id  │  │ TailDispatchPolicy（可插拔）  │
 │ ┌──────────────────────────┐ │  │ ┌──────────────────────────┐ │
-│ │ v1：InOrder 逐实例轮转     │ │  │ │ v1：FIFO 队首序逐实例     │ │
+│ │ 定案：ArrivalFIFO 谁先来   │ │  │ │ 定案：RecvReadyFirst      │ │
 │ │ 扩展：RecvReadyAware      │ │  │ │ 扩展：RecvReadyFirst      │ │
 │ │  （recv ready 的实例优先   │ │  │ │  （ready 实例 TAIL 先行， │ │
 │ │   喂 HEAD，减少等待）      │ │  │ │   就绪序 = as-arrived）   │ │
@@ -1115,6 +1123,39 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - **HEAD 与 TAIL 策略解耦**：HEAD 是 per-step 决策（coord 分发，2DP 一致），TAIL 是事件驱动（recv fence 就绪序），两个策略接口独立可插拔
 - TAIL 侧任何策略必须遵守三条硬约束：实例内保序、2DP lockstep、队首不跳队--策略只能在「实例间先后」上做选择
 - 与 §3.11 状态源打通（InstanceLoadStats 复用），扩展时只加策略实现、不动分发通道
+- **2026-08 定案**：HEAD 策略 = ArrivalFIFO（原始请求全局按谁先来，替代 v1 InOrder 轮转）；TAIL 策略 = RecvReadyFirst 且 **DRL 提为全局最高优先**（详见 §5.1.1）
+
+#### 5.1.1 实例间调度次序（2026-08 定案：全局视图 + DRL 优先 + ready-first 尾 + arrival-FIFO 首段）
+
+**需求语义**：所有实例的 running/waiting 等队列一起调度；MTP 尾（DRL）优先；PL/DL 尾按实例谁先 ready 谁先；原始请求（首段）实例间按谁先来。
+
+**现状基线复用**（均代码核实，pd_separated_scheduler.py）：
+- 尾 ready 队列：每实例 3 条 deque（prefills/decodes/drafts_last_ready，:226-228），SO 预构建、EngineCore 从云返回填入 -> leader 聚合 N×3 条即天然全局视图；
+- 尾优先级 DRL>DL>PL（:855-876）直接推广到实例维；
+- MTP 交替不变量 `_force_draft_last`（DRF 在飞禁再发 DRF，:950-959）保持 **per-instance**（channel 池按实例复制，跨实例无此约束）；
+- DL/DRL 各 10ms delay 窗（:348-355）per-instance 各自计时，窗口内视为未 ready；
+- 到达序：`_assign_original_seq` 全局计数器 + arrival 戳已是全局序 -> "谁先来"零新机制；
+- **水位驱动的层间次序**（:839-879，代码注释原文）：IDLE（无 chunked prefill 在飞）= **P首 > Draft尾 > Draft首 > D尾 > D首 > P尾**（waiting 队首 PF 插队到一切 ready 尾之前，即基线防饿设计）；HIGH（chunk 在飞）= **Draft尾 > Draft首 > D尾 > D首 > P尾**（不开新 PF）；两个更高优先的插队例外：`decodes_first_ready` 占位 D首（DRL 后紧跟的 verify 占位）、DL/DRL 后 `first_only` 保留窗。**基线不一致核实项**：`_intended_batch_type` 对 LOW 预测 PF>DL>DF>PL，但 `_pick_by_state` 把 LOW 并入 HIGH 分支（无 PF 项）--LOW 下预测器与实际挑选可能不一致，复用 winner 机制前须核实。
+
+**方案**：
+- **S0 全局视图（leader dp0）**：聚合 N 实例 3 条尾 ready 队列（带 ready 时间戳）+ waiting 合并索引（按 original_seq，只建指针）；ready 源 = recv fence（§5.2 COMM_RECV），**按实例 D-dp AND**；dp1 ready 位经 §3.4 all_reduce payload 捎带 N-bit ready bitmap（不新增通道）。
+- **S1 每 step 决策（leader 提议 -> all_reduce 分发 instance_id+bt）--层间次序泛化基线水位状态机，同层内做实例选择**：
+  1. 插队例外最优先（跨实例按各自触发序）：占位 D首（`decodes_first_ready`）、`first_only` 保留窗内的 D首/DR首；
+  2. **全局 IDLE**（所有实例 IDLE，无任何实例 chunked prefill 在飞）：全局 waiting 按 original_seq 谁先来的 **PF 最优先**（防饿语义从基线原样带上）；
+  3. 其后按层：DRL（实例间 ready 时间 FIFO）> DRF（per-instance 交替不变量约束内选）> DL（ready FIFO）> DF > PL（ready FIFO）；**全局 HIGH**（任一实例 chunk 在飞）跳过 PF 层，直接从 DRL 起；
+  4. 首段落到 pin 实例；受 chunked prefill 状态机、`_force_draft_last`、per-instance KV 预算约束；
+  5. delay 窗口（DL/DRL 10ms，per-instance 计时）内视为未 ready；无候选 -> coord EMPTY/sleep 等云（现有路径）。
+- **S2 follower dp**：跟随 (instance_id, bt)，本 dp 对应实例 scheduler 出 SO（尾已 pin / 首段查本 dp 簿记），无工作出 dummy（现有机制）。
+- 分发通道与三条硬约束（实例内保序、2DP lockstep、队首不跳队）全部不动；正好落在 §5.1 预留的两个可插拔策略位（HEAD=ArrivalFIFO 替代 v1 InOrder，TAIL=RecvReadyFirst+DRL 提全局最高）。
+
+**调度风险**：
+1. **首段饥饿/TTFT 劣化（最大风险）**：若层间简化为"尾永远优先"（本节初稿曾有此表述，已修正），N 越大 ready 集合越满 -> PF 无限推迟，比基线（IDLE 时 PF 全链第一）更差。方案已按水位泛化（全局 IDLE 时 PF 最优先）；残余风险 = 全局 IDLE 判定被个别实例长 chunk 频繁打破 -> 首段年龄阈值兜底（超 T 强制 PF，任一水位下）。
+2. **队头阻塞**：全局 FIFO 队首请求 pin 实例 KV 满/长 chunked 占用 -> 队首不可调度挡住后面、其他实例闲置。缓解：有界跳过（最多 K 个）+ dispatcher least-loaded 预防。
+3. **2DP lockstep 破坏**：ready 只看 dp0 -> 实例两 dp 失配 -> count-drift 死锁（代码注释先例）。缓解：ready=per-instance D-dp AND，dp1 位经 all_reduce 捎带，决策只在 leader。
+4. **MTP 链串行阻塞**：DRL 延迟 -> verify 链停 -> 实例 decode 吞吐掉；反向 DRL 密集时其他实例尾等待年龄增长。缓解：监控 per-instance tail-wait age 进 InstanceLoadStats，超龄 DL 可先于新 DRL。
+5. **跨实例状态一致性**：全局索引与 per-instance 队列 abort/finish 同步不一致 -> 丢/重复调度。缓解：簿记留 per-instance scheduler、leader 只聚合指针；abort 沿用现有 `_process_aborts_queue`/`_scheduler_output_intersects_req_ids` 在飞处理。
+6. **尾批不可丢弃**：尾 SO 是云已算完的接收侧（KV 已写），ready 后必须最终被调度不可取消；现有无界 deque 天然满足，调度层永不取消尾批。
+7. **慢实例倾斜**：长请求占住实例 worker -> ready 频率低；若 dispatcher 不看负载 FIFO 持续喂新请求。缓解：least-loaded 已定（§3.3），tail-wait age 进负载统计。
 
 ### 5.2 调度层计算/通信分离（核心改造）
 
