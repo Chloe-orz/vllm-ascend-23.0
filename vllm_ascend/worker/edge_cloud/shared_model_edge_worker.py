@@ -59,9 +59,15 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
+from vllm_ascend.distributed.edge_cloud_comm import (
+    BatchKind,
+    CommChannelType,
+    CommRequest,
+    channel_for,
+    get_comm_service,
+    kind_for_batch_type,
+)
 from vllm_ascend.distributed.parallel_state import (
-    edge_cloud_broadcast_recv,
-    edge_cloud_isend_tensor_dict,
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
 )
@@ -317,13 +323,21 @@ class _BatchedExecuteMarker(DeferredExecutePostprocess):
         # with explicit ``dst`` and ``num_tokens`` slicing so the
         # receiver can allocate buffers based on
         # ``SchedulerOutput.total_num_scheduled_tokens`` alone (no
-        # metadata wire transfer).
+        # metadata wire transfer).  Channel-less "plain" wire (default
+        # device group, caller's current stream) — unchanged from the
+        # legacy direct call; the service owns completion and keeps the
+        # gathered buffer alive until then.
         num_tokens = self.bundle.scheduler_output.total_num_scheduled_tokens
-        self.worker._pp_send_work = edge_cloud_isend_tensor_dict(
-            _gathered,
-            dst=dp_rank + 1,
-            num_tokens=num_tokens,
-        )
+        get_comm_service().submit_send(
+            CommRequest(
+                channel=CommChannelType.PREFILL_UP,
+                op="send",
+                kind=BatchKind.PREFILL,
+                num_tokens=num_tokens,
+                tensor_dict=_gathered,
+                src_dst=dp_rank + 1,
+                wire="plain",
+            ))
         edge_sp = enable_sp()
         pending_deferred[dp_rank] = (
             self.worker.make_batched_recv_closure(
@@ -580,18 +594,20 @@ class _FirstRoundMarker(DeferredExecutePostprocess):
         logger.info(
             "[PD] FIRST isend: dp_rank=%d num_tokens=%d dst=%d",
             dp_rank, num_tokens, dp_rank + 1)
-        # Wait for previous send on this channel before launching
-        # a new one (mirrors NPUWorker.execute_model L564-576).
-        channel = self.worker._hidden_channel_for(
-            self.bundle.scheduler_output)
-        self.worker._wait_pp_send_work(channel)
-        handles = edge_cloud_isend_tensor_dict(
-            _gathered,
-            dst=dp_rank + 1,
-            num_tokens=num_tokens,
-            channel=channel,
-        )
-        self.worker._record_pp_send_work(handles, channel)
+        # The comm service owns send completion (per-channel FIFO
+        # ordering + buffer keepalive); no wait/record here anymore.
+        _so = self.bundle.scheduler_output
+        _kind = kind_for_batch_type(_so.batch_type)
+        get_comm_service().submit_send(
+            CommRequest(
+                channel=channel_for(_so.batch_type, _kind),
+                op="send",
+                kind=_kind,
+                num_tokens=num_tokens,
+                tensor_dict=_gathered,
+                transport=_so.hidden_channel,
+                src_dst=dp_rank + 1,
+            ))
 
 
 class _LastRoundMarker(_BatchedExecuteMarker):
@@ -624,24 +640,21 @@ class _LastRoundMarker(_BatchedExecuteMarker):
         logger.info(
             "[PD] LAST recv: dp_rank=%d num_tokens=%d src=%d",
             dp_rank, num_tokens, dp_rank + 1)
-        # Wait for the FIRST round's isend on this channel to
-        # complete before we recv the cloud's response
-        # (mirrors NPUWorker.execute_model L564-576).
-        channel = self.worker._hidden_channel_for(
-            self.bundle.scheduler_output)
-        self.worker._wait_pp_send_work(channel)
-        tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv(
+        # The FIRST round's isend on this channel is ordered by the
+        # comm service's per-channel FIFO (no explicit wait needed).
+        _so = self.bundle.scheduler_output
+        _kind = kind_for_batch_type(_so.batch_type)
+        recv_future = get_comm_service().submit_recv(
+            CommRequest(
+                channel=channel_for(_so.batch_type, _kind),
+                op="recv",
+                kind=_kind,
                 num_tokens=num_tokens,
+                transport=_so.hidden_channel,
                 sp_chunk=edge_sp,
-                src=dp_rank + 1,
-                channel=channel,
+                src_dst=dp_rank + 1,
             ))
-        return AsyncIntermediateTensors(
-            tensor_dict,
-            comm_handles=comm_handles,
-            comm_postprocess=comm_postprocess,
-        )
+        return recv_future.as_intermediate_tensors()
 
 
 class SharedModelEdgeWorker(NPUWorker):
@@ -886,10 +899,8 @@ class SharedModelEdgeWorker(NPUWorker):
             )
             dp.step()
 
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
+        # Edge-cloud sends are owned by the comm service (per-channel
+        # FIFO ordering + send-buffer keepalive); nothing to drain here.
 
         # SharedModelEdgeWorker always sits at PP rank 0 (the edge is
         # the first stage of the shared PP group), so there is no
@@ -917,12 +928,19 @@ class SharedModelEdgeWorker(NPUWorker):
         # ``self.local_rank + 1``). The explicit ``dst=`` is required
         # because the edge sits at in-group rank 0 — without it every
         # virtual worker would send to in-group rank 1, which is only
-        # correct for the first virtual worker.
-        self._pp_send_work = edge_cloud_isend_tensor_dict(
-            _gathered,
-            dst=self.local_rank + 1,
-            num_tokens=scheduler_output.total_num_scheduled_tokens,
-        )
+        # correct for the first virtual worker.  Channel-less "plain"
+        # wire (default device group, current stream) — unchanged from
+        # the legacy direct call.
+        get_comm_service().submit_send(
+            CommRequest(
+                channel=CommChannelType.PREFILL_UP,
+                op="send",
+                kind=BatchKind.PREFILL,
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                tensor_dict=_gathered,
+                src_dst=self.local_rank + 1,
+                wire="plain",
+            ))
 
         edge_sp = enable_sp()
         # Defer the tail recv + tail forward to the end of the
@@ -940,16 +958,19 @@ class SharedModelEdgeWorker(NPUWorker):
             # Receive the cloud's middle-layer result and run
             # the second forward (tail layers). The cloud peer
             # is at in-group rank ``self.local_rank + 1``.
-            tensor_dict, comm_handles, comm_postprocess = (
-                edge_cloud_broadcast_recv(
+            # Transport defaults to PREFILL_1, matching the legacy
+            # channel-default recv; data readiness is ordered
+            # device-side on first .tensors access.
+            recv_future = get_comm_service().submit_recv(
+                CommRequest(
+                    channel=CommChannelType.PREFILL_DOWN,
+                    op="recv",
+                    kind=BatchKind.PREFILL,
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     sp_chunk=edge_sp,
-                    src=self.local_rank + 1))
-            intermediate_tensors = AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
+                    src_dst=self.local_rank + 1,
+                ))
+            intermediate_tensors = recv_future.as_intermediate_tensors()
             tail_output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors)
             if isinstance(tail_output,
@@ -981,7 +1002,8 @@ class SharedModelEdgeWorker(NPUWorker):
         head + send path is **not** taken.
 
         Behaviour:
-        - Drain any in-flight ``_pp_send_work`` and step the profiler.
+        - Step the profiler (edge-cloud sends are owned by the comm
+          service; nothing to drain).
         - Call :meth:`BatchedModelRunner.execute_model_pre` to update
           ``self.input_batch`` and obtain an
           :class:`_ExecuteModelBundle`.
@@ -1002,10 +1024,6 @@ class SharedModelEdgeWorker(NPUWorker):
                 dynamic_profile as dp,
             )
             dp.step()
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
         if self.profiler is not None:
             self.profiler.step()
 
@@ -1039,10 +1057,6 @@ class SharedModelEdgeWorker(NPUWorker):
                 dynamic_profile as dp,
             )
             dp.step()
-        if self._pp_send_work:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
         if self.profiler is not None:
             self.profiler.step()
 
@@ -1070,21 +1084,9 @@ class SharedModelEdgeWorker(NPUWorker):
         approach where ``execute_model`` is called independently
         for each stage.
         """
-        # Drain in-flight PP sends from any preceding FIRST round
-        # before the LAST round's preprocessing begins.
-        if self._pp_send_work:
-            logger.info(
-                "[PD] execute_model_tail_pre: waiting for %d isend handles "
-                "dp_rank=%d",
-                len(self._pp_send_work), self.local_rank)
-            for handle in self._pp_send_work:
-                handle.wait()
-            logger.info(
-                "[PD] execute_model_tail_pre: all isend handles waited "
-                "dp_rank=%d",
-                self.local_rank)
-            self._pp_send_work = []
-
+        # Edge-cloud sends are owned by the comm service (per-channel
+        # FIFO ordering + send-buffer keepalive); the preceding FIRST
+        # round's isend needs no explicit drain here.
         bt = getattr(scheduler_output, "batch_type", None)
         num_tokens = scheduler_output.total_num_scheduled_tokens
         logger.info(
@@ -1114,24 +1116,23 @@ class SharedModelEdgeWorker(NPUWorker):
         this dp_rank (``local_rank + 1`` on the shared PP group).
         ``num_tokens`` / ``sp_chunk`` mirror the recv call in
         :meth:`SharedModelEdgeWorker.execute_model`'s
-        ``_tail_postprocess``. The closure stores the received
-        ``comm_postprocess`` handles on the returned
-        ``AsyncIntermediateTensors``; the batched tail call in the
-        busy_loop awaits them via ``AsyncIntermediateTensors``
-        (mirrors the original ``DeferredExecutePostprocess``
-        semantics).
+        ``_tail_postprocess``. The closure materializes the comm
+        service's recv future as ``AsyncIntermediateTensors``; the
+        batched tail call in the busy_loop triggers the device-side
+        ordering + postprocess on first ``.tensors`` access (mirrors
+        the original ``DeferredExecutePostprocess`` semantics).
         """
         def _recv():
-            tensor_dict, comm_handles, comm_postprocess = (
-                edge_cloud_broadcast_recv(
+            recv_future = get_comm_service().submit_recv(
+                CommRequest(
+                    channel=CommChannelType.PREFILL_DOWN,
+                    op="recv",
+                    kind=BatchKind.PREFILL,
                     num_tokens=num_tokens,
                     sp_chunk=sp_chunk,
-                    src=src))
-            return AsyncIntermediateTensors(
-                tensor_dict,
-                comm_handles=comm_handles,
-                comm_postprocess=comm_postprocess,
-            )
+                    src_dst=src,
+                ))
+            return recv_future.as_intermediate_tensors()
         return _recv
 
     # ------------------------------------------- memory / compile / warmup

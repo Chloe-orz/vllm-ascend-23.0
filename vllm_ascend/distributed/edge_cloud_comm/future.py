@@ -1,0 +1,208 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+"""CommFuture: completion-notification vehicle of the comm service.
+
+Completion semantics (see design doc section 4):
+
+* The HCCL op runs on an internal HCCL stream.  ``Work.wait()`` only
+  bridges the HCCL completion event onto the *current* stream and returns
+  immediately on the CPU — it never means "finished".
+* At submit time the channel bridges the handles onto the channel stream
+  (``handle.wait()`` inside the channel-stream context) and records
+  ``done_event`` right after the bridge.  ``done_event`` therefore fires
+  exactly when the P2P op completes.
+* ``query()`` on that event is the ONLY reliable CPU-side completion
+  observation (``is_completed()`` is not — it only means "queued").
+* Consumers must NOT rely on ``query()`` for data readiness: they order
+  their stream behind the event with ``wait_event`` (device-side), which
+  is what :class:`_CommSyncedIntermediateTensors` does.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import TYPE_CHECKING, Any, Callable
+
+import torch
+from vllm.logger import logger
+from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
+
+from vllm_ascend.distributed.edge_cloud_comm.types import (
+    CommRequest,
+    CommResult,
+    CommStatus,
+)
+
+if TYPE_CHECKING:
+    pass
+
+
+class _CommSyncedIntermediateTensors(AsyncIntermediateTensors):
+    """AsyncIntermediateTensors whose sync point is a recorded NPU event.
+
+    Equivalent to the legacy ``handle.wait()`` in ``wait_for_comm`` — but
+    the bridge already happened on the channel stream at submit time, so
+    ordering the consumer stream behind ``done_event`` achieves the same
+    device-side ordering without touching HCCL handles here.
+    """
+
+    def __init__(
+        self,
+        tensors: dict[str, torch.Tensor],
+        done_event: "torch.npu.Event | None",
+        comm_postprocess: list[Callable[[], None]] | None,
+    ) -> None:
+        super().__init__(
+            tensors, comm_handles=None, comm_postprocess=comm_postprocess
+        )
+        self._done_event = done_event
+
+    def wait_for_comm(self) -> None:
+        if self._comm_waited:
+            return
+        if self._done_event is not None:
+            # Device-side ordering only; returns immediately on the CPU.
+            torch.npu.current_stream().wait_event(self._done_event)
+        for fn in self._comm_postprocess or []:
+            fn()
+        self._comm_waited = True
+
+
+class CommFuture:
+    """Handle to one submitted communication request.
+
+    * ``done()`` — pure CPU-side query (event.query()), no side effects.
+    * ``wait()`` — blocking convenience for legacy/debug paths.
+    * ``add_callback()`` — fired once on completion (by the channel reaper
+      or by ``wait()``); callbacks must be cheap and non-blocking.
+    * ``as_intermediate_tensors()`` — recv only: bridge into the existing
+      lazy-consumption path of the model runner.
+
+    For send requests the future owns the source tensors
+    (``_keepalive``) until completion: the caching allocator must not hand
+    the block to the next batch while the HCCL internal stream may still
+    be reading it.  This replaces the legacy ``_wait_pp_send_work``.
+    """
+
+    def __init__(
+        self,
+        request: CommRequest,
+        handles: list[Any],
+        done_event: "torch.npu.Event | None",
+        tensor_dict: dict[str, Any] | None,
+        postprocess: list[Callable[[], None]],
+        keepalive: Any,
+    ) -> None:
+        self._request = request
+        self._handles = handles
+        self._done_event = done_event
+        self._tensor_dict = tensor_dict
+        self._postprocess = postprocess
+        self._keepalive = keepalive
+        self._status = CommStatus.PENDING
+        self._error: BaseException | None = None
+        self._callbacks: list[Callable[[CommResult], None]] = []
+        self._lock = threading.Lock()
+        if done_event is None:
+            # No cross-node op on this rank (non-PP-rank0 / world_size 1):
+            # nothing to wait for; postprocess collectives still run at
+            # consumption time via as_intermediate_tensors().
+            self._status = CommStatus.OK
+            self._keepalive = None
+
+    # ------------------------------------------------------------------ #
+    # Queries                                                             #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def request(self) -> CommRequest:
+        return self._request
+
+    def done(self) -> bool:
+        """CPU-side, non-blocking.  Pure query — never fires callbacks."""
+        if self._status != CommStatus.PENDING:
+            return True
+        event = self._done_event
+        return event is not None and event.query()
+
+    def result(self) -> CommResult:
+        return CommResult(
+            status=self._status,
+            tensor_dict=self._tensor_dict,
+            error=self._error,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Synchronization                                                     #
+    # ------------------------------------------------------------------ #
+
+    def wait(self, timeout: float | None = None) -> CommResult:
+        """Block the calling thread until completion (debug/legacy path).
+
+        Production consume paths should use ``as_intermediate_tensors()``
+        (device-side ordering, no CPU blocking).
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not self.done():
+            if deadline is not None and time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"CommFuture.wait timed out after {timeout}s: "
+                    f"{self._request.channel} {self._request.op}"
+                )
+            time.sleep(0.001)
+        self._finalize()
+        return self.result()
+
+    def add_callback(self, fn: Callable[[CommResult], None]) -> None:
+        with self._lock:
+            if self._status is CommStatus.PENDING:
+                self._callbacks.append(fn)
+                return
+        fn(self.result())
+
+    # ------------------------------------------------------------------ #
+    # Consumption bridge                                                  #
+    # ------------------------------------------------------------------ #
+
+    def as_intermediate_tensors(self) -> AsyncIntermediateTensors:
+        """Recv only: wrap the received tensors for lazy consumption.
+
+        Data readiness is enforced device-side (``wait_event``) the first
+        time ``.tensors`` is accessed — no CPU-side ``query()`` needed.
+        """
+        assert self._request.op == "recv", (
+            "as_intermediate_tensors() is only valid for recv requests"
+        )
+        return _CommSyncedIntermediateTensors(
+            self._tensor_dict, self._done_event, self._postprocess
+        )
+
+    # ------------------------------------------------------------------ #
+    # Internal                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _finalize(self, error: BaseException | None = None) -> bool:
+        """Transition to a terminal state exactly once; fire callbacks.
+
+        Called by the channel reaper (head-of-line query) and by
+        ``wait()``.  Releases the send-buffer keepalive so the block
+        returns to the caching allocator.
+        """
+        with self._lock:
+            if self._status is not CommStatus.PENDING:
+                return False
+            self._status = CommStatus.ERROR if error else CommStatus.OK
+            self._error = error
+            self._keepalive = None
+            callbacks, self._callbacks = self._callbacks, []
+        result = self.result()
+        for cb in callbacks:
+            try:
+                cb(result)
+            except Exception:
+                logger.exception(
+                    "[edge-cloud-comm] completion callback failed: %s %s",
+                    self._request.channel,
+                    self._request.op,
+                )
+        return True
