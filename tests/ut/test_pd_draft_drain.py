@@ -3,7 +3,7 @@
 drain path that pairs the cloud's DRAFT_LAST response when the owning request
 finishes or is aborted mid-chain.
 
-Regression coverage for the edge-side MTP draft deadlock fixes:
+Regression coverage for the edge-side scheduled draft deadlock fixes:
 
   * ``_can_schedule_draft_first`` (pre-generated branch) now respects
     ``_force_draft_last`` -- a second DRAFT_FIRST may not be picked until the
@@ -109,6 +109,193 @@ def _make_real_output(
     so.num_scheduled_tokens = {req_id: 8}
     so.total_num_scheduled_tokens = 8
     return so
+
+
+def _configure_scheduled_draft(
+    scheduler,
+    method: str,
+    *,
+    async_scheduling: bool = True,
+    model_type: str = "",
+):
+    scheduler.scheduler_config = MagicMock()
+    scheduler.scheduler_config.async_scheduling = async_scheduling
+    scheduler.vllm_config = MagicMock()
+    scheduler.vllm_config.speculative_config = MagicMock()
+    scheduler.vllm_config.speculative_config.method = method
+    scheduler.vllm_config.model_config = MagicMock()
+    scheduler.vllm_config.model_config.hf_config = MagicMock()
+    scheduler.vllm_config.model_config.hf_config.model_type = model_type
+
+
+# ------------------------------------------------------------------ #
+# Test: Eagle3 uses the generic async placeholder control chain       #
+# ------------------------------------------------------------------ #
+
+
+class TestAsyncScheduledDraftPlaceholders:
+    @pytest.mark.parametrize("method", ["eagle3", "qwen3_5_mtp", "qwen_mtp"])
+    def test_supported_method_uses_placeholders(self, method):
+        s = _make_bare_scheduler()
+        _configure_scheduled_draft(s, method)
+
+        assert s._uses_async_scheduled_draft_placeholders() is True
+
+    def test_normalized_qwen_mtp_uses_placeholders(self):
+        s = _make_bare_scheduler()
+        _configure_scheduled_draft(s, "mtp", model_type="qwen3_5")
+
+        assert s._uses_async_scheduled_draft_placeholders() is True
+
+    @pytest.mark.parametrize(
+        ("method", "async_scheduling", "model_type"),
+        [
+            ("eagle3", False, ""),
+            ("mtp", True, "deepseek_v3"),
+            ("ngram", True, "qwen3_5"),
+        ],
+    )
+    def test_unsupported_configuration_does_not_use_placeholders(
+        self, method, async_scheduling, model_type
+    ):
+        s = _make_bare_scheduler()
+        _configure_scheduled_draft(
+            s,
+            method,
+            async_scheduling=async_scheduling,
+            model_type=model_type,
+        )
+
+        assert s._uses_async_scheduled_draft_placeholders() is False
+
+    def test_eagle3_pregenerates_control_only_chain(self):
+        s = _make_bare_scheduler()
+        _configure_scheduled_draft(s, "eagle3")
+        request = MagicMock()
+        request.is_finished.return_value = False
+        s.requests["req-0"] = request
+        target = _make_real_output(BatchType.DECODE_LAST)
+
+        s._pregenerate_draft_chain(target)
+
+        assert len(s.drafts_first_ready) == s.num_spec_tokens
+        assert [
+            output.draft_step_idx for output in s.drafts_first_ready
+        ] == list(range(s.num_spec_tokens))
+        assert all(
+            output.draft_task_id == target.head_token
+            for output in s.drafts_first_ready
+        )
+        assert all(
+            output.num_accepted_tokens is None
+            and output.valid_sampled_token_count is None
+            for output in s.drafts_first_ready
+        )
+        assert (
+            s._draft_first_cloud_publish_pending
+            is s.drafts_first_ready[0]
+        )
+        assert target.head_token in s._pregenerated_draft_task_ids
+
+    def test_eagle3_patches_only_step_zero_cloud_scalars(self):
+        s = _make_bare_scheduler()
+        _configure_scheduled_draft(s, "eagle3")
+        request = MagicMock()
+        request.is_finished.return_value = False
+        s.requests["req-0"] = request
+        target = _make_real_output(BatchType.DECODE_LAST)
+        s._pregenerate_draft_chain(target)
+
+        finalized = s.finalize_pre_generated_draft_first(
+            draft_task_id=target.head_token,
+            num_accepted_tokens={"req-0": 2},
+            valid_sampled_token_count={"req-0": 2},
+        )
+
+        assert finalized is s.drafts_first_ready[0]
+        assert finalized.draft_step_idx == 0
+        assert finalized.num_accepted_tokens == {"req-0": 2}
+        assert finalized.valid_sampled_token_count == {"req-0": 2}
+        assert all(
+            output.num_accepted_tokens is None
+            and output.valid_sampled_token_count is None
+            for output in list(s.drafts_first_ready)[1:]
+        )
+        assert s._draft_first_scalars_patched is True
+
+    def test_eagle3_next_target_waits_for_final_draft_tail(self):
+        s = _make_bare_scheduler()
+        _configure_scheduled_draft(s, "eagle3")
+        s._pregenerated_draft_task_ids.add("task-0")
+        s._pregenerated_draft_req_ids["task-0"] = {"req-0"}
+        s.running = [MagicMock()]
+        s.decodes_first_ready = deque()
+        s._decode_first_placeholder_parent = None
+        next_decode = _make_real_output(BatchType.DECODE_FIRST)
+        s._pick_decode_first_batch = MagicMock(return_value=next_decode)
+
+        s._prepare_next_decode_first_placeholder(
+            _make_draft_last(task_id="task-0", step=0)
+        )
+        s._pick_decode_first_batch.assert_not_called()
+        assert not s.decodes_first_ready
+
+        s._prepare_next_decode_first_placeholder(
+            _make_draft_last(
+                task_id="task-0", step=s.num_spec_tokens - 1
+            )
+        )
+        s._pick_decode_first_batch.assert_called_once_with()
+        assert list(s.decodes_first_ready) == [next_decode]
+
+
+class TestUnresolvedDraftParentGate:
+    @staticmethod
+    def _engine_with_parent(parent, *, pregenerated):
+        engine = MagicMock()
+        engine._uses_scheduled_edge_cloud_draft.return_value = True
+        engine.batch_queue = [(MagicMock(), parent, MagicMock())]
+        engine.scheduler.is_pre_generated_draft.return_value = pregenerated
+        return engine
+
+    @pytest.mark.parametrize(
+        "batch_type", [BatchType.PREFILL_LAST, BatchType.DECODE_LAST]
+    )
+    def test_non_pregenerated_target_tail_blocks_queue_fill(
+        self, batch_type
+    ):
+        from vllm_ascend.patch.platform.patch_engine_core import (
+            _has_unresolved_edge_cloud_draft_parent,
+        )
+
+        parent = _make_real_output(batch_type)
+        engine = self._engine_with_parent(parent, pregenerated=False)
+
+        assert _has_unresolved_edge_cloud_draft_parent(engine) is True
+
+    @pytest.mark.parametrize(
+        "batch_type", [BatchType.PREFILL_LAST, BatchType.DECODE_LAST]
+    )
+    def test_pregenerated_target_tail_allows_queue_fill(self, batch_type):
+        from vllm_ascend.patch.platform.patch_engine_core import (
+            _has_unresolved_edge_cloud_draft_parent,
+        )
+
+        parent = _make_real_output(batch_type)
+        engine = self._engine_with_parent(parent, pregenerated=True)
+
+        assert _has_unresolved_edge_cloud_draft_parent(engine) is False
+
+    def test_mid_prefill_tail_also_blocks_queue_fill(self):
+        from vllm_ascend.patch.platform.patch_engine_core import (
+            _has_unresolved_edge_cloud_draft_parent,
+        )
+
+        parent = _make_real_output(BatchType.PREFILL_LAST)
+        parent.is_last_prefill_chunk = False
+        engine = self._engine_with_parent(parent, pregenerated=False)
+
+        assert _has_unresolved_edge_cloud_draft_parent(engine) is True
 
 
 # ------------------------------------------------------------------ #
@@ -233,7 +420,7 @@ class TestMidPrefillDraftChain:
         request = MagicMock()
         request.is_finished.return_value = False
         s.requests["req-0"] = request
-        s._uses_async_scheduled_mtp_placeholders = MagicMock(
+        s._uses_async_scheduled_draft_placeholders = MagicMock(
             return_value=True
         )
 

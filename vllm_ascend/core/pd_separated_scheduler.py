@@ -346,7 +346,7 @@ class PDSeparatedScheduler(Scheduler):
         self._draft_last_delay_start_ts: float | None = None
         self._draft_last_delay_schedule_ms: int = 10
 
-        # Async scheduled-MTP keeps real draft token IDs in the edge worker.
+        # Async scheduled draft keeps real draft token IDs in the edge worker.
         # The scheduler only needs fixed-length placeholder SchedulerOutputs,
         # which can be generated and dispatched before the preceding worker
         # result is returned to EngineCore.  Cloud publication is finalized
@@ -1703,14 +1703,22 @@ class PDSeparatedScheduler(Scheduler):
         )
         return scheduler_output
 
-    def _uses_async_scheduled_mtp_placeholders(self) -> bool:
-        """Whether scheduled MTP can use native async placeholder semantics."""
+    def _uses_async_scheduled_draft_placeholders(self) -> bool:
+        """Whether scheduled draft can use native async placeholders.
+
+        The placeholders contain control metadata only. Real draft tokens and
+        Eagle3 hidden-state/residual dependencies remain in the edge worker,
+        where worker FIFO order guarantees that step N's DRAFT_LAST updates
+        the task context before step N+1's DRAFT_FIRST consumes it.
+        """
         if not getattr(self.scheduler_config, "async_scheduling", False):
             return False
         speculative_config = self.vllm_config.speculative_config
         if speculative_config is None or self.num_spec_tokens <= 0:
             return False
         method = getattr(speculative_config, "method", None)
+        if method == "eagle3":
+            return True
         if method in ("qwen3_5_mtp", "qwen_mtp"):
             return True
         if method != "mtp":
@@ -1730,7 +1738,7 @@ class PDSeparatedScheduler(Scheduler):
         the step-0 accepted-token scalars are finalized later for the cloud;
         they are not consumed by the edge worker.
         """
-        if not self._uses_async_scheduled_mtp_placeholders():
+        if not self._uses_async_scheduled_draft_placeholders():
             return
         if (
             self.drafts_first_ready
@@ -1779,7 +1787,7 @@ class PDSeparatedScheduler(Scheduler):
         self._pregenerated_draft_task_ids.add(task_id)
         self._pregenerated_draft_req_ids[task_id] = set(req_ids)
         logger.info(
-            "[PD] pre-generated async MTP placeholders task_id=%s steps=%d",
+            "[PD] pre-generated async draft placeholders task_id=%s steps=%d",
             task_id,
             self.num_spec_tokens,
         )
@@ -1956,7 +1964,7 @@ class PDSeparatedScheduler(Scheduler):
         replaces them with its local ``_draft_token_ids`` after this DRL has
         executed, so no DraftTokenIds round-trip through EngineCore is needed.
         """
-        if not self._uses_async_scheduled_mtp_placeholders():
+        if not self._uses_async_scheduled_draft_placeholders():
             return
         if draft_last.draft_task_id not in self._pregenerated_draft_task_ids:
             self._decode_first_placeholder_parent = None
