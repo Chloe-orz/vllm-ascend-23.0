@@ -1051,8 +1051,17 @@ class NPUWorker(WorkerBase):
                 return  # idempotent: another hint already submitted
             if key in self._early_recv_consumed:
                 return  # busy_loop already consumed (submitted its own)
+            _t0 = time.monotonic()
             future = get_comm_service().submit_recv(request)
+            _dt_ms = (time.monotonic() - _t0) * 1000
             self._early_recv_futures[key] = future  # cache for busy_loop
+        if _dt_ms > 5.0:
+            logger.info(
+                "[early-irecv] submit_recv took %.1f ms channel=%s seqno=%d",
+                _dt_ms,
+                channel.value,
+                seqno,
+            )
         logger.debug(
             "[early-irecv] early-recv submitted channel=%s seqno=%d "
             "num_tokens=%d",
