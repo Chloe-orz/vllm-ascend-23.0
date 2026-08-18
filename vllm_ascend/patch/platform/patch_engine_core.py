@@ -678,10 +678,17 @@ def _uses_scheduled_edge_cloud_draft(self) -> bool:
 
 
 def _has_unresolved_edge_cloud_draft_parent(self) -> bool:
-    """Keep async scheduling behind a prefill tail only.
+    """Keep async scheduling behind a non-pre-generated target tail.
 
-    Async scheduled-MTP pre-generates the decode draft chain when DECODE_LAST
-    is picked, so DECODE_LAST must not hold back local edge dispatch.
+    Normally async scheduled draft pre-generates its control chain when a
+    target tail is picked, so EngineCore can safely keep filling the worker
+    FIFO. If another chain already owns the single pending step-0 publication
+    slot, pre-generation deliberately declines and EngineCore must first
+    collect this target result. ``_advance_edge_cloud_draft`` then enqueues its
+    fallback dynamic DRAFT_FIRST before another target can overtake the
+    accepted-token correction. This applies to both PREFILL_LAST and
+    DECODE_LAST; limiting the guard to prefill leaves the Eagle3 decode race
+    that presents on the cloud as ``expected=..., pending=None``.
     """
     if not self._uses_scheduled_edge_cloud_draft():
         return False
@@ -689,10 +696,13 @@ def _has_unresolved_edge_cloud_draft_parent(self) -> bool:
     if not batch_queue:
         return False
     for _future, scheduler_output, _exec_future in batch_queue:
-        if (
+        is_prefill_tail = (
             scheduler_output.batch_type == BatchType.PREFILL_LAST
-            and getattr(scheduler_output, "is_last_prefill_chunk", True)
-        ):
+        )
+        is_decode_tail = (
+            scheduler_output.batch_type == BatchType.DECODE_LAST
+        )
+        if is_prefill_tail or is_decode_tail:
             is_pregenerated = getattr(
                 self.scheduler,
                 "is_pre_generated_draft",
@@ -785,9 +795,9 @@ def _patched_step_with_batch_queue(self):
     assert len(batch_queue) < self.batch_queue_size
 
     model_executed = False
-    fill_async_mtp_placeholders = getattr(
+    fill_async_draft_placeholders = getattr(
         self.scheduler,
-        "_uses_async_scheduled_mtp_placeholders",
+        "_uses_async_scheduled_draft_placeholders",
         lambda: False,
     )()
     deferred_scheduler_output: tuple[
@@ -866,9 +876,9 @@ def _patched_step_with_batch_queue(self):
             len(batch_queue),
             queue_types,
         )
-        if not fill_async_mtp_placeholders:
+        if not fill_async_draft_placeholders:
             # Preserve the upstream one-schedule-per-turn behavior for every
-            # other mode. Only async scheduled-MTP needs one EngineCore turn
+            # other mode. Only async scheduled draft needs one EngineCore turn
             # to materialize the complete placeholder chain.
             if (
                 scheduled_model_executed
@@ -1001,15 +1011,15 @@ def _patched_process_engine_step(self) -> bool:
     for output in outputs.items() if outputs else ():
         self.output_queue.put_nowait(output)
     self.post_step(model_executed)
-    async_mtp_in_flight = bool(self.batch_queue) and getattr(
+    async_draft_in_flight = bool(self.batch_queue) and getattr(
         self.scheduler,
-        "_uses_async_scheduled_mtp_placeholders",
+        "_uses_async_scheduled_draft_placeholders",
         lambda: False,
     )()
     if (
         not model_executed
         and self.scheduler.has_unfinished_requests()
-        and not async_mtp_in_flight
+        and not async_draft_in_flight
     ):
         _time.sleep(0.001)
     return model_executed
