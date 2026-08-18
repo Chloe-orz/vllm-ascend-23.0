@@ -24,6 +24,7 @@ import gc
 import logging
 import threading
 import time
+from dataclasses import replace
 from types import NoneType
 
 import torch
@@ -1075,6 +1076,21 @@ class NPUWorker(WorkerBase):
         and submit directly.
         """
         if request.seqno is None or not self._early_recv_comm_active:
+            # Non-PP-first ranks sit in a singleton PP group, and the comm
+            # service collapses every logical channel onto the singleton
+            # default device group (service.py's world_size<=1 shortcut),
+            # so ALL of this rank's recvs share one CommChannel and one
+            # seqno counter -- the independent per-type seqno spaces
+            # (prefill/decode/draft each start at 0) would collide there.
+            # These ranks perform no real cross-node op (their futures
+            # complete immediately), so ordering needs no seqno: submit
+            # unsequenced, keeping the collapsed channel uniformly
+            # unsequenced (sequenced/unsequenced must not mix).
+            if (
+                request.seqno is not None
+                and get_pp_group().world_size <= 1
+            ):
+                request = replace(request, seqno=None)
             return get_comm_service().submit_recv(request)
         key = (request.channel, request.seqno)
         with self._early_recv_lock:
