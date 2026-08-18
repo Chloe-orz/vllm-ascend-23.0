@@ -769,6 +769,34 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 - **变 3（ack 无独立队列）**：POST_OUT 完成 ack 经共用 ROUTER/DEALER 接收方向按 identity 归入对应 (instance,dp) scheduler 状态（`_drain_worker_completion_acks` 一族），不新增队列实体。
 - **不变（正交项）**：rpc_broadcast_mq 方案一（大组 MQ）是 method 链通道，execute_model/sample_tokens 均只上本地平面，与本节 scheduler 队列结构正交（§2.2.2）。
 
+#### 3.1.1 队列/簿记按实例扩展的资源量（2026-08 估算，标注项待实测）
+
+**队列类（running/waiting/3 条尾 ready deque/requests 簿记）**：随**请求总量**线性，不随 N 配置本身放大--per-instance 拆分只是分组管理，内存上界 = 全局并发请求数 × 单请求簿记。估算（文本请求，8K prompt 量级）：
+
+| 项 | 单请求/单对象量级 | 备注 |
+|---|---|---|
+| Request 对象（waiting/running） | ~50-90KB（prompt 数组 + 簿记 + 采样参数） | mm 特征例外：每图像特征 0.5-数 MB，按部署实测 |
+| running 簿记（block_ids 等） | ~2-6KB | 边 KV block 表 |
+| SchedulerOutput（尾 ready deque 内） | ~10-100KB | 有界：prefill_inflight≤2/实例/dp + decode/draft 在飞少量 |
+| HiddenChannelManager | ~KB 级（纯 channel ID 的 deque/dict，无 tensor，pd_separated_scheduler.py:93-190） | ×N×D 可忽略 |
+
+- **总量公式**：控制面队列内存 ≈ 全局并发 R × (60-100KB)。若全局并发上限保持单实例口径（如 256），**总量不变**；若每实例 max_num_seqs 配成单实例同值且 N 实例全部打满（N=16×256=4096 并发），上界 ×N ≈ 4096×80KB ≈ **330MB 边 EngineCore 进程 RAM**（文本；含 mm 按实测另计）--部署上建议给全局并发上限或水位联动，而非无脑 ×N。
+- per-instance 固定开销（scheduler 对象族、manager、容器）：几十 KB × N×D；N=16/D=2 = 32 套 ≈ 数 MB，可忽略。
+
+**控制面（EngineCore）其余按实例扩展项与量级**：
+
+| 项 | 是否按实例扩展 | 量级（N=16, D=2 示例） |
+|---|---|---|
+| ZMQ ROUTER per-identity out 队列 | 是（N identity/dp） | 有界 1000 条/identity，占用随**在飞**不随 N 配置：在飞 ≤ prefill_inflight(2)+少量 decode -> 实际 MB 级；极端满队 10-100MB/identity 仅作背压告警上限（§3.7.2） |
+| InstanceLoadStats + 全局合并视图（leader） | 是 | O(N) 小结构，<100KB |
+| ready bitmap（all_reduce payload 捎带） | 是 | N bit，可忽略 |
+| HCCL channel 池（数据通道标签） | 是：N×D×3（2P1D/dp，:89-90） | 96 个 channel；若每 channel 占独立流/tag，设备侧固定开销单流几十 KB 级 ×96 ≈ 数 MB（**待实测**，含流创建上限核实） |
+| rpc_broadcast_mq / coord group / TCPStore / gloo 组 | **否**（方案一大组 MQ、单 store、§2.2 已定零扩展） | 0 |
+| 边 KV 池 | **否**（边 worker 共享池，按请求分配，不按实例切分；云 KV 在各实例 worker 内，云总量固定 32 卡） | 0 |
+| 云侧 PassiveEC / 云 scheduler | 天然 per-instance（本设计既定形态） | 不属于边 EngineCore 扩展项 |
+
+**结论**：控制面真正的扩展量 = ①队列簿记（请求总量驱动，可控，无 N 线性放大必要）+ ②ROUTER identity 队列（在飞驱动，有界）+ ③HCCL channel/流（N×D×3，数 MB 级待实测）+ ④统计/视图（O(N) 忽略）；通道与 store 类零扩展（§2.2 定案的直接收益）。
+
 ### 3.2 两级结构
 
 | 层 | 耦合 | 协调 | 集合通信 |
