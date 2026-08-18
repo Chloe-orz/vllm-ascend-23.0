@@ -223,6 +223,103 @@
 
 **代价**：云双机每实例需传对端机 IP（N 对地址，拉起脚本生成）；**实现期核实项：peer_worker_response_mq 的 handle 交换是否依赖云侧 bind 地址**（若依赖，云侧地址仍需传到边的途径，不能只靠 master_addr 反连）。
 
+**rpc/response MQ 的 handle 分发机制与多实例影响（2026-08 代码核实）**：handle 分发不走 ZMQ/store，分三段--同机 worker->executor = multiprocessing.Pipe（ready_pipe，patch_multiproc_executor.py:374-409）；**跨机 = `inner_dp_world` gloo cpu_group 内 `dist.broadcast_object_list` 广播 Handle 对象**（shm_broadcast.py:949-960 `create_from_process_group` / `create_single_reader_mq_broadcasters`，云 worker 的 response MQ bind 自己 `get_ip()`:随机端口、Handle 广播回边、边 connect）；同机 PassiveEC->worker 旁路（cloud_recv_hint_mq）= 环境变量装 base64 pickle handle。**推论：handle 分发拓扑 = 进程组划分拓扑，"按实例区分 handle" = 按实例划分广播组 + MQ 归属与组一一对应**。多实例四个问题：
+1. **组<->MQ 归属错配 = 真正串台形态**（非端口撞）：组扩成 [边dpX, 实例*.dpX] 而只建一份 MQ -> method 链（profile/KV/warmup）是全组 collective、无法只发一个实例、慢实例 gate 全组、edge `response_mqs` 扩到 N×C 条且全部 `wait_until_ready` 才放行（:246-247）；按实例分 N×D 组则隔离干净但边参加 N×D 个 gloo 组。Handle 写死 ip:port，广播域与归属域错位时连得上就静默串台。
+2. **云侧 bind 地址可达性**：每云 worker bind 自己 `get_ip()`:随机端口，edge 反向 connect N×C 个地址；随机端口 -> 防火墙放行 ephemeral 段或改显式端口（与 pre_out 同口径）；`get_ip()` 多网卡选错 -> 广播成功后才卡 wait_until_ready，排障隐蔽。
+3. **启动门闩乘 N**：Handle 广播是全组集合通信、广播点在 worker init，错峰拉起 = 慢实例 gate 全组 MQ 建立（§3.10 风险 #3 死锁面乘 N）。
+4. **设计待定点**：一份大组 MQ vs 按实例 N×D 组--与 §3.4 实例分发、§4 rank/组布局是同一决策的两面，在 §4 组设计时一并定。
+
+**边界澄清（2026-08 代码核实，二次修正）**：`execute_model` 在边云模式 `local_only=True`（multiproc_executor.py:364-384，"cloud receives work solely via ZMQ"），每步 scheduler_output 不走 rpc_broadcast_mq 跨机平面；`clear_pending_edge_cloud_draft_for_req_ids` 亦 local_only（patch_multiproc_executor.py:307-317）；`execute_dummy_batch` 在 coord DP 模式下已刻意规避（core.py:1936-1943）；`update_max_model_len` 在启动链 initialize_kv_caches 内、仅 auto-fit 缩小 max_model_len 时发一次（core.py:290-295），非运行期。
+**但 sample_tokens 是每步跨机的**（一次修正中"仅结构化输出"的判断有误）：本树为 deferred sampling 设计，last rank 的 execute_model 只算 logits 存 ExecuteModelState 后恒返回 None（gpu_model_runner.py:4408-4427），采样推迟到独立 sample_tokens RPC，结构化输出的 grammar bitmask 在采样前 apply（:4474-4478；grammar_output=None 时掩码跳过但 RPC 照发）。边云链路：尾段 batch（PL/DL）后 EngineCore 发 `sample_tokens`（patch_engine_core.py:363-374 `_needs_sample_tokens` gate 掉头段 PF/DF），collective_rpc 无 local_only/无 unique_reply_rank（multiproc_executor.py:386-396）-> **跨机广播到云 worker，云每 worker 都 dequeue、立即返回 EMPTY_MODEL_RUNNER_OUTPUT no-op 不碰 HCCL**（model_runner_v1.py:5230-5240），边 rank0 真采样，边**等全组回包**（含 N×C 云 no-op 包）future 才完成。**多实例后果：这是每步发生的"慢实例 gate 全组"**--云 busy_loop 单线程，任一实例跑长 P-middle 期间不 dequeue，其他实例的 no-op 回包排队，边每步被最慢实例卡；多实例化时 sample_tokens 应与 execute_model 同口径处理（local_only 化或并入 ZMQ 通道），云 no-op 回包协议才能收敛。
+
+**rpc_broadcast_mq 多实例两方案（2026-08）**：
+- **当前机制基线**：广播面=边 leader 建 MessageQueue（patch:95-100），本地平面 shm+IPC 无端口、远程平面 XPUB bind `tcp://master_addr:{get_open_port()}`（**MQ 随机端口**，shm_broadcast.py:428）；响应面=每 worker 一条 MQ(1,1)，云 worker bind 自己 `get_ip():随机端口`；handle 交换同机=Pipe、跨机=inner_dp_world gloo 组 broadcast_object_list；**gloo 建链端口=OS 临时端口**（经 PD TCPStore PrefixStore 会合交换地址，无显式配置；与 coord 组 master_port+201 显式端口是两回事）。
+
+```
+图 3：rpc_broadcast_mq 当前机制基线（单实例，云 C 个 worker）
+
+┌────────────────────────────────────────────────┐
+│ 边 leader Executor（node_rank_within_dp==0）    │
+│   EngineCore → collective_rpc(method) → enqueue │
+└───────────────────────┬────────────────────────┘
+                        ▼
+      rpc_broadcast_mq（1 条，边 leader 建，patch:95-100）
+      ┌─────────────────────────────────────────────────────┐
+      │ 本地平面：ShmRingBuffer + XPUB，ipc://unix socket    │ ←无端口
+      │ 远程平面：XPUB bind tcp://master_addr:{随机端口}      │ ←MQ 随机端口
+      └──────────┬───────────────────────────┬──────────────┘
+                 │ shm/IPC（本地读者）        │ TCP 订阅（跨机，云 connect）
+                 ▼                           ▼
+        ┌────────────────┐          ┌────────────────────────┐
+        │ 边 worker ×C_e │          │ 云 worker ×C            │
+        │ dequeue 执行    │          │ dequeue 执行            │
+        └───────┬────────┘          └───────┬────────────────┘
+                │ response MQ(1,1)          │ response MQ(1,1)
+                │ shm 本地回包               │ bind tcp://{云 get_ip()}:{随机端口}
+                ▼                           ▼
+        Executor 收集 response_mqs（range(world_size)，远程取 workers[0].peer_worker_response_mqs）
+                │  全部回包到齐 → future 完成 → EngineCore
+                ▼
+
+Handle 分发与 gloo 建链时序：见图 3b（时序图）
+
+运行时流量标注：
+  execute_model ：local_only=True → 远程平面不发（云工作全经 ZMQ PRE_OUT）
+  sample_tokens ：每尾段 step 跨机广播 → 云全 worker no-op 回包 → 边等全组
+                  （多实例=每步慢实例 gate，须 local_only 化，见方案一）
+  init/warmup   ：跨机广播 + 等全组回包（启动期一次性，慢实例 gate 全组）
+```
+
+```
+图 3b：rpc_broadcast_mq 建链与 Handle 交换时序（启动期 -> 运行期，单实例）
+
+边侧 leader（Executor + rank0 worker）                     云侧 worker ×C
+      │                                                        │
+ ①会合 │ 全体经 tcp://master_addr:master_port（PD TCPStore）入 G0
+      │ new_group 派生 inner_dp_world 子组：cpu gloo + device hccl，
+      │ 同一 TCPStore + PrefixStore key 隔离 -> 零新端口
+      │                                                        │
+ ②建链 │ gloo 组内每 rank 监听 OS 临时端口，地址经 store 交换（非显式配置）
+      │ ═════════════ gloo TCP（临时端口）双向链 ══════════════│
+      │                                                        │
+ ③本地平面（同机，无网络）
+      │ Executor 建 ShmRingBuffer + XPUB ipc://unix（无端口）
+      │ 边 worker 用 spawn 传入的 input_shm_handle 直连（不经 gloo）
+      │ worker ready 后经 multiprocessing.Pipe（ready_pipe，OS 管道）
+      │ 回传本地 response MQ handle（wait_for_response_handle_ready）
+      │                                                        │
+ ④广播 MQ Handle 下行（边->云，走 gloo 广播）
+      │ 边建远程平面：XPUB bind tcp://master_addr:{MQ 随机端口}
+      │ ──── gloo broadcast_object_list([Handle]) ───────────> │
+      │                                         云 create_from_handle：
+      │                                         ZMQ connect master_addr:{随机端口}
+      │                                                        │
+ ⑤响应 MQ Handle 上行（云->边，走 gloo 广播）
+      │                                      每云 worker 建 MQ(1,1)
+      │                                      bind tcp://{云 get_ip()}:{随机端口}
+      │ <──── gloo broadcast_object_list([Handle×C]) ───────── │
+      │ 边 create_from_handle ×C -> peer_worker_response_mqs
+      │ 边 ZMQ connect {云IP}:{随机端口} ×C
+      │                                                        │
+ ⑥就绪门闩
+      │ Executor：rpc_broadcast_mq.wait_until_ready()（等全部读者连上）
+      │          + 逐条 response_mq.wait_until_ready()（含全部云远程 MQ）
+      │ -> 全组就绪才放行 method 链（慢实例 gate 全组，一次性）
+      │                                                        │
+ ⑦同机旁路：cloud_recv_hint_mq Handle 走环境变量（base64 pickle），
+      │ PassiveEC -> 云 worker，不经 gloo、不占端口
+      │                                                        │
+ ──────┴──────────────── 运行期 ───────────────────────────────┴─────
+      │ execute_model：local_only -> 只上本地平面（云不收，工作经 ZMQ PRE_OUT）
+      │ sample_tokens：上双平面 ─────────────────────────────> │ 云全 worker no-op 回包
+      │ <── response MQ(1,1) 全组回包到齐 future 完成 ──────── │（多实例=每步 gate，须修）
+      │ init/warmup 等控制方法：同 sample_tokens 路径（启动期一次性）
+```
+
+- **方案一（一份大组 MQ，v1 推荐）**：inner_dp_world 扩成 [边dpX + N 实例的 dpX]，广播 MQ 仍 1 条（1 个随机端口 N 实例订阅）、response MQ N·C 条。慢实例 gate 影响分层：启动链全组门闩（一次性，不影响稳态）；热路径 local_only+ZMQ 不受影响；**sample_tokens 每尾段 step 等全组 no-op 回包=每步推理性能劣化，必须修**--与 execute_model 同口径 local_only 化（multiproc_executor.py:386-396），修后运行时零跨机 method。改动清单：① rank 布局/global_start_rank 实例偏移（第一代码改动点，patch:161-165）；② sample_tokens local_only（**风险已核（2026-08）**：local_only 只跳远程发送、不改 response 收集面（multiproc_executor.py:464-466），response_mqs 含云（patch:202-217）--只加 local_only 必每步超时等云回包；必须成对加 `unique_reply_rank=output_rank`（execute_model/clear_pending 同款，worker 端 payload output_rank 门控回包已存在 :1226/:1347-1351，只门控回包不门控执行，本地全 worker 仍执行并清 execute_model_state）。前置核实项：a) PD 模式 kv_output_aggregator 实际取值（aggregator 非 None 时强制 output_rank=None 等全组，local_only 下无人替云回包即挂；今天能跑反证 PD aggregator=None，须加守卫并写配置约束『PD 边云不支持 KVConnector 框架』）；b) 云 worker 确认从不设 execute_model_state（否则少清理触发 State error）。已排除项：集合语义（云今天 no-op 不碰任何 PP/HCCL 原语，边 sample_tokens 若含需云参加的 collective 现在就挂了）、混合升级（边侧改动，云只是少收消息，busy_loop 无超时期望）、非 PD 回归（gate 与 execute_model 逐字一致即可）；返回形态从全组 list 变单对象，消费端按 execute_model 路径吃单对象，方向正确）；③ wait_until_ready 启动门闩配错峰拉起硬前提；④ 故障域=全组（per-instance 失败判定 v1 先记为限制）；⑤ 防火墙放行 ephemeral 段（1+N·C 个随机端口）。
+- **方案二（按实例 N×D 个 gloo 组，v2 演进）**：每 (dp,instance) 独立子组+独立广播/响应 MQ，边 dpX 参加 N 组。收益：串台构造上不可能、故障域/启动按实例隔离可滚动拉起、sample_tokens 可定向。代价与改动：① N×D 个 new_group；② MQ 双平面拆分（本地 shm 共享 1 份+远程按实例 N 份，MessageQueue 现耦合两平面=最大结构性改动）；③ 云 worker 用本实例组（instance_id 已可从 node_rank 取）；④ executor response_mqs 按实例字典+collective_rpc 实例寻址参数；⑤ 广播端口 N 个随机端口。
+- **决策建议**：v1 = 方案一 + sample_tokens local_only 化（零机制扩展，改动集中 rank 布局）；方案二待需要滚动拉起/per-instance 故障隔离时演进，其 MQ 拆平面与 §4 组布局强耦合，留 §4 一并定。
+
 现有所有按 dp_rank 编码的端口/store，N 实例下会撞端口，需加 **instance 偏移**（与 ZMQ `instance*D+dp` 同类改动）：
 
 | 通道 | 现有编码 | 多实例编码 |
@@ -231,12 +328,12 @@
 | IP-exchange store | `master_port+200` (按 dp_rank) | **删除**（云双机 coord IP 改显式配置，已定，§2.2.2） |
 | gloo coord group | `master_port+201` (云到云) | 每实例独立 gloo 组，保留；对端 IP 改显式配置（已定，§2.2.2），端口仍加 instance 偏移 |
 | cloud_ip store | `master_port+1+dp_rank` | **删除（已定，§3.7.1 形态 b）**：POST_OUT 共用 PRE_OUT 的 ROUTER/DEALER，云不 bind 任何端口、边不需知云 IP，key/port 双偏移问题随之消失 |
-| rpc_broadcast_mq / peer_worker_response_mq（跨节点 collective_rpc ZMQ） | 按 dp_rank/world 编码 | 加 instance 偏移；**启动期 method 链全走此通道**（get_kv_cache_specs / determine_available_memory / initialize_from_config / warmup，见 §3.10），撞端口 = 控制面串台 |
+| rpc_broadcast_mq / peer_worker_response_mq（跨节点 collective_rpc ZMQ） | **双平面（2026-08 代码核实，修正原"按 dp_rank 编码"口径）**：本地读者 = 共享内存 ring buffer + XPUB over **IPC**（unix socket，不占端口）；跨机读者 = XPUB over **TCP**，端口 = `get_open_port()` **拉起时随机分配**（shm_broadcast.py:428，无配置、无推导），完整地址 `tcp://{connect_ip}:{随机端口}` 写入 `Handle.remote_subscribe_addr` 随 handle 分发（multiproc_executor.py:847-866） | **无端口偏移/串台问题**（随机端口 OS 保证不撞，同机多实例各拉各的 MQ）；真正 gap = ① handle（内含 ip:port 字符串）跨机分发须按实例区分（§2.2.2 已标实现期核实项）② 部署防火墙须放行随机端口段，若部署要求固定/显式端口（同 pre_out 口径）则需把 `get_open_port()` 改造为可配置；**启动期 method 链全走此通道**（get_kv_cache_specs / determine_available_memory / initialize_from_config / warmup，见 §3.10）不变 |
 | 边侧 PD TCPStore（HCCL rendezvous store） | 单 store 服务单实例 | **无需扩展端口、也无需 per-instance store**（2026-08 代码核实）：`nnodes>1` 时边云全体 dp rank 并入**同一个 world group**（`init_distributed_environment` 里 rank 重排 + `world_size_across_dp`，vllm/parallel_state.py:1602-1645），gloo cpu_group 与 HCCL device_group 均为该 world 上的 `new_group` 子组（parallel_state.py:416-425），靠 torch 内部 PrefixStore key 前缀（由全局唯一 rank 集派生）隔离，**不新增端口**。多实例沿用 G0 单世界组（§2.1，world = E+N·D·C）：各实例子组 rank 集全局唯一 ⇒ key 天然不撞。`get_next_dp_init_port()`（29500 递增）仅在 `nnodes==1` 单机多 DP 路径生效（:1646-1649），边云不经过。代价：`new_group` 是全 world 集合通信，N 实例启动偏差互相 gate（见 §3.10） |
 
 云侧镜像不变（各实例独立 deployment，按 §2.1 推导的 instance_id 入自己子组，本就隔离）。
 
-**同机多实例 = 偏移硬前提（2026-08 升级；形态 b 后偏移面收窄）**：跨服务器时同端口可靠 IP 区分，**同一服务器上多实例同 IP**。2026-08 通道收敛后仍在偏移面上的只剩 **gloo coord（+201）与 rpc_broadcast_mq / peer_worker_response_mq**（ZMQ 端口 per-dp 显式配置不随 N、IP-exchange/cloud_ip store 已删、PD TCPStore 单 store 零偏移）；这两类**不偏移必然撞、且无法靠 IP 兜底**。原 §2.6 形态二风险 #2 从"多实例风险"升级为同机部署的硬性前提，实现上必须：
+**同机多实例 = 偏移硬前提（2026-08 升级；形态 b 后偏移面收窄）**：跨服务器时同端口可靠 IP 区分，**同一服务器上多实例同 IP**。2026-08 通道收敛后仍在偏移面上的只剩 **gloo coord（+201）**（ZMQ 端口 per-dp 显式配置不随 N、IP-exchange/cloud_ip store 已删、PD TCPStore 单 store 零偏移、rpc_broadcast/response_mq 端口随机不撞--其真实待项是 handle 分发与防火墙放行，见上表）；gloo coord **不偏移必然撞、且无法靠 IP 兜底**。原 §2.6 形态二风险 #2 从"多实例风险"升级为同机部署的硬性前提，实现上必须：
 
 - 偏移对同机场景**强制校验**：拉起期按 `instance*D + dp_rank` 规则推导端口并检查可用性（被占且非本实例规则端口 = 拒绝拉起），防止端口翻转串台
 - 所有 store key 强制带 instance（`cloud_ip_{i}` / `coord_master_ip_{i}` 等），同机同 IP 下 key 不带 instance 无法区分
