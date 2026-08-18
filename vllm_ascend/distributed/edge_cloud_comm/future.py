@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch
 from vllm.logger import logger
@@ -32,9 +33,6 @@ from vllm_ascend.distributed.edge_cloud_comm.types import (
     CommResult,
     CommStatus,
 )
-
-if TYPE_CHECKING:
-    pass
 
 
 class _CommSyncedIntermediateTensors(AsyncIntermediateTensors):
@@ -49,7 +47,7 @@ class _CommSyncedIntermediateTensors(AsyncIntermediateTensors):
     def __init__(
         self,
         tensors: dict[str, torch.Tensor],
-        done_event: "torch.npu.Event | None",
+        done_event: torch.npu.Event | None,
         comm_postprocess: list[Callable[[], None]] | None,
     ) -> None:
         super().__init__(
@@ -78,17 +76,28 @@ class CommFuture:
     * ``as_intermediate_tensors()`` — recv only: bridge into the existing
       lazy-consumption path of the model runner.
 
-    For send requests the future owns the source tensors
-    (``_keepalive``) until completion: the caching allocator must not hand
-    the block to the next batch while the HCCL internal stream may still
-    be reading it.  This replaces the legacy ``_wait_pp_send_work``.
+    For send requests the future owns a communication-layer payload copy
+    (``_keepalive``) until completion.  The producer may therefore replay a
+    graph or reuse its staging buffers without overwriting data that HCCL is
+    still reading.
+
+    Deferred futures (sequenced submission): when a request arrives with
+    a ``seqno`` ahead of the channel's next expected one, the channel
+    holds the request and returns a *deferred* future — not yet bound
+    to any HCCL op.  The future binds in-place once the missing
+    predecessors are submitted and the wire op is actually posted (see
+    :meth:`_bind`).  ``done()`` is False while unbound; ``wait()`` and
+    ``as_intermediate_tensors()`` block the CPU until binding (an
+    out-of-order consumer has no device event to order behind yet —
+    binding is normally instantaneous because early submission means
+    the op was posted long before the consume point).
     """
 
     def __init__(
         self,
         request: CommRequest,
         handles: list[Any],
-        done_event: "torch.npu.Event | None",
+        done_event: torch.npu.Event | None,
         tensor_dict: dict[str, Any] | None,
         postprocess: list[Callable[[], None]],
         keepalive: Any,
@@ -103,12 +112,73 @@ class CommFuture:
         self._error: BaseException | None = None
         self._callbacks: list[Callable[[CommResult], None]] = []
         self._lock = threading.Lock()
+        self._bound = True
+        self._bind_event = threading.Event()
+        self._bind_event.set()
         if done_event is None:
             # No cross-node op on this rank (non-PP-rank0 / world_size 1):
             # nothing to wait for; postprocess collectives still run at
             # consumption time via as_intermediate_tensors().
             self._status = CommStatus.OK
             self._keepalive = None
+
+    @classmethod
+    def deferred(cls, request: CommRequest) -> CommFuture:
+        """Create an unbound future for a held (out-of-order) request."""
+        self = cls.__new__(cls)
+        self._request = request
+        self._handles = None
+        self._done_event = None
+        self._tensor_dict = None
+        self._postprocess = None
+        self._keepalive = None
+        self._status = CommStatus.PENDING
+        self._error = None
+        self._callbacks = []
+        self._lock = threading.Lock()
+        self._bound = False
+        self._bind_event = threading.Event()
+        return self
+
+    def _bind(
+        self,
+        *,
+        handles: list[Any],
+        done_event: torch.npu.Event | None,
+        tensor_dict: dict[str, Any] | None,
+        postprocess: list[Callable[[], None]],
+        keepalive: Any,
+    ) -> None:
+        """Bind a deferred future to its just-posted wire op.
+
+        Called by the channel under its submission lock when the held
+        request's seqno turn arrives.  From here on the future lives in
+        the channel's pending queue and is reaped/finalized like any
+        other.
+        """
+        with self._lock:
+            assert not self._bound, "CommFuture._bind called twice"
+            self._handles = handles
+            self._done_event = done_event
+            self._tensor_dict = tensor_dict
+            self._postprocess = postprocess
+            self._keepalive = keepalive
+            self._bound = True
+            if done_event is None:
+                # No cross-node op on this rank: complete immediately,
+                # same as the eager constructor path.
+                self._status = CommStatus.OK
+                self._keepalive = None
+        self._bind_event.set()
+
+    def _await_binding(self, timeout: float | None = None) -> None:
+        if not self._bind_event.wait(timeout=timeout):
+            raise TimeoutError(
+                f"CommFuture binding timed out after {timeout}s: "
+                f"{self._request.channel} {self._request.op} "
+                f"seqno={self._request.seqno} (predecessor submissions "
+                "missing?)"
+            )
 
     # ------------------------------------------------------------------ #
     # Queries                                                             #
@@ -122,6 +192,8 @@ class CommFuture:
         """CPU-side, non-blocking.  Pure query — never fires callbacks."""
         if self._status != CommStatus.PENDING:
             return True
+        if not self._bound:
+            return False
         event = self._done_event
         return event is not None and event.query()
 
@@ -140,9 +212,11 @@ class CommFuture:
         """Block the calling thread until completion (debug/legacy path).
 
         Production consume paths should use ``as_intermediate_tensors()``
-        (device-side ordering, no CPU blocking).
+        (device-side ordering, no CPU blocking past binding).
         """
-        deadline = None if timeout is None else time.monotonic() + timeout
+        start = time.monotonic()
+        self._await_binding(timeout=timeout)
+        deadline = None if timeout is None else start + timeout
         while not self.done():
             if deadline is not None and time.monotonic() > deadline:
                 raise TimeoutError(
@@ -169,10 +243,15 @@ class CommFuture:
 
         Data readiness is enforced device-side (``wait_event``) the first
         time ``.tensors`` is accessed — no CPU-side ``query()`` needed.
+        A still-deferred future (sequenced submission held behind missing
+        predecessors) blocks the CPU here until the op is posted: there
+        is no device event to order behind before that, and a consumer
+        reaching this point genuinely cannot proceed without the recv.
         """
         assert self._request.op == "recv", (
             "as_intermediate_tensors() is only valid for recv requests"
         )
+        self._await_binding()
         return _CommSyncedIntermediateTensors(
             self._tensor_dict, self._done_event, self._postprocess
         )
@@ -185,8 +264,7 @@ class CommFuture:
         """Transition to a terminal state exactly once; fire callbacks.
 
         Called by the channel reaper (head-of-line query) and by
-        ``wait()``.  Releases the send-buffer keepalive so the block
-        returns to the caching allocator.
+        ``wait()``. Releases the communication-owned send-buffer keepalive.
         """
         with self._lock:
             if self._status is not CommStatus.PENDING:

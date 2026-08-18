@@ -25,8 +25,8 @@ from a scheduler process does not pull in the wire layer.
 from vllm_ascend.distributed.edge_cloud_comm.mapping import (
     channel_for,
     channel_for_direction,
-    default_transport,
     kind_for_batch_type,
+    transport_for,
 )
 from vllm_ascend.distributed.edge_cloud_comm.scheduler_api import (
     LoggingSchedulerCommSink,
@@ -62,11 +62,11 @@ __all__ = [
     "build_recv_request",
     "channel_for",
     "channel_for_direction",
-    "default_transport",
     "get_comm_service",
     "kind_for_batch_type",
     "make_recv_hint",
     "recv_request_from_hint",
+    "transport_for",
 ]
 
 
