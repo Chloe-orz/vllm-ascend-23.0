@@ -1110,6 +1110,12 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 
 **源码核实（2026-08，C:\cann torch_npu + hcomm）--200MB 与 2×20MB 不叠加，且分配为惰性**：
 
+| **边侧在途张量（主要项）** | isend 直接发激活张量本体（无池化拷贝，record_stream 保活至 send 完成）；每 (instance,dp) `prefill_inflight_limit=2` -> 边聚合 prefill 在途 ≤ **2×N×D 份 chunk hidden 张量**，每份 ≈ chunk_tokens×hidden×dtype 字节（chunk 上限 = 组 batch 配置）；decode 在途每份 = 当步 decode batch token 数×hidden，被并发封顶（MB 级） | prefill **×N 线性**；decode 不敏感 |
+| 云侧 recv 缓冲 | irecv 按对端 metadata 逐张量 `torch.empty` 新分配；每台云机只承载本实例在途（≤2×D 份） | 不 ×N |
+| metadata（pickle，gloo cpu 组）/ZMQ/MQ | CPU 内存，非显存 | - |
+
+**源码核实（2026-08，C:\cann torch_npu + hcomm）--200MB 与 2×20MB 不叠加，且分配为惰性**：
+
 1. **是显存、2×B 结构**：`CCLBufferManager::CreateCommCCLbuffer`（hcomm ccl_buffer_manager.cc:50-90）分配 inCCL+outCCL+扩展 = 2×B+小项，`DeviceMem::alloc` = Device 显存
 2. **P2P send 分块流过 inCCL**：`CollSendExecutor::RunLoop`（coll_send_executor.cc:130-170）每轮 `D2DMemcpyAsync(用户张量->cclInputMem)` 再发出，块大小 = inCCL 容量
 3. **send/recv 走专用 P2P 域，pg_options 200 进不去**：torch_npu ProcessGroupHCCL.cpp:2826-2835，isend/irecv 在 `HcclCommInitRootInfoConfig 存在 && P2P_HCCL_BUFFSIZE≠0 && 非 coalescing` 时建独立 2-rank P2P 域，其 `hcclBufferSize` **被硬性覆盖**为 P2P_HCCL_BUFFSIZE（默认 20，OptionsManager.cpp:492-505）
@@ -1117,56 +1123,56 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 5. **新风险（替代「叠加」风险）**：若部署设 `P2P_HCCL_BUFFSIZE=0`，专用 P2P 域不启用，send/recv 落回组域 -> 隐藏通道组自出 CCL 缓冲 = **2×200MB/域**（96 域 = 76.8GB，不可行）-> **该环境变量绝对不能设 0**；兜底=通道组 per-group 调小 hccl_buffer_size
 6. **同名域共享缓冲**：ShareCCLbufferMgr 按 (设备, bufferName) refcount 共享一块 CCL 缓冲（bufferName 为内部字段，公开 API 未暴露，默认空=不共享）
 7. 遗留实测项：各域真实占用以 NPU 整体口径验证（40MB/域）；G0/TP/EP 集合域缓冲量；下调 P2P_HCCL_BUFFSIZE 对 isend/irecv 吞吐影响
-| **边侧在途张量（主要项）** | isend 直接发激活张量本体（无池化拷贝，record_stream 保活至 send 完成）；每 (instance,dp) `prefill_inflight_limit=2` -> 边聚合在途 ≤ **2×N×D 份 chunk hidden 张量**，每份 ≈ chunk_tokens×hidden×dtype 字节 | **×N 线性** |
-| 云侧 recv 缓冲 | irecv 按对端 metadata 逐张量 `torch.empty` 新分配；每台云机只承载本实例在途（≤2×D 份） | 不 ×N |
-| metadata（pickle，gloo cpu 组）/ZMQ/MQ | CPU 内存，非显存 | - |
 
-量级示例：hidden≈5k、chunk=2048 tok、bf16 -> 单份 ≈21MB；单实例 D=2 在途 4 份 ≈84MB；N=16、D=2 -> 64 份 ≈**1.3GB 边侧峰值**（边 KV 池 GB 级，占比可观）。decode/draft 尾通道每步张量 MB 级，忽略。**chunk 语义（2026-08 核对）**：chunk = chunked prefill 的一个分片，一个 PF batch = 一个（请求，chunk），独占一个 head_token + prefill 通道，即"一份在途"（pd_separated_scheduler.py:1375-1391 `PrefillChunkFlight.num_scheduled_tokens`）；其上限链 = min(请求剩余 prompt, long_prefill_token_threshold, max_num_scheduled_tokens，未配时 = max_num_batched_tokens)（scheduler.py:405-418）-> **峰值在途对组 batch 配置线性敏感**：组上限 8192 时单份最坏 ≈84MB、N16/D1 在途 ≈2.6GB（2048 假设的 4 倍），规划时须按实际部署配置代入。
+**量级评估（2026-08，实际部署口径：`--max-num-batched-tokens`=8192、4k1k 性能负载、并发 86、D=1、hidden≈5k、bf16）--prefill 与 decode 分开估**：
 
-**联动发现**：§5.1.2 方案 1 的全局水位 K（默认 2N）**同时是边侧在途显存的限幅旋钮**--边聚合在途 ≤ K×D 份 chunk 张量。显存紧张时下调 K（<2N）即压低峰值，K 的取值两难多了一个显存维度；全局视图方案（§5.1.1/§5.1.3）同理可加「跨实例总在途上限」约束（等价于 K 的硬帽）。
+- **chunk 语义**：chunk = chunked prefill 的一个分片，一个 PF batch = 一个（请求，chunk），独占一个 head_token + prefill 通道，即「一份在途」（pd_separated_scheduler.py:1375-1391 `PrefillChunkFlight.num_scheduled_tokens`）；上限链 = min(请求剩余 prompt, long_prefill_token_threshold, max_num_scheduled_tokens，未配时 = max_num_batched_tokens)（scheduler.py:405-418）-> **prefill 单份对组 batch 配置线性敏感**
+- **prefill 单份**：4k prompt < 8192 组上限 -> 每请求恰一个 chunk = 4096 tok -> 单份 ≈ **42MB**（若 8k prompt 打满组上限则 84MB/份）
+- **prefill 份数**：2/（实例，dp）；现实封顶 = min(2N, 并发 86 中处于 prefill 阶段的请求数)——N=1 时 2 通道对 86 排队恒满（在途=上限值），N=16 时 32 通道打满概率低（配置上限口径）
+- **decode 单份**：当步 decode batch token 数×hidden，并发 86 封顶全部实例 decode 总量 ≈ **≤0.9MB**（N=1/N=16 相同）；MTP draft 乘深度系数也仅几 MB，可忽略
+
+**联动发现**：§5.1.2 方案 1 的全局水位 K（默认 2N）**同时是边侧 prefill 在途显存的限幅旋钮**--边聚合在途 ≤ K×D 份 chunk 张量（4k1k 下 ≈ K×D×42MB）。显存紧张时下调 K（<2N）即压低峰值，K 的取值两难多了一个显存维度；全局视图方案（§5.1.1/§5.1.3）同理可加「跨实例总在途上限」约束（等价于 K 的硬帽）。
 
 **两块显存相互独立（2026-08 核对）**：在途张量属 torch NPU caching allocator 池（瞬态、随 K 可调），域缓冲由 HCCL 向 CANN runtime 独立申请（常驻、随配置/域数），互不复用、峰值相加；大消息是分块「流过」域缓冲的，但用户张量须存活到整条消息发完，故传输期两者同时驻留。**可观测性注意**：域缓冲不在 torch allocator 统计内（`memory_reserved` 看不到），评估边卡余量须用 NPU 整体显存口径，否则 N16 时高估 2-4GB 可用量。
 
-**建通道是否预留该显存（2026-08 核对）**：**不预留**。`_create_one_hidden_channel`（patch_distributed.py:381-407）只调 `new_group` 建通信器（+gloo cpu 组），无任何 tensor 分配；warmup 仅 8 元素建链。发送侧在途张量是 head 段 forward 的**计算输出本体**（isend 零拷贝直发、record_stream 保活至 send 完成），接收侧 `_allocate_merged_recv_buffer` 逐次 `torch.empty`（channel stream ctx 内），非常驻池。即：该显存没有通信也存在（计算中间量），通信只延长其生命周期至对端 recv 完成。**但预算仍须按峰值留**--caching allocator 池按峰值扩、基本不缩，峰值在途（K×D 份）会固化成 allocator 池水位。边侧显存预算 = 权重 + KV 池 + 峰值在途（K×D 份）+ 固定通信开销（N×D×3 子组）。
+**建通道是否预留该显存（2026-08 核对）**：**不预留**。`_create_one_hidden_channel`（patch_distributed.py:381-407）只调 `new_group` 建通信器（+gloo cpu 组），无任何 tensor 分配；warmup 仅 8 元素建链。发送侧在途张量是 head 段 forward 的**计算输出本体**（isend 零拷贝直发、record_stream 保活至 send 完成），接收侧 `_allocate_merged_recv_buffer` 逐次 `torch.empty`（channel stream ctx 内），非常驻池。即：该显存没有通信也存在（计算中间量），通信只延长其生命周期至对端 recv 完成。**但预算仍须按峰值留**--caching allocator 池按峰值扩、基本不缩，峰值在途会固化成 allocator 池水位。边侧显存预算 = 权重 + KV 池 + prefill 峰值在途（K×D 份）+ 域缓冲（3N×D 域 × 2×P2P_HCCL_BUFFSIZE）。
 
-**图 3c 边卡数据通道显存对比（D=1、2P1D；域缓冲 40MB/域=2×P2P_HCCL_BUFFSIZE 默认值；在途 21MB/份=chunk 2048 tok × hidden≈5k × bf16；每 (实例,dp) 在途上限 2 份）**
+**图 3c 边卡数据通道显存对比（D=1、2P1D、4k1k 负载、并发 86、组上限 8192；域缓冲 40MB/域 = 2×P2P_HCCL_BUFFSIZE 默认值；prefill 在途 42MB/份 = 1 chunk = 4096 tok × hidden≈5k × bf16；decode 在途全程 ≤1MB）**
 
 ```
- 边卡数据通道显存对比（D=1，2P1D；■ 域缓冲=40MB/域·常驻 · □ 在途≈21MB/份·瞬态）
+ 边卡数据通道显存（D=1、2P1D、4k1k、并发 86）
+ ■ = 40MB 域缓冲（常驻，每域 in+out 双缓冲）   ▓ = 42MB prefill 在途（瞬态，每份 1 chunk）
+ · = decode 在途（瞬态，全部实例合计 ≤1MB，不可见级）
 
-                        通道域缓冲 (3N 域)                峰值在途 (2N 份)          边卡合计
-                      ┌───────────────────┐          ┌─────────────┐
- 单实例  N=1  (3域)   │ ■ ■ ■             │  120MB   │ □ □         │  42MB  │  ~162MB
-                      └───────────────────┘          └─────────────┘
- 4 实例  N=4  (12域)  │ ■×12              │  480MB   │ □×8         │ 168MB  │  ~648MB
-                      └───────────────────┘          └─────────────┘
-16 实例  N=16 (48域)  │ ■×48 ...          │ 1.92GB   │ □×32 ...    │ 672MB  │  ~2.6GB
-                      └───────────────────┘          └─────────────┘
+                        通道域缓冲 (3N 域)          prefill 在途 (2N 份)         decode    边卡合计
+                      ┌──────────────────┐       ┌──────────────────┐
+ 单实例  N=1  (3域)   │ ■ ■ ■            │ 120MB │ ▓ ▓              │  84MB │ ≤1MB │  ~205MB
+                      └──────────────────┘       └──────────────────┘
+ 4 实例  N=4  (12域)  │ ■×12             │ 480MB │ ▓×8              │ 336MB │ ≤1MB │  ~816MB
+                      └──────────────────┘       └──────────────────┘
+16 实例  N=16 (48域)  │ ■×48 ...         │ 1.92GB│ ▓×32 ...         │ 1.34GB│ ≤1MB │  ~3.3GB
+                      └──────────────────┘       └──────────────────┘
 
- 云卡（任意 N 不变）   │ ■ ■ ■             │  120MB   │ □ □         │  42MB  │  ~162MB
-   （仅本实例 3 域）   └───────────────────┘          └─────────────┘
+ 云卡（任意 N 不变）   │ ■ ■ ■            │ 120MB │ ▓ ▓              │  84MB │ ≤1MB │  ~205MB
+   （仅本实例 3 域）   └──────────────────┘       └──────────────────┘
 ```
 
 要点：
 
-| N | 域缓冲（×N 线性） | 峰值在途（×N 线性） | 边卡合计 | 域缓冲占比 |
+| N | 域缓冲（×N 线性） | prefill 在途（×N 线性） | decode 在途 | 边卡合计 |
 |---|---|---|---|---|
-| 1 | 3×40 = 120MB | 2×21 = 42MB | 162MB | 74% |
-| 4 | 12×40 = 480MB | 8×21 = 168MB | 648MB | 74% |
-| 16 | 48×40 = **1.92GB** | 32×21 = 672MB | **2.6GB** | 74% |
+| 1 | 3×40 = 120MB | 2×42 = 84MB | ≤1MB | ~205MB |
+| 4 | 12×40 = 480MB | 8×42 = 336MB | ≤1MB | ~816MB |
+| 16 | 48×40 = **1.92GB** | 32×42 = **1.34GB** | ≤1MB | **~3.3GB** |
+| （8k prompt 最坏） | 同上 | ×2 = 2.7GB | ≤1MB | ~4.6GB |
 
-**实际参数修正版（2026-08，边云部署口径：`--max-num-batched-tokens`=8192、4k1k 性能负载、并发 86、D=1）--prefill 与 decode 分开估**：
-
-- **prefill 在途**：4k prompt < 8192 组上限 -> **每请求恰一个 chunk = 4096 tok**，单份 ≈42MB（对比图 3c 的 2048/21MB 假设翻倍；若 8k prompt 打满组上限则再翻倍至 84MB/份）。N=1/4/16 -> 2/8/32 份 = **84MB / 336MB / 1.34GB**（最坏 168MB/672MB/2.7GB）
-- **decode 在途（可忽略）**：每份 = 当步 decode batch token 数 × hidden，并发 86 封顶全部实例 decode 总量 -> N=1 时 ≈0.9MB、N=16 每实例 ~5 并发聚合仍 ≤0.9MB；draft/MTP 乘深度系数也仅几 MB
-- **并发对份数的现实封顶**：在途 chunk 份数 ≤ min(2N, 并发 86 中处于 prefill 阶段的请求数)。N=1 时 2 通道对 86 排队几乎恒满（在途=上限值）；N=16 时 32 通道打满概率不高，表为**配置上限口径**
-- 边卡数据通道显存全景（4k1k/并发 86/D=1）：N=1/4/16 合计 ≈ **205MB / 816MB / 3.3GB**（域缓冲 120/480/1920MB + prefill 在途 84/336/1340MB）-> 域缓冲与在途同为 GB 级（N16），两块都要压：域缓冲调 `hccl_buffer_size`，在途随负载 prompt 长度天然变化
-
-- 两项均随 N 线性但斜率不同：域缓冲每实例 +120MB、在途每实例 +42MB（默认值下域缓冲恒为在途 ~2.8 倍，占比固定 74%）
-- **控制旋钮不同**：压域缓冲走 `hccl_buffer_size`/`P2P_HCCL_BUFFSIZE`（40MB/域 -> 2×4MB/域 时 N16 域缓冲降至 ~384MB、合计 ~1.1GB）；压在途走调度水位 K（K=8 时 N16 在途 = 8×21≈168MB）
+- prefill 与 decode 分开估：prefill 单份 = chunk×hidden（4k prompt 恰一 chunk 42MB，8k prompt 打满组上限 84MB）；decode 单份 = 当步 batch token×hidden，并发 86 封顶全程 ≤0.9MB，N 无关
+- 两项均随 N 线性但斜率不同：域缓冲每实例 +120MB、prefill 在途每实例 +84MB（4k1k 下域缓冲 ≈1.4 倍在途）
+- **控制旋钮不同**：压域缓冲走 `P2P_HCCL_BUFFSIZE`（**不能设 0**）/per-group `hccl_buffer_size`（如 2×4MB/域 时 N16 域缓冲降至 ~384MB、合计 ~1.7GB）；压在途走调度水位 K（K=8 时 N16 prefill 在途 = 8×42 ≈336MB）
+- 在途份数现实封顶 = min(2N, 86 中 prefill 阶段请求数)：N=1 恒满、N=16 打满概率低（配置上限口径）
 - 两块独立相加、互不抵扣；域缓冲不在 torch allocator 统计内（见上）
-- **风险敞口（已源码核实改写）**：默认配置下 200MB 组域口径与 40MB P2P 域**不叠加**（P2P 域独立、组域惰性且永不触发，§4.5.1「源码核实」）；真正的敞口是**部署设 `P2P_HCCL_BUFFSIZE=0`** -> send/recv 落回组域按 2×200MB/域分配，N16 = 48×400MB ≈ 19.2GB（不可行）-> 该环境变量**绝对不能设 0**，per-group 调小 hccl_buffer_size 作兜底
-- 云卡恒为 ~162MB 与 N 无关，多实例数据通道显存压力全部集中在边卡
+- **风险敞口（源码核实）**：默认 200MB 组域口径与 40MB P2P 域不叠加；真正敞口是**部署设 `P2P_HCCL_BUFFSIZE=0`** -> send/recv 落回组域按 2×200MB/域分配，N16 = 48×400MB ≈ 19.2GB（不可行）-> 该环境变量**绝对不能设 0**，per-group 调小 hccl_buffer_size 作兜底
+- 云卡恒为 ~205MB 与 N 无关，多实例数据通道显存压力全部集中在边卡
 
 ---
 
