@@ -1,17 +1,20 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""batch_type -> six-channel mapping and default transport resolution.
+"""batch_type -> six-channel mapping and channel -> physical wire resolution.
 
 This module absorbs the channel-selection logic that used to live in the
 worker (``_hidden_channel_for``) and the scheduler's data-plane channel
 management.  The scheduler only needs to label a batch with its
-``BatchType`` (and optionally pin a physical transport via
-``SchedulerOutput.hidden_channel``); the mapping to logical channels
-lives here.
+``BatchType``; the mapping to channels lives here.
 
 Direction convention: ``*_FIRST`` batches travel edge->cloud (UP),
 ``*_LAST`` batches travel cloud->edge (DOWN).  Both peers map the same
-wire to the same logical channel — e.g. the edge's PREFILL_FIRST send and
-the cloud's matching recv are both PREFILL_UP.
+wire to the same channel — e.g. the edge's PREFILL_FIRST send and the
+cloud's matching recv are both PREFILL_UP.
+
+Physical resolution is the identity: each CommChannelType owns a
+dedicated HCCL communicator + stream whose HiddenChannelType has the
+same value ("prefill_up" -> HiddenChannelType.PREFILL_UP).  One
+communicator therefore carries exactly one task type in one direction.
 """
 
 from __future__ import annotations
@@ -96,19 +99,18 @@ def channel_for(
     return channel_for_direction(kind, up)
 
 
-def default_transport(channel: CommChannelType) -> HiddenChannelType:
-    """Default physical wire for a logical channel.
+def transport_for(channel: CommChannelType) -> HiddenChannelType:
+    """Physical wire of a channel — the identity mapping.
 
-    Used when the scheduler did not pin a transport on the request.
-    Prefill-family channels default to the first prefill pool entry,
-    decode-family to the first decode pool entry — matching the legacy
-    ``_hidden_channel_for`` fallback (PREFILL_1 / DECODE).
+    Each channel owns a dedicated communicator whose HiddenChannelType
+    has the same value, so resolution is just a value lookup.  Kept as
+    a function so every resolution site shares one implementation (and
+    one place to validate).
     """
-    if channel in (
-        CommChannelType.PREFILL_UP,
-        CommChannelType.PREFILL_DOWN,
-        CommChannelType.PREFILL_DRAFT_UP,
-        CommChannelType.PREFILL_DRAFT_DOWN,
-    ):
-        return HiddenChannelType.prefill(1)
-    return HiddenChannelType.decode(1)
+    transport = getattr(HiddenChannelType, channel.name, None)
+    if transport is None:
+        raise RuntimeError(
+            f"No physical channel group for {channel!r}: the six "
+            "directional channels require create_six_channel_groups()"
+        )
+    return transport

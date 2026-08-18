@@ -173,6 +173,18 @@ class GroupCoordinatorPatch(GroupCoordinator):
             self._decode_device_groups: list[torch.distributed.ProcessGroup] = []
             self._decode_cpu_groups: list[torch.distributed.ProcessGroup] = []
 
+            # The six fixed directional edge-cloud channels (type x
+            # direction), each a dedicated HCCL communicator + gloo cpu
+            # group, keyed by channel value ("prefill_up", ...).  Created
+            # by create_six_channel_groups(); each communicator carries
+            # exactly one task type in one direction, so P2P matching
+            # order per (group, peer) is the per-channel seqno order and
+            # nothing else.
+            self._six_channel_device_groups: dict[
+                str, torch.distributed.ProcessGroup] = {}
+            self._six_channel_cpu_groups: dict[
+                str, torch.distributed.ProcessGroup] = {}
+
             # Seed index-0 with the primary PP group (PREFILL_1) so that
             # len(_prefill_device_groups) is 1 and the range in
             # create_hidden_channel_groups starts at PREFILL_2 instead of
@@ -274,6 +286,14 @@ class GroupCoordinatorPatch(GroupCoordinator):
             torch.distributed.destroy_process_group(cpu_group)
         if hasattr(self, "cpu_group"):
             del self.cpu_group
+
+        # Destroy the six directional channel groups.
+        for groups in (self._six_channel_device_groups,
+                       self._six_channel_cpu_groups):
+            for pg in groups.values():
+                if pg is not None:
+                    torch.distributed.destroy_process_group(pg)
+            groups.clear()
 
         # Destroy hidden channel groups (array-based).
         for groups in (self._prefill_device_groups, self._prefill_cpu_groups,
@@ -378,14 +398,46 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 self._decode_device_groups, self._decode_cpu_groups,
             )
 
-    def _create_one_hidden_channel(
+    def create_six_channel_groups(
+        self,
+        torch_distributed_backend: str | Backend,
+    ) -> None:
+        """Create the six fixed directional edge-cloud channel groups.
+
+        One dedicated HCCL communicator (+ gloo cpu group) per
+        type x direction channel: prefill_up/down, prefill_draft_up/down,
+        decode_up/down.  Every communicator carries exactly one task type
+        in one direction, so P2P matching order per (group, peer) is
+        nothing but the per-channel submission order — no cross-type or
+        cross-direction coupling anywhere.  ``new_group`` is collective
+        on the default group, so every rank participates in every call
+        and only keeps the group it belongs to.
+        """
+        from vllm.v1.core.sched.output import HiddenChannelType
+
+        assert not self._six_channel_device_groups, (
+            "six directional channel groups already created"
+        )
+        for name in HiddenChannelType.SIX_DIRECTIONAL_CHANNELS:
+            value = name.lower()
+            device_group, cpu_group = self._build_one_hidden_channel(
+                f"pp_{value}", torch_distributed_backend,
+            )
+            self._six_channel_device_groups[value] = device_group
+            self._six_channel_cpu_groups[value] = cpu_group
+            logger.info(
+                "[PP Group] %s directional channel: ranks=%s size=%d "
+                "backend=%s",
+                value, self.ranks, self.world_size, self.backend,
+            )
+
+    def _build_one_hidden_channel(
         self,
         pg_name: str,
         backend: str | Backend,
-        device_list: list[torch.distributed.ProcessGroup],
-        cpu_list: list[torch.distributed.ProcessGroup],
-    ) -> None:
-        """Create one hidden channel using *pg_name* as the HCCL pg_options key."""
+    ) -> tuple[torch.distributed.ProcessGroup, torch.distributed.ProcessGroup]:
+        """Create one hidden channel using *pg_name* as the HCCL pg_options
+        key; returns the (device, cpu) group pair this rank belongs to."""
         hccl_pg_options = create_hccl_pg_options(pg_name)
         device_group = None
         cpu_group = None
@@ -399,6 +451,19 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 cpu_group = cg
         assert device_group is not None
         assert cpu_group is not None
+        return device_group, cpu_group
+
+    def _create_one_hidden_channel(
+        self,
+        pg_name: str,
+        backend: str | Backend,
+        device_list: list[torch.distributed.ProcessGroup],
+        cpu_list: list[torch.distributed.ProcessGroup],
+    ) -> None:
+        """Create one hidden channel using *pg_name* as the HCCL pg_options key."""
+        device_group, cpu_group = self._build_one_hidden_channel(
+            pg_name, backend,
+        )
         device_list.append(device_group)
         cpu_list.append(cpu_group)
         logger.info(
@@ -465,7 +530,9 @@ class GroupCoordinatorPatch(GroupCoordinator):
     def _hidden_channel_groups(self, channel: Any):
         """Resolve a HiddenChannelType to (device_group, cpu_group).
 
-        Uses array-indexed lookup for scalability::
+        The six fixed directional values (``"prefill_up"`` ...) resolve
+        to their dedicated communicators.  Legacy pool values use
+        array-indexed lookup for backward compatibility::
 
             "prefill_N" -> _prefill_device_groups[N-1]
             "decode_M"  -> _decode_device_groups[M-1]
@@ -476,6 +543,9 @@ class GroupCoordinatorPatch(GroupCoordinator):
         value = getattr(channel, "value", channel)
         logger.debug("[PP Group] _hidden_channel_groups: channel=%s -> value=%s",
                      channel, value)
+        if value in self._six_channel_device_groups:
+            return (self._six_channel_device_groups[value],
+                    self._six_channel_cpu_groups[value])
         if value == "prefill_1":
             return self.device_group, self.cpu_group
         if value == "decode":

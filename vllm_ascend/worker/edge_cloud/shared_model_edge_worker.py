@@ -605,7 +605,6 @@ class _FirstRoundMarker(DeferredExecutePostprocess):
                 kind=_kind,
                 num_tokens=num_tokens,
                 tensor_dict=_gathered,
-                transport=_so.hidden_channel,
                 src_dst=dp_rank + 1,
             ))
 
@@ -650,7 +649,6 @@ class _LastRoundMarker(_BatchedExecuteMarker):
                 op="recv",
                 kind=_kind,
                 num_tokens=num_tokens,
-                transport=_so.hidden_channel,
                 sp_chunk=edge_sp,
                 src_dst=dp_rank + 1,
             ))
@@ -958,9 +956,9 @@ class SharedModelEdgeWorker(NPUWorker):
             # Receive the cloud's middle-layer result and run
             # the second forward (tail layers). The cloud peer
             # is at in-group rank ``self.local_rank + 1``.
-            # Transport defaults to PREFILL_1, matching the legacy
-            # channel-default recv; data readiness is ordered
-            # device-side on first .tensors access.
+            # The matching head send uses the channel-less default PP group,
+            # so mark this receive as the same physical ``plain`` wire.
+            # Data readiness is ordered on first .tensors access.
             recv_future = get_comm_service().submit_recv(
                 CommRequest(
                     channel=CommChannelType.PREFILL_DOWN,
@@ -969,6 +967,7 @@ class SharedModelEdgeWorker(NPUWorker):
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     sp_chunk=edge_sp,
                     src_dst=self.local_rank + 1,
+                    wire="plain",
                 ))
             intermediate_tensors = recv_future.as_intermediate_tensors()
             tail_output = self.model_runner.execute_model(
@@ -1131,6 +1130,7 @@ class SharedModelEdgeWorker(NPUWorker):
                     num_tokens=num_tokens,
                     sp_chunk=sp_chunk,
                     src_dst=src,
+                    wire="plain",
                 ))
             return recv_future.as_intermediate_tensors()
         return _recv

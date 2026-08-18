@@ -59,7 +59,6 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import (
     BatchType,
     GrammarOutput,
-    HiddenChannelType,
     SchedulerOutput,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -823,7 +822,7 @@ class NPUWorker(WorkerBase):
     # num_tokens fully determine the recv, so the same primitives serve
     # CHER (cloud, edge->cloud) and EHER (edge, cloud->edge).
     def _submit_early_recv_locked(
-        self, channel: "HiddenChannelType | None", num_tokens: int,
+        self, num_tokens: int,
         include_mrope: bool = True,
     ) -> CommFuture:
         """Submit a prefill hidden recv to the comm service and return the
@@ -842,7 +841,6 @@ class NPUWorker(WorkerBase):
                 op="recv",
                 kind=BatchKind.PREFILL,
                 num_tokens=num_tokens,
-                transport=channel,
                 sp_chunk=do_sp_chunk,
                 include_mrope=include_mrope,
             ))
@@ -898,7 +896,7 @@ class NPUWorker(WorkerBase):
         )
 
     def get_or_post_early_recv(
-        self, head_token: str | None, channel: "HiddenChannelType | None",
+        self, head_token: str | None,
         num_tokens: int, include_mrope: bool = True,
     ) -> CommFuture | None:
         """Atomically reuse the guard-thread's early-recv future, or submit
@@ -924,7 +922,7 @@ class NPUWorker(WorkerBase):
             # a duplicate (orphan recv) when its hint arrives later.
             try:
                 return self._submit_early_recv_locked(
-                    channel, num_tokens, include_mrope=include_mrope)
+                    num_tokens, include_mrope=include_mrope)
             except Exception:
                 logger.exception(
                     "[CHER] get_or_post_early_recv failed head_token=%s",
@@ -1100,7 +1098,6 @@ class NPUWorker(WorkerBase):
                     kind=_kind,
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     tensor_dict=_gathered,
-                    transport=scheduler_output.hidden_channel,
                     include_mrope=include_mrope,
                 ))
         # Return a placeholder output that carries the request IDs so the
@@ -1132,7 +1129,6 @@ class NPUWorker(WorkerBase):
                 op="recv",
                 kind=_kind,
                 num_tokens=scheduler_output.total_num_scheduled_tokens,
-                transport=scheduler_output.hidden_channel,
                 sp_chunk=edge_sp,
                 include_mrope=False,
             ))
@@ -1183,16 +1179,14 @@ class NPUWorker(WorkerBase):
             # [CHER] Atomically reuse the guard thread's early-recv future,
             # or submit the recv ourselves.  get_or_post_early_recv
             # guarantees at most one recv per head_token even when the guard
-            # thread's hint dequeue races this dequeue.  Applies to
-            # PREFILL_FIRST only: DECODE_FIRST must NOT use early-recv
-            # because DECODE is a single channel/stream -- a guard-thread
-            # recv submit on the DECODE stream races busy_loop's isend on
-            # that same stream (cross-thread FIFO ordering is
-            # non-deterministic -> deadlock).  PREFILL has two channels
-            # (PREFILL_1/2) so irecv and isend land on different streams.
-            # The guard thread ONLY submits (never wait()s); ordering is
-            # done lazily via as_intermediate_tensors() on the busy_loop
-            # thread.
+            # thread's hint dequeue races this dequeue.  The guard thread
+            # ONLY submits (never wait()s); ordering is done lazily via
+            # as_intermediate_tensors() on the busy_loop thread.  Each
+            # directional channel now owns a dedicated communicator and
+            # stream, so an early-posted irecv can never block (or be
+            # blocked by) sends of any type — the old PREFILL-only
+            # restriction was an artifact of channel sharing and survives
+            # here only because decode/draft hints are not emitted yet.
             _ht = getattr(scheduler_output, "head_token", None)
             recv_future = None
             # Match the sender. The edge scheduler stamps `has_mrope` on
@@ -1214,7 +1208,6 @@ class NPUWorker(WorkerBase):
                     and scheduler_output.batch_type == BatchType.PREFILL_FIRST):
                 recv_future = self.get_or_post_early_recv(
                     _ht,
-                    scheduler_output.hidden_channel,
                     scheduler_output.total_num_scheduled_tokens,
                     include_mrope=_cloud_include_mrope,
                 )
@@ -1253,7 +1246,6 @@ class NPUWorker(WorkerBase):
                         op="recv",
                         kind=_kind,
                         num_tokens=scheduler_output.total_num_scheduled_tokens,
-                        transport=scheduler_output.hidden_channel,
                         sp_chunk=do_sp_chunk,
                         src_dst=_recv_src,
                         include_mrope=_cloud_include_mrope,
@@ -1304,7 +1296,6 @@ class NPUWorker(WorkerBase):
                     kind=_kind,
                     num_tokens=scheduler_output.total_num_scheduled_tokens,
                     tensor_dict=_gathered,
-                    transport=scheduler_output.hidden_channel,
                     src_dst=_send_dst,
                 ))
         return output
@@ -1402,7 +1393,7 @@ class NPUWorker(WorkerBase):
                 ))
             logger.info(
                 "Send intermediate tensors to edge, "
-                f"hidden_channel: {HiddenChannelType.DECODE.value}"
+                f"hidden_channel: {CommChannelType.DECODE_DOWN.value}"
             )
         logger.info(
             f"Execute model, batch_type: {scheduler_output.batch_type}, after."
@@ -1445,7 +1436,7 @@ class NPUWorker(WorkerBase):
                 ))
             logger.info(
                 "Send intermediate tensors to cloud, "
-                f"hidden_channel: {HiddenChannelType.DECODE.value}"
+                f"hidden_channel: {CommChannelType.DECODE_UP.value}"
             )
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
@@ -1472,7 +1463,7 @@ class NPUWorker(WorkerBase):
             ))
         logger.info(
             "Receive intermediate tensors from cloud after, "
-            f"hidden_channel: {HiddenChannelType.DECODE.value}"
+            f"hidden_channel: {CommChannelType.DECODE_DOWN.value}"
         )
         # Lazy consumption: wait_event ordering + postprocess run on first
         # .tensors access inside the last segment.
