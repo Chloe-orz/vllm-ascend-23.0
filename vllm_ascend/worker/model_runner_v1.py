@@ -5022,6 +5022,18 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_common_attn_metadata
                 )
                 self._cloud_spec_decode_num_reqs = num_reqs
+        _pd_timing = (
+            self._edge_cloud_enabled
+            and scheduler_output.batch_type in (
+                BatchType.DECODE_FIRST, BatchType.DECODE_LAST
+            )
+        )
+        if _pd_timing:
+            logger.info(
+                "[PD-TIMING] runner prep enter batch_type=%s ts=%.4f",
+                scheduler_output.batch_type,
+                time.monotonic(),
+            )
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
                 if not _fast_path and not _cloud_fast_path:
@@ -5120,6 +5132,13 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output,
                         num_scheduled_tokens_np,
                     )
+                    if _pd_timing:
+                        logger.info(
+                            "[PD-TIMING] runner update_states+prepare_inputs "
+                            "done batch_type=%s ts=%.4f",
+                            scheduler_output.batch_type,
+                            time.monotonic(),
+                        )
 
                     if not num_scheduled_tokens:
                         if (
@@ -5473,12 +5492,6 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
-            _pd_timing = (
-                self._edge_cloud_enabled
-                and scheduler_output.batch_type in (
-                    BatchType.DECODE_FIRST, BatchType.DECODE_LAST
-                )
-            )
             if _pd_timing:
                 logger.info(
                     "[PD-TIMING] runner prep done batch_type=%s ts=%.4f",
