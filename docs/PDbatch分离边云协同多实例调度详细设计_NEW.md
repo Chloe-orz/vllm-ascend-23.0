@@ -1612,6 +1612,90 @@ TAIL 等 hidden 期间 worker 继续 dispatch 其他 round/实例；tail 下发�
 4. **channel 释放绑定在完成线程**（⑤）：recv 完成即释放该实例 prefill channel，信用回路短一个 RTT（§4.4）
 5. 云侧只有数据面参与（isend），POST_OUT ack 走 ZMQ 不在本图
 
+#### 5.2.4b 尾调度条件机制对比框图：现状 vs 多实例分离后（2026-08）
+
+现状三类尾的 ready 条件（代码核实，pd_separated_scheduler.py / passive_core.py）：
+
+- **PL（prefill 尾）**= 真·云执行完成信号，但走**两跳控制面**：云 worker 执行完中间段 -> ack response MQ（`__pp_scheduler_ack__`）-> `_maybe_publish_post_out` 改写 PF->PL -> POST_OUT ZMQ -> 边 `_drain_pd_channel_inbox` -> `prefills_last_ready`（passive_core.py:580-611 / patch_engine_core.py:204-237）
+- **DL/DRL（decode/draft 尾）**= **边自投递占位**，无任何云信号：DF/DRF 下发时刻即改写 SO（bt=DECODE_LAST/DRAFT_LAST）入队（:2341-2355 / :1685-1715），外加 10ms delay 窗（`_can_schedule_decode_last/_can_schedule_draft_last` :1105-1139；PL 无 delay 窗），数据就绪靠 worker FIFO + per-channel send-wait 隐式保序
+
+```
+════════════════════ 现状（单实例）尾调度条件机制 ════════════════════
+
+                    PL（prefill 尾）              DL/DRL（decode/draft 尾）
+              ┌───────────────────────┐    ┌───────────────────────────┐
+ 边 EngineCore│ prefills_last_ready   │    │ decodes_last_ready        │
+              │ decodes_last_ready    │    │ drafts_last_ready         │
+              │ drafts_last_ready     │    │                           │
+              └────────▲───────▲──────┘    └────────▲──────────────────┘
+                       │       │                    │
+        POST_OUT(ZMQ)──┘       │                    │ 当场自投递（零往返）
+        云回 PL SO              │                    │（DF/DRF 下发时刻即入队，
+                       │       │                    │  + 10ms delay 窗启动）
+                       │       │                    │
+                       │       │                    │ 数据就绪：无信号！
+                       │       │                    │ 靠 worker FIFO +
+                       │       │                    │ per-channel send-wait
+                       │       │                    │ 隐式保序
+  云 worker 执行完中间段 ──► ack ──► PassiveEC 改写  │
+  （真·执行完成信号，     response MQ    PF->PL      │
+   两跳：ack->POST_OUT）   __pp_scheduler_ack__      │
+                                                ─────────────────────────
+  ready 语义：  PL = 真云执行完          DL/DRL = 占位（下发时刻+delay 窗）
+  调度门控：    水位优先级链 + 10ms 窗(仅 DL/DRL) + 强制交替 + 2DP winner
+  时序风险：    PL 走 ZMQ 两跳才 ready；DL/DRL delay 窗是拍出来的估计值
+  串行点：      round barrier 等 tail drain + sampler D2H（§5.2.1 三点）
+
+════════════ 多实例·通信/计算分离后（§5.2 目标态）尾调度条件机制 ═══════════
+
+  ┌──────────────────────────── 边 EngineCore ────────────────────────────┐
+  │  per-(instance,dp) × N×D：3 类尾 ready deque（带 ready 时间戳）        │
+  │        ▲                              ▲                               │
+  │        │ ⑥ recv_done_mq drain         │ SO 预构建（HEAD 下发时       │
+  │        │   （标记 COMPUTE(tail)       │   自投递，三类统一，          │
+  │        │    ready + 时间戳）          │   零控制面往返）              │
+  │        │                              │                               │
+  │  实例间调度（§5.1）：DRL 全局最高 > 尾 ready-first（真数据就绪序）      │
+  │                     > 首 arrival-FIFO；2DP lockstep 门控(all_reduce)   │
+  └────────┼──────────────────────────────┼───────────────────────────────┘
+           │                              │
+           │ ⑥ 新增·上送通道               │ ① 现有·下发通道（rpc_broadcast_mq）
+           │   recv_done_mq sideband      │   COMPUTE(tail) 下发
+           ▼                              │
+  ┌──────────────────── 边 Worker ─────────┼──────────────────────────────┐
+  │  完成线程 × N×D：                    │  主循环：                       │
+  │   ④ NPU event.query()/synchronize()  │   ② head forward + isend ─► 云 │
+  │      监控本 (instance,dp) recv       │   ③ COMM_RECV post 即返        │
+  │   ⑤ recv 完成 ->                     │      （round barrier 放宽，    │
+  │      写 recv_done_mq                 │       不等 tail drain）       │
+  │    + channel 释放                    │   ⑦ tail forward（fence 已    │
+  │      （信用回路短一 RTT）             │      ready 不阻塞）+ sampler  │
+  │        ▲                             │                               │
+  │        │                             │                               │
+  │        └── HCCL 数据通道（RECV 流）──┼── 云实例 i isend（执行完发起）──┘
+  └───────────────────────────────────────┘
+
+  ready 语义：  三类统一 = 数据面 recv fence CPU 可见完成（真数据到达）
+  PL 变化：     云回两跳(ack->POST_OUT)删除 -> 自投递 + fence（POST_OUT 只剩 ack）
+  DL/DRL 变化： 占位+10ms 拍的 delay 窗 -> fence 真就绪（窗语义可选保留/取消）
+  调度门控：    per-instance 门控不变 + 实例间全局调度（§5.1）+ 2DP D-dp AND
+  收益：        TAIL 等待不占计算槽（完成线程扛等待）-> 跨实例/跨 round 重叠
+```
+
+对比要点：
+
+| 维度 | 现状 | 多实例分离后 |
+|---|---|---|
+| PL ready 触发 | 云 worker 执行完 -> ack -> POST_OUT ZMQ 回边（两跳） | HEAD 下发时自投递 + **数据面 fence**（数据到达即 ready） |
+| DL/DRL ready 触发 | DF/DRF 下发时**占位自投递** + 10ms delay 窗（非数据就绪） | 同自投递，但执行时机由 **fence 真就绪**驱动（delay 窗可去/改） |
+| ready 时间戳语义 | PL=云执行完、DL/DRL=下发时刻（**不可比**） | 三类统一 = recv 完成时刻（**可比**，ready-first 才有意义） |
+| 等待由谁扛 | round barrier 同步 drain（占计算槽） | 完成线程（计算槽跨实例填满） |
+| channel 释放 | PL 从 POST_OUT 弹出时 | fence 完成即释放（短一 RTT） |
+| 云->边控制面 | POST_OUT 承载 PL 回传 + ack | 仅剩完成 ack（轻流量） |
+| 实例间选择 | 无（单实例） | DRL 全局最高 > 尾 ready-first > 首 arrival-FIFO |
+
+**关键衔接**：现状 DL/DRL 的「ready」是占位语义这一点，正是 §5.1 定案 RecvReadyFirst 的**隐藏前提改造项**--不换 fence 驱动，实例间「谁先 ready 调度谁」对 DL/DRL 就退化成「谁先发 DF/DRF」；换成 fence 后三类时间戳才同语义可比。PL 自投递化是本次尾机制改造的重心（云回两跳删除）。
+
 #### 5.2.5 2DP lockstep / 乱序 / 保序
 
 | 约束 | 机制 |
