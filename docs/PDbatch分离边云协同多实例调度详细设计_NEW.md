@@ -103,8 +103,8 @@
 2、后续可靠性方案 考虑
 
 问题
-1、api选择实例，api在边云场景基于kv选择
-2、边侧暴露多个端点，服务命令行
+1、api选择实例，api在边云场景基于kv选择 -- **已答复（2026-08）**：v1 = 一实例一端点、上游 API 网关选端点即选实例（请求经 client_index 透传 pin 到实例，§3.12）；「基于 KV 选择」（prefix 亲和）依赖 §3.5 前端发布 + 网关负载感知，v1.x 增强（§3.12 风险 #2）
+2、边侧暴露多个端点，服务命令行 -- **已答复（2026-08）**：`vllm serve --api-server-count N`（上游现有参数）+ 每子进程独立监听端口（§3.12 改动 1/2），一实例一端点；dp=1/dp>1 均适用（dp>1 = 「端点定实例、负载定 dp」，§3.12.1 场景四）
 3、
 
 ---
@@ -815,6 +815,8 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 
 可插拔 `InstanceDispatcher` 策略接口，默认 least-loaded，prefix-aware v1 不做。请求 pinning 后，draft/prefill/MTP/decode 全跟随（不只 decode）。
 
+> **2026-08 定案补充（§3.12）**：外层实例选择**上移到边侧上游 API 网关**（一实例一 API 端点，网关选端点即选实例，请求 pin 经 client_index 透传进 EngineCore，dp=1/dp>1 同口径）；`InstanceDispatcher` 接口保留、默认策略改 **RequestPinned**（读请求自带 instance_id 并校验合法，least-loaded 降为无 pin 请求的 fallback）。内层 DP 分发维持本节前端 internal LB 不变（dp>1 下"端点定实例、负载定 dp"两维度各归各，§3.12.1 场景四）。
+
 ### 3.4 实例调度分层（方案 c，已选）
 
 实例决策由 **leader（dp0 EngineCore 进程，调度层）的独立状态感知策略接口**（`InstanceDispatcher`，可插拔）做：
@@ -830,6 +832,7 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 **作用域**：
 - `InstanceDispatcher` 决策 **HEAD（FIRST）batch 喂哪个实例**
 - **TAIL（LAST）batch 的实例 = HEAD 下发时已 pin 的 instance**（edge 自投递 TAIL 的 SO，不依赖云返回；`depends_on={COMM_RECV(c2e)}`）。「as-arrived」性质保留：TAIL 处理顺序由「recv fence 完成」驱动，仍是云返回到达序，只是从控制面（POST_OUT）换成数据面（recv 完成）；2DP lockstep = edge 2DP 各自 `COMM_RECV` 的 fence 都 ready
+- **2026-08 补充（§3.12）**：网关多端点形态下 instance_id **不由 leader 提议、请求自带**（`instance_id = client_index`，网关选端点即选实例）；本节 all_reduce 分发通道仍必需（2DP 同 (实例,bt) 配对云 EP），payload 中 instance_id 改为请求 pin 的透传，leader 提议机制保留用于无 pin 请求的 fallback，pin 合法性校验（0 ≤ id < N）落在 InstanceDispatcher 的 RequestPinned 策略内
 
 > **2026-08 定案**：TAIL 自投递 + recv fence **采纳**（上文 as-arrived 换驱动源的描述即为落地目标）；**POST_OUT 通道保留**（原"通道删除"提案关闭）--`_maybe_publish_post_out` 的 PL/DL SO 回传取消，剩余载荷 = `_drain_worker_completion_acks` 一族完成 ack 控制信号（云 worker 推理完成 + isend 已发起；明细落地时定）。通道形态（b 共用 PRE_OUT 的 ROUTER/DEALER / c 独立）见 §3.7.1。
 
@@ -1022,6 +1025,182 @@ per-channel ZMQ（每 channel 独立 `queue.Queue(1000)` + 独立 pub/sub 线程
 ```
 
 要点：**决策点单一**（leader/前端，无分歧）、pinning 落请求级元数据全链路透传（verify 继承，§3.4）、内层 DP 分发零改。
+
+### 3.12 边侧前端形态：一实例一端点 + 网关选实例（2026-08 定案）
+
+**需求（2026-08 明确）**：边侧设备上游存在 API 网关设备；边侧**一个云实例对应一个 API 端点**（各自独立 ip:port），网关均衡选择端点连接 = 选择实例。边侧算力复用落点不变：仍是一个 EngineCore（内部 N 个 per-instance scheduler，§3.1）跨实例时分复用。
+
+**现状机制核实（2026-08，均代码核实）**：
+
+- 上游已有 `--api-server-count N`（`-asc`，cli_args.py:360-367，不传时默认 = data_parallel_size）：`run_multi_api_server`（serve.py:257）launcher spawn 1 组 EngineCore + N 个 ApiServer 子进程，EngineCore 对 N 个 input 地址各建 DEALER、N 个 output 地址各建 PUSH（core.py:1492-1499/1590-1595）--**「多前端连一组 EngineCore」是本树正式机制**，dp=1 无校验拦截（serve.py:143-144：`api_server_count > 1` 即走 run_multi_api_server）
+- **请求已带 client_index 到 EngineCore**（core_client.py:1097/1107，本用于输出回投），输出按 client_index 定向回发起端点（core.py:1614-1630）--「网关选端点 -> 请求带实例 -> 输出回同端点」的**传输层现成**
+- **缺口（为什么要改）**：N 个子进程**共享同一 HTTP listen socket**（serve.py:284 `setup_server` 单 sock + utils.py:229-235 传全体子进程，nginx 多 worker 模式）--对外单端点，连接落给哪个进程由内核 accept 决定；client_index 是"回信地址"（进程编号），不构成端点↔实例区分。若直接复用，端点语义在 accept 随机性面前失效
+
+**目标拓扑**：
+
+```
+                API 网关（边侧上游设备，LB 选端点 = 选实例）
+      ┌──────────────┬──────────────┬──────────────┬──────────────┐
+      ▼              ▼              ▼              ▼
+ 边端点0 :8000   边端点1 :8001   边端点2 :8002   边端点3 :8003     ← N 个独立 ip:port
+ ApiServer_0     ApiServer_1     ApiServer_2     ApiServer_3       ← client_index = i
+      └────────── ZMQ ROUTER_i / PULL_i（现有机制，零改）───────────┘
+                            ▼ 汇入同一个
+                     1 个 EngineCore（dp=1；边侧算力复用落点）
+                     ├─ instance 0 scheduler  ◄─ instance_id=0 的请求
+                     ├─ instance 1 scheduler  ◄─ instance_id=1 的请求
+                     └─ ... instance N-1（§3.1 的 N×D 分组，D=1 即 N 个）
+                            ▼ PRE_OUT 按实例定向（§3.7）
+                     云实例 0 .. N-1
+```
+
+端点 i = 实例 i = client_index i，三个编号天然合一；网关的选择直接成为请求的实例亲和。
+
+**与 §3.3/§3.4/§5.1 的关系（决策点上移、调度不变）**：
+
+- 请求 pin 的决策者从 InstanceDispatcher（§3.4 方案 c leader 提议）**上移到网关**；InstanceDispatcher 接口保留，默认策略改 **RequestPinned**（读请求元数据 `instance_id = client_index`）：校验 pin 合法（0 ≤ id < N）+ 为无 pin 请求（直连调试、后续 header 亲和）留 least-loaded fallback 位
+- **pin 只决定请求去哪个实例的队列（亲和）；何时下发 HEAD 仍由 §5.1 调度决定**（arrival-FIFO / 水位状态机，§5.1.1），TAIL 的 RecvReadyFirst 不变；§5.1.3 机制 #1 硬约束（chunked 续 chunk 必须 pin 原实例）因请求不迁移天然满足
+- **dp>1 扩展口径（2026-08 定，"端点定实例、负载定 dp"）**：ApiServer = N（不是 N×D）--端点 i 仍 = 实例 i（`instance_id = client_index` 照旧），dp 维度留给前端 internal LB（`DPLBAsyncMPClient` 按 `waiting×4+running` 在 D 个 EngineCore 间选，零改、复用现有 DPCoordinator 统计），**不做端点↔dp 静态绑定**（2DP 是 EP all-toall 紧耦合，静态分割流量直接转化为两侧失衡）。两个正交维度各归各：端点（网关）决定请求的实例亲和，前端负载决定落哪个 dp；§3.4 的 all_reduce 分发通道在 dp>1 仍必需（2DP 同 (实例,bt) 配对云 EP），payload 中 instance_id 的来源从"leader 提议"变为"请求自带 pin 的透传/校验"
+
+#### 3.12.1 请求传输四场景框图（apiserver ↔ engine，含进程清单与选择逻辑）
+
+统一符号：`ci = client_index`；ZMQ 连接方向都是 **EngineCore 主动 connect 前端 bind**（DEALER 连 input ROUTER、PUSH 连 output PULL）；internal LB = 前端进程内 `DPLBAsyncMPClient` 打分选 dp（core_client.py:1398-1426，统计源 DPCoordinator XPUB/XSUB ~100ms）。
+
+**场景一：dp=1 单实例（N=1, D=1）--1:1 现网退化形态**
+
+```
+客户端 ──► ApiServer (:8000, ci=0)        ← api_server_count 默认 = dp = 1
+             │ bind input ROUTER / output PULL
+             ▼
+          EngineCore_0 (dp0)              ← 唯一 EngineCore，无 coordinator
+          ├─ scheduler ×1
+          └─ worker ×1 (shared-model)
+             │ PRE_OUT ──► 云 PassiveEC ×1 (实例0, dp0)
+             ▼
+          输出按 ci=0 回投 ApiServer ──► 客户端
+```
+
+选择逻辑：无 dp 选择（仅 1）、无实例选择（仅 1），请求直进唯一 EngineCore。进程清单：ApiServer×1、EngineCore×1、worker×1、DPCoordinator×0、云 PassiveEC×1。
+
+**场景二：dp=2 单实例（N=1, D=2）--现网 1:1 dp=2 形态**
+
+```
+客户端 ──► :8000（共享 listen sock，accept 随机分给某个 ApiServer）
+        ┌────┴─────────────────────┐
+   ApiServer_0 (ci=0)        ApiServer_1 (ci=1)     ← api_server_count 默认 = dp = 2
+   ┌ DPLBAsyncMPClient ┐    ┌ DPLBAsyncMPClient ┐
+   │ lb_engines=[[w,r],[w,r]]  ← XSUB 订阅 ← DPCoordinator ×1（XPUB，~100ms 刷新）
+   │ 选 dp：score=waiting×4+running 最小       │
+   └──┬───────────┬──────────┘
+      │ bind ROUTER/PULL（各自独立）
+      ▼           ▼
+   EngineCore_0 (dp0)   EngineCore_1 (dp1)      ← D 个 EngineCore 进程
+   ├ scheduler ×1       ├ scheduler ×1
+   └──────┬─────────────┴──── 双 dp 共享 worker ×1（shared-model host 2 vworker）
+          │ PRE_OUT（dp0/dp1 各一条）──► 云 PassiveEC ×2（实例0 的 dp0/dp1）
+          ▼
+   输出 sockets[ci] 回投「发起请求的 ApiServer」──► 客户端
+```
+
+选择逻辑：①dp = 前端 internal LB；②实例维度不存在（N=1）；③ci 只管回投。进程清单：ApiServer×2（单端点）、EngineCore×2、worker×1、DPCoordinator×1、云 PassiveEC×2。
+
+**场景三：dp=1 两实例（N=2, D=1）--网关形态基本型**
+
+```
+                 API 网关（请求级分发，选端点 = 选实例）
+        ┌───────────────┬───────────────┐
+        ▼               ▼
+  ApiServer_0      ApiServer_1          ← api-server-count = N = 2，改动1：独立端口
+  (:8000, ci=0)    (:8001, ci=1)          不共享 sock；dp=1 无 coordinator
+   │ bind ROUTER/PULL │
+   ▼                  ▼
+   ┌──────── EngineCore_0 (dp0) ────────┐ ← 唯一 EngineCore（算力复用落点）
+   │  admission: instance_id = ci       │ ← 改动3：请求自带 pin
+   │  ├─ instance 0 scheduler 组        │
+   │  └─ instance 1 scheduler 组        │ ← N×D = 2 组
+   │  §5.1 决定何时下发 HEAD（谁先来/水位）│
+   └──────────────┬─────────────────────┘
+                  │ PRE_OUT 按实例定向
+        ┌─────────┴─────────┐
+        ▼                   ▼
+  云 PassiveEC (实例0)  云 PassiveEC (实例1)
+                  │
+   输出 sockets[ci] 回投：端点 i 进的请求回端点 i（网关无需响应关联）
+```
+
+选择逻辑：①实例 = 网关（选端点），EngineCore 内 RequestPinned 校验 `0 ≤ ci < N` 后入对应 scheduler 组；②dp 不存在（仅 1）；③HEAD 时机 = §5.1（arrival-FIFO/水位），TAIL = RecvReadyFirst（数据面驱动）。进程清单：ApiServer×2（**双端点**）、EngineCore×1、worker×1、DPCoordinator×0、云 PassiveEC×2。
+
+**场景四：dp=2 两实例（N=2, D=2）--"端点定实例、负载定 dp"扩展形态**
+
+```
+                 API 网关（请求级分发，选端点 = 选实例 pin）
+        ┌───────────────┬───────────────┐
+        ▼               ▼
+  ApiServer_0      ApiServer_1          ← api-server-count = N = 2（独立端口）
+  (:8000, ci=0)    (:8001, ci=1)
+   │ DPLBAsyncMPClient（每个前端各持 D 个引擎句柄）
+   │   lb_engines=[[w,r],[w,r]] ← XSUB ← DPCoordinator ×1（XPUB）
+   │   选 dp：score = waiting×4 + running 最小     ← dp 维度：前端 internal LB（零改）
+   │ bind ROUTER/PULL
+   ▼（DEALER id=dp_rank 定向，请求带 ci）
+   ┌─────────────┐          ┌─────────────┐
+   │ EngineCore_0│          │ EngineCore_1│   ← 仍是 D=2 个（N 不加进程）
+   │  (dp0)      │          │  (dp1)      │
+   │ admission:  │          │ admission:  │   ← instance_id = ci（改动3）
+   │ ├ inst0 组  │          │ ├ inst0 组  │   ← 每 EC 内 N=2 组，全局 N×D=4
+   │ └ inst1 组  │          │ └ inst1 组  │
+   │ §3.4 all_reduce (instance_id+bt)：2DP 同 (实例,bt) 配对 │
+   └──────┬──────┘          └──────┬──────┘
+          └───── 双 dp 共享 worker ×1（shared-model）─────┘
+          │ PRE_OUT：边 dpX ──► 云 (实例i, dpX)
+   ┌──────┴───────────────┬──────────────────┐
+   ▼                      ▼                  ▼
+ 云(实例0,dp0)       云(实例0,dp1)      云(实例1,dp0/dp1)   ← PassiveEC ×4
+          │
+   输出 sockets[ci] 回投：回端点 i（与落哪个 dp 无关）
+```
+
+选择逻辑（两正交维度各归各）：①实例 = 网关（选端点 -> `ci=i` -> 任一 EngineCore 都路由到实例 i 组，pin 后 draft/prefill/MTP/decode 全跟随）；②dp = 前端 internal LB（无端点↔dp 静态绑定）；③下发时机 = §3.4 all_reduce（2DP 同实例同 bt 配对云 EP）+ §5.1 水位；④输出回投只看 ci，与被调度到哪个 dp/实例无关。进程清单：ApiServer×2（双端点）、EngineCore×2、worker×1、DPCoordinator×1、云 PassiveEC×4。
+
+**四场景对比总表**：
+
+| 场景 | N | D | ApiServer（端点） | EngineCore | scheduler 组 | worker | DPCoordinator | 云 PassiveEC | 实例由谁选 | dp 由谁选 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 一（1:1 退化）| 1 | 1 | 1（单） | 1 | 1 | 1 | 0 | 1 | - | - |
+| 二（1:1 现网）| 1 | 2 | 2（**共享单端点**） | 2 | 2 | 1 | 1 | 2 | -（N=1） | 前端 internal LB |
+| 三（网关基本型）| 2 | 1 | 2（**独立双端点**） | 1 | 2 | 1 | 0 | 2 | 网关（ci） | -（D=1） |
+| 四（dp>1 扩展）| 2 | 2 | 2（**独立双端点**） | 2 | 4 | 1 | 1 | 4 | 网关（ci） | 前端 internal LB |
+
+规律：**ApiServer 数与 EngineCore 数都不随 N 增长**（网关形态下 ApiServer=N 是端点语义要求，不是 N 份算力）；N 只体现在 EngineCore 内部 scheduler 分组数（N×D）与云侧 PassiveEC 数（N×D）。1:1 退化（场景一/二）与多实例（场景三/四）是同一代码路径，部署差异只在端点数与 EngineCore 内 scheduler 分组数。
+
+**修改点（4 个触点）**：
+
+| # | 层 | 位置 | 改动 |
+|---|---|---|---|
+| 1 | HTTP 监听 | serve.py:284（setup_server）+ v1/utils.py:172-235（APIServerProcessManager） | 单 sock 共享 -> launcher 预创建 **N 个 sock_i**（各 bind `host:port_i`，端口显式列表或 base+i 推导，建议与 §2.2 pre_out_ports 同口径**显式配置、必填无默认**）；spawn 时第 i 个子进程拿 sock_i，**子进程侧零改**（仍走 sock= 路径，api_server.py:683-685 build_and_serve）。per-child 端口先例：dp_supervisor.py:119（`child_args.port = args.port + local_rank`） |
+| 2 | 拉起校验 | serve.py / edge-cloud patch | 端口列表长度 = api_server_count = **N（= nnodes-1）**；值唯一、可用性 fail-fast（被占即拒绝拉起，防同机串台，与 §2.2 同款硬前提） |
+| 3 | 请求 admission | EngineCore 请求准入（边云多实例分支，dp=1/dp>1 同口径） | `instance_id = client_index`，路由到第 instance_id 个 per-instance scheduler（§3.1 分组的构造来源从 InstanceDispatcher 分发变为请求自带；dp>1 下落进任一 EngineCore 都路由到实例 ci 的组，见 §3.12.1 场景四）；InstanceDispatcher 默认策略 RequestPinned |
+| 4 | 观测 | metrics / 日志 | 端点/实例标签强制（§2.6 处理项 #6 同款）：client_index（= instance_id）进 metrics label 与日志前缀，N 个端点的输出可区分 |
+
+**零改动清单（评审排除面）**：
+
+- ZMQ input/output 全套：每子进程 input ROUTER / output PULL、实际地址 pipe 回传（gather_actual_addresses，utils.py:246-294）、handshake 下发、EngineCore DEALER×N / PUSH×N--零改
+- 输出按 client_index 回投（core.py:1630）--零改，新形态下语义恰好正确：哪个端点进的请求、流式输出回哪个端点，**网关无需做响应关联**
+- EngineCore spawn 链（CoreEngineProcManager）、shared-model executor、边↔云 PRE_OUT/云侧 PassiveEC--零改
+- shutdown / 进程监控（wait_for_completion_or_failure）--零改
+
+**配置面**：`--api-server-count N` 沿用上游参数（不新增）；新增 N 个监听端口的表达（显式列表优先）。与 §2.1「零新增显式实例配置」不冲突的理由：监听端口是**前端部署参数**，不是实例身份编码--instance_id 仍由 `node_rank-1` 推导，边云两侧的世界组/通道推导不受影响。
+
+**风险与部署约束**：
+
+| # | 风险 | 性质 | 对策 |
+|---|------|------|------|
+| 1 | **网关 LB 粒度** | 部署约束（硬） | SSE / HTTP keep-alive 长连接会粘住一个端点 -> 负载倾斜、实例选择失效；网关必须**请求级分发**（短连接，或 LB 支持 request/stream 级路由），写进部署要求 |
+| 2 | 网关无后端视角 | 性能（v1 接受） | 纯轮询/最小连接数下，长序列大户粘端点 i 会打满该实例 edge/N 配额而其他实例闲置（§6.3 配额匹配问题在前端 pin 模式下更突出）；v1.x = §3.5 前端发布（`_maybe_publish_request_counts` 扩 instance_id）+ 端点 metrics，网关 least-loaded / prefix 一致性哈希（prefix->实例亲和正好承接 §6.5 KV 不迁移设计，即 §1.4 问题 1「基于 kv 选择」的完整落点） |
+| 3 | 端点级故障 | 可用性 | ApiServer_i 挂 -> launcher `wait_for_completion_or_failure` 拉停全体（与 v1「任一实例挂整体挂」一致）；网关摘除端点 i 只救流量不救服务 |
+| 4 | 1:1 退化 | 无 | N=1 时单端点单 client_index，与现网行为一致（部署差异只在端口数随 N） |
+
+**否决的替代路线**：①dp_supervisor 式 N 个独立 `vllm serve`--每 serve spawn 自己的 EngineCore -> N 个 EngineCore 各占边卡，算力不共享，直接违背需求；②单端点 + 请求头传实例（`x-instance-id` 类）--网关/客户端要懂 header、端点即实例的运维语义弱，留作 v1.x 无网关直连场景补充；③纯 §3.4 方案 c 单端点 leader 决策--最省，但与「一实例一端点、网关选实例」的部署预期不符。
 
 ---
 
@@ -1931,6 +2110,7 @@ dp=2 不影响 R（边云 per-dp 同除）。
 | #1 | 同 batch_type 跨实例尾层组批 | **不做**，各实例尾层独立处理；后续需要再考虑 |
 | #6 | 实例调度决策机制 | **方案 c**：leader 决策 + all_reduce 分发 |
 | #5 | prefill_inflight_limit 作用域 | **per-(instance,dp)**，共 4N |
+| - | 边侧前端形态（2026-08） | **一实例一 API 端点 + 上游网关选实例**（§3.12）：`--api-server-count N` + 每子进程独立监听端口，`instance_id = client_index` 请求自带 pin；InstanceDispatcher 默认策略 RequestPinned；dp>1 = 「端点定实例、负载定 dp」（ApiServer=N，dp 归前端 internal LB，§3.12.1 场景四），方案 c 的 all_reduce 保留为 2DP 协调通道 |
 
 ### 7.2 待后续
 
@@ -1944,6 +2124,7 @@ dp=2 不影响 R（边云 per-dp 同除）。
 | - | 2 卡实例口径 R 重实测（2026-08） | §6.3 现表为既有口径实测；qwen3.6-27b 2 卡 tp2 实例云侧 num_blocks 需重测，N=8 临界判定依赖该值 |
 | - | per-server 聚合带宽实测（2026-08） | 同机 K 实例 hidden isend/irecv + ZMQ 挤同一网口，K=4 聚合带宽 vs 单实例流量的实测决定多实例重叠收益上限（§2.6 处理项 #3） |
 | - | 同机错峰拉起编排（2026-08） | 编排层按 instance 序错峰 / 权重加载流水放行，profile/warmup 同机串行、跨机并行（§3.10 #6），错峰参数待实测定 |
+| - | 网关负载/KV 感知（2026-08） | v1 网关纯 LB（轮询/最小连接数）；v1.x = §3.5 前端发布扩 instance_id + 端点 metrics，网关 least-loaded / prefix 亲和（§3.12 风险 #2、§1.4 问题 1 的完整落点）；网关请求级分发为部署硬约束 |
 
 ### 7.3 风险性质汇总
 
