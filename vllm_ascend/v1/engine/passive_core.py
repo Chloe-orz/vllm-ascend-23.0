@@ -735,6 +735,8 @@ class PassiveEngineCoreProc:
         # blocked.  No gating: schedule() ran already and P-middle is being
         # dispatched regardless; the hint only decides *when* the irecv is
         # posted, not whether P-middle runs.
+        from vllm_ascend.distributed.edge_cloud_comm import make_recv_hint
+
         so = batch.scheduler_output
         if (
             self._cher_enabled
@@ -749,24 +751,25 @@ class PassiveEngineCoreProc:
             _ht = so.head_token
             if _is_first_slice and _ht not in self._cher_hint_sent:
                 _channel = getattr(so, "hidden_channel", None)
-                _hint = {
-                    "head_token": _ht,
-                    "hidden_channel": (
-                        _channel.value if _channel is not None else None
-                    ),
-                    "num_tokens": so.total_num_scheduled_tokens,
-                    # has_mrope is stamped by the edge PDSeparatedScheduler
-                    # (it owns the request registry; the passive cloud does
-                    # not - scheduled_cached_reqs carries only req_ids, so
-                    # cached-req multimodality cannot be derived from the SO
-                    # alone here). The stamp mirrors NPUModelRunner.
-                    # step_has_multimodal_req exactly, so the guard-thread
-                    # irecv expects exactly the mrope_positions the edge sender
-                    # puts on the wire (eliminates the mixed-batch mismatch).
-                    # Defaults True when unset (non-PD / no stamp) so mrope is
-                    # received conservatively.
-                    "has_mrope": getattr(so, "has_mrope", True),
-                }
+                # has_mrope is stamped by the edge PDSeparatedScheduler
+                # (it owns the request registry; the passive cloud does
+                # not - scheduled_cached_reqs carries only req_ids, so
+                # cached-req multimodality cannot be derived from the SO
+                # alone here). The stamp mirrors NPUModelRunner.
+                # step_has_multimodal_req exactly, so the guard-thread
+                # irecv expects exactly the mrope_positions the edge sender
+                # puts on the wire (eliminates the mixed-batch mismatch).
+                # Defaults True when unset (non-PD / no stamp) so mrope is
+                # received conservatively.
+                # The hint schema is owned by the comm layer
+                # (edge_cloud_comm.scheduler_api.make_recv_hint) — design
+                # doc 8.3-① scheduler -> comm recv-request injection.
+                _hint = make_recv_hint(
+                    head_token=_ht,
+                    hidden_channel=_channel,
+                    num_tokens=so.total_num_scheduled_tokens,
+                    has_mrope=getattr(so, "has_mrope", True),
+                )
                 _hint_mq = getattr(self.executor, "cloud_recv_hint_mq", None)
                 if _hint_mq is not None:
                     try:

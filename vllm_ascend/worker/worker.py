@@ -75,13 +75,21 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
+from vllm_ascend.distributed.edge_cloud_comm import (
+    BatchKind,
+    CommChannelType,
+    CommFuture,
+    CommRequest,
+    LoggingSchedulerCommSink,
+    channel_for,
+    channel_for_direction,
+    get_comm_service,
+    kind_for_batch_type,
+    recv_request_from_hint,
+)
 from vllm_ascend.distributed.parallel_state import (
     ScheduledDraftTensorMeta,
     build_scheduled_draft_tensor_meta,
-    edge_cloud_broadcast_recv,
-    edge_cloud_broadcast_recv_scheduled_draft,
-    edge_cloud_send_tensor_dict,
-    edge_cloud_send_tensor_dict_scheduled_draft,
     init_ascend_model_parallel,
     init_edge_cloud_tensor_meta,
 )
@@ -224,23 +232,34 @@ class NPUWorker(WorkerBase):
         if self.use_v2_model_runner and vllm_version_is("0.23.0"):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.23.0; falling back to v1 model runner.")
             self.use_v2_model_runner = False
+        # Legacy (non-edge-cloud) PP path: one outstanding send, waited at
+        # the top of _execute_model_legacy.  Edge-cloud sends are owned by
+        # the comm service (EdgeCloudCommService) and never tracked here.
         self._pp_send_work: list[Handle] = []
-        self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
 
         # [CHER/EHER] Cloud-side hidden early-receive (and its edge-side
-        # mirror) cache.  The guard thread posts irecv ahead of the batch's
-        # execute_model (keyed by head_token); execute_model pops the cached
-        # AsyncIntermediateTensors and runs wait_for_comm() (which both
-        # waits the HCCL handles and runs comm_postprocess, the latter being
-        # a TP collective that must run inside execute_model on all ranks).
-        # Shared by CHER (cloud) and EHER (edge) since the recv primitives
-        # are direction-agnostic (driven by hidden_channel + num_tokens).
-        self._early_recv_handles: dict[str, AsyncIntermediateTensors] = {}
+        # mirror) cache.  The executor's guard thread calls
+        # start_early_irecv() to submit a recv to the comm service ahead of
+        # the batch's execute_model (keyed by head_token); execute_model
+        # pops the cached CommFuture and materializes it via
+        # as_intermediate_tensors() (whose wait_event ordering + comm
+        # postprocess, the latter being a TP collective, run lazily on first
+        # .tensors access inside execute_model on all ranks).  Shared by
+        # CHER (cloud) and EHER (edge) since the recv requests are
+        # direction-agnostic (driven by hidden_channel + num_tokens).
+        self._early_recv_futures: dict[str, CommFuture] = {}
         self._early_recv_lock = threading.Lock()
         # head_tokens already consumed by busy_loop (get_or_post_early_recv).
-        # Prevents the guard thread from posting a duplicate (orphan) irecv
-        # when its hint arrives after busy_loop already posted its own.
+        # Prevents the guard thread from submitting a duplicate (orphan)
+        # recv when its hint arrives after busy_loop already submitted its
+        # own.
         self._early_recv_consumed: set[str] = set()
+        # comm -> scheduler completion feedback (design doc 8.3-2):
+        # register the logging no-op sink so the chain
+        # submit -> reap -> sink is live end-to-end; poll_completions()
+        # at the execute_model loop head drives it.  Registration is
+        # type-idempotent (shared-model virtual workers share a process).
+        get_comm_service().register_sink(LoggingSchedulerCommSink())
         # Whether cloud-side hidden early-receive (CHER) is active on this
         # worker.  CHER is a built-in part of PD-separation masking, so on a
         # PD-separated cloud worker (local_rank==0) this is always True; False
@@ -778,165 +797,134 @@ class NPUWorker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
-    def _record_pp_send_work(
-        self, handles: list[Handle], channel: HiddenChannelType | None = None
-    ) -> None:
-        if channel is None:
-            self._pp_send_work = handles
-        else:
-            logger.info(
-                "[PD] _record_pp_send_work: channel=%s handles=%d",
-                channel.value,
-                len(handles),
-            )
-            self._pp_send_work_by_channel[channel.value] = handles
+    def _wait_pp_send_work(self) -> None:
+        """Legacy (non-edge-cloud) PP path only: wait the single outstanding
+        send before this batch's compute may reuse its source buffer.
 
-    def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
-        if channel is None:
-            for handle in self._pp_send_work:
-                handle.wait()
-            self._pp_send_work = []
-            for handles in self._pp_send_work_by_channel.values():
-                for handle in handles:
-                    handle.wait()
-            self._pp_send_work_by_channel.clear()
-            return
-
-        handles = self._pp_send_work_by_channel.pop(channel.value, [])
-        logger.info(
-            "[PD] _wait_pp_send_work: channel=%s handles=%d",
-            channel.value,
-            len(handles),
-        )
-        for handle in handles:
+        Edge-cloud sends are submitted to the comm service, whose
+        per-channel FIFO + wait-bridge gives device-side ordering and whose
+        CommFuture keeps the send buffer alive until ``event.query()``
+        reports completion — no wait is ever needed on the compute path for
+        them (see edge_cloud_comm_design.md section 5).
+        """
+        for handle in self._pp_send_work:
             handle.wait()
+        self._pp_send_work = []
 
     # ------------------------------------------------------------------ #
     # [CHER/EHER] Cloud/edge hidden early-receive primitives             #
     # ------------------------------------------------------------------ #
-    # The guard thread calls start_early_irecv() to post an irecv ahead of
-    # the batch's execute_model (keyed by head_token); execute_model calls
-    # get_or_post_early_recv() to consume/reuse it.  These are direction-
-    # agnostic: the hidden_channel + num_tokens fully determine the recv, so
-    # the same
-    # primitives serve CHER (cloud, edge->cloud) and EHER (edge, cloud->edge).
-    def _post_early_irecv_locked(
-        self, ht: str, channel: "HiddenChannelType", num_tokens: int,
+    # The executor's guard thread calls start_early_irecv() to submit a
+    # recv to the comm service ahead of the batch's execute_model (keyed by
+    # head_token); execute_model calls get_or_post_early_recv() to
+    # consume/reuse the CommFuture.  The comm service posts the irecv
+    # immediately on submit, so "early" is purely a matter of when the hint
+    # arrives.  These are direction-agnostic: the hidden_channel +
+    # num_tokens fully determine the recv, so the same primitives serve
+    # CHER (cloud, edge->cloud) and EHER (edge, cloud->edge).
+    def _submit_early_recv_locked(
+        self, channel: "HiddenChannelType | None", num_tokens: int,
         include_mrope: bool = True,
-    ) -> AsyncIntermediateTensors:
-        """Post an irecv and return the entry.  Caller MUST hold
-        ``_early_recv_lock``.  Does NOT cache in ``_early_recv_handles`` --
-        the caller decides whether to cache (guard thread) or consume
-        immediately (busy_loop).  This prevents the memory leak where
-        busy_loop's self-posted entries were left in the dict forever.
+    ) -> CommFuture:
+        """Submit a prefill hidden recv to the comm service and return the
+        future.  Caller MUST hold ``_early_recv_lock``.  Does NOT cache in
+        ``_early_recv_futures`` -- the caller decides whether to cache
+        (guard thread) or consume immediately (busy_loop).  This prevents
+        the memory leak where busy_loop's self-submitted entries were left
+        in the dict forever.
         """
         do_sp_chunk = enable_sp() and (
             self.model_runner.edge_cloud_cfg.mode != "embedding_only"
             or not self.model_runner.supports_mm_inputs)
-        tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-            num_tokens=num_tokens,
-            channel=channel,
-            sp_chunk=do_sp_chunk,
-            include_mrope = include_mrope,
-        )
-        entry = AsyncIntermediateTensors(
-            tensor_dict,
-            comm_handles=comm_handles,
-            comm_postprocess=comm_postprocess,
-        )
-        return entry
+        return get_comm_service().submit_recv(
+            CommRequest(
+                channel=CommChannelType.PREFILL_UP,
+                op="recv",
+                kind=BatchKind.PREFILL,
+                num_tokens=num_tokens,
+                transport=channel,
+                sp_chunk=do_sp_chunk,
+                include_mrope=include_mrope,
+            ))
 
     def start_early_irecv(self, hint: dict) -> None:
-        """Post an irecv for the hinted hidden tensors and cache it.
+        """Submit a recv for the hinted hidden tensors and cache the future.
 
-        Atomic check-or-post under ``_early_recv_lock``: a repeated hint for
-        the same head_token (or one that execute_model already posted via
-        get_or_post_early_recv) is a no-op -- exactly one irecv is ever posted
-        per head_token, avoiding the double-post deadlock where two irecvs on
-        the same channel would race for the sender's single isend.
+        The hint schema is owned by the comm layer
+        (``edge_cloud_comm.scheduler_api``); this method only adds the
+        worker-side idempotency/cap bookkeeping.  Atomic check-or-submit
+        under ``_early_recv_lock``: a repeated hint for the same
+        head_token (or one that execute_model already submitted via
+        get_or_post_early_recv) is a no-op -- exactly one recv is ever
+        submitted per head_token, avoiding the double-post deadlock where
+        two irecvs on the same channel would race for the sender's single
+        isend.
         """
-        ht = hint.get("head_token")
-        if not ht:
-            return
-        channel_str = hint.get("hidden_channel")
-        num_tokens = hint.get("num_tokens")
-        has_mrope = hint.get("has_mrope", True)
-        if channel_str is None or num_tokens is None:
-            logger.warning(
-                "[CHER] start_early_irecv: incomplete hint %s, skipping.",
-                {k: hint.get(k) for k in ("head_token", "hidden_channel",
-                                          "num_tokens")},
-            )
-            return
-        try:
-            channel = HiddenChannelType(channel_str)
-        except Exception:
-            logger.warning(
-                "[CHER] start_early_irecv: bad channel %r, skipping.",
-                channel_str,
-            )
+        do_sp_chunk = enable_sp() and (
+            self.model_runner.edge_cloud_cfg.mode != "embedding_only"
+            or not self.model_runner.supports_mm_inputs)
+        request, ht = recv_request_from_hint(hint, sp_chunk=do_sp_chunk)
+        if request is None or ht is None:
             return
         with self._early_recv_lock:
-            if ht in self._early_recv_handles:
-                return  # idempotent: another thread already posted
+            if ht in self._early_recv_futures:
+                return  # idempotent: another thread already submitted
             if ht in self._early_recv_consumed:
-                return  # busy_loop already consumed (posted its own); skip
+                return  # busy_loop already consumed (submitted its own)
             # Cap the cache at prefill_inflight_limit: only that many P-middle
             # batches are in flight on the cloud at once, so only that many
             # early-recv entries are ever useful.  Extra hints (e.g. far-ahead
             # chunks whose P-middle won't run until current ones drain) are
-            # skipped here -- busy_loop posts them via get_or_post_early_recv
-            # when they actually run.  This bounds cache memory (no OOM) and
-            # keeps the guard draining fast (skip costs no NPU alloc), so the
-            # small hint ring never fills and hints are never dropped.
+            # skipped here -- busy_loop submits them via
+            # get_or_post_early_recv when they actually run.  This bounds
+            # cache memory (no OOM) and keeps the guard draining fast (skip
+            # costs no NPU alloc), so the small hint ring never fills and
+            # hints are never dropped.
             _max = getattr(self, "_early_recv_max_inflight", 2)
-            if len(self._early_recv_handles) >= _max:
+            if len(self._early_recv_futures) >= _max:
                 return
             try:
-                entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
-                self._early_recv_handles[ht] = entry  # cache for busy_loop
+                future = get_comm_service().submit_recv(request)
+                self._early_recv_futures[ht] = future  # cache for busy_loop
             except Exception:
                 logger.exception(
-                    "[CHER] start_early_irecv failed head_token=%s channel=%s",
-                    ht, channel_str,
+                    "[CHER] start_early_irecv failed head_token=%s",
+                    ht,
                 )
                 return
         logger.debug(
-            "[CHER] early-recv posted head_token=%s channel=%s num_tokens=%d",
-            ht, channel_str, num_tokens,
+            "[CHER] early-recv submitted head_token=%s channel=%s num_tokens=%d",
+            ht, hint.get("hidden_channel"), request.num_tokens,
         )
 
     def get_or_post_early_recv(
-        self, head_token: str | None, channel: "HiddenChannelType",
+        self, head_token: str | None, channel: "HiddenChannelType | None",
         num_tokens: int, include_mrope: bool = True,
-    ) -> AsyncIntermediateTensors | None:
-        """Atomically reuse the guard-thread's early-recv entry, or post one.
+    ) -> CommFuture | None:
+        """Atomically reuse the guard-thread's early-recv future, or submit
+        one.
 
         execute_model calls this instead of pop-then-fallback: under
-        ``_early_recv_lock`` it pops a cached entry if the guard thread
-        already posted one, otherwise it posts the irecv itself and returns
-        it.  This guarantees at most one irecv per head_token even when the
-        guard thread's hint dequeue races ahead of (or lags behind)
-        execute_model's pp_scheduler_output dequeue -- the original
-        pop-then-fallback path posted a second irecv when the guard had not
-        posted yet, and both irecvs then raced for the sender's single isend,
-        deadlocking (the losing irecv waits forever -> no ack -> no POST_OUT
-        -> edge has no P-tail -> full stall).
+        ``_early_recv_lock`` it pops a cached future if the guard thread
+        already submitted one, otherwise it submits the recv itself and
+        returns the future.  This guarantees at most one recv per
+        head_token even when the guard thread's hint dequeue races ahead of
+        (or lags behind) execute_model's pp_scheduler_output dequeue.
         """
         if not head_token:
             return None
         with self._early_recv_lock:
-            entry = self._early_recv_handles.pop(head_token, None)
+            future = self._early_recv_futures.pop(head_token, None)
             self._early_recv_consumed.add(head_token)
-            if entry is not None:
-                return entry  # guard thread posted it, consumed
-            # Not posted by guard: post our own.  Do NOT cache in
-            # _early_recv_handles -- we consume it immediately.  Marking
-            # _early_recv_consumed above prevents the guard from posting a
-            # duplicate (orphan irecv) when its hint arrives later.
+            if future is not None:
+                return future  # guard thread submitted it, consumed
+            # Not submitted by guard: submit our own.  Do NOT cache in
+            # _early_recv_futures -- we consume it immediately.  Marking
+            # _early_recv_consumed above prevents the guard from submitting
+            # a duplicate (orphan recv) when its hint arrives later.
             try:
-                return self._post_early_irecv_locked(
-                    head_token, channel, num_tokens, include_mrope=include_mrope)
+                return self._submit_early_recv_locked(
+                    channel, num_tokens, include_mrope=include_mrope)
             except Exception:
                 logger.exception(
                     "[CHER] get_or_post_early_recv failed head_token=%s",
@@ -948,7 +936,7 @@ class NPUWorker(WorkerBase):
     def cleanup_early_recv(self, head_token: str) -> None:
         """Drop a leaked early-recv entry (e.g. request aborted mid-prefill)."""
         with self._early_recv_lock:
-            self._early_recv_handles.pop(head_token, None)
+            self._early_recv_futures.pop(head_token, None)
             self._early_recv_consumed.discard(head_token)
 
     def _all_gather_tensor_dict(
@@ -994,24 +982,13 @@ class NPUWorker(WorkerBase):
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
 
-        # Edge-cloud PD separation can keep one outstanding send per hidden
-        # channel.  Only wait on the channel about to be reused; legacy PP waits
-        # for all outstanding sends to preserve the original behavior.
+        # Edge-cloud sends/recvs are owned by the comm service: per-channel
+        # FIFO + wait-bridge ordering plus send-buffer keepalive make the
+        # legacy entry wait unnecessary (see edge_cloud_comm_design.md
+        # section 5).  Drive completion callbacks/sinks from this loop head
+        # instead (one head-of-line event.query() per active channel).
         if self.model_runner._edge_cloud_enabled:
-            bt = scheduler_output.batch_type
-            if bt in (
-                BatchType.PREFILL_FIRST,
-                BatchType.DECODE_FIRST,
-                BatchType.DRAFT_FIRST,
-                BatchType.PREFILL_LAST,
-                BatchType.DECODE_LAST,
-                BatchType.DRAFT_LAST,
-            ):
-                self._wait_pp_send_work(self._hidden_channel_for(scheduler_output))
-            else:
-                self._wait_pp_send_work()
-        else:
-            self._wait_pp_send_work()
+            get_comm_service().poll_completions()
 
         # Edge-cloud PD-separation: dispatch by batch_type and role.
         if self.model_runner._edge_cloud_enabled:
@@ -1039,19 +1016,6 @@ class NPUWorker(WorkerBase):
         return self._execute_model_legacy(
             scheduler_output, layer_slice_info, use_alt_group
         )
-
-    def _hidden_channel_for(self, scheduler_output: "SchedulerOutput") -> HiddenChannelType:
-        channel = scheduler_output.hidden_channel
-        if channel is not None:
-            return channel
-        bt = scheduler_output.batch_type
-        if bt in (BatchType.PREFILL_FIRST, BatchType.PREFILL_LAST):
-            return HiddenChannelType.PREFILL_1
-        if bt in (BatchType.DECODE_FIRST, BatchType.DECODE_LAST):
-            return HiddenChannelType.DECODE
-        if bt in (BatchType.DRAFT_FIRST, BatchType.DRAFT_LAST):
-            return HiddenChannelType.DECODE
-        raise RuntimeError(f"No hidden channel for batch_type={bt}")
 
     def _execute_model_edge_head(
         self,
@@ -1128,12 +1092,17 @@ class NPUWorker(WorkerBase):
                 self.model_runner.mrope_positions.gpu[:, :n].t().contiguous()
             )
         if get_pp_group().world_size == 2:
-            channel = self._hidden_channel_for(scheduler_output)
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
-                channel=channel,
-            )
+            _kind = kind_for_batch_type(scheduler_output.batch_type)
+            get_comm_service().submit_send(
+                CommRequest(
+                    channel=channel_for(scheduler_output.batch_type, _kind),
+                    op="send",
+                    kind=_kind,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    tensor_dict=_gathered,
+                    transport=scheduler_output.hidden_channel,
+                    include_mrope=include_mrope,
+                ))
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
         # because sampling happens in the tail segment (PL/DL).
@@ -1150,26 +1119,25 @@ class NPUWorker(WorkerBase):
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         edge_sp = enable_sp()
         """Edge tail segment (PL/DL): recv -> segment_e -> return output."""
-        #logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
-        channel = self._hidden_channel_for(scheduler_output)
         # The cloud->edge reply never carries mrope_positions (the c2e meta
         # is built with uses_mrope=False: only the edge computes M-RoPE and
         # pushes it to the cloud).  Pass include_mrope=False explicitly so
         # this recv stays correct if the c2e meta ever gains an mrope key --
         # with the default True, the edge would irecv a tensor the cloud
         # never sends and deadlock on the channel.
-        tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-            num_tokens=scheduler_output.total_num_scheduled_tokens,
-            channel=channel,
-            sp_chunk=edge_sp,
-            include_mrope=False,
-        )
+        _kind = kind_for_batch_type(scheduler_output.batch_type)
+        recv_future = get_comm_service().submit_recv(
+            CommRequest(
+                channel=channel_for(scheduler_output.batch_type, _kind),
+                op="recv",
+                kind=_kind,
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                transport=scheduler_output.hidden_channel,
+                sp_chunk=edge_sp,
+                include_mrope=False,
+            ))
 
-        intermediate_tensors = AsyncIntermediateTensors(
-            tensor_dict,
-            comm_handles=comm_handles,
-            comm_postprocess=comm_postprocess,
-        )
+        intermediate_tensors = recv_future.as_intermediate_tensors()
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
@@ -1212,19 +1180,21 @@ class NPUWorker(WorkerBase):
         if is_first_slice:
             self.model_runner.cloud_prepare_early(scheduler_output)
         if forward_pass and is_first_slice:
-            # [CHER] Atomically reuse the guard thread's early-recv entry, or
-            # post the irecv ourselves.  get_or_post_early_recv guarantees at
-            # most one irecv per head_token even when the guard thread's hint
-            # dequeue races this dequeue.  Applies to PREFILL_FIRST only:
-            # DECODE_FIRST must NOT use early-recv because DECODE is a single
-            # channel/stream -- a guard-thread irecv post on the DECODE stream
-            # races busy_loop's isend on that same stream (cross-thread FIFO
-            # ordering is non-deterministic -> deadlock).  PREFILL has two
-            # channels (PREFILL_1/2) so irecv and isend land on different
-            # streams.  The guard thread ONLY posts (never wait()s); wait is
-            # done by execute_model's wait_for_comm() on the busy_loop thread.
+            # [CHER] Atomically reuse the guard thread's early-recv future,
+            # or submit the recv ourselves.  get_or_post_early_recv
+            # guarantees at most one recv per head_token even when the guard
+            # thread's hint dequeue races this dequeue.  Applies to
+            # PREFILL_FIRST only: DECODE_FIRST must NOT use early-recv
+            # because DECODE is a single channel/stream -- a guard-thread
+            # recv submit on the DECODE stream races busy_loop's isend on
+            # that same stream (cross-thread FIFO ordering is
+            # non-deterministic -> deadlock).  PREFILL has two channels
+            # (PREFILL_1/2) so irecv and isend land on different streams.
+            # The guard thread ONLY submits (never wait()s); ordering is
+            # done lazily via as_intermediate_tensors() on the busy_loop
+            # thread.
             _ht = getattr(scheduler_output, "head_token", None)
-            entry = None
+            recv_future = None
             # Match the sender. The edge scheduler stamps `has_mrope` on
             # every SO from its authoritative request registry, and the edge
             # sender's include_mrope always equals it. The cloud runner's own
@@ -1242,54 +1212,53 @@ class NPUWorker(WorkerBase):
                     scheduler_output)
             if (self._cloud_hidden_early_recv_enabled and _ht
                     and scheduler_output.batch_type == BatchType.PREFILL_FIRST):
-                _channel = self._hidden_channel_for(scheduler_output)
-                entry = self.get_or_post_early_recv(
-                    _ht, _channel,
+                recv_future = self.get_or_post_early_recv(
+                    _ht,
+                    scheduler_output.hidden_channel,
                     scheduler_output.total_num_scheduled_tokens,
                     include_mrope=_cloud_include_mrope,
                 )
-            if entry is not None:
+            if recv_future is not None:
                 logger.debug("[CHER] consume early-recv head_token=%s", _ht)
-                intermediate_tensors = entry
-                # wait_for_comm() runs implicitly on first .tensors access
-                # inside execute_model (AsyncIntermediateTensors.__getattr__),
-                # which both waits the HCCL handles and runs comm_postprocess
-                # (the TP collective) on all ranks synchronized.  Do NOT call
-                # it explicitly here: doing so blocks busy_loop on the recv
-                # wait BEFORE execute_model, defeating cloud_prepare_early's
-                # overlap and stalling the pipeline (TPOT regression).
+                # wait_event ordering + comm postprocess (the TP collective)
+                # run lazily on first .tensors access inside execute_model,
+                # on all ranks synchronized.  Do NOT force completion here:
+                # doing so blocks busy_loop on the recv BEFORE
+                # execute_model, defeating cloud_prepare_early's overlap
+                # and stalling the pipeline (TPOT regression).
+                intermediate_tensors = recv_future.as_intermediate_tensors()
             else:
-                # Fallback: synchronous recv (CHER off, or get_or_post failed).
-                # Pre-compute input preparation while edge runs segment_a.
-                # This overlaps cloud's _update_states, _prepare_inputs,
+                # Fallback: submit the recv now (CHER off, or
+                # get_or_post failed).  Pre-compute input preparation while
+                # edge runs segment_a.  This overlaps cloud's
+                # _update_states, _prepare_inputs,
                 # _determine_batch_execution_and_padding, and
                 # _build_attention_metadata with edge's segment_a forward.
-                # SP chunking is part of edge_cloud_broadcast_recv's
-                # postprocess for both merged and non-merged payloads. It must
-                # run only after the receive and TP broadcast have completed.
+                # SP chunking is part of the recv postprocess for both
+                # merged and non-merged payloads. It must run only after
+                # the receive and TP broadcast have completed.
                 do_sp_chunk = enable_sp() and (
                     self.model_runner.edge_cloud_cfg.mode != "embedding_only"
                     or not self.model_runner.supports_mm_inputs)
-                channel = self._hidden_channel_for(scheduler_output)
                 # In the shared-model edge-cloud topology the edge has a single
                 # distributed rank at in-group rank 0; the cloud first-worker of
                 # each dp_rank must receive from that rank (src=0).  In the
                 # standard (non-shared-model) topology src=None suffices: it
                 # resolves to the implicit "previous PP rank" which IS the edge.
                 _recv_src = 0 if self.parallel_config.is_shared_model_edge else None
-                tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-                    num_tokens=scheduler_output.total_num_scheduled_tokens,
-                    channel=channel,
-                    sp_chunk=do_sp_chunk,
-                    src=_recv_src,
-                    include_mrope=_cloud_include_mrope,
-                )
-
-                intermediate_tensors = AsyncIntermediateTensors(
-                    tensor_dict,
-                    comm_handles=comm_handles,
-                    comm_postprocess=comm_postprocess,
-                )
+                _kind = kind_for_batch_type(scheduler_output.batch_type)
+                recv_future = get_comm_service().submit_recv(
+                    CommRequest(
+                        channel=channel_for(scheduler_output.batch_type, _kind),
+                        op="recv",
+                        kind=_kind,
+                        num_tokens=scheduler_output.total_num_scheduled_tokens,
+                        transport=scheduler_output.hidden_channel,
+                        sp_chunk=do_sp_chunk,
+                        src_dst=_recv_src,
+                        include_mrope=_cloud_include_mrope,
+                    ))
+                intermediate_tensors = recv_future.as_intermediate_tensors()
         if self.profiler is not None:
             self.profiler.step()
 
@@ -1324,14 +1293,20 @@ class NPUWorker(WorkerBase):
         # edge sits at in-group rank 0, so dst=0 is needed.  Otherwise dst=None
         # resolves to the implicit "next PP rank" which IS the edge.
         if get_pp_group().world_size > 1:
-            channel = self._hidden_channel_for(scheduler_output)
             _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                                            num_tokens=scheduler_output.total_num_scheduled_tokens,
-                                            dst=_send_dst),
-                channel=channel,
-            )
+            _kind = kind_for_batch_type(scheduler_output.batch_type)
+            get_comm_service().submit_send(
+                CommRequest(
+                    # The batch arrived on the UP wire; the reply travels on
+                    # the DOWN wire of the same family.
+                    channel=channel_for_direction(_kind, up=False),
+                    op="send",
+                    kind=_kind,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    tensor_dict=_gathered,
+                    transport=scheduler_output.hidden_channel,
+                    src_dst=_send_dst,
+                ))
         return output
 
     def _scheduled_draft_tensor_meta(
@@ -1390,18 +1365,18 @@ class NPUWorker(WorkerBase):
             scheduler_output,
             "e2c",
         )
-        tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv_scheduled_draft(
-                tensor_meta=recv_tensor_meta,
-            )
-        )
-        for handle in comm_handles:
-            handle.wait()
-        for postprocess in comm_postprocess:
-            postprocess()
-        assert tensor_dict is not None
+        recv_future = get_comm_service().submit_recv(
+            CommRequest(
+                channel=CommChannelType.DECODE_UP,
+                op="recv",
+                kind=BatchKind.DECODE_DRAFT,
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                draft_meta=recv_tensor_meta,
+            ))
+        # Lazy consumption: wait_event ordering + TP-broadcast postprocess
+        # run on first .tensors access inside the middle segment.
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
-            scheduler_output, IntermediateTensors(tensor_dict)
+            scheduler_output, recv_future.as_intermediate_tensors()
         )
         if get_pp_group().world_size == 2:
             out_tensor_dict = {
@@ -1410,18 +1385,21 @@ class NPUWorker(WorkerBase):
                 else value
                 for key, value in output.items()
             }
-            # Async send only -- record, do NOT wait.  See method docstring.
+            # Submit only -- the service owns completion; do NOT wait.  See
+            # method docstring.
             send_tensor_meta = self._scheduled_draft_tensor_meta(
                 scheduler_output,
                 "c2e",
             )
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict_scheduled_draft(
-                    out_tensor_dict,
-                    tensor_meta=send_tensor_meta,
-                ),
-                channel=HiddenChannelType.DECODE,
-            )
+            get_comm_service().submit_send(
+                CommRequest(
+                    channel=CommChannelType.DECODE_DOWN,
+                    op="send",
+                    kind=BatchKind.DECODE_DRAFT,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    tensor_dict=out_tensor_dict,
+                    draft_meta=send_tensor_meta,
+                ))
             logger.info(
                 "Send intermediate tensors to edge, "
                 f"hidden_channel: {HiddenChannelType.DECODE.value}"
@@ -1456,13 +1434,15 @@ class NPUWorker(WorkerBase):
                 scheduler_output,
                 "e2c",
             )
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict_scheduled_draft(
-                    tensor_dict,
-                    tensor_meta=send_tensor_meta,
-                ),
-                channel=HiddenChannelType.DECODE,
-            )
+            get_comm_service().submit_send(
+                CommRequest(
+                    channel=CommChannelType.DECODE_UP,
+                    op="send",
+                    kind=BatchKind.DECODE_DRAFT,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    tensor_dict=tensor_dict,
+                    draft_meta=send_tensor_meta,
+                ))
             logger.info(
                 "Send intermediate tensors to cloud, "
                 f"hidden_channel: {HiddenChannelType.DECODE.value}"
@@ -1482,22 +1462,22 @@ class NPUWorker(WorkerBase):
             scheduler_output,
             "c2e",
         )
-        tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv_scheduled_draft(
-                tensor_meta=recv_tensor_meta,
-            )
-        )
-        for handle in comm_handles:
-            handle.wait()
-        for postprocess in comm_postprocess:
-            postprocess()
+        recv_future = get_comm_service().submit_recv(
+            CommRequest(
+                channel=CommChannelType.DECODE_DOWN,
+                op="recv",
+                kind=BatchKind.DECODE_DRAFT,
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                draft_meta=recv_tensor_meta,
+            ))
         logger.info(
             "Receive intermediate tensors from cloud after, "
             f"hidden_channel: {HiddenChannelType.DECODE.value}"
         )
-        assert tensor_dict is not None
+        # Lazy consumption: wait_event ordering + postprocess run on first
+        # .tensors access inside the last segment.
         return self.model_runner._run_edge_cloud_draft_last_segment(
-            scheduler_output, IntermediateTensors(tensor_dict)
+            scheduler_output, recv_future.as_intermediate_tensors()
         )
 
     def _execute_model_legacy(
@@ -1507,6 +1487,10 @@ class NPUWorker(WorkerBase):
         use_alt_group: bool,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Original non-edge-cloud path (standard PP, layer-slicing, etc.)."""
+        # Wait the one outstanding legacy send before this batch's compute
+        # may reuse its source buffer (edge-cloud sends never land here;
+        # they are owned by the comm service).
+        self._wait_pp_send_work()
         # Only receive intermediate tensors on the first slice.
         is_first_slice = (
             layer_slice_info is None or layer_slice_info.is_first_slice
