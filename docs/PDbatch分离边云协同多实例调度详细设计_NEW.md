@@ -286,31 +286,38 @@
   顺序：per-id pipe FIFO；per-id 队列满 = EAGAIN 留队重试（不丢、不阻塞 actor）
 ```
 
-**图 2：多实例（示例：边 D=2，每 dp 一个 ROUTER；云服务器 A 同机共置 2 实例 × D=2 + 云服务器 B 1 实例 × D=2，N=3）**
+**图 2：多实例（示例：边 D=2，每 dp 一个 ROUTER；云服务器 A 同机共置实例0/实例1，云服务器 B 实例2，N=3。同一实例的 D 个 dp 必须一致部署--见下）**
 
 ```
-     边（master_addr 机，D=2；每 dp 进程各一个 ROUTER，端口按 dp 推导）
+     边（master_addr 机，D=2；每 dp 进程各一个 ROUTER，端口按 dp 显式配置）
 ┌──────────────────────────────────────┐
 │ EngineCore(dp0)：ROUTER actor（1 线程）│        云服务器 A（IP_A，同机共置实例0/实例1）
-│   bind tcp://*:PORTS[0]               │   ┌──────────────────────────────────────────────┐
-│   · readiness 表（本 dp 的 N 个 id）   │◄──┼─ IP_A 实例0.dp0   DEALER id="0" ────────────┤
-│   · ack inbox（按 id 记来源）          │◄──┼─ IP_A 实例1.dp0   DEALER id="1" ────────────┤
-│   · out 队列 × N（id = instance）      │─►─┼─ 两者 connect tcp://master_addr:PORTS[0] ────┤
-│   · ack -> dp0 负载统计                │   └──────────────────────────────────────────────┘
-└──────────────────────────────────────┘            ^ 目标 = 边 dp0 的地址（非云本地；云不 bind）
-┌──────────────────────────────────────┐        云服务器 B（IP_B，实例2）
-│ EngineCore(dp1)：ROUTER actor（1 线程）│   ┌──────────────────────────────────────────────┐
-│   bind tcp://*:PORTS[1]               │◄──┼─ IP_B 实例2.dp0   DEALER id="2" ────────────┤
-│   （结构同 dp0，只服务各实例的 dp1）     │   │   connect tcp://master_addr:PORTS[0]          │
-│   · ack -> dp1 负载统计                │   └──────────────────────────────────────────────┘
-└──────────────────────────────────────┘   （IP_A 实例0.dp1/实例1.dp1 与 IP_B 实例2.dp1 同理
-                                              connect PORTS[1]，id 分别 "0"/"1"/"2"）
+│   bind tcp://*:PORTS[0]               │     ┌─────────────────────────────────────────────────┐
+│   · readiness 表（本 dp 的 N 个 id）   │◄────┼─ 实例0.dp0  DEALER id="0" ── connect PORTS[0]   │
+│   · ack inbox（按 id 记来源）          │◄────┼─ 实例1.dp0  DEALER id="1" ── connect PORTS[0]   │
+│   · out 队列 × N（id = instance）      │     │                                                 │
+│   · ack -> dp0 负载统计                │     │  同机同实例的 dp1（同一批实例，见下框）：          │
+└──────────────────────────────────────┘     │   实例0.dp1  DEALER id="0" ── connect PORTS[1]   │
+┌──────────────────────────────────────┐     │   实例1.dp1  DEALER id="1" ── connect PORTS[1]   │
+│ EngineCore(dp1)：ROUTER actor（1 线程）│◄────┼─（本框 4 个 DEALER 同 IP_A，分连两组端口）        │
+│   bind tcp://*:PORTS[1]               │     └─────────────────────────────────────────────────┘
+│   （结构同 dp0，服务【同一批 N 实例】   │        云服务器 B（IP_B，实例2）
+│     的 dp1 侧）                        │     ┌─────────────────────────────────────────────────┐
+│   · ack -> dp1 负载统计                │◄────┼─ 实例2.dp0  DEALER id="2" ── connect PORTS[0]   │
+└──────────────────────────────────────┘◄────┼─ 实例2.dp1  DEALER id="2" ── connect PORTS[1]   │
+                                             └─────────────────────────────────────────────────┘
+
+  **硬约束：两 dp 的实例配置必须一样**。实例 = node_rank 逻辑节点（§2.1），实例 i 的 dp0/dp1 PassiveEC
+        同机拉起、同一 instance_id；PORTS[0] 与 PORTS[1] 两个 ROUTER 背后是【完全同一批 N 个实例】
+        （实例集合、instance_id 排列、部署位置均一致）。id="2" 在 PORTS[0] 上 = 实例2.dp0，
+        在 PORTS[1] 上 = 实例2.dp1（跨端口 (dp,instance) 二元组全局唯一）。
+        校验（拉起期）：两个 ROUTER 的 readiness 表 id 集合必须同为 {0..N-1}，不一致 = 拒绝放行。
+        由拉起配置天然保证：每个实例只传一份 node_rank/instance_id，其 D 个 dp 共用派生。
 
   端口：边共 D 个显示值（PORTS = pre_out_ports 显式列表、不推导；随 D 增长、不随 N）；云不 bind 任何端口
   连接：N×D 条全双工 TCP，云 (i,dpX) connect 到 PORTS[dpX] 的边 dpX ROUTER，与配对边 dp 直连、无中继；
         DEALER 显式 IDENTITY 断线重连保持身份
-  IDENTITY：每个 ROUTER 内 = instance_id（dp 已由端口区分）；同机共置（IP_A 上 4 个 DEALER）分属两组端口、
-        每组 2 个 id，仍无需 instance 端口偏移与 IP 兜底（§2.2.2 / §3.7.1）
+  同机共置（IP_A 上 4 个 DEALER）：同 IP、分连两组端口、每组 2 个 id，无需 instance 端口偏移与 IP 兜底
   跨 dp 汇聚：各 dp ROUTER 收到的 ack/负载统计经既有 inner-DP gloo 组（§3.4 all_reduce 同路）汇入 leader
         的 InstanceDispatcher，不新增通道
   消息：HELLO(id)/ACK(id) 云->边（ROUTER 收向自动带 id 帧，来源解复免费）；
@@ -784,7 +791,7 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 - 每 dp 的 actor：recv 排干（HELLO -> 本 dp readiness 表（N 个 id）/ ack -> 本 dp 负载统计）+ **per-identity out 队列**发送（NOBLOCK/MANDATORY：EAGAIN = 慢实例留队重试；EHOSTUNREACH = 未就绪入队等待 / 已就绪后失联 = v1 故障模型整体挂，fail-fast）
 - **跨 dp 汇聚走既有通道**：dp>1 时各 dp 的 ack/负载统计经现有 inner-DP gloo 组（与 §3.4 实例分发的 all_reduce 同路）汇入 leader 的 `InstanceDispatcher`，**不新增通道、无 IPC 转发 hop**
 - 线程数：现状 2×N×D -> **D（每 dp 1 actor）**；N=16/D=2：64 -> 2；D=4：64 -> 4
-- **配置校验（拉起期 fail-fast）**：列表长度 = D、值唯一、端口可用（被占且非本 dp 显式端口 = 拒绝拉起，防同机串台）；边云列表一致性由人为保证（§2.1 既定口径）；master_port 偏移空间预留等推导类约束对本通道不再适用
+- **配置校验（拉起期 fail-fast）**：列表长度 = D、值唯一、端口可用（被占且非本 dp 显式端口 = 拒绝拉起，防同机串台）；**两 dp 的实例配置必须一样**--实例 = node_rank 逻辑节点，实例 i 的 dp0/dp1 同机拉起、同一 instance_id，D 个 ROUTER 背后是同一批 N 实例（校验：各 dp readiness 表 id 集合必须同为 {0..N-1}，不一致 = 拒绝放行）；边云列表一致性由人为保证（§2.1 既定口径）；master_port 偏移空间预留等推导类约束对本通道不再适用
 - pickle 按 dp 分散（每 actor 各自序列化，无单点）；leader 无收发依赖（只消费汇聚后的负载统计）
 
 **运行时路径（dp=2 示例，全部直连、无中继）**：
