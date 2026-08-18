@@ -55,12 +55,16 @@ from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-# Decoupled data-plane irecv coordination (implemented by the channel
-# layer owners).  Same interface contract as documented in
-# ``vllm_ascend.patch.platform.patch_engine_core``: post_irecv_hint(hint)
-# pre-posts an irecv on the local worker, is_irecv_complete(key) queries
-# the completion flag from this process.
-from vllm_ascend.distributed.edge_cloud_irecv import post_irecv_hint
+# Decoupled data-plane irecv coordination.  The scheduler-process glue
+# (scheduler_link) forwards recv hints to the local worker's comm thread
+# and answers per-channel watermark queries fed by the worker's
+# completion reports.  See the schema in scheduler_link's docstring and
+# vllm_ascend.patch.platform.patch_engine_core.
+from vllm_ascend.distributed.edge_cloud_comm.scheduler_link import (
+    post_irecv_hint,
+    record_irecv_completions,
+    register_hint_sender,
+)
 
 logger = init_logger(__name__)
 
@@ -517,29 +521,31 @@ class PassiveEngineCoreProc:
                 _pd_enabled,
                 "on" if pp_pd_channel is not None else "off",
             )
-            # [CHER] Cloud-side hidden early-receive: a built-in part of
-            # PD-separation masking -- always active on the cloud role when
-            # PD-separation is enabled (no separate flag).  step() fires a
-            # recv-hint to the cloud worker's sideband cloud_recv_hint_mq so
-            # the guard thread posts irecv ahead of execute_model.  Read from
-            # vllm_config (parallel_config + additional_config dict, both
-            # serialized fields) so the gate does not depend on ascend_config
-            # singleton init order or on dynamic scheduler_config attributes.
+            # Arrival-time recv pre-posting: hints travel on the
+            # executor's hint MQ to the cloud worker's comm thread.
+            # Read from vllm_config (parallel_config + additional_config
+            # dict, both serialized fields) so the gate does not depend
+            # on ascend_config singleton init order.
             _pc = vllm_config.parallel_config
             _ac = getattr(vllm_config, "additional_config", None) or {}
             _ec = _ac.get("edge_cloud_config", {}) if isinstance(_ac, dict) else {}
             _pd = _ec.get("pd_separation", {}) if isinstance(_ec, dict) else {}
-            self._cher_enabled = bool(
+            _hint_mq = getattr(self.executor, "cloud_recv_hint_mq", None)
+            if (
                 getattr(_pc, "enable_edge_cloud", False)
                 and not getattr(_pc, "is_edge_node", True)
                 and _pd.get("enabled", False)
-            )
-            # Track which head_tokens we have already sent a hint for, so
-            # layer-slicing's multiple first-slice steps fire it only once.
-            self._cher_hint_sent: set[str] = set()
-        else:
-            self._cher_enabled = False
-            self._cher_hint_sent = set()
+                and _hint_mq is not None
+            ):
+
+                def _send_hint(hint: dict, mq=_hint_mq) -> None:
+                    # Blocking enqueue: with readiness gating active a
+                    # lost hint deadlocks the pipeline (no pre-post ->
+                    # watermark never advances -> the gated batch is
+                    # never dispatched).
+                    mq.enqueue((b"irecv_hint", (hint,), {}, None))
+
+                register_hint_sender(_send_hint)
         self._idle_sleep_seconds = 0.001
 
         self._prev_dispatch_req_ids: set[str] = set()
@@ -618,15 +624,15 @@ class PassiveEngineCoreProc:
 
         For every PREFILL_FIRST / DECODE_FIRST the cloud will receive
         (edge -> cloud):
-          1. this batch's head payload (key = head_token), and
+          1. this batch's head payload (same comm_seqno, UP channel of
+             the pair), and
           2. one DRAFT_FIRST head payload per speculative step of the
-             draft chain that follows the batch
-             (key = "<head_token>:<step_idx>" — the chain's
-             draft_task_id IS the parent batch's head_token).
+             draft chain that follows the batch — the chain's reserved
+             seqno range rides on the SO as ``draft_seqno_base``.
 
-        Posting at arrival (instead of dispatch, as CHER did) maximizes
+        Posting at arrival (instead of at dispatch time) maximizes
         the compute/transfer overlap and lets the passive scheduler gate
-        PF dispatch on irecv completion instead of letting the worker
+        dispatch on irecv completion instead of letting the worker
         block on recv.
         """
         for _seq, so in arrivals:
@@ -636,39 +642,55 @@ class PassiveEngineCoreProc:
                 BatchType.DECODE_FIRST,
             ):
                 continue
-            head_token = getattr(so, "head_token", None)
-            if not head_token:
+            seqno = getattr(so, "comm_seqno", None)
+            if seqno is None:
                 continue
-            task_kind = (
-                "prefill" if bt == BatchType.PREFILL_FIRST else "decode"
-            )
             total_tokens = so.total_num_scheduled_tokens
-            # Head payloads carry mrope when the edge stamped the SO
-            # (mirrors the CHER hint fields).
+            # Head payloads carry mrope when the edge stamped the SO.
             post_irecv_hint({
-                "key": head_token,
-                "task_kind": task_kind,
+                "batch_type": bt,
+                "draft_prefill_phase": False,
+                "seqno": seqno,
                 "num_tokens": total_tokens,
                 "has_mrope": bool(getattr(so, "has_mrope", True)),
                 "draft_step_idx": None,
             })
-            num_spec = self._num_scheduled_spec_tokens()
-            if num_spec <= 0:
+            base = getattr(so, "draft_seqno_base", None)
+            if base is None:
                 continue
+            prefill_phase = bt == BatchType.PREFILL_FIRST
+            num_spec = self._num_scheduled_spec_tokens()
             # Draft step shapes (mirrors the worker's meta derivation):
             # step 0 runs over the parent batch's full token count,
             # later steps over one token per request.
             num_reqs = len(so.num_scheduled_tokens)
             for step_idx in range(num_spec):
                 post_irecv_hint({
-                    "key": f"{head_token}:{step_idx}",
-                    "task_kind": "draft",
+                    "batch_type": BatchType.DRAFT_FIRST,
+                    "draft_prefill_phase": prefill_phase,
+                    "seqno": base + step_idx,
                     "num_tokens": (
                         total_tokens if step_idx == 0 else num_reqs
                     ),
                     "has_mrope": False,
                     "draft_step_idx": step_idx,
                 })
+
+    def _drain_irecv_completions(self) -> None:
+        """Drain worker completion reports into the per-channel
+        watermarks the passive scheduler's readiness gating queries."""
+        done_mq = getattr(self.executor, "irecv_done_mq", None)
+        if done_mq is None:
+            return
+        items = []
+        while True:
+            try:
+                items.append(done_mq.dequeue(timeout=0))
+            except Exception:
+                # TimeoutError (empty queue) or transient failure: stop.
+                break
+        if items:
+            record_irecv_completions(items)
 
     def step(self) -> bool:
         """Single tick: poll ZMQ → pick batches → enqueue worker payloads.
@@ -682,6 +704,8 @@ class PassiveEngineCoreProc:
         """
         _t0 = time.monotonic()
         self._drain_worker_completion_acks()
+        # Drain worker recv-completion reports into the watermarks.
+        self._drain_irecv_completions()
         _dt_drain = (time.monotonic() - _t0) * 1000
 
         _t0 = time.monotonic()
@@ -722,89 +746,6 @@ class PassiveEngineCoreProc:
         #     f"slices_count={len(batch.slices)}, "
         #     f"slice_info={_slice_info_str}",
         # )
-
-        # [CHER] Fire a recv-hint so the cloud worker's guard thread posts
-        # the edge->cloud prefill hidden irecv ahead of this batch's
-        # execute_model.  Only for the first slice of a PREFILL_FIRST batch:
-        # the hidden transfer is initiated by the edge P-head and consumed
-        # by the cloud P-middle's first slice; later slices reuse the same
-        # intermediate tensors and must not re-post.  Sent BEFORE the
-        # pp_scheduler_output enqueue: the sideband MQ is independent of the
-        # (possibly back-pressured) rpc_broadcast_mq, so the hint is never
-        # delayed by pp_scheduler_output's enqueue even when busy_loop is
-        # blocked.  No gating: schedule() ran already and P-middle is being
-        # dispatched regardless; the hint only decides *when* the irecv is
-        # posted, not whether P-middle runs.
-        from vllm_ascend.distributed.edge_cloud_comm import make_recv_hint
-
-        so = batch.scheduler_output
-        if (
-            self._cher_enabled
-            and so.batch_type == BatchType.PREFILL_FIRST
-            and getattr(so, "head_token", None)
-        ):
-            _is_first_slice = (
-                not batch.slices
-                or batch.slices[0] is None
-                or getattr(batch.slices[0], "is_first_slice", True)
-            )
-            _ht = so.head_token
-            if _is_first_slice and _ht not in self._cher_hint_sent:
-                _channel = getattr(so, "hidden_channel", None)
-                # has_mrope is stamped by the edge PDSeparatedScheduler
-                # (it owns the request registry; the passive cloud does
-                # not - scheduled_cached_reqs carries only req_ids, so
-                # cached-req multimodality cannot be derived from the SO
-                # alone here). The stamp mirrors NPUModelRunner.
-                # step_has_multimodal_req exactly, so the guard-thread
-                # irecv expects exactly the mrope_positions the edge sender
-                # puts on the wire (eliminates the mixed-batch mismatch).
-                # Defaults True when unset (non-PD / no stamp) so mrope is
-                # received conservatively.
-                # The hint schema is owned by the comm layer
-                # (edge_cloud_comm.scheduler_api.make_recv_hint) — design
-                # doc 8.3-① scheduler -> comm recv-request injection.
-                _hint = make_recv_hint(
-                    head_token=_ht,
-                    hidden_channel=_channel,
-                    num_tokens=so.total_num_scheduled_tokens,
-                    has_mrope=getattr(so, "has_mrope", True),
-                )
-                _hint_mq = getattr(self.executor, "cloud_recv_hint_mq", None)
-                if _hint_mq is not None:
-                    try:
-                        # Non-blocking (timeout=0): the hint is fire-and-forget.
-                        # If the guard thread hasn't drained the sideband MQ
-                        # (slow / contended on _early_recv_lock), we DROP the
-                        # hint rather than block PassiveEC.step() here -- a
-                        # blocked step can't drain acks, which fills
-                        # response_mq, which blocks the worker's ack enqueue,
-                        # which stops it from dequeuing rpc_broadcast_mq, which
-                        # blocks PassiveEC's dispatch -> circular deadlock.
-                        # When a hint is dropped, busy_loop's get_or_post_early
-                        # _recv posts the irecv itself (synchronous), so only
-                        # the early-post overlap is lost, never correctness.
-                        _hint_mq.enqueue(
-                            (b"pp_recv_hint", (_hint,), {}, None),
-                            timeout=0,
-                        )
-                        self._cher_hint_sent.add(_ht)
-                        logger.debug(
-                            "[CHER] send recv-hint head_token=%s channel=%s",
-                            _ht, _hint["hidden_channel"],
-                        )
-                    except TimeoutError:
-                        logger.warning(
-                            "[CHER] recv-hint dropped (ring full) "
-                            "head_token=%s; busy_loop will post irecv itself",
-                            _ht,
-                        )
-                    except Exception as _e:
-                        logger.warning(
-                            "[CHER] recv-hint dropped (error=%r) "
-                            "head_token=%s; busy_loop will post irecv itself",
-                            _e, _ht,
-                        )
 
         for slice_info in batch.slices:
             _t0 = time.monotonic()

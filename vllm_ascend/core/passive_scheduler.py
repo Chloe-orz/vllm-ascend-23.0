@@ -26,7 +26,10 @@ from vllm import envs
 from vllm.logger import logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 
-from vllm_ascend.distributed.edge_cloud_irecv import is_irecv_complete
+from vllm_ascend.distributed.edge_cloud_comm.scheduler_link import (
+    is_irecv_complete,
+)
+from vllm_ascend.distributed.edge_cloud_comm.types import CommChannelType
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -638,50 +641,54 @@ class PassiveScheduler:
     # ------------------------------------------------------------------ #
     # Pick methods (analogous to edge-side PDSeparatedScheduler)         #
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _seqno_ready(channel: CommChannelType, so: SchedulerOutput) -> bool:
+        """True once the pre-posted irecv for this batch's head payload
+        has completed — i.e. the channel's completion watermark covers
+        the batch's ``comm_seqno`` (stamped by the edge scheduler and
+        carried on the SO).  Batches without a comm_seqno (legacy
+        PURE_* path) carry no sequenced traffic and are always ready."""
+        seqno = getattr(so, "comm_seqno", None)
+        if seqno is None:
+            return True
+        return is_irecv_complete(channel, seqno)
+
     def _prefill_head_data_ready(self) -> bool:
         """True once the head-of-queue prefill's payload has arrived.
 
-        A PREFILL_FIRST is ready only once the pre-posted irecv for its
-        ``head_token`` has completed.  Only the fresh-prefill queue is
-        gated: active slice continuations reuse an already-received
-        payload, and PD-mix batches do not participate in pre-posted
-        irecv.
+        Only the fresh-prefill queue is gated: active slice continuations
+        reuse an already-received payload, and PD-mix batches do not
+        participate in pre-posted irecv.
         """
         if not self.ready_prefills:
             return False
-        token = getattr(self.ready_prefills[0], "head_token", None)
-        if not token:
-            return True
-        return is_irecv_complete(token)
+        return self._seqno_ready(
+            CommChannelType.PREFILL_UP, self.ready_prefills[0]
+        )
 
     def _decode_head_data_ready(self) -> bool:
-        """True once the head-of-queue decode's payload has arrived.
-
-        The irecv for a DECODE_FIRST head payload (keyed by
-        ``head_token``) was pre-posted when the SO arrived.
-        """
+        """True once the head-of-queue decode's payload has arrived."""
         if not self.ready_decodes:
             return False
-        token = getattr(self.ready_decodes[0], "head_token", None)
-        if not token:
-            return True
-        return is_irecv_complete(token)
+        return self._seqno_ready(
+            CommChannelType.DECODE_UP, self.ready_decodes[0]
+        )
 
     def _draft_head_data_ready(self) -> bool:
         """True once the head-of-queue draft's payload has arrived.
 
-        Keyed by ``"<draft_task_id>:<draft_step_idx>"`` — the irecv was
-        pre-posted for every speculative step when the parent PF/DF SO
-        arrived.
+        Prefill-phase chains travel on the dedicated PREFILL_DRAFT pair,
+        decode-phase chains share the DECODE pair with plain decode.
         """
         if not self.ready_drafts:
             return False
         so = self.ready_drafts[0]
-        task_id = getattr(so, "draft_task_id", None)
-        step_idx = getattr(so, "draft_step_idx", None)
-        if not task_id or step_idx is None:
-            return True
-        return is_irecv_complete(f"{task_id}:{step_idx}")
+        channel = (
+            CommChannelType.PREFILL_DRAFT_UP
+            if getattr(so, "draft_prefill_phase", False)
+            else CommChannelType.DECODE_UP
+        )
+        return self._seqno_ready(channel, so)
 
     def _pick_prefill_batch(self) -> ScheduledBatch:
         """Pick a prefill or prefill-like batch from the ready queues.

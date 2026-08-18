@@ -8,11 +8,11 @@
 
    * cross-process (multiproc executor): the scheduler emits a recv-hint
      (plain dict, pickle-friendly) on the sideband MQ; the worker-side
-     guard thread turns it into a ``submit_recv`` call via
-     :func:`recv_request_from_hint`.  This is CHER today
-     (``PassiveEngineCore`` -> ``cloud_recv_hint_mq`` ->
-     ``NPUWorker.start_early_irecv``); the edge-side mirror (EHER) reuses
-     the same schema;
+     comm thread turns it into a ``submit_recv`` call.  The live producer
+     is the arrival-time pre-posting path (``PassiveEngineCore`` / edge
+     ``EngineCore`` patch -> hint MQ -> ``NPUWorker.start_early_irecv``;
+     schema in :mod:`.scheduler_link`); the CHER dispatch-time producer
+     has been retired.
    * same process (uni-proc / in-process executor): the scheduler may call
      ``EdgeCloudCommService.submit_recv`` directly with a request built by
      :func:`recv_request_from_hint` / :func:`build_recv_request`, and hand

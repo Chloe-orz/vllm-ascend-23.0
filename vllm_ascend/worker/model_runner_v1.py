@@ -5246,7 +5246,8 @@ class NPUModelRunner(GPUModelRunner):
             # `intermediate_tensors` to a local-buffer copy that omits
             # mrope_positions (the sync loop skips it). Gate on the tensor's
             # presence so this never KeyErrors regardless of whether the
-            # edge/cloud include_mrope decision (CHER hint vs sync) agreed.
+            # edge/cloud include_mrope decision (early-recv hint vs sync)
+            # agreed.
             recv_intermediate_tensors = intermediate_tensors
             if (self._edge_cloud_enabled
                     and self.edge_cloud_cfg.role == "cloud"

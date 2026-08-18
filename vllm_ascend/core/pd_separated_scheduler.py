@@ -13,14 +13,17 @@ from uuid import uuid4
 from vllm.logger import logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import BatchType, HiddenChannelType, SchedulerOutput
+from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
-from vllm_ascend.distributed.edge_cloud_irecv import is_irecv_complete
+from vllm_ascend.distributed.edge_cloud_comm.scheduler_link import (
+    is_irecv_complete,
+)
+from vllm_ascend.distributed.edge_cloud_comm.types import CommChannelType
 
 
 class PrefillState(enum.Enum):
@@ -50,8 +53,6 @@ class PrefillChunkFlight:
     head_token : str
         Unique token assigned to this chunk's PREFILL_FIRST batch.
         PREFILL_LAST echoes it back so the flight can be located.
-    hidden_channel : HiddenChannelType
-        Prefill data-plane channel allocated for this chunk.
     chunk_index : int
         0-based index of this chunk within the request.
     is_last_chunk : bool
@@ -61,7 +62,6 @@ class PrefillChunkFlight:
     """
     request_id: str
     head_token: str
-    hidden_channel: HiddenChannelType
     chunk_index: int
     is_last_chunk: bool
     num_scheduled_tokens: int
@@ -86,66 +86,11 @@ _PD_FIRST_TO_LAST = {
 _PD_LAST_TO_FIRST = {last: first for first, last in _PD_FIRST_TO_LAST.items()}
 
 
-# DP-scalable hidden-channel allocation.
-_PREFILL_CHANNELS_PER_DP = 2
-_DECODE_CHANNELS_PER_DP = 1
-
 # Default cap on concurrent PF→PL round trips (2P pipelining).  This is a
 # pure scheduler-side counter: with key-tagged pre-posted irecvs the
 # FIFO channel pairs multiple in-flight batches by order, so the limit is
 # no longer derived from the channel pool size.
 _DEFAULT_PREFILL_INFLIGHT_LIMIT = 2
-
-
-class HiddenChannelManager:
-    """Data-plane hidden tensor channel stamps for edge-cloud PD separation.
-
-    Channels are fixed per task type: one prefill channel and one decode
-    channel per DP rank.  Key-tagged pre-posted irecvs keep multiple
-    in-flight batches paired on the same FIFO channel, so there is no
-    per-batch allocation or free-list bookkeeping.  Shared-model DP ranks
-    receive disjoint channel slices; in the per-rank topology each DP has
-    its own physical process-group world and reuses the first slice.
-    """
-
-    def __init__(
-        self,
-        dp_rank: int = 0,
-        is_shared_model_edge: bool = False,
-    ) -> None:
-        if not is_shared_model_edge:
-            dp_rank = 0
-        prefill_start = dp_rank * _PREFILL_CHANNELS_PER_DP + 1
-        self._prefill_channel = HiddenChannelType.prefill(prefill_start)
-        self._decode_channel = HiddenChannelType.decode(dp_rank + 1)
-
-    # ------------------------------------------------------------------ #
-    # Fixed per-type channel stamps                                      #
-    # ------------------------------------------------------------------ #
-    def prefill_channel(self) -> HiddenChannelType:
-        return self._prefill_channel
-
-    def decode_channel(self) -> HiddenChannelType:
-        return self._decode_channel
-
-    # ------------------------------------------------------------------ #
-    # Introspection                                                      #
-    # ------------------------------------------------------------------ #
-    @property
-    def prefill_pool(self) -> frozenset[HiddenChannelType]:
-        return frozenset((self._prefill_channel,))
-
-    @property
-    def decode_pool(self) -> frozenset[HiddenChannelType]:
-        return frozenset((self._decode_channel,))
-
-    @staticmethod
-    def required_prefill_groups(dp_size: int) -> int:
-        return dp_size * _PREFILL_CHANNELS_PER_DP
-
-    @staticmethod
-    def required_decode_groups(dp_size: int) -> int:
-        return dp_size * _DECODE_CHANNELS_PER_DP
 
 
 class PDSeparatedScheduler(Scheduler):
@@ -208,21 +153,22 @@ class PDSeparatedScheduler(Scheduler):
         self.decode_head_inflight_count: int = 0
         self.draft_remote_pending_count: int = 0
 
-        # Phase6 data-plane channel manager — per-dp_rank slice.
-        dp_rank = getattr(self.vllm_config.parallel_config,
-                          "data_parallel_rank", 0)
-        is_shared = getattr(self.vllm_config.parallel_config,
-                            "is_shared_model_edge", False)
-        self.hidden_channel_manager = HiddenChannelManager(
-            dp_rank=dp_rank,
-            is_shared_model_edge=is_shared,
-        )
-        logger.info(
-            "[PD] HiddenChannelManager(dp_rank=%d): prefill_pool=%s decode_pool=%s",
-            dp_rank,
-            self.hidden_channel_manager.prefill_pool,
-            self.hidden_channel_manager.decode_pool,
-        )
+        # Comm-layer sequencing: per-channel-pair counters.  The edge
+        # scheduler is the single ordering authority — it stamps
+        # ``comm_seqno`` at FIRST-batch pick time, FIRST and its matching
+        # LAST share the value, and both peers derive the same per-channel
+        # order from the SO alone.  DF and decode-phase DRF share the
+        # DECODE pair (one counter); prefill-phase DRF uses the dedicated
+        # PREFILL_DRAFT pair.
+        self._prefill_comm_seqno: int = 0
+        self._decode_comm_seqno: int = 0
+        self._prefill_draft_comm_seqno: int = 0
+        # head_token -> first comm seqno of the not-yet-created draft
+        # chain that follows this PF/DF batch.  Reserved at FIRST pick
+        # time so both peers can pre-post all n draft recv requests as
+        # soon as the parent is published; DRF steps consume
+        # base + draft_step_idx at pick time.
+        self._reserved_draft_seqno_base: dict[str, int] = {}
 
         # Buffer queue: requests whose P-first segment is done but P-last
         # segment has not yet returned from the cloud.  Not eligible for
@@ -793,7 +739,7 @@ class PDSeparatedScheduler(Scheduler):
         if has_work or is_tail:
             self._log_scheduler_state(state, scheduler_output.batch_type)
         # Stamp whether this batch carries any multimodal request so the
-        # cloud's CHER early-recv hint (built in PassiveEC.step from this SO)
+        # cloud's early-recv hint (built in PassiveEC.step from this SO)
         # can decide whether to irecv mrope_positions. The passive cloud has
         # NO request registry (mm_features do not cross the edge->cloud SO
         # boundary for cached reqs - scheduled_cached_reqs carries only
@@ -1156,9 +1102,9 @@ class PDSeparatedScheduler(Scheduler):
                 else:
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
                     scheduler_output.head_token = uuid4().hex
-                    scheduler_output.hidden_channel = (
-                        self.hidden_channel_manager.prefill_channel()
-                    )
+                    scheduler_output.comm_seqno = self._prefill_comm_seqno
+                    self._prefill_comm_seqno += 1
+                    self._reserve_draft_seqnos(scheduler_output)
                     self.prefill_inflight_count += 1
                     self._register_pd_flight(scheduler_output)
 
@@ -1197,9 +1143,6 @@ class PDSeparatedScheduler(Scheduler):
                                 flight = PrefillChunkFlight(
                                     request_id=req.request_id,
                                     head_token=scheduler_output.head_token,
-                                    hidden_channel=(
-                                        scheduler_output.hidden_channel
-                                    ),
                                     chunk_index=max(0, req.chunk_num - 1),
                                     is_last_chunk=is_last,
                                     num_scheduled_tokens=num_scheduled,
@@ -1349,13 +1292,19 @@ class PDSeparatedScheduler(Scheduler):
 
         return scheduler_output  # type: ignore[return-value]
 
-    def _prefill_tail_data_ready(self, so: SchedulerOutput) -> bool:
-        """True once the pre-posted irecv for this PL's tail payload
-        (keyed by ``head_token``) has completed."""
-        token = so.head_token
-        if not token:
+    @staticmethod
+    def _seqno_ready(channel: CommChannelType, so: SchedulerOutput) -> bool:
+        """True once the pre-posted irecv for this batch's payload has
+        completed — i.e. the channel's completion watermark covers the
+        batch's ``comm_seqno``.  Batches without a comm_seqno carry no
+        cross-node traffic and are always ready."""
+        seqno = so.comm_seqno
+        if seqno is None:
             return True
-        return is_irecv_complete(token)
+        return is_irecv_complete(channel, seqno)
+
+    def _prefill_tail_data_ready(self, so: SchedulerOutput) -> bool:
+        return self._seqno_ready(CommChannelType.PREFILL_DOWN, so)
 
     def _has_actionable_prefill_tail(self) -> bool:
         """True when a queued PREFILL_LAST can actually be dispatched now."""
@@ -1364,23 +1313,15 @@ class PDSeparatedScheduler(Scheduler):
         )
 
     def _decode_tail_data_ready(self, so: SchedulerOutput) -> bool:
-        """True once the pre-posted irecv for this DL's tail payload
-        (keyed by ``head_token``) has completed."""
-        token = so.head_token
-        if not token:
-            return True
-        return is_irecv_complete(token)
+        return self._seqno_ready(CommChannelType.DECODE_DOWN, so)
 
     def _draft_tail_data_ready(self, so: SchedulerOutput) -> bool:
-        """True once the pre-posted irecv for this DRL's tail payload
-        (keyed by ``"<draft_task_id>:<draft_step_idx>"``) has completed.
-        The irecv was pre-posted for every speculative step when the
-        parent PF/DF batch was published."""
-        task_id = so.draft_task_id
-        step_idx = so.draft_step_idx
-        if not task_id or step_idx is None:
-            return True
-        return is_irecv_complete(f"{task_id}:{step_idx}")
+        channel = (
+            CommChannelType.PREFILL_DRAFT_DOWN
+            if so.draft_prefill_phase
+            else CommChannelType.DECODE_DOWN
+        )
+        return self._seqno_ready(channel, so)
 
     def _has_actionable_decode_tail(self) -> bool:
         """True when a queued DECODE_LAST can actually be dispatched now."""
@@ -1451,45 +1392,11 @@ class PDSeparatedScheduler(Scheduler):
                 req for req in self.chunk_prefill_first
                 if req.request_id not in last_req_ids
             ]
-        self._validate_prefill_tail_channel(so)
         # Every chunk needs a draft-prefill pass.  Only the last chunk's draft
         # tokens are published to the following target verify batch; the
         # worker uses draft_output_req_ids to discard mid-chunk outputs.
         self._pregenerate_draft_chain(so)
         return so
-
-    def _validate_prefill_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
-        if not scheduler_output.head_token:
-            raise RuntimeError("PREFILL_LAST missing head_token")
-        pool = self.hidden_channel_manager.prefill_pool
-        if scheduler_output.hidden_channel not in pool:
-            raise RuntimeError(
-                f"PREFILL_LAST expects a prefill hidden channel from "
-                f"{pool}, got {scheduler_output.hidden_channel}"
-            )
-
-    def _validate_decode_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
-        pool = self.hidden_channel_manager.decode_pool
-        if scheduler_output.hidden_channel not in pool:
-            raise RuntimeError(
-                f"DECODE_LAST expects a decode hidden channel from "
-                f"{pool}, got {scheduler_output.hidden_channel}"
-            )
-
-    def _validate_draft_tail_channel(
-        self, scheduler_output: SchedulerOutput
-    ) -> None:
-        if not scheduler_output.head_token:
-            raise RuntimeError("DRAFT_LAST missing head_token")
-        if not scheduler_output.draft_task_id:
-            raise RuntimeError("DRAFT_LAST missing draft_task_id")
-        if scheduler_output.draft_step_idx is None:
-            raise RuntimeError("DRAFT_LAST missing draft_step_idx")
-        if scheduler_output.hidden_channel != HiddenChannelType.DECODE:
-            raise RuntimeError(
-                "DRAFT_LAST expects decode hidden channel, got "
-                f"{scheduler_output.hidden_channel}"
-            )
 
     def _pick_draft_first_batch(self) -> SchedulerOutput:
         while self.drafts_first_ready:
@@ -1500,6 +1407,9 @@ class PDSeparatedScheduler(Scheduler):
                         scheduler_output.draft_task_id
                     )
                     self._pregenerated_draft_req_ids.pop(
+                        scheduler_output.draft_task_id, None
+                    )
+                    self._reserved_draft_seqno_base.pop(
                         scheduler_output.draft_task_id, None
                     )
                     # Report the cut chain so EngineCore can release the
@@ -1532,7 +1442,26 @@ class PDSeparatedScheduler(Scheduler):
         scheduler_output.batch_type = BatchType.DRAFT_FIRST
         if scheduler_output.head_token is None:
             scheduler_output.head_token = uuid4().hex
-        scheduler_output.hidden_channel = HiddenChannelType.DECODE
+        # The chain's seqno range was reserved at parent PF/DF pick time
+        # (draft_seqno_base on the parent SO); steps consume
+        # base + draft_step_idx so the pre-posted recv requests match.
+        task_id = scheduler_output.draft_task_id
+        step_idx = int(scheduler_output.draft_step_idx or 0)
+        base = (
+            self._reserved_draft_seqno_base.get(task_id)
+            if task_id
+            else None
+        )
+        if base is not None:
+            scheduler_output.comm_seqno = base + step_idx
+            if step_idx >= self.num_spec_tokens - 1:
+                self._reserved_draft_seqno_base.pop(task_id, None)
+        elif scheduler_output.draft_prefill_phase:
+            scheduler_output.comm_seqno = self._prefill_draft_comm_seqno
+            self._prefill_draft_comm_seqno += 1
+        else:
+            scheduler_output.comm_seqno = self._decode_comm_seqno
+            self._decode_comm_seqno += 1
         # Draft-first self-posting mirrors the decode path below. Every
         # field needed by DRAFT_LAST is already known on the edge; the cloud
         # used to echo the same SchedulerOutput back through POST_OUT only
@@ -1557,7 +1486,6 @@ class PDSeparatedScheduler(Scheduler):
             "draft_output_req_ids",
             tuple(scheduler_output.num_scheduled_tokens),
         )
-        self._validate_draft_tail_channel(draft_last)
         self._register_pd_flight(scheduler_output)
         self.drafts_last_ready.append(draft_last)
         self.decode_or_draft_inflight_count += 1
@@ -1577,6 +1505,36 @@ class PDSeparatedScheduler(Scheduler):
             self.draft_remote_pending_count,
         )
         return scheduler_output
+
+    def _reserve_draft_seqnos(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        """Reserve the comm-seqno range for the draft chain that follows
+        this PF/DF batch.
+
+        The chain does not exist yet at FIRST pick time, but the
+        scheduling invariants (no decode-channel consumer may interleave
+        an active/queued draft chain) guarantee its steps will occupy
+        exactly ``[base, base + num_spec_tokens)`` on the phase's channel
+        pair.  Reserving now lets both peers pre-post all n draft recv
+        requests the moment the parent is published, via
+        ``draft_seqno_base`` on the SO.
+        """
+        if not self._check_scheduled_edge_cloud_draft():
+            return
+        if self.num_spec_tokens <= 0:
+            return
+        head_token = scheduler_output.head_token
+        if not head_token:
+            return
+        if scheduler_output.batch_type == BatchType.PREFILL_FIRST:
+            base = self._prefill_draft_comm_seqno
+            self._prefill_draft_comm_seqno += self.num_spec_tokens
+        else:
+            base = self._decode_comm_seqno
+            self._decode_comm_seqno += self.num_spec_tokens
+        self._reserved_draft_seqno_base[head_token] = base
+        scheduler_output.draft_seqno_base = base
 
     def _uses_async_scheduled_mtp_placeholders(self) -> bool:
         """Whether scheduled MTP can use native async placeholder semantics."""
@@ -1627,10 +1585,12 @@ class PDSeparatedScheduler(Scheduler):
                 target_tail,
                 batch_type=BatchType.DRAFT_FIRST,
                 head_token=None,
-                hidden_channel=HiddenChannelType.DECODE,
                 parent_req_id=req_ids[0],
                 draft_task_id=task_id,
                 draft_step_idx=step_idx,
+                draft_prefill_phase=(
+                    target_tail.batch_type == BatchType.PREFILL_LAST
+                ),
                 num_accepted_tokens=None,
                 valid_sampled_token_count=None,
             )
@@ -1733,10 +1693,16 @@ class PDSeparatedScheduler(Scheduler):
             source,
             batch_type=BatchType.DRAFT_FIRST,
             head_token=None,
-            hidden_channel=HiddenChannelType.DECODE,
             parent_req_id=req_ids[0],
             draft_task_id=draft_task_id,
             draft_step_idx=draft_step_idx,
+            # Chain continuations inherit the phase from the previous
+            # DRAFT_LAST; chain starts derive it from the parent tail.
+            draft_prefill_phase=(
+                source.draft_prefill_phase
+                if source.batch_type == BatchType.DRAFT_LAST
+                else source.batch_type == BatchType.PREFILL_LAST
+            ),
             num_accepted_tokens=num_accepted_tokens,
             valid_sampled_token_count=valid_sampled_token_count,
         )
@@ -1780,7 +1746,6 @@ class PDSeparatedScheduler(Scheduler):
                     "drafts_last_ready expects DRAFT_LAST, got "
                     f"{scheduler_output.batch_type}"
                 )
-            self._validate_draft_tail_channel(scheduler_output)
             # A DRAFT_LAST here always has its DRAFT_FIRST already dispatched
             # to the cloud (it was self-posted in _pick_draft_first_batch when
             # the head was picked).  The cloud does not track request
@@ -2033,6 +1998,7 @@ class PDSeparatedScheduler(Scheduler):
                 if task_id is not None:
                     self._pregenerated_draft_task_ids.discard(task_id)
                     self._pregenerated_draft_req_ids.pop(task_id, None)
+                    self._reserved_draft_seqno_base.pop(task_id, None)
                     self._dropped_draft_task_ids_to_report.append(task_id)
                 if output is self._draft_first_cloud_publish_pending:
                     self._draft_first_cloud_publish_pending = None
@@ -2135,7 +2101,6 @@ class PDSeparatedScheduler(Scheduler):
         assert so.batch_type == BatchType.DECODE_LAST, (
             f"decodes_last_ready expects DECODE_LAST, got {so.batch_type}"
         )
-        self._validate_decode_tail_channel(so)
         self._start_decode_or_draft_first_only_window()
         self._force_decode_last = False
         self._pregenerate_draft_chain(so)
@@ -2206,9 +2171,9 @@ class PDSeparatedScheduler(Scheduler):
                 else:
                     scheduler_output.batch_type = BatchType.DECODE_FIRST
                     scheduler_output.head_token = uuid4().hex
-                    scheduler_output.hidden_channel = (
-                        self.hidden_channel_manager.decode_channel()
-                    )
+                    scheduler_output.comm_seqno = self._decode_comm_seqno
+                    self._decode_comm_seqno += 1
+                    self._reserve_draft_seqnos(scheduler_output)
                     self._ensure_cached_all_token_ids(scheduler_output)
                     self.decode_or_draft_inflight_count += 1
                     self.decode_head_inflight_count += 1
