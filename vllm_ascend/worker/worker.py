@@ -107,14 +107,15 @@ from vllm_ascend.utils import (
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-# [early-irecv] Env-var handles of the executor-created sideband MQs.  The
-# names are owned by patch/platform/patch_multiproc_executor.py (which sets
+# [early-irecv] Env-var handles of the executor-created sideband hint MQs.
+# The names are owned by patch/platform/patch_multiproc_executor.py (which sets
 # them before spawning workers); duplicated here as literals because
 # importing the patch module from the worker would apply its class
-# replacements as an import side effect.
+# replacements as an import side effect.  The reverse completion-report MQ
+# needs no env handle: it is created (as writer) by this worker and its
+# handle rides the READY handshake back to the executor.
 _CLOUD_RECV_HINT_MQ_ENV = "VLLM_ASCEND_CLOUD_RECV_HINT_MQ_HANDLE"
 _EDGE_RECV_HINT_MQ_ENV = "VLLM_ASCEND_EDGE_RECV_HINT_MQ_HANDLE"
-_IRECV_DONE_MQ_ENV = "VLLM_ASCEND_IRECV_DONE_MQ_HANDLE"
 
 
 class SchedulerBatchType(Enum):
@@ -280,6 +281,10 @@ class NPUWorker(WorkerBase):
         # _early_recv_comm_active then gates the registry/reporting path.
         self._irecv_hint_mq = None
         self._irecv_done_mq = None
+        # Public alias of _irecv_done_mq: WorkerProc picks it up after
+        # worker construction and exports its handle in the READY
+        # handshake so the engine core can attach the reader.
+        self.irecv_done_mq = None
         self._early_recv_comm_active: bool = False
         # Set at the end of init_device: the comm thread must not
         # submit_recv before the model runner and the edge-cloud tensor
@@ -803,8 +808,8 @@ class NPUWorker(WorkerBase):
     # thread reports every completed recv as (channel, seqno) on
     # irecv_done_mq, feeding the scheduler's per-channel watermarks.
     def _start_edge_cloud_comm_thread(self) -> None:
-        """Rebuild the sideband MQs from their env handles and start the
-        comm thread.
+        """Rebuild the hint MQ from its env handle, create the reverse
+        completion-report MQ (writer side), and start the comm thread.
 
         Arrival-time irecv pre-posting is a built-in part of PD-separation
         masking, so the gate is simply "PD-separated edge/cloud node +
@@ -841,26 +846,31 @@ class NPUWorker(WorkerBase):
             if getattr(pc, "is_edge_node", False)
             else _CLOUD_RECV_HINT_MQ_ENV
         )
-        mqs = {}
-        for env_var in (hint_env, _IRECV_DONE_MQ_ENV):
-            raw = os.environ.get(env_var)
-            if raw is None:
-                # The executor did not create the MQ (PD hint infra off).
-                return
-            try:
-                handle = pickle.loads(base64.b64decode(raw))
-                mqs[env_var] = MessageQueue.create_from_handle(handle, 0)
-            except Exception:
-                logger.exception(
-                    "[early-irecv] failed to rebuild %s on worker rank=%s; "
-                    "early-irecv disabled (consume points submit recv "
-                    "synchronously)",
-                    env_var,
-                    getattr(self, "rank", "?"),
-                )
-                return
-        self._irecv_hint_mq = mqs[hint_env]
-        self._irecv_done_mq = mqs[_IRECV_DONE_MQ_ENV]
+        raw = os.environ.get(hint_env)
+        if raw is None:
+            # The executor did not create the hint MQ (PD hint infra off).
+            return
+        try:
+            handle = pickle.loads(base64.b64decode(raw))
+            self._irecv_hint_mq = MessageQueue.create_from_handle(handle, 0)
+        except Exception:
+            logger.exception(
+                "[early-irecv] failed to rebuild %s on worker rank=%s; "
+                "early-irecv disabled (consume points submit recv "
+                "synchronously)",
+                hint_env,
+                getattr(self, "rank", "?"),
+            )
+            return
+        # Reverse completion-report channel: THIS worker is the writer
+        # (MessageQueue creators are writers; create_from_handle yields a
+        # reader).  The engine core attaches a reader via the READY
+        # handshake (WorkerProc.irecv_done_mq), so no env handle is needed
+        # in this direction.
+        self._irecv_done_mq = MessageQueue(
+            1, 1, max_chunk_bytes=1024, max_chunks=64,
+        )
+        self.irecv_done_mq = self._irecv_done_mq
         self._early_recv_comm_active = True
         self._edge_cloud_comm_thread = threading.Thread(
             target=self._edge_cloud_comm_loop,

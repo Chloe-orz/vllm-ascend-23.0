@@ -24,13 +24,14 @@ from vllm.v1.executor.multiproc_executor import (
     set_multiprocessing_worker_envs,
 )
 # [early-irecv] Environment variables carrying the pickled+base64'd Handle
-# of each sideband MQ, so the worker process (spawned by
+# of each sideband hint MQ, so the worker process (spawned by
 # make_worker_process) can rebuild the MQs without changing
 # make_worker_process/WorkerProc.__init__ signatures.  Fork inherits env
-# directly; spawn gets it via the env copied at process start.
+# directly; spawn gets it via the env copied at process start.  The reverse
+# completion-report MQ (irecv_done_mq) needs no env var: it is created as
+# a writer inside NPUWorker and its handle rides the READY handshake.
 _CLOUD_RECV_HINT_MQ_ENV = "VLLM_ASCEND_CLOUD_RECV_HINT_MQ_HANDLE"
 _EDGE_RECV_HINT_MQ_ENV = "VLLM_ASCEND_EDGE_RECV_HINT_MQ_HANDLE"
-_IRECV_DONE_MQ_ENV = "VLLM_ASCEND_IRECV_DONE_MQ_HANDLE"
 
 
 def _pd_separation_enabled(vllm_config: VllmConfig) -> bool:
@@ -175,21 +176,11 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             )
         else:
             os.environ.pop(_EDGE_RECV_HINT_MQ_ENV, None)
-        # Completion-report MQ (worker comm thread -> engine core), created
-        # on both roles: each side gates its own tail dispatch on its own
-        # recv watermarks.
-        if self.parallel_config.enable_edge_cloud and _pd_on:
-            self.irecv_done_mq = MessageQueue(
-                1, 1, max_chunk_bytes=1024, max_chunks=64,
-            )
-            _export_mq_handle_env(self.irecv_done_mq, _IRECV_DONE_MQ_ENV)
-            logger.info(
-                "[early-irecv] irecv_done_mq created on executor "
-                "(is_edge_node=%s, local_world_size=%d)",
-                self.parallel_config.is_edge_node, self.local_world_size,
-            )
-        else:
-            os.environ.pop(_IRECV_DONE_MQ_ENV, None)
+        # Completion-report MQ (worker comm thread -> engine core): created
+        # as a WRITER inside the PP-first worker (MessageQueue creators are
+        # always writers, create_from_handle always yields a reader), so it
+        # cannot be created here.  The reader is attached from the READY
+        # handshake handle below, once workers are up.
         # Create workers
         context = get_mp_context()
         shared_worker_lock = context.Lock()
@@ -284,6 +275,24 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
+            # [early-irecv] Attach the reverse completion-report MQ reader
+            # (worker comm thread -> engine core).  Only the PP-first
+            # worker (local_rank 0 == workers[0]) creates/reports.  No
+            # wait_until_ready here: same startup-ordering constraint as
+            # the hint MQs above, and the writer only starts reporting
+            # after init_device, long after this point.
+            if (
+                self.parallel_config.enable_edge_cloud
+                and _pd_on
+                and self.workers
+            ):
+                self.irecv_done_mq = self.workers[0].irecv_done_mq
+                if self.irecv_done_mq is not None:
+                    logger.info(
+                        "[early-irecv] irecv_done_mq reader attached on "
+                        "executor (is_edge_node=%s)",
+                        self.parallel_config.is_edge_node,
+                    )
             self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
             self._post_init_executor()
 
@@ -454,8 +463,8 @@ class AscendWorkerProc(WorkerProc):
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
 
 # [early-irecv] Wrap the ORIGINAL WorkerProc._init_message_queues to rebuild
-# the sideband MQs (cloud_recv_hint_mq / edge_recv_hint_mq / irecv_done_mq)
-# on the PP-first worker of either role.  We must wrap the base class
+# the sideband hint MQs (cloud_recv_hint_mq / edge_recv_hint_mq) on the
+# PP-first worker of either role.  We must wrap the base class
 # directly (AscendWorkerProc.__bases__[0]) and capture the original method
 # BEFORE any replacement, because:
 #  - worker_main (spawned) resolves `WorkerProc` to the original base class,
@@ -465,24 +474,26 @@ vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
 #    subclass's own _init_message_queues, causing infinite recursion when the
 #    subclass calls super().
 # AscendWorkerProc._init_message_queues is kept for the executor-side path
-# (it also initializes the attributes); the wrapper early-returns if
-# irecv_done_mq is already set, so there is no double-rebuild / clobber.
+# (it also initializes the attributes); the wrapper early-returns via the
+# _early_irecv_mqs_rebuilt flag, so there is no double-rebuild / clobber.
 _OrigWorkerProc = AscendWorkerProc.__bases__[0]
 _orig_init_message_queues = _OrigWorkerProc._init_message_queues
 
 
 def _edge_cloud_comm_init_message_queues(self, input_shm_handle, vllm_config):
     _orig_init_message_queues(self, input_shm_handle, vllm_config)
-    # Only rebuild if not already done by AscendWorkerProc._init_message_queues.
-    if getattr(self, "irecv_done_mq", None) is not None:
+    # Only rebuild if not already done (guard against double invocation).
+    if getattr(self, "_early_irecv_mqs_rebuilt", False):
         return
+    self._early_irecv_mqs_rebuilt = True
     self.cloud_recv_hint_mq = None
     self.edge_recv_hint_mq = None
-    self.irecv_done_mq = None
     # Only the PP-first worker (local_rank==0, the rank issuing the
-    # cross-node irecv) needs the sideband MQs; other ranks receive hidden
+    # cross-node irecv) needs the hint MQs; other ranks receive hidden
     # via TP-broadcast from rank0.  Both roles rebuild (the edge worker
     # pre-posts tail recvs, the cloud worker pre-posts head recvs).
+    # The reverse irecv_done_mq is NOT rebuilt here: it is created as a
+    # writer inside NPUWorker and its handle rides the READY handshake.
     if not (
         self.local_rank == 0
         and _pd_separation_enabled(vllm_config)
@@ -491,7 +502,6 @@ def _edge_cloud_comm_init_message_queues(self, input_shm_handle, vllm_config):
     for _env_var, _attr in (
         (_CLOUD_RECV_HINT_MQ_ENV, "cloud_recv_hint_mq"),
         (_EDGE_RECV_HINT_MQ_ENV, "edge_recv_hint_mq"),
-        (_IRECV_DONE_MQ_ENV, "irecv_done_mq"),
     ):
         _raw = os.environ.get(_env_var)
         if _raw is None:
