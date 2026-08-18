@@ -1211,6 +1211,11 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Edge head segment (PF/DF): segment_a -> isend -> suspend -> return EMPTY."""
+        logger.info(
+            "[PD-TIMING] edge head enter batch_type=%s ts=%.4f",
+            scheduler_output.batch_type,
+            time.monotonic(),
+        )
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors=None,
             layer_slice_info=layer_slice_info,

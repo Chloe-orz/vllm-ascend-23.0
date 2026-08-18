@@ -845,6 +845,11 @@ def _patched_step(self):
 
     scheduler_output = self.scheduler.schedule()
     self._ensure_pd_head_token(scheduler_output)
+    if scheduler_output.batch_type == BatchType.DECODE_FIRST:
+        logger.info(
+            "[PD-TIMING] DF scheduled ts=%.4f",
+            _time.monotonic(),
+        )
 
     # [ascend insert] Merge worker cleanup stashed from EMPTY batches
     # BEFORE publishing to the cloud, so the published SO also carries
@@ -869,6 +874,11 @@ def _patched_step(self):
         self.log_iteration_details(scheduler_output),
     ):
         model_output = future.result()
+        if scheduler_output.batch_type == BatchType.DECODE_FIRST:
+            logger.info(
+                "[PD-TIMING] DF head result collected ts=%.4f",
+                _time.monotonic(),
+            )
         if model_output is None:
             model_output = self.model_executor.sample_tokens(grammar_output)
 
