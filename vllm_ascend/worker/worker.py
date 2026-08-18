@@ -965,6 +965,11 @@ class NPUWorker(WorkerBase):
                     seqno,
                 )
                 continue
+            logger.info(
+                "[early-irecv] completion reported channel=%s seqno=%d",
+                channel.value,
+                seqno,
+            )
             with self._early_recv_lock:
                 key = (channel, seqno)
                 self._early_recv_reported.add(key)

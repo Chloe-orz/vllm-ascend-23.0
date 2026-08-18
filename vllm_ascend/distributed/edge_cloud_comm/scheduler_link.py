@@ -42,12 +42,18 @@ from __future__ import annotations
 import threading
 from collections.abc import Callable, Iterable
 
+from vllm.logger import logger
+
 from vllm_ascend.distributed.edge_cloud_comm.types import CommChannelType
 
 _hint_sender: Callable[[dict], None] | None = None
 _gating_enabled: bool = True
 _watermarks: dict[CommChannelType, int] = {}
 _lock = threading.Lock()
+# One-shot diagnostic logs: record the first time a gated batch is
+# observed waiting on each (channel, seqno), so a stuck pipeline shows
+# exactly which recv the scheduler is blocked on.
+_logged_waiting: set[tuple[CommChannelType, int]] = set()
 
 
 def register_hint_sender(sender: Callable[[dict], None]) -> None:
@@ -64,12 +70,24 @@ def register_hint_sender(sender: Callable[[dict], None]) -> None:
 
 
 def post_irecv_hint(hint: dict) -> None:
-    """Send one recv hint to the local worker's comm thread."""
+    """Send one recv hint to the local worker's comm thread.
+
+    No sender registered means this node's topology has no hint
+    transport (e.g. shared-model single-NPU edge, where readiness
+    gating is disabled as well), so dropping the hint is safe — log and
+    return rather than raising: the publish path must not crash on
+    topologies that simply don't pre-post.
+    """
     if _hint_sender is None:
-        raise RuntimeError(
-            "post_irecv_hint called before register_hint_sender: the "
-            "engine-core patch must install the hint transport at init."
+        logger.warning(
+            "[scheduler_link] post_irecv_hint with no sender registered; "
+            "hint dropped (batch_type=%s seqno=%s). Hints are a "
+            "correctness dependency wherever readiness gating is active — "
+            "if this node gates tails, this is a wiring bug.",
+            hint.get("batch_type"),
+            hint.get("seqno"),
         )
+        return
     _hint_sender(hint)
 
 
@@ -90,6 +108,12 @@ def record_irecv_completions(
         for channel, seqno in items:
             if seqno > _watermarks.get(channel, -1):
                 _watermarks[channel] = seqno
+                logger.info(
+                    "[scheduler_link] watermark advanced: channel=%s "
+                    "seqno=%d",
+                    channel.value,
+                    seqno,
+                )
 
 
 def is_irecv_complete(channel: CommChannelType, seqno: int) -> bool:
@@ -97,4 +121,14 @@ def is_irecv_complete(channel: CommChannelType, seqno: int) -> bool:
     if not _gating_enabled:
         return True
     with _lock:
-        return seqno <= _watermarks.get(channel, -1)
+        ready = seqno <= _watermarks.get(channel, -1)
+        if not ready and (channel, seqno) not in _logged_waiting:
+            _logged_waiting.add((channel, seqno))
+            logger.info(
+                "[scheduler_link] gated batch waiting on recv: channel=%s "
+                "seqno=%d (watermark=%d)",
+                channel.value,
+                seqno,
+                _watermarks.get(channel, -1),
+            )
+        return ready
