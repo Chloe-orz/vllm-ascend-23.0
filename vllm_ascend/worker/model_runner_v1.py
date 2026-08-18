@@ -7148,6 +7148,51 @@ class NPUModelRunner(GPUModelRunner):
             logits,
             sampling_metadata,
         )
+        # [EC-DEBUG] A launched sampler row must always receive at least the
+        # bonus token; an all-placeholder row means the kernel never wrote
+        # it (num_draft_tokens/cu misalignment) or target_argmax itself was
+        # -1 (garbage logits row).  Dump everything needed to tell which.
+        _st = sampler_output.sampled_token_ids
+        if torch.is_tensor(_st) and _st.dim() == 2:
+            _empty_rows = (
+                (_st == -1).all(dim=1).nonzero().flatten().tolist()
+            )
+            if _empty_rows:
+                _ndt = list(spec_decode_metadata.num_draft_tokens)
+                _cu = spec_decode_metadata.cu_num_draft_tokens.tolist()
+                for _r in _empty_rows:
+                    _req_id = (
+                        self.input_batch.req_ids[_r]
+                        if _r < len(self.input_batch.req_ids)
+                        else "<oob>"
+                    )
+                    _start = 0 if _r == 0 else _cu[_r - 1]
+                    _end = _cu[_r]
+                    logger.error(
+                        "[EC-DEBUG] sampler produced an all-placeholder "
+                        "row: req=%s row=%d num_draft_tokens=%s "
+                        "cu_range=(%d,%d) draft_ids=%s "
+                        "num_draft_tokens_list=%s batch_reqs=%d "
+                        "all_greedy=%s all_random=%s",
+                        _req_id,
+                        _r,
+                        (
+                            _ndt[_r]
+                            if _r < len(_ndt)
+                            else "<missing>"
+                        ),
+                        _start,
+                        _end,
+                        (
+                            spec_decode_metadata.draft_token_ids[
+                                _start:_end
+                            ].tolist()
+                        ),
+                        _ndt,
+                        len(self.input_batch.req_ids),
+                        sampling_metadata.all_greedy,
+                        sampling_metadata.all_random,
+                    )
         return sampler_output
 
     # TODO: remove this func after eagle_proposer is refactored and
