@@ -837,6 +837,94 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 - **dp=1**：前端无 internal LB（ApiServer 即 N=8 个），无云双机 coord / IP broker / per-dp 端口扩展；`pre_out_ports` 单值
 - 同机共置处理项照 §2.6：#2 同机端口/store 偏移校验、#5 错峰拉起、#6 instance 标签强制；本场景每服务器 K=4，per-server 聚合带宽与 host 资源 ×4（§2.6 #3）
 
+#### 场景二：deepseek-v4-flash-w8a8，head_tail 首3尾1，边 2 卡，云 2 台 16 卡服务器 × 2 实例（N=4，dp=1，C=8）
+
+**基本量**：E=2（边 2 卡边内 TP=2，跑首 3 层 + 尾 1 层，**有边侧 KV**）、N=4、D=1、C=8（云实例单机 tp8）；world = 2+4·1·8 = **34**；G2 共 4 个（各 = {边 rank0,1} ∪ 实例 i 云 8 rank，size 2+8）；边云算力比 2:32 = 1:16。
+
+**拉起配置**（§2.1 口径）：
+
+| 侧 | 配置 |
+|----|------|
+| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首3尾1）；前端 `--api-server-count 4` + 4 个监听端口显式列表（§3.12）；`pre_out_ports = [P0]`（D=1 单值，§3.7.1） |
+| 云服务器A 实例0 | `--nnodes 2 --node-rank 1 --instance-parallel-size 4 --instance-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
+| 云服务器A 实例1 | 同上，`--instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=8-15` |
+| 云服务器B 实例2 | 同上，`--instance-parallel-start-rank 2` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
+| 云服务器B 实例3 | 同上，`--instance-parallel-start-rank 3` + `ASCEND_RT_VISIBLE_DEVICES=8-15` |
+
+边云共用同一 `--edge-npu-count 2 --cloud-npu-count 32` 与 `--instance-parallel-size 4`；云两台服务器全部 node_rank 1；同机 2 实例（K=2）独立拉起、卡静态切片、错峰启动（§2.6 #5、§3.10 #6）。
+
+**编队 / rank 清单**（§4.1 公式：云实例 i 首 rank = E+i·D·C = 2+8i）：
+
+| 实例 i | start-rank | 服务器 | 卡切片 | 云 rank | DEALER IDENTITY | G2_i | 2P1D |
+|--------|-----------|--------|--------|---------|-----------------|------|------|
+| 0 | 0 | A | 0-7 | 2-9 | "0" | {0,1, 2..9} | 2P+1D |
+| 1 | 1 | A | 8-15 | 10-17 | "1" | {0,1, 10..17} | 2P+1D |
+| 2 | 2 | B | 0-7 | 18-25 | "2" | {0,1, 18..25} | 2P+1D |
+| 3 | 3 | B | 8-15 | 26-33 | "3" | {0,1, 26..33} | 2P+1D |
+
+边 rank0/1（2 卡 TP2）**同时进全部 4 个 G2**，跨实例时分复用；云实例内 8 卡 tp8 单机无跨机依赖。
+
+**边云通信全图**：
+
+```
+                上游 API 网关（请求级分发：选端点 = 选实例，§3.12）
+                  │ HTTP ×4（端点 i ↔ 实例 i）
+                  ▼
+┌────────────────────────────────────────────────────────────────┐
+│ 边侧服务器（node_rank 0，2 卡，master_addr，head_tail 首3尾1）      │
+│                                                                │
+│  ApiServer_0..3 ×4（各独立 ip:port）                            │
+│    │ ZMQ input/output（client_index = i = instance_id pin）     │
+│    ▼                                                           │
+│  EngineCore(dp0) ×1（scheduler 组 ×4 per-instance）             │
+│    ├─ PRE_OUT ROUTER actor：bind tcp://*:P0（单端口，D=1）       │
+│    │    readiness 表 {0..3}：4 个 HELLO 齐才放行（G0 barrier）    │
+│    ├─ PD TCPStore（master_port，边 rank0 host）                 │
+│    │    G0 world=34 rendezvous + G2 子组 prefix key ×4          │
+│    ├─ rpc_broadcast_mq / response_mq（启动期 method 链）          │
+│    └─ 边卡0/1 [rank0,1]（边内 TP=2）：hidden channel 池           │
+│         = 4 × (2 prefill + 1 decode)，HCCL isend/irecv           │
+│           按实例定向；边侧 KV 分区准入 142728/4（§6.1）            │
+└──────┬──────────────────────────────────┬───────────────────────┘
+       │ ZMQ 控制面（4 条 DEALER->ROUTER）  │ HCCL 数据面（4 个 G2，
+       │ [id|HELLO/SO/ACK]，IDENTITY =     │ 各 {0,1}∪实例 i 云 8 rank；
+       │ start-rank，MANDATORY/EAGAIN 慢实例  │ prefill：云->边 hidden；
+       │ 留队重试不串台（§2.2.3）           │ decode：边->云 head_token
+┌──────┴───────────────────┐  ┌──────────┴────────────────────────┐
+│ 云服务器A（node_rank 1）    │  │ 云服务器B（node_rank 1）           │
+│ 实例0 卡0-7 rank2-9       │  │ 实例2 卡0-7 rank18-25            │
+│   tp8，PassiveEC+DEALER   │  │   tp8，PassiveEC+DEALER          │
+│   id="0"                  │  │   id="2"                          │
+│ 实例1 卡8-15 rank10-17    │  │ 实例3 卡8-15 rank26-33            │
+│   tp8，PassiveEC+DEALER   │  │   tp8，PassiveEC+DEALER          │
+│   id="1"                  │  │   id="3"                          │
+│ （2 实例独立拉起、卡切片、   │  │ （同左，K=2）                      │
+│   错峰启动；云不 bind 端口） │  │                                 │
+└──────────────────────────┘  └─────────────────────────────────┘
+```
+
+**通道明细**：与场景一同构（§2.2.1 六类通道、形态 b 定案），差异项：
+
+| 通道 | 本场景形态 | 量 / 端口 |
+|------|-----------|----------|
+| HTTP（网关->端点） | 4 端点，请求级分发 | 4 × ip:port |
+| ZMQ input/output | 边内本地，client_index = instance_id | ×4 |
+| PRE_OUT（ROUTER/DEALER） | 边 bind `tcp://*:P0`；4 个 PassiveEC DEALER connect，IDENTITY = start-rank；同服务器 2 条同 IP 同端口、仅 IDENTITY 区分 | 1 端口、4 连接 |
+| PD TCPStore | 边 rank0 host；G0 world=34 一次 rendezvous + 启动 barrier | 1 store |
+| rpc_broadcast_mq / response | 边 leader 广播、云 32 worker 按 rank 回收 | 随机端口 |
+| HCCL hidden channel | 4 个 G2 子组（各 2+8 rank）各自 isend/irecv；每实例 2P1D；边 2 卡整体（TP2）进每个 G2 跨实例时分复用 | 4 组、12 channel |
+| gloo coord / IP-exchange | **无**（D=1） | - |
+| cloud_ip store | **无**（形态 b 已删） | - |
+
+**head_tail / DS 特有注记**：
+
+- **有边侧 KV，分区准入**（§6.1）：边 num_blocks 142728，per-instance 分区 = 142728/4 = 35682 > 云侧 8127 -> **min 汇聚恒取云侧 8127，cloud-bound 余量 4.39×**（R = 17.56，N=4 远低于翻转点，§6.3 DS 行），本场景无容量临界问题
+- **边侧算力口径**：边 2 卡跑全部 4 实例的首 3 层 + 尾 1 层（TP2），跨 4 个 G2 时分复用；inflight = 2N = 8 个 prefill 在飞（§6.4，D=1），边侧首/尾吞吐 ≥ 4 流喂入速率是重叠收益兑现前提（§1.2/§1.3）
+- **算力比 2:32**：与 §1.4 head_tail 目标口径（2:32@4 服务器满配）一致，本场景即满配
+- **同机共置 K=2**（每服务器 2 实例 × 8 卡）：§2.6 #2 端口/store 偏移校验、#3 per-server 聚合带宽 ×2、#5 错峰、#6 instance 标签；DS 单实例 8 卡 tp8 权重加载 host RAM 压力 = 同机 ×2，启动竞争比 K=4 场景温和
+- **dp=1**：无 internal LB、无云双机 coord / IP broker；`pre_out_ports` 单值
+- DS 的 §6.3 原口径「每服务器 1 实例」是 8 卡服务器部署；本场景 16 卡服务器同机 2 实例，其余结论（R=17.56、容量安全）不变
+
 ---
 
 ## 3 控制面方案
