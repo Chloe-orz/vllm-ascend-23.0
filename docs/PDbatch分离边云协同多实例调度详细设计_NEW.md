@@ -2079,7 +2079,7 @@ force 机制出 SO（本地候选不一致时强制对齐/出 dummy，现有 2DP
 - **K6** MTP 链推进自由度（chain-aware vs 纯 ready 序）
 - 附加：running 容量配额（均分 vs 全局共享）、dp1 摘要载体
 
-**旋钮定值（2026-08 定案收口，全局调度路线确认时一并落定）**：K1 = 水位状态机全局泛化（全局 IDLE/HIGH，防饿语义保留 + 首段年龄阈值兜底）；K2 = **类型主序全局保留，DRL 全局最高**（DRL > DRF > DL > DF > PL，层内才比实例）；K3 = original_seq 全局 FIFO（首段实例选择 = 请求到达时间）；K4 = ready 时间（尾实例选择，D-dp AND 取较晚 dp）；K5 = per-instance 保留（10ms 各自计时）；K6 = per-instance 不变量保留 + 链龄监控兜底（tail-wait age 进 InstanceLoadStats）。即 §5.1.1 就是本框架在这些定值下的实例化，方案 1（决策分布 + 薄仲裁）路线未采用。
+**旋钮定值（2026-08 定案收口，全局调度路线确认时一并落定）**：K1 = 水位状态机全局泛化（全局 IDLE/HIGH，防饿语义保留 + 首段年龄阈值兜底）；K2 = **类型主序全局保留，DRL 全局最高**（DRL > DRF > DL > DF > PL，层内才比实例）；K3 = original_seq 全局 FIFO（首段实例选择 = 请求到达时间）；K4 = ready 时间（尾实例选择，D-dp AND 取较晚 dp）；K5 = 现状基线 per-instance 保留（§5.2 落地后随 fence 就绪门控归零，见 §7.4 delay 窗行）；K6 = per-instance 不变量保留 + 链龄监控兜底（tail-wait age 进 InstanceLoadStats）。即 §5.1.1 就是本框架在这些定值下的实例化，方案 1（决策分布 + 薄仲裁）路线未采用。
 
 ### 5.2 调度层计算/通信分离（核心改造）
 
@@ -2643,7 +2643,7 @@ leader 维护全部 N 个实例的下列状态（per-instance scheduler 只出�
 | waiting FIFO | N 份序合并，合并键 = original_seq |
 | 水位状态机（inflight vs limit） | 全局水位：全局 IDLE / HIGH 定义见 §7.3；首段年龄阈值兜底（见 §7.6） |
 | running 准入门（max_num_running_reqs） | per-instance 原样保留，作为全局决策的**过滤器** |
-| DL/DRL delay 窗（10ms） | per-instance 各自计时，窗内视为未 ready |
+| DL/DRL delay 窗（DL 30ms / DRL 10ms） | **现状基线保留、§5.2 落地后归零**：窗是自投递优化（D首/DR首 pick 时预生成尾 SO 入 ready deque、云跳过 POST_OUT）下数据到达的唯一时间代理，删早了尾早调度 -> round barrier 空等云 RTT、时分复用被破坏；§5.2 的 COMM_RECV fence（event.query()）就绪判定落地后，时间窗职责被数据驱动门控整块取代，保留反而成为每 DL/DRL 的固定延迟下限（DRL 在 MTP 链上链式放大），默认归零、配置位留作 fence 异常兜底。已是配置项 + 热加载（layer_slice_config.yaml），迁移无需改码 |
 | decode/draft 单飞门 | per-instance 原样保留（计数不跨实例合并） |
 | chunked prefill 状态机 | per-instance 原样保留；续 chunk 必须 pin 原实例 |
 
