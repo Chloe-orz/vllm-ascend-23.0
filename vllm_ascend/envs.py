@@ -150,9 +150,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # purely for measuring per-channel HCCL device-memory cost.  The dummy
     # channels are never used for data transfer; each one only gets a
     # device/cpu process-group pair (same ranks & pg_options scheme as the
-    # real hidden channels) plus one tiny allreduce warmup so the HCCL
-    # communicator resources are actually allocated instead of lazily
-    # created on first use.  Default 0 (disabled).
+    # real hidden channels) plus one tiny P2P isend/irecv warmup so the
+    # HCCL communicator resources are actually allocated instead of lazily
+    # created on first use (the edge-cloud link only supports P2P, not
+    # collectives).  Default 0 (disabled).
     "VLLM_ASCEND_EDGE_CLOUD_DUMMY_CHANNELS": lambda: int(
         os.getenv("VLLM_ASCEND_EDGE_CLOUD_DUMMY_CHANNELS", "0")
     ),

@@ -439,13 +439,20 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         torch.distributed.new_group creates the process-group bookkeeping
         only; the HCCL communicator (streams, buffers, links) is allocated
-        lazily on first collective.  To make the memory measurement
-        meaningful, run one tiny allreduce per dummy channel and log the
-        NPU memory delta.  All ranks iterate the groups in the same order,
-        and every rank of a group joins the allreduce, so this cannot
-        deadlock.
+        lazily on first communication.  To make the memory measurement
+        meaningful, exchange a tiny tensor on every dummy channel and log
+        the NPU memory delta.
+
+        The edge-cloud interconnect (edge host-RDMA NIC <-> cloud NPU NIC)
+        only supports P2P send/recv -- collectives such as all_reduce are
+        NOT supported on it.  So each dummy channel is warmed with an
+        isend/irecv ring over the group members: group-rank r exchanges a
+        tensor with (r+1) % world_size, exactly like the first-use
+        rendezvous of a real hidden channel.  Every rank posts both ops
+        before waiting, and all ranks iterate the groups in the same
+        order, so the ring cannot deadlock.
         """
-        if not self._dummy_device_groups:
+        if not self._dummy_device_groups or self.world_size <= 1:
             return
 
         def _npu_mem_free_mb() -> float | None:
@@ -456,13 +463,23 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 return None
 
         free_before = _npu_mem_free_mb()
+        dst = (self.rank_in_group + 1) % self.world_size
+        src = (self.rank_in_group - 1) % self.world_size
         for i, device_group in enumerate(self._dummy_device_groups, start=1):
-            if self.world_size <= 1:
-                break
-            warmup_tensor = torch.zeros(
+            send_tensor = torch.zeros(
                 8, dtype=torch.bfloat16, device="npu"
             )
-            torch.distributed.all_reduce(warmup_tensor, group=device_group)
+            recv_tensor = torch.zeros(
+                8, dtype=torch.bfloat16, device="npu"
+            )
+            send_handle = torch.distributed.isend(
+                send_tensor, dst=dst, group=device_group
+            )
+            recv_handle = torch.distributed.irecv(
+                recv_tensor, src=src, group=device_group
+            )
+            send_handle.wait()
+            recv_handle.wait()
             free_now = _npu_mem_free_mb()
             if free_before is not None and free_now is not None:
                 logger.error(
