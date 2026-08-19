@@ -753,7 +753,7 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 
 | 侧 | 配置 |
 |----|------|
-| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 8 --edge-npu-count 1 --cloud-npu-count 16`，边模式 `embedding_only`；前端 `--api-server-count 8` + 8 个监听端口显式列表（形态 A，§3.12/§3.12.2）；`pre_out_ports = [P0]`（D=1 仅 1 个显示值，§3.7.1） |
+| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 8 --edge-npu-count 1 --cloud-npu-count 16`，边模式 `embedding_only`；前端 `--api-server-count 8` + 键值式端口列表 `instance<i>=ip:port`×8（形态 A，§3.12.2）；`pre_out_ports = [P0]`（D=1 仅 1 个显示值，§3.7.1） |
 | 云服务器A 实例0 | `--nnodes 2 --node-rank 1 --instance-parallel-size 8 --instance-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0,1` |
 | 云服务器A 实例1 | 同上，`--instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=2,3` |
 | 云服务器A 实例2 | 同上，`--instance-parallel-start-rank 2` + `ASCEND_RT_VISIBLE_DEVICES=4,5` |
@@ -845,7 +845,7 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 
 | 侧 | 配置 |
 |----|------|
-| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首3尾1）；前端 `--api-server-count 4` + 4 个监听端口显式列表（形态 A，§3.12/§3.12.2）；`pre_out_ports = [P0]`（D=1 单值，§3.7.1） |
+| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首3尾1）；前端 `--api-server-count 4` + 键值式端口列表 `instance<i>=ip:port`×4（形态 A，§3.12.2）；`pre_out_ports = [P0]`（D=1 单值，§3.7.1） |
 | 云服务器A 实例0 | `--nnodes 2 --node-rank 1 --instance-parallel-size 4 --instance-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
 | 云服务器A 实例1 | 同上，`--instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=8-15` |
 | 云服务器B 实例2 | 同上，`--instance-parallel-start-rank 2` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
@@ -933,7 +933,7 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 
 | 侧 | 配置 |
 |----|------|
-| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 1 --cloud-npu-count 32`，边模式 `embedding_only`；前端 `--api-server-count 2` + 2 个监听端口显式列表（形态 A，§3.12/§3.12.2）；`pre_out_ports = [P0, P1]`（D=2 两个显示值，§3.7.1） |
+| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 1 --cloud-npu-count 32`，边模式 `embedding_only`；前端 `--api-server-count 2` + 键值式端口列表 `instance<i>=ip:port`×2（形态 A，§3.12.2）；`pre_out_ports = [P0, P1]`（D=2 两个显示值，§3.7.1） |
 | 云服务器1（实例0 dp0） | `--nnodes 2 --node-rank 1 --instance-parallel-size 2 --instance-parallel-start-rank 0 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-start-rank 0`（整机 8 卡，无切片） |
 | 云服务器2（实例0 dp1） | 同上，`--data-parallel-start-rank 1` |
 | 云服务器3（实例1 dp0） | `--instance-parallel-start-rank 1 --data-parallel-start-rank 0`，其余同服务器1 |
@@ -1025,7 +1025,7 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 
 | 侧 | 配置 |
 |----|------|
-| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首1尾1）；前端 `--api-server-count 2` + 2 个监听端口显式列表（形态 A，§3.12/§3.12.2）；`pre_out_ports = [P0..P3]`（D=4 四个显示值，§3.7.1） |
+| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首1尾1）；前端 `--api-server-count 2` + 键值式端口列表 `instance<i>=ip:port`×2（形态 A，§3.12.2）；`pre_out_ports = [P0..P3]`（D=4 四个显示值，§3.7.1） |
 | 云服务器A 实例0（dp0/dp1） | `--nnodes 2 --node-rank 1 --instance-parallel-size 2 --instance-parallel-start-rank 0 --data-parallel-size 4 --data-parallel-size-local 2 --data-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
 | 云服务器A 实例1（dp0/dp1） | 同上，`--instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=8-15` |
 | 云服务器B 实例0（dp2/dp3） | `--instance-parallel-start-rank 0 --data-parallel-start-rank 2`，其余同服务器A 实例0 |
@@ -1599,10 +1599,10 @@ vllm serve /models/<model> \
   --nnodes 2 --node-rank 0 \
   <边云角色/模型常规配置，同现网单实例写法> \
   --api-server-count 4 \
-  --api-server-endpoints 10.0.0.1:9001,10.0.0.2:9002,10.0.0.3:9003,10.0.0.4:9004
+  --api-server-endpoints instance0=10.0.0.1:9001,instance2=10.0.0.3:9003,instance1=10.0.0.2:9002,instance3=10.0.0.4:9004  # 键值式，书写顺序无关
 ```
 
-- `--api-server-endpoints`：**新参数**（存量 `--host/--port` 单值，无法表达 N 个 ip:port）；实例号 i = 列表下标（隐式）。
+- `--api-server-endpoints`：**新参数**（存量 `--host/--port` 单值，无法表达 N 个 ip:port），**键值式 `instance<i>=ip:port`、N 个端点地址的唯一来源（含实例 0，无特例）**：实例 i 的端点 = 键 `instance<i>` 的值，**与书写顺序无关**（不靠下标隐式约定人为保证顺序，与 §2.1「显式配置优于隐式推导」同精神，也与形态 B 的 `--instance-parallel-start-rank i` 显式给号对称）。校验（启动 fail-fast）：①键集合恰好 = `{instance0..instance<N-1>}`（缺号/重号/越界拒绝）；②ip:port 全体唯一且可用（占用即拒，防同机串台）。`--host/--port` 与 endpoints **互斥**：形态 A 下不出现，同时给出且指向不一致即拒绝拉起（防实例 0 地址双写漂移）；形态 B 下反过来（每命令必带 `--host/--port`，endpoints 不出现）。
 - `<常规配置>` 指模型路径、TP/DP、KV cache、边云角色标识等现网 1:1 部署本来就要写的参数，与形态 B 完全相同，非差异项。
 
 **形态 B：多命令（1 主 + N-1 attach，运维与云侧对称）**--主命令起 EngineCore + 实例 0 前端；其余 N-1 条各起 1 个 ApiServer，attach 到主命令的 coordinator：
@@ -1613,13 +1613,13 @@ vllm serve /models/<model> \
   --instance-parallel-size 4 --instance-parallel-start-rank 0 \
   --nnodes 2 --node-rank 0 \
   <边云角色/模型常规配置> \
-  --api-server-count 4 --host 10.0.0.1 --port 9001
+  --api-server-count 4 --api-server-rpc-port 29550   --host 10.0.0.1 --port 9001
 
 # 命令 2..4（attach 前端：各起 1 个 ApiServer，i = 1,2,3）
 vllm serve /models/<model> \
   --instance-parallel-size 4 --instance-parallel-start-rank 1 \
   <边云角色/模型常规配置，须与命令 1 逐字一致> \
-  --api-server-count 4 --api-server-attach 10.0.0.1:<rpc_port> \
+  --api-server-count 4 --api-server-attach 10.0.0.1:29550   # = 主命令声明的 --api-server-rpc-port \
   --host 10.0.0.2 --port 9002
 ```
 
@@ -1633,7 +1633,7 @@ vllm serve /models/<model> \
 |---|---|---|
 | 1 | 前端注册/发现 | coordinator 分发 engine ZMQ 地址 + client_index 申领（显式 `--instance-parallel-start-rank i` 即前端序，对齐云侧风格；或原子递增分配） |
 | 2 | client_count 改注册制 | 从构造定值改为「数到 N 才放行」（见上） |
-| 3 | attach 入口 | `--api-server-attach <ip:rpc_port>`：跳过 engine/rendezvous，只起 ApiServer + 注册；每命令自带 `--host/--port`（存量单值参数即可，**不需要 endpoints 列表**） |
+| 3 | attach 入口（新参数对） | 主命令 `--api-server-rpc-port <port>`（形态 B **显式必填**，coordinator/handshake 监听口）+ attach 命令 `--api-server-attach <ip:port>`（指向主命令声明值；带上即 attach 模式，跳过 engine/rendezvous，只起 ApiServer + 注册）；每命令自带 `--host/--port`（存量单值参数即可，**不需要 endpoints 列表**）。**不复用 `-dpa/-dpp`**：二者语义归属 dp 轴（DP 集群编队），dp=1 部署下拿来配前端 attach 产生歧义、违反 §2.1 三轴正交；底层复用同一套 DPCoordinator TCPStore handshake 机制（run_headless 同款，serve.py:223-224），但**独立 store/端口命名空间**，与 dp LB 的 rpc 口两不相干（dp>1 亦然）。同机 K>1 多主命令时该端口须互异且避开 G0 store（29500）/supervisor（9256）/coord gloo（master_port+201+i），与 §2.2 pre_out_ports 同款显式配置 + 占用 fail-fast |
 | 4 | 顺序约束 | 主命令必须先行（起 store/coordinator）；attach 命令可乱序、可间隔执行；公共配置逐字一致需校验（不一致 fail-fast） |
 
 **配置面对比**：
@@ -1642,7 +1642,7 @@ vllm serve /models/<model> \
 |---|---|---|
 | 命令数（边侧） | 1 | N |
 | 实例号来源 | endpoints 列表下标（隐式） | `--instance-parallel-start-rank i`（显式，与云侧同款参数） |
-| ip:port 表达 | `--api-server-endpoints` 列表（**新参数**） | 每条命令自带 `--host/--port`（**存量参数**；新参数仅 `--api-server-attach`） |
+| ip:port 表达 | `--api-server-endpoints` 键值列表 `instance<i>=ip:port`（**新参数**，唯一来源、含实例 0、顺序无关；`--host/--port` 互斥不出现） | 每条命令自带 `--host/--port`（**存量参数**；另加 `--api-server-rpc-port`/`--api-server-attach`） |
 | 模型/部署参数 | 1 份，天然无漂移 | N 份，除 host/port/start-rank/attach 外须逐字一致（启动校验兜底） |
 | 命令顺序约束 | 无 | 主命令先行；attach 可乱序 |
 | 到齐 barrier | launcher 进程内 spawn 完即齐 | coordinator 前端注册计数（跨进程） |
