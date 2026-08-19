@@ -2326,7 +2326,7 @@ class NPUModelRunner(GPUModelRunner):
                 correction.num_accepted_tokens
             )
             self._cloud_pending_request_corrections.pop(req_id, None)
-            logger.info(
+            logger.debug(
                 "[EC-MTP-CORR] consumed: req=%s task=%s generation=%d "
                 "num_draft=%d actual=%d accepted=%d",
                 req_id,
@@ -6877,7 +6877,7 @@ class NPUModelRunner(GPUModelRunner):
                     actual,
                 )
                 recorded += 1
-                logger.info(
+                logger.debug(
                     "[EC-MTP-CORR] recorded: task=%s req=%s "
                     "generation=%d num_draft=%d valid=%d accepted=%d "
                     "optimistic=%d actual=%d",
@@ -6941,7 +6941,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_accepted_values,
                 valid_sampled_values,
             )
-            logger.info(
+            logger.debug(
                 "[EC-MTP-CORR] record attempt complete: task=%s step=%d "
                 "num_spec=%d recorded=%d",
                 scheduler_output.draft_task_id,
