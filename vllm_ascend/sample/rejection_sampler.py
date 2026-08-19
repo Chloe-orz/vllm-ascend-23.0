@@ -815,7 +815,28 @@ def rejection_sample(
                     ori_target_probs=ori_target_probs,
                 )
 
-    return output_token_ids[:batch_size]
+    output_token_ids = output_token_ids[:batch_size]
+
+    # [EC-DEBUG] An all-placeholder output does not tell us whether the
+    # random rejection kernel skipped the row or wrote an invalid recovered
+    # token. Log only the recovered tokens corresponding to abnormal rows so
+    # the two cases can be distinguished without changing sampling results.
+    all_placeholder_rows = torch.nonzero(
+        (output_token_ids == PLACEHOLDER_TOKEN_ID).all(dim=1)
+    ).flatten()
+    if all_placeholder_rows.numel() > 0:
+        for row in all_placeholder_rows.tolist():
+            start = sum(num_draft_tokens[:row])
+            end = start + num_draft_tokens[row]
+            logger.error(
+                "[EC-DEBUG] all-placeholder sampler row recovered tokens: "
+                "row=%d recovered_token_ids=%s",
+                row,
+                recovered_token_ids[start:end].tolist(),
+            )
+
+    return output_token_ids
+
 
 def expand_batch_to_tokens(
     x: torch.Tensor,  # [batch_size]
