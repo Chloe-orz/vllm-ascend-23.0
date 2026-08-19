@@ -2040,6 +2040,25 @@ class PDSeparatedScheduler(Scheduler):
             # on the next schedule turn after that request moves to running.
             return
         if (
+            self._force_decode_last
+            or self.decode_or_draft_inflight_count > 0
+            or self.decode_head_inflight_count > 0
+        ):
+            # A real DECODE_FIRST is still in flight: picked earlier (the
+            # draft-lane split lets a real DF go out while a prefill-phase
+            # chain is active), but its DL has not been picked or its
+            # update_from_output has not landed yet.  Creating the
+            # placeholder now would claim the decode counters a second time
+            # and its immediate pop would dispatch a second verify behind
+            # the in-flight one — both verify the same scheduler-side spec
+            # state, and the cloud's request-keyed corrections are consumed
+            # by the first, so the second fails with "missing request-keyed
+            # speculative corrections".  Defer; the parent stays set and a
+            # later turn retries once the in-flight DF has fully drained
+            # (its DL pick clears _force_decode_last, its update clears the
+            # counters).
+            return
+        if (
             self.prefill_drafts_first_ready
             or self.prefill_drafts_last_ready
             or self.decode_drafts_first_ready
