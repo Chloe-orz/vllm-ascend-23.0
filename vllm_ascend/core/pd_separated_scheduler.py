@@ -1043,12 +1043,20 @@ class PDSeparatedScheduler(Scheduler):
     def _can_schedule_decode_first(self) -> bool:
         # Scoped to the decode lane: prefill-phase draft work travels on the
         # dedicated PREFILL_DRAFT channel pair and must not hold back DF.
+        # `not self.decodes_first_ready` restores a key invariant the shared
+        # pending counter used to imply: a queued placeholder verify DF must
+        # never race a real DECODE_FIRST.  The placeholder's pop gate waits
+        # for BOTH lanes to drain, so while a prefill-phase chain holds it
+        # back the decode lane is fully quiet — without this check a real
+        # DF would slip through, double-verify the same drafts, and desync
+        # the cloud's request-keyed correction bookkeeping.
         return bool(
             self.running
             and self.decode_or_draft_inflight_count == 0
             and self.decode_draft_remote_pending_count == 0
             and not self.decode_drafts_first_ready
             and not self.decode_drafts_last_ready
+            and not self.decodes_first_ready
             and not self._force_decode_last
             and not self._force_decode_draft_last
         )
