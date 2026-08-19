@@ -219,7 +219,8 @@ def _drain_pd_channel_inbox(self) -> None:
     if not (
         hasattr(self.scheduler, "prefills_last_ready")
         and hasattr(self.scheduler, "decodes_last_ready")
-        and hasattr(self.scheduler, "drafts_last_ready")
+        and hasattr(self.scheduler, "prefill_drafts_last_ready")
+        and hasattr(self.scheduler, "decode_drafts_last_ready")
     ):
         return
     new_outputs = self._pp_pd_channel.consume_new_outputs()
@@ -234,7 +235,7 @@ def _drain_pd_channel_inbox(self) -> None:
             # DRAFT_LAST is self-posted by _pick_draft_first_batch (like
             # DECODE_LAST). If it arrives via POST_OUT (e.g. from an older
             # cloud that still publishes it), drop it -- the edge already has
-            # its own copy in drafts_last_ready.
+            # its own copy in the per-lane drafts_last_ready queue.
             logger.debug(
                 "Dropping POST_OUT DRAFT_LAST head_token=%s "
                 "(edge self-posts DRAFT_LAST)",
