@@ -117,48 +117,42 @@
 1、显示增加实例配置
 2、边侧按照多实例，拉一次服务，
 
-**不新增显式实例配置**：`nnodes` / `node_rank` 已完全编码实例数与实例id，**内部推导**，去掉 `--cloud-instance-num` 与 `instance_id`：
+**显式实例配置（2026-08 定案，对标 data_parallel 系参数模式）**：新增两个参数显式编码实例维度，`nnodes`/`node_rank` 回归「边/云角色」本义（恒 2 / 恒 0,1）：
 
-- 边侧：`N = nnodes - 1`（边固定 node_rank 0、单节点）
-- 云侧：`instance_id = node_rank - 1`（**从 0 开始**，node_rank 1..N → 实例 0..N-1）
+- `--instance-parallel-size`：实例总数 N，**边云三侧同值**（与 D 一样由人为保证边云一致）
+- `--instance-parallel-start-rank`：本实例编号，云侧传，取值 0..N-1；v1 每进程组 = 1 实例，`instance_id = instance_parallel_start_rank`（对标 `--data-parallel-start-rank`：云双机两机同 node_rank 1、靠 start-rank 区分 dp）
 - 每实例 npu 数 = `cloud-npu-count / N`（云总 npu 不变）
-- 校验：`cloud-npu-count % N == 0`（整除断言）；边必须 node_rank 0；云 node_rank ∈ [1, N]
-- **节点维度 = 实例维度，不数物理机**：nnodes 数的是「边 + 每实例一个 node-rank」。实例内云多机（dp 云双机）**不占额外 node-rank**，用现有 dp 配置表达：`--data-parallel-size 2 --data-parallel-size-local 1` + 每机 `--data-parallel-start-rank 0/1`（1:1 dp=2 云双机现状即如此：nnodes 仍为 2，边 node-rank 0、云双机都是 node-rank 1，靠 start-rank 区分）。推导规则对单机/双机实例**全部成立**，无需显式实例配置
-- **一物理机多逻辑 node-rank（同机多实例，2026-08 新增）**：反向同理--一台物理服务器可承载 **K 个逻辑 node-rank**（= K 个实例）。8 卡服务器部署 4 个 2 卡实例 = 4 次独立拉起，node_rank 1..4，各自 `ASCEND_RT_VISIBLE_DEVICES` 静态卡切片（0,1 / 2,3 / 4,5 / 6,7），**卡按实例静态划分、不共卡**（共卡分时复用不在考虑范围）。`instance_id = node_rank-1` 推导规则零改动成立，§2.6 形态二的「配置推导破坏」缺口由此消解
-- 校验补充（同机多实例）：同一物理服务器上各实例卡切片**不重叠**（拉起脚本/部署侧保证，切片信息不进 vllm 配置面）；同机实例端口/store 偏移校验见 §2.2
-
-| 侧 | 拉起配置（N=4 示例） |
-|----|----------------------|
-| 边 | `--nnodes 5 --node-rank 0` + `--edge-npu-count 2 --cloud-npu-count 32` |
-| 云实例 i | `--nnodes 5 --node-rank 1+i` + `--edge-npu-count 2 --cloud-npu-count 32` |
-
-| 侧 | 拉起配置（N=4 示例） |
-|----|----------------------|
-| 边 | `--nnodes 5 --node-rank 0` + `--edge-npu-count 2 --cloud-npu-count 8` |
-| 云实例 i | `--nnodes 5 --node-rank 1+i` + `--edge-npu-count 2 --cloud-npu-count 8` |
-
-- 边云共用同一 `--edge-npu-count / --cloud-npu-count`（云总 npu，非单实例），实例差异只在 node-rank
-- dp 配置（D）由人为保证边云一致
-- 实例注册/发现 = **静态推导**（node-rank），无动态注册
+- 校验（fail-fast）：`cloud-npu-count % N == 0`（整除断言）；边必须 node_rank 0；云 start_rank ∈ [0, N)；边云 instance-parallel-size 不一致拒绝拉起
+- **三轴正交**：node_rank（边/云角色）× instance-start-rank（实例 i）× dp-start-rank（dp 双机 j），各维度独立编码互不复用，「同 node-rank」不再一词两义；实例跨机/同机、dp 双机/单机**全部成立**，无需从 node_rank 推导任何实例信息
+- 实例注册/发现 = **静态配置**（无动态注册），实例维信息源 = 显式参数
 - 故障模型（v1）：任一实例挂即整个服务挂，不做 failover / 优雅 drain
+
+**定案变更记录（2026-08）**：原方案「不新增显式实例配置，N = nnodes-1、instance_id = node_rank-1、节点维度=实例维度（一机多实例 = 一物理机多逻辑 node-rank）」**反转**为上述显式配置口径。动因：①实例维度复用 node_rank 与云双机 dp「双机不占额外 node-rank」语义相撞--两维度叠加（多实例 × dp 云双机）时同一 node-rank 编码两个维度、无法区分；②原方案同机多实例要求一物理机多逻辑 node-rank 加入同一 rendezvous（一机多 agent），拉起工具支持是遗留核实项。显式配置把实例维独立成轴后两项均消解：nnodes 恒 2，**同机 K 实例 = 同 node_rank 1 + 不同 start-rank + `ASCEND_RT_VISIBLE_DEVICES` 静态卡切片**（卡按实例静态划分、不共卡，共卡分时复用不在考虑范围），「一机多 agent」核实遗留项整体作废；同机各实例卡切片不重叠由拉起脚本/部署侧保证（切片信息不进 vllm 配置面），同机实例端口/store 偏移校验见 §2.2。
+
+| 侧 | 拉起配置（N=4 示例，跨机多实例，每实例单机 tp8） |
+|----|----------------------|
+| 边 | `--nnodes 2 --node-rank 0 --instance-parallel-size 4` + `--edge-npu-count 2 --cloud-npu-count 32` |
+| 云实例 i（服务器 i） | `--nnodes 2 --node-rank 1 --instance-parallel-size 4 --instance-parallel-start-rank i` + `--edge-npu-count 2 --cloud-npu-count 32` |
+
+| 侧 | 拉起配置（N=4 同机共置示例：边 2 卡 + 1 台 8 卡服务器 × 4 实例，qwen3.6 2 卡/实例，典型形态见 §2.6 形态三） |
+|----|----------------------|
+| 边 | `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 8` |
+| 云服务器A 实例0 | `--nnodes 2 --node-rank 1 --instance-parallel-size 4 --instance-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0,1` |
+| 云服务器A 实例1 | `--nnodes 2 --node-rank 1 --instance-parallel-size 4 --instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=2,3` |
+| 云服务器A 实例2 | `--nnodes 2 --node-rank 1 --instance-parallel-size 4 --instance-parallel-start-rank 2` + `ASCEND_RT_VISIBLE_DEVICES=4,5` |
+| 云服务器A 实例3 | `--nnodes 2 --node-rank 1 --instance-parallel-size 4 --instance-parallel-start-rank 3` + `ASCEND_RT_VISIBLE_DEVICES=6,7` |
+
+  同一物理机上 4 个实例各自独立拉起（4 个进程组/4 套 deployment），**全部 node_rank 1、仅 start-rank 不同**；world = 2+8 = 10。rendezvous 语义：实例身份不依赖 node_rank，同机多实例无「一机多 agent」要求（每实例独立拉起即可），原「实现期核实拉起工具对一机多 agent 支持」遗留项作废。
+
+- 边云共用同一 `--edge-npu-count / --cloud-npu-count`（云总 npu，非单实例）与同一 `--instance-parallel-size`，实例差异只在 start-rank
+- dp 配置（D）与实例配置（N）同为人为保证边云一致；两者可叠加（多实例 × dp 云双机见 §2.4 形态二）
 
 **全局编排（torchrun rendezvous，G0 单世界组）**：
 
-- 全局 world_size = E + N·D·C（E=edge-npu-count），rank 派生见 §4.1（边 rank 在前、实例按 node_rank 序续编，instance_id = node_rank-1 与 §4.1 的实例序一致）
+- 全局 world_size = E + N·D·C（E=edge-npu-count、N=instance-parallel-size），rank 派生见 §4.1（边 rank 在前、实例按 start-rank 序续编，instance_id 与 §4.1 的实例序一致）
 - 边 = rank0 master，一次 rendezvous + 启动 barrier（全部实例就位才放行，任一实例未起整体阻塞，见 §3.10）
 - pp 语义不变：每实例仍"边 pp0 + 云 pp1"两段借用，G2 per-instance（§4.2）
-- 现状 1:1 即 `--nnodes 2 --node-rank 0/1`（N = 2-1 = 1，instance_id = 0，退化为现有行为），多实例是该编排的自然扩展（node 数变化，无新配置面）
-- **同机多实例拉起示例（边 2 卡 + 1 台 8 卡服务器 × 4 实例，N=4，典型形态见 §2.6 形态三）**：
-
-| 侧 | 拉起配置（N=4，qwen3.6 2 卡/实例） |
-|----|----------------------|
-| 边 | `--nnodes 5 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 8` |
-| 云服务器A 实例0 | `--nnodes 5 --node-rank 1 --cloud-npu-count 8` + `ASCEND_RT_VISIBLE_DEVICES=0,1` |
-| 云服务器A 实例1 | `--nnodes 5 --node-rank 2 --cloud-npu-count 8` + `ASCEND_RT_VISIBLE_DEVICES=2,3` |
-| 云服务器A 实例2 | `--nnodes 5 --node-rank 3 --cloud-npu-count 8` + `ASCEND_RT_VISIBLE_DEVICES=4,5` |
-| 云服务器A 实例3 | `--nnodes 5 --node-rank 4 --cloud-npu-count 8` + `ASCEND_RT_VISIBLE_DEVICES=6,7` |
-
-  同一物理机上 4 个实例各自独立拉起（4 个进程组/4 套 deployment），node_rank 即实例 id；world = 2+8 = 10。**rendezvous 语义注意**：torchrun/编排器的"node"须按逻辑节点理解--同一物理机上的多个实例以不同 node-rank 加入同一 rendezvous（边 master_addr），编排器需支持一机多 agent（或用每实例独立拉起脚本实现），实现期核实拉起工具对该模式的支持。
+- 现状 1:1 即 `--nnodes 2 --node-rank 0/1` + N=1（start-rank 0，退化为现有行为）；多实例只加 instance-parallel 两参数，node/dp 配置面均不动
 
 
 ### 2.2 端口 / 通信 store 编码扩展
@@ -317,7 +311,7 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 ```
 
 - **方案一（一份大组 MQ，v1 推荐）**：inner_dp_world 扩成 [边dpX + N 实例的 dpX]，广播 MQ 仍 1 条（1 个随机端口 N 实例订阅）、response MQ N·C 条。慢实例 gate 影响分层：启动链全组门闩（一次性，不影响稳态）；热路径 local_only+ZMQ 不受影响；**sample_tokens 每尾段 step 等全组 no-op 回包=每步推理性能劣化，必须修**--与 execute_model 同口径 local_only 化（multiproc_executor.py:386-396），修后运行时零跨机 method。改动清单：① rank 布局/global_start_rank 实例偏移（第一代码改动点，patch:161-165）；② sample_tokens local_only（**风险已核（2026-08）**：local_only 只跳远程发送、不改 response 收集面（multiproc_executor.py:464-466），response_mqs 含云（patch:202-217）--只加 local_only 必每步超时等云回包；必须成对加 `unique_reply_rank=output_rank`（execute_model/clear_pending 同款，worker 端 payload output_rank 门控回包已存在 :1226/:1347-1351，只门控回包不门控执行，本地全 worker 仍执行并清 execute_model_state）。前置核实项：a) PD 模式 kv_output_aggregator 实际取值（aggregator 非 None 时强制 output_rank=None 等全组，local_only 下无人替云回包即挂；今天能跑反证 PD aggregator=None，须加守卫并写配置约束『PD 边云不支持 KVConnector 框架』）；b) 云 worker 确认从不设 execute_model_state（否则少清理触发 State error）。已排除项：集合语义（云今天 no-op 不碰任何 PP/HCCL 原语，边 sample_tokens 若含需云参加的 collective 现在就挂了）、混合升级（边侧改动，云只是少收消息，busy_loop 无超时期望）、非 PD 回归（gate 与 execute_model 逐字一致即可）；返回形态从全组 list 变单对象，消费端按 execute_model 路径吃单对象，方向正确）；③ wait_until_ready 启动门闩配错峰拉起硬前提；④ 故障域=全组（per-instance 失败判定 v1 先记为限制）；⑤ 防火墙放行 ephemeral 段（1+N·C 个随机端口）。
-- **方案二（按实例 N×D 个 gloo 组，v2 演进）**：每 (dp,instance) 独立子组+独立广播/响应 MQ，边 dpX 参加 N 组。收益：串台构造上不可能、故障域/启动按实例隔离可滚动拉起、sample_tokens 可定向。代价与改动：① N×D 个 new_group；② MQ 双平面拆分（本地 shm 共享 1 份+远程按实例 N 份，MessageQueue 现耦合两平面=最大结构性改动）；③ 云 worker 用本实例组（instance_id 已可从 node_rank 取）；④ executor response_mqs 按实例字典+collective_rpc 实例寻址参数；⑤ 广播端口 N 个随机端口。
+- **方案二（按实例 N×D 个 gloo 组，v2 演进）**：每 (dp,instance) 独立子组+独立广播/响应 MQ，边 dpX 参加 N 组。收益：串台构造上不可能、故障域/启动按实例隔离可滚动拉起、sample_tokens 可定向。代价与改动：① N×D 个 new_group；② MQ 双平面拆分（本地 shm 共享 1 份+远程按实例 N 份，MessageQueue 现耦合两平面=最大结构性改动）；③ 云 worker 用本实例组（instance_id = instance-parallel-start-rank，显式配置可取）；④ executor response_mqs 按实例字典+collective_rpc 实例寻址参数；⑤ 广播端口 N 个随机端口。
 - **决策建议**：v1 = 方案一 + sample_tokens local_only 化（零机制扩展，改动集中 rank 布局）；方案二待需要滚动拉起/per-instance 故障隔离时演进，其 MQ 拆平面与 §4 组布局强耦合，留 §4 一并定。
 
 现有所有按 dp_rank 编码的端口/store，N 实例下会撞端口，需加 **instance 偏移**（与 ZMQ `instance*D+dp` 同类改动）：
@@ -331,7 +325,7 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 | rpc_broadcast_mq / peer_worker_response_mq（跨节点 collective_rpc ZMQ） | **双平面（2026-08 代码核实，修正原"按 dp_rank 编码"口径）**：本地读者 = 共享内存 ring buffer + XPUB over **IPC**（unix socket，不占端口）；跨机读者 = XPUB over **TCP**，端口 = `get_open_port()` **拉起时随机分配**（shm_broadcast.py:428，无配置、无推导），完整地址 `tcp://{connect_ip}:{随机端口}` 写入 `Handle.remote_subscribe_addr` 随 handle 分发（multiproc_executor.py:847-866） | **无端口偏移/串台问题**（随机端口 OS 保证不撞，同机多实例各拉各的 MQ）；真正 gap = ① handle（内含 ip:port 字符串）跨机分发须按实例区分（§2.2.2 已标实现期核实项）② 部署防火墙须放行随机端口段，若部署要求固定/显式端口（同 pre_out 口径）则需把 `get_open_port()` 改造为可配置；**启动期 method 链全走此通道**（get_kv_cache_specs / determine_available_memory / initialize_from_config / warmup，见 §3.10）不变 |
 | 边侧 PD TCPStore（HCCL rendezvous store） | 单 store 服务单实例 | **无需扩展端口、也无需 per-instance store**（2026-08 代码核实）：`nnodes>1` 时边云全体 dp rank 并入**同一个 world group**（`init_distributed_environment` 里 rank 重排 + `world_size_across_dp`，vllm/parallel_state.py:1602-1645），gloo cpu_group 与 HCCL device_group 均为该 world 上的 `new_group` 子组（parallel_state.py:416-425），靠 torch 内部 PrefixStore key 前缀（由全局唯一 rank 集派生）隔离，**不新增端口**。多实例沿用 G0 单世界组（§2.1，world = E+N·D·C）：各实例子组 rank 集全局唯一 ⇒ key 天然不撞。`get_next_dp_init_port()`（29500 递增）仅在 `nnodes==1` 单机多 DP 路径生效（:1646-1649），边云不经过。代价：`new_group` 是全 world 集合通信，N 实例启动偏差互相 gate（见 §3.10） |
 
-云侧镜像不变（各实例独立 deployment，按 §2.1 推导的 instance_id 入自己子组，本就隔离）。
+云侧镜像不变（各实例独立 deployment，按 §2.1 的 instance_id（= start-rank）入自己子组，本就隔离）。
 
 **同机多实例 = 偏移硬前提（2026-08 升级；形态 b 后偏移面收窄）**：跨服务器时同端口可靠 IP 区分，**同一服务器上多实例同 IP**。2026-08 通道收敛后仍在偏移面上的只剩 **gloo coord（+201）**（ZMQ 端口 per-dp 显式配置不随 N、IP-exchange/cloud_ip store 已删、PD TCPStore 单 store 零偏移、rpc_broadcast/response_mq 端口随机不撞--其真实待项是 handle 分发与防火墙放行，见上表）；gloo coord **不偏移必然撞、且无法靠 IP 兜底**。原 §2.6 形态二风险 #2 从"多实例风险"升级为同机部署的硬性前提，实现上必须：
 
@@ -351,7 +345,7 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 | pre_out_ports（ZMQ 端口列表） | **显式配置，必填、无默认、不做推导**（部署要求，§3.7.1）：`[p0..p_{D-1}]` 按 dp_rank 序、边云共享同一列表、长度=D、值唯一：边 dpX **bind** `tcp://*:p_X`（`*`=本机所有网卡），云 (i,dpX) **connect** `tcp://master_addr:p_X`（整体为边 dpX 的 IP:端口，非云本地） | 1 个（dp0） | D 个显示值（**随 D 增长、不随 N**；dp=4 即 4 个；post_out_port 配置项已取消） |
 | 边 IP（仅出现在云的 connect 目标里） | `master_addr`（现有配置，= PD TCPStore host、边 rank0 所在机；**边云共享同一配置值**，现状 1:1 云侧即用它 connect PRE_OUT，passive_core.py:1040） | 同左 | 同左 |
 | 云 IP / 云端口 | **无**：云不 bind 任何端口，边不需知云 IP（cloud_ip store 已删，§2.2.2） | 同左 | 同左（同机共置/跨机无差别） |
-| DEALER IDENTITY | **静态推导** `instance_id`（= node_rank-1，§2.1，无新增配置）；dp 已由端口区分，identity 无需编码 dp，跨 socket 的 (dp, instance) 二元组全局唯一 | `"0"` | 每个 dp 的 ROUTER 内 `"0"`..`"{N-1}"`；**同机多实例同 IP 连同组端口，仅靠 IDENTITY 区分**（无 instance 端口偏移、无 IP 兜底需求） |
+| DEALER IDENTITY | **显式配置** `instance_id`（= instance-parallel-start-rank，§2.1）；dp 已由端口区分，identity 无需编码 dp，跨 socket 的 (dp, instance) 二元组全局唯一 | `"0"` | 每个 dp 的 ROUTER 内 `"0"`..`"{N-1}"`；**同机多实例同 IP 连同组端口，仅靠 IDENTITY 区分**（无 instance 端口偏移、无 IP 兜底需求） |
 | readiness | HELLO 首帧（connect 后云发，ROUTER 收向自动带 [id\|"HELLO"]）；全部到齐才放行调度（G0 barrier，§3.10） | 1 个 HELLO | 每个 dp ROUTER 各收 N 个（全局 N×D） |
 | 边内结构（仅边侧） | 每 dp 进程独立 ROUTER，**无 fan-in、无 IPC 转发**（§3.7.2 修订）；跨 dp 的 ack/负载统计经既有 inner-DP gloo 组汇入 leader | 单进程单 ROUTER | D 个 ROUTER（每 dp 进程一个） |
 
@@ -404,12 +398,12 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 └──────────────────────────────────────┘◄────┼─ 实例2.dp1  DEALER id="2" ── connect PORTS[1]   │
                                              └─────────────────────────────────────────────────┘
 
-  **硬约束：两 dp 的实例配置必须一样**。实例 = node_rank 逻辑节点（§2.1），实例 i 的 dp0/dp1 PassiveEC
+  **硬约束：两 dp 的实例配置必须一样**。实例 = instance-parallel-start-rank（§2.1），实例 i 的 dp0/dp1 PassiveEC
         同机拉起、同一 instance_id；PORTS[0] 与 PORTS[1] 两个 ROUTER 背后是【完全同一批 N 个实例】
         （实例集合、instance_id 排列、部署位置均一致）。id="2" 在 PORTS[0] 上 = 实例2.dp0，
         在 PORTS[1] 上 = 实例2.dp1（跨端口 (dp,instance) 二元组全局唯一）。
         校验（拉起期）：两个 ROUTER 的 readiness 表 id 集合必须同为 {0..N-1}，不一致 = 拒绝放行。
-        由拉起配置天然保证：每个实例只传一份 node_rank/instance_id，其 D 个 dp 共用派生。
+        由拉起配置天然保证：每个实例只传一份 instance-parallel 配置（size + start-rank），其 D 个 dp 共用派生。
 
   端口：边共 D 个显示值（PORTS = pre_out_ports 显式列表、不推导；随 D 增长、不随 N）；云不 bind 任何端口
   连接：N×D 条全双工 TCP，云 (i,dpX) connect 到 PORTS[dpX] 的边 dpX ROUTER，与配对边 dp 直连、无中继；
@@ -450,7 +444,7 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
    ▼          ▼          ▼          ▼
 ┌─────────┐┌─────────┐┌─────────┐┌─────────┐
 │云服务器1 ││云服务器2 ││云服务器3 ││云服务器4 │
-│node_rank1││node_rank2││node_rank3││node_rank4│
+│inst_id 0 ││inst_id 1 ││inst_id 2 ││inst_id 3 │
 │实例0     ││实例1     ││实例2     ││实例3     │
 │rank 2-9  ││rank10-17 ││rank18-25 ││rank26-33 │
 │dp1×tp8   ││dp1×tp8   ││dp1×tp8   ││dp1×tp8   │
@@ -458,8 +452,8 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 ```
 
 - 边侧 2 卡全部进每个 G2（tp2 整体是一个 PP stage，两 rank 都在全部 4 个 G2 内，跨实例时分复用）
-- 配置：`--nnodes 5 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 32`；云各服务器 `--node-rank 1..4`
-- world = 2+32 = 34；每实例 2P1D 通道独立；**§2.1 推导规则适用**（N=4，instance_id=node_rank-1）
+- 配置：边 `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 32`；云各服务器 `--node-rank 1 --instance-parallel-start-rank 0..3`
+- world = 2+32 = 34；每实例 2P1D 通道独立；**§2.1 配置规则适用**（N=4，instance_id=start-rank；云全部机器 node_rank 1）
 - 边内 TP=2 与云侧实例内 TP 无耦合（各切各的，hidden 按 G2 内边侧 TP 切分对齐）
 
 #### 形态二：2 实例，dp=2，dp 云双机
@@ -474,7 +468,8 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
    ▼                              ▼
 ┌────────────────────────┐  ┌────────────────────────┐
 │ 实例0 = 服务器1 + 服务器2 │  │ 实例1 = 服务器3 + 服务器4 │
-│ 两机都是 node_rank 1    │  │ 两机都是 node_rank 2    │
+│ 两机都是 node_rank 1：   │  │ 同左，实例靠 start-rank │
+│ 实例0 = start-rank 0    │  │ 实例1 = start-rank 1    │
 │ 服务器1: dp0×tp4 (rank2-5)│  │ 服务器3: dp0×tp4(rank10-13)│
 │   --data-parallel-start-  │  │   --data-parallel-start-  │
 │    rank 0, local 1        │  │    rank 0, local 1        │
@@ -488,9 +483,9 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 └────────────────────────┘  └────────────────────────┘
 ```
 
-- 配置：边 `--nnodes 3 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 32`；云每机 `--nnodes 3 --node-rank 1或2 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-start-rank 0/1`（同 1:1 云双机现状：双机不占额外 node-rank，靠 start-rank 区分）
+- 配置：边 `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 2 --cloud-npu-count 32`；云每机 `--node-rank 1 --instance-parallel-size 2 --instance-parallel-start-rank 0/1 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-start-rank 0/1`（实例/dp 双轴 start-rank 区分，全部机器同 node_rank 1）
 - world = 18；G2 共 N×D=4 个（各 1+4 rank）；coord/IP-broker/gloo 端口全部 +instance 偏移（§2.2）
-- **§2.1 推导规则适用**（N = 3-1 = 2，instance_id = node_rank-1；节点维度只数实例，物理机数 4 > nnodes 3）
+- **§2.1 配置规则适用**（N = instance-parallel-size = 2，instance_id = start-rank；物理机数 4 与 nnodes=2 无关）
 
 #### 形态三：四实例，dp=2，dp 云单机
 
@@ -504,7 +499,7 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
    ▼          ▼          ▼          ▼
 ┌─────────┐┌─────────┐┌─────────┐┌─────────┐
 │云服务器1 ││云服务器2 ││云服务器3 ││云服务器4 │
-│node_rank1││node_rank2││node_rank3││node_rank4│
+│inst_id 0 ││inst_id 1 ││inst_id 2 ││inst_id 3 │
 │实例0     ││实例1     ││实例2     ││实例3     │
 │dp0: rank ││dp0: rank ││…         ││…         │
 │  2-5(tp4)││ 10-13    ││          ││          │
@@ -514,16 +509,16 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 └─────────┘└─────────┘└─────────┘└─────────┘
 ```
 
-- 配置：`--nnodes 5 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 32`；world = 34
+- 配置：边 `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 32`；云各服务器 `--node-rank 1 --instance-parallel-start-rank 0..3`；world = 34
 - 每服务器内 dp0/dp1 同机（coord 走本机，无双机 IP broker 依赖）
-- **§2.1 推导规则适用**（N=4，instance_id=node_rank-1），边 2 卡全部利用--三形态中边侧利用率与设计目标最贴合
+- **§2.1 配置规则适用**（N=4，instance_id=start-rank；云全部机器 node_rank 1），边 2 卡全部利用--三形态中边侧利用率与设计目标最贴合
 
 #### 汇总对比
 
-| 形态 | N | D | C | world | G2 数 | 边卡利用 | §2.1 推导 | 备注 |
+| 形态 | N | D | C | world | G2 数 | 边卡利用 | §2.1 配置 | 备注 |
 |------|---|---|---|-------|-------|----------|-----------|------|
 | 一：四实例 dp1 边 tp2 | 4 | 1 | 8 | 34 | 4（各 2+8） | 2/2 卡（边内 TP=2） | ✓ | 边两卡整体进全部 G2，跨实例时分复用 |
-| 二：2实例 dp2 云双机 | 2 | 2 | 4 | 18 | 4 | 2/2 卡 | ✓（nnodes=3） | 双机不占 node-rank（dp start-rank 区分）；云双机 coord + IP broker per-instance |
+| 二：2实例 dp2 云双机 | 2 | 2 | 4 | 18 | 4 | 2/2 卡 | ✓ | 实例/dp 均不占额外 node-rank（instance/dp 双 start-rank 区分）；云双机 coord + IP broker per-instance |
 | 三：四实例 dp2 云单机 | 4 | 2 | 4 | 34 | 8 | 2/2 卡 | ✓ | 同机 coord（dp local=2 同进程组）；边 2 卡 × 4 实例全时分复用 |
 
 ### 2.5 部署形态（边 1 卡，云 4 服务器 × 8 卡）
@@ -541,15 +536,15 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
    ▼          ▼          ▼          ▼
 ┌─────────┐┌─────────┐┌─────────┐┌─────────┐
 │云服务器1 ││云服务器2 ││云服务器3 ││云服务器4 │
-│node_rank1││node_rank2││node_rank3││node_rank4│
+│inst_id 0 ││inst_id 1 ││inst_id 2 ││inst_id 3 │
 │实例0     ││实例1     ││实例2     ││实例3     │
 │rank 1-8  ││rank 9-16 ││rank17-24 ││rank25-32 │
 │dp1×tp8   ││dp1×tp8   ││dp1×tp8   ││dp1×tp8   │
 └─────────┘└─────────┘└─────────┘└─────────┘
 ```
 
-- 配置：`--nnodes 5 --node-rank 0 --edge-npu-count 1 --cloud-npu-count 32`；云各服务器 `--node-rank 1..4`
-- world = 1+32 = 33；**§2.1 推导规则适用**（N=4，instance_id=node_rank-1）
+- 配置：边 `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 1 --cloud-npu-count 32`；云各服务器 `--node-rank 1 --instance-parallel-start-rank 0..3`
+- world = 1+32 = 33；**§2.1 配置规则适用**（N=4，instance_id=start-rank；云全部机器 node_rank 1）
 - D=1 时与 §2.4 形态一同构（边 1 rank，无 TP/无 virtual worker 差异）
 
 #### 形态二：2 实例，dp=2，dp 云双机（边 1 卡 host 2 virtual worker）
@@ -566,7 +561,8 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
    ▼                              ▼
 ┌────────────────────────┐  ┌────────────────────────┐
 │ 实例0 = 服务器1 + 服务器2 │  │ 实例1 = 服务器3 + 服务器4 │
-│ 两机都是 node_rank 1    │  │ 两机都是 node_rank 2    │
+│ 两机都是 node_rank 1：   │  │ 同左，实例靠 start-rank │
+│ 实例0 = start-rank 0    │  │ 实例1 = start-rank 1    │
 │ 服务器1: dp0×tp4 (rank1-4) │  │ 服务器3: dp0×tp4(rank9-12) │
 │   --data-parallel-start-  │  │   --data-parallel-start-  │
 │    rank 0, local 1        │  │    rank 0, local 1        │
@@ -580,10 +576,10 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 └────────────────────────┘  └────────────────────────┘
 ```
 
-- 配置：边 `--nnodes 3 --node-rank 0 --edge-npu-count 1 --cloud-npu-count 32`；云每机 `--nnodes 3 --node-rank 1或2 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-start-rank 0/1`（同 1:1 云双机现状）
+- 配置：边 `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 1 --cloud-npu-count 32`；云每机 `--node-rank 1 --instance-parallel-size 2 --instance-parallel-start-rank 0/1 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-start-rank 0/1`（同 1:1 云双机现状：全部机器同 node_rank 1）
 - world = 1+16 = 17；G2 共 N=2 个（shared-model 每实例一个 `{0}∪实例i云rank`，size 1+8，按 dp 切 channel）
 - 边内 2 DP 在 1 进程内，**2DP 协调在 EngineCore gloo 层**（G1：D 个 EngineCore，边 HCCL rank 仅 1 个）
-- **§2.1 推导规则适用**（N = 3-1 = 2，instance_id = node_rank-1；节点维度只数实例，物理机数 4 > nnodes 3）
+- **§2.1 配置规则适用**（N = instance-parallel-size = 2，instance_id = start-rank；物理机数 4 与 nnodes=2 无关）
 
 #### 形态三：四实例，dp=2，dp 云单机（边 1 卡 host 2 virtual worker）
 
@@ -599,7 +595,7 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
    ▼          ▼          ▼          ▼
 ┌─────────┐┌─────────┐┌─────────┐┌─────────┐
 │云服务器1 ││云服务器2 ││云服务器3 ││云服务器4 │
-│node_rank1││node_rank2││node_rank3││node_rank4│
+│inst_id 0 ││inst_id 1 ││inst_id 2 ││inst_id 3 │
 │实例0     ││实例1     ││实例2     ││实例3     │
 │dp0: rank ││dp0: rank ││…         ││…         │
 │  1-4(tp4)││  9-12    ││          ││          │
@@ -609,16 +605,16 @@ Handle 分发与 gloo 建链时序：见图 3b（时序图）
 └─────────┘└─────────┘└─────────┘└─────────┘
 ```
 
-- 配置：`--nnodes 5 --node-rank 0 --edge-npu-count 1 --cloud-npu-count 32`；world = 1+32 = 33
+- 配置：边 `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 1 --cloud-npu-count 32`；云各服务器 `--node-rank 1 --instance-parallel-start-rank 0..3`；world = 1+32 = 33
 - 每服务器内 dp0/dp1 同机（coord 走本机，无双机 IP broker 依赖）
-- **§2.1 推导规则适用**；边 1 卡 × 4 实例全时分复用，是边侧算力最紧张、多实例重叠收益最大的形态
+- **§2.1 配置规则适用**（N=4，instance_id=start-rank）；边 1 卡 × 4 实例全时分复用，是边侧算力最紧张、多实例重叠收益最大的形态
 
 #### 汇总对比
 
-| 形态 | N | D | C | world | G2 数 | 边模式 | §2.1 推导 | 备注 |
+| 形态 | N | D | C | world | G2 数 | 边模式 | §2.1 配置 | 备注 |
 |------|---|---|---|-------|-------|--------|-----------|------|
 | 一：四实例 dp1 | 4 | 1 | 8 | 33 | 4（各 1+8） | 单 rank（无 virtual） | ✓ | 与 §2.4 形态一同构 |
-| 二：2实例 dp2 云双机 | 2 | 2 | 4 | 17 | 2 | shared-model（2 vworker，EP=1） | ✓（nnodes=3） | 双机不占 node-rank（dp start-rank 区分）；云双机 coord + IP broker per-instance |
+| 二：2实例 dp2 云双机 | 2 | 2 | 4 | 17 | 2 | shared-model（2 vworker，EP=1） | ✓ | 实例/dp 均不占额外 node-rank（双 start-rank 区分）；云双机 coord + IP broker per-instance |
 | 三：四实例 dp2 云单机 | 4 | 2 | 4 | 33 | 4 | shared-model（2 vworker，EP=1） | ✓ | 同机 coord；边 1 卡 × 4 实例全时分复用 |
 
 与 §2.4（边 2 卡）的核心差异：E=2/TP2 或 per-rank 双 rank -> E=1 单 rank；G2 从「边全部 rank 进每实例」变为「边 1 rank 进每实例」（形态二/三 G2 数从 N×D 降为 N，dp 维度在 channel 切分层消化）；形态二/三的边侧 tail 无跨 2DP EP all-toall（EP=1，leader 代算），worker 层异步重叠约束更宽松（§5.3）。
@@ -639,15 +635,15 @@ dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均�
    ▼                     ▼
 ┌───────────────────┐  ┌───────────────────┐
 │云服务器1 (16卡)     │  │云服务器2 (16卡)     │
-│node_rank 1         │  │node_rank 2         │
+│start-rank 0        │  │start-rank 1        │
 │实例0               │  │实例1               │
 │rank 2-17           │  │rank 18-33          │
 │dp1×tp16            │  │dp1×tp16            │
 └───────────────────┘  └───────────────────┘
 ```
 
-- 配置：`--nnodes 3 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 32`；云各服务器 `--node-rank 1/2`
-- **§2.1 推导规则适用**（N=3-1=2）；与 §2.4 形态一完全同构（只是 C=8->16），无新增项，**v1 支持**
+- 配置：边 `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 2 --cloud-npu-count 32`；云各服务器 `--node-rank 1 --instance-parallel-start-rank 0/1`
+- **§2.1 配置规则适用**（N = instance-parallel-size = 2）；与 §2.4 形态一完全同构（只是 C=8->16），无新增项，**v1 支持**
 
 #### 形态二：4 实例（每服务器 2 实例，tp8）--每服务器多实例，v1 支持（2026-08 升级）
 
@@ -662,19 +658,19 @@ dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均�
 ┌──────────────────────────┐  ┌──────────────────────────┐
 │云服务器1 (16卡)           │  │云服务器2 (16卡)           │
 │ 实例0: 卡0-7,  tp8        │  │ 实例2: 卡0-7,  tp8        │
-│   node_rank 1, rank 2-9   │  │   node_rank 3, rank18-25  │
+│   start-rank 0, rank 2-9  │  │   start-rank 2, rank18-25 │
 │   VISIBLE_DEVICES=0-7     │  │   VISIBLE_DEVICES=0-7     │
 │ 实例1: 卡8-15, tp8        │  │ 实例3: 卡8-15, tp8        │
-│   node_rank 2, rank10-17  │  │   node_rank 4, rank26-33  │
+│   start-rank 1, rank10-17 │  │   start-rank 3, rank26-33 │
 │   VISIBLE_DEVICES=8-15    │  │   VISIBLE_DEVICES=8-15    │
 │ （同机 2 实例，卡静态划分，  │  │                          │
 │   各自独立拉起）           │  │                          │
 └──────────────────────────┘  └──────────────────────────┘
 ```
 
-- **实例编码 = node_rank 即逻辑实例**（§2.1 新增规则）：同一物理服务器上 2 个实例各自独立拉起，node_rank 1/2（服务器1）与 3/4（服务器2）；`instance_id = node_rank-1`、`N = nnodes-1 = 4` 推导规则**零改动成立**
+- **实例编码 = instance-parallel-start-rank**（§2.1 显式配置）：同一物理服务器上 2 个实例各自独立拉起，全部 node_rank 1，实例0/1 = start-rank 0/1（服务器1）与 2/3（服务器2）；`instance_id = start-rank`、`N = instance-parallel-size = 4`
 - 卡静态划分：实例0 用卡 0-7、实例1 用卡 8-15（`ASCEND_RT_VISIBLE_DEVICES` 切片），不共卡
-- world = 34；nnodes=5 数「边 + 4 个逻辑节点」（物理机 3 台 < nnodes 5，节点维度=实例维度在两个方向上成立：一实例跨多机不占额外交 rank、一机多实例各占一个 node_rank）
+- world = 34；nnodes 恒 2（边 + 云角色），4 实例全部 node_rank 1、仅 start-rank 不同；物理机 3 台与 nnodes 无关，实例维度由 instance-parallel 显式编码（原「一机多逻辑 node-rank」口径作废，§2.1 定案变更记录）
 
 #### 形态二支持项 / 新增处理项分析（2026-08 更新：v1 支持）
 
@@ -688,20 +684,20 @@ dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均�
 | 4 | 调度 / KV 分区 / prefill_inflight per-(instance,dp) 独立 | §3.1/§6.1/§6.4 与物理位置无关 |
 | 5 | NPU 算力/显存无竞争（**前提：卡按实例静态划分**，实例0 卡0-7、实例1 卡8-15，不共卡） | profile/KV 分配各自 8 卡 |
 | 6 | ZMQ 控制面 per-instance channel 可同机共存（端口偏移后） | §2.2/§3.7 |
-| 7 | **实例配置推导成立（原硬缺口 #1 已消解）** | §2.1 新增「一物理机多逻辑 node-rank」：同机实例各自独立拉起、node_rank 即 instance_id，推导规则零改 |
+| 7 | **实例配置成立（原硬缺口 #1 已消解）** | §2.1 显式实例配置（--instance-parallel-size/start-rank）：同机实例各自独立拉起、start-rank 即 instance_id，全部同 node_rank 1 |
 
 **新增处理项（v1 必做，原「不支持项」）**：
 
 | # | 项 | 性质 | 说明 |
 |---|----|------|------|
-| ~~1~~ | ~~配置推导破坏~~ | 已消解 | 原「node_rank 数服务器不数实例」缺口由 §2.1 逻辑 node-rank 规则消解：无需恢复 `--cloud-instance-num` / 显式 instance-id，同机实例 = 不同 node-rank 独立拉起 + 卡切片。遗留：拉起脚本/编排器须支持一机多实例拉起（node_rank->物理机映射由部署侧维护，不进 vllm 配置面） |
+| ~~1~~ | ~~配置推导破坏~~ | 已消解 | 原「node_rank 数服务器不数实例」缺口由 §2.1 显式实例配置消解（2026-08 反转原「逻辑 node-rank」方案）：`--instance-parallel-size/start-rank` 直接编码实例维度，同机实例 = 同 node_rank 1 + 不同 start-rank 独立拉起 + 卡切片。遗留：拉起脚本/编排器须支持一机多实例拉起（start-rank->物理机映射由部署侧维护，不进 vllm 配置面）；原「一机多 agent」核实项作废 |
 | 2 | **同机端口/store 偏移（硬前提，必做）** | 拉起失败 | 跨服务器同端口可靠 IP 区分，**同服务器同 IP 必撞**：§2.2 全通道 instance 偏移 + 拉起期端口规则校验（强制）；cloud_ip key/port 双维度带 instance（passive_core.py:1017-1028） |
 | 3 | **host 资源竞争（K=4 时量化）** | 性能 | 同机 K 个实例：模型权重加载 ×K（qwen3.6-27b 2 卡实例权重 host RAM ×4）、worker 进程/线程 ×4、CPU 竞争；**边↔云网络出口共享**（4 实例 hidden isend/irecv + ZMQ 控制面挤同一网口）-> 数据面带宽评估口径从 per-instance 改 **per-server 聚合**：每服务器聚合带宽须 ≥ 4×单实例 hidden 流量，否则多实例重叠收益被带宽竞争吃掉（千兆/万兆口下 qwen3.6-27b 4 实例聚合是带宽评估重点，实现期实测） |
 | 4 | **相关性故障（故障域=服务器）** | 可用性 | 一服务器挂 = 该机 K 实例**同时**挂：N=8（2 服务器 × 4 实例）实际只有 2 个故障域，一机挂即半数实例挂 -> v1「任一实例挂=整体挂」下整体挂；可用性 = 服务器级可用性，多实例不增加故障点也不分散。逃生手段（§1.4 遗留）：v1 无 failover，实例级故障定位需先区分「单实例挂（进程级）」vs「整机挂（K 实例齐挂）」--后者恢复=整服务器重拉 |
 | 5 | **启动竞争** | 启动时长 | 同机 K 实例同时权重加载/profile_run/warmup（CPU/内存带宽/网口竞争），启动变慢甚至超时。处理：**同机实例错峰拉起**（编排层：实例 i 延后 i×错峰间隔，或权重加载完成后再放行下一实例）+ §3.10 逐实例串行握手；代价 = 启动时长 ∝ 同机实例数（K=4 时约 4× 单实例关键路径，可部分并行：权重加载与上一实例 profile 重叠） |
 | 6 | **运维/观测混淆** | 可用性 | 同机日志、进程命名、metrics **强制带 instance 标签**（instance_id 进日志前缀/进程 title/metrics label），否则同机 K 实例输出无法区分；拉起脚本进程命名建议 `vllm-cloud-inst{i}` |
 
-**结论（2026-08 更新）**：形态一（每服务器 1 实例）与形态二（每服务器多实例）**均 v1 支持**。原硬缺口 #1（配置推导）由 §2.1「node_rank = 逻辑实例」消解，零新增配置项；剩余必做项 = #2 同机端口偏移强制校验（§2.2）、#5 启动错峰（§3.10）、#6 instance 标签强制；#3 带宽（per-server 聚合口径）与 #4 故障域（=服务器）为评估/运维口径变更，非功能缺口。卡静态划分（不共卡）仍是前提，共卡（实例间分时复用同卡）不在考虑范围。
+**结论（2026-08 更新）**：形态一（每服务器 1 实例）与形态二（每服务器多实例）**均 v1 支持**。原硬缺口 #1（配置推导）由 §2.1 显式实例配置消解（新增 instance-parallel 两参数，换 nnodes 恒 2、无逻辑 node-rank/一机多 agent）；剩余必做项 = #2 同机端口偏移强制校验（§2.2）、#5 启动错峰（§3.10）、#6 instance 标签强制；#3 带宽（per-server 聚合口径）与 #4 故障域（=服务器）为评估/运维口径变更，非功能缺口。卡静态划分（不共卡）仍是前提，共卡（实例间分时复用同卡）不在考虑范围。
 
 #### 形态三：qwen3.6-27b 典型形态（边 2 卡 + 8 卡服务器 × 4 实例 tp2，2026-08 新增）
 
@@ -717,33 +713,33 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
    ▼      ▼      ▼      ▼
 ┌──────────────────────────────┐
 │云服务器A (8卡, 4 实例)         │
-│ 实例0: 卡0-1,  node_rank 1    │
+│ 实例0: 卡0-1,  start-rank 0   │
 │   rank 2-3,  VISIBLE=0,1     │
-│ 实例1: 卡2-3,  node_rank 2    │
+│ 实例1: 卡2-3,  start-rank 1   │
 │   rank 4-5,  VISIBLE=2,3     │
-│ 实例2: 卡4-5,  node_rank 3    │
+│ 实例2: 卡4-5,  start-rank 2   │
 │   rank 6-7,  VISIBLE=4,5     │
-│ 实例3: 卡6-7,  node_rank 4    │
+│ 实例3: 卡6-7,  start-rank 3   │
 │   rank 8-9,  VISIBLE=6,7     │
 │ （同机 4 实例，卡静态划分，     │
 │   各自独立拉起+错峰启动）      │
 └──────────────────────────────┘
 ```
 
-- 配置：边 `--nnodes 5 --node-rank 0 --edge-npu-count 2 --cloud-npu-count 8`；云服务器A 上 4 实例分别 `--node-rank 1..4` + 各自 `ASCEND_RT_VISIBLE_DEVICES` 切片（§2.1 同机多实例拉起示例）
+- 配置：边 `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 8`；云服务器A 上 4 实例分别 `--node-rank 1 --instance-parallel-start-rank 0..3` + 各自 `ASCEND_RT_VISIBLE_DEVICES` 切片（§2.1 同机多实例拉起示例）
 - world = 2+8 = 10；G2 共 4 个（各 2+2 rank，边 2 卡整体进全部 G2）
-- 扩展到 2 台 8 卡服务器：N=8、world=18、nnodes=9（物理机 3 台）；**N=8 进入容量临界区**（edge/N ÷ cloud ≈ 1.02×，§6.3），边侧资源扩展为前置条件
+- 扩展到 2 台 8 卡服务器：N=8、world=18（nnodes 仍 2，物理机数与 nnodes 无关）；**N=8 进入容量临界区**（edge/N ÷ cloud ≈ 1.02×，§6.3），边侧资源扩展为前置条件
 - 该形态是 qwen3.6-27b 的**默认部署形态**：形态二（16 卡 × 2×tp8）退居非典型；§2.6 全部同机多实例结论（支持项 7 条 / 处理项 5 条）对本形态同等适用，K=4 使 #3 host 竞争、#5 启动错峰的影响翻倍（4 实例权重加载 ×4、启动关键路径 ∝4）
 
 #### 汇总对比（§2.6）
 
-| 形态 | N | 每服务器实例 | C | world | 物理机数 | 边卡利用 | §2.1 推导 | 备注 |
+| 形态 | N | 每服务器实例 | C | world | 物理机数 | 边卡利用 | §2.1 配置 | 备注 |
 |------|---|------------|---|-------|---------|----------|-----------|------|
 | 一：2实例 tp16 | 2 | 1 | 16 | 34 | 3 | 2/2 卡 | ✓ | 标准形态，零新增 |
-| 二：4实例 tp8 | 4 | 2 | 8 | 34 | 3 | 2/2 卡 | ✓（一机多 node-rank） | 同机多实例，v1 支持 |
-| 三a：4实例(1服务器) tp2 | 4 | 4 | 2 | 10 | 2 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.6-27b 单服务器形态；同机压力最大（K=4） |
-| 三b：8实例(2服务器) tp2 | 8 | 4 | 2 | 18 | 3 | 2/2 卡 | ✓（一机多 node-rank） | qwen3.6-27b 中间形态；N=8 容量临界（§6.3） |
-| 三c：16实例(4服务器) tp2 | 16 | 4 | 2 | 34 | 5 | 2/2 卡 | ✓（一机多 node-rank） | **N 上限满配形态**；翻转 edge-bound（云利用率 ~51%，§6.3），边侧资源扩展为硬前置 |
+| 二：4实例 tp8 | 4 | 2 | 8 | 34 | 3 | 2/2 卡 | ✓（同机多实例：同 node_rank + start-rank） | 同机多实例，v1 支持 |
+| 三a：4实例(1服务器) tp2 | 4 | 4 | 2 | 10 | 2 | 2/2 卡 | ✓（同机多实例：同 node_rank + start-rank） | qwen3.6-27b 单服务器形态；同机压力最大（K=4） |
+| 三b：8实例(2服务器) tp2 | 8 | 4 | 2 | 18 | 3 | 2/2 卡 | ✓（同机多实例：同 node_rank + start-rank） | qwen3.6-27b 中间形态；N=8 容量临界（§6.3） |
+| 三c：16实例(4服务器) tp2 | 16 | 4 | 2 | 34 | 5 | 2/2 卡 | ✓（同机多实例：同 node_rank + start-rank） | **N 上限满配形态**；翻转 edge-bound（云利用率 ~51%，§6.3），边侧资源扩展为硬前置 |
 
 ---
 
@@ -927,7 +923,7 @@ N 实例 × D DP-rank = **N×D 个 per-DP-rank 调度器**（`PDSeparatedSchedul
 - 每 dp 的 actor：recv 排干（HELLO -> 本 dp readiness 表（N 个 id）/ ack -> 本 dp 负载统计）+ **per-identity out 队列**发送（NOBLOCK/MANDATORY：EAGAIN = 慢实例留队重试；EHOSTUNREACH = 未就绪入队等待 / 已就绪后失联 = v1 故障模型整体挂，fail-fast）
 - **跨 dp 汇聚走既有通道**：dp>1 时各 dp 的 ack/负载统计经现有 inner-DP gloo 组（与 §3.4 实例分发的 all_reduce 同路）汇入 leader 的 `InstanceDispatcher`，**不新增通道、无 IPC 转发 hop**
 - 线程数：现状 2×N×D -> **D（每 dp 1 actor）**；N=16/D=2：64 -> 2；D=4：64 -> 4
-- **配置校验（拉起期 fail-fast）**：列表长度 = D、值唯一、端口可用（被占且非本 dp 显式端口 = 拒绝拉起，防同机串台）；**两 dp 的实例配置必须一样**--实例 = node_rank 逻辑节点，实例 i 的 dp0/dp1 同机拉起、同一 instance_id，D 个 ROUTER 背后是同一批 N 实例（校验：各 dp readiness 表 id 集合必须同为 {0..N-1}，不一致 = 拒绝放行）；边云列表一致性由人为保证（§2.1 既定口径）；master_port 偏移空间预留等推导类约束对本通道不再适用
+- **配置校验（拉起期 fail-fast）**：列表长度 = D、值唯一、端口可用（被占且非本 dp 显式端口 = 拒绝拉起，防同机串台）；**两 dp 的实例配置必须一样**--实例 = instance-parallel-start-rank（§2.1），实例 i 的 dp0/dp1 同机拉起、同一 instance_id，D 个 ROUTER 背后是同一批 N 实例（校验：各 dp readiness 表 id 集合必须同为 {0..N-1}，不一致 = 拒绝放行）；边云列表一致性由人为保证（§2.1 既定口径）；master_port 偏移空间预留等推导类约束对本通道不再适用
 - pickle 按 dp 分散（每 actor 各自序列化，无单点）；leader 无收发依赖（只消费汇聚后的负载统计）
 
 **运行时路径（dp=2 示例，全部直连、无中继）**：
@@ -1178,7 +1174,7 @@ per-channel ZMQ（每 channel 独立 `queue.Queue(1000)` + 独立 pub/sub 线程
 | # | 层 | 位置 | 改动 |
 |---|---|---|---|
 | 1 | HTTP 监听 | serve.py:284（setup_server）+ v1/utils.py:172-235（APIServerProcessManager） | 单 sock 共享 -> launcher 预创建 **N 个 sock_i**（各 bind `host:port_i`，端口显式列表或 base+i 推导，建议与 §2.2 pre_out_ports 同口径**显式配置、必填无默认**）；spawn 时第 i 个子进程拿 sock_i，**子进程侧零改**（仍走 sock= 路径，api_server.py:683-685 build_and_serve）。per-child 端口先例：dp_supervisor.py:119（`child_args.port = args.port + local_rank`） |
-| 2 | 拉起校验 | serve.py / edge-cloud patch | 端口列表长度 = api_server_count = **N（= nnodes-1）**；值唯一、可用性 fail-fast（被占即拒绝拉起，防同机串台，与 §2.2 同款硬前提） |
+| 2 | 拉起校验 | serve.py / edge-cloud patch | 端口列表长度 = api_server_count = **N（= instance-parallel-size）**；值唯一、可用性 fail-fast（被占即拒绝拉起，防同机串台，与 §2.2 同款硬前提） |
 | 3 | 请求 admission | EngineCore 请求准入（边云多实例分支，dp=1/dp>1 同口径） | `instance_id = client_index`，路由到第 instance_id 个 per-instance scheduler（§3.1 分组的构造来源从 InstanceDispatcher 分发变为请求自带；dp>1 下落进任一 EngineCore 都路由到实例 ci 的组，见 §3.12.1 场景四）；InstanceDispatcher 默认策略 RequestPinned |
 | 4 | 观测 | metrics / 日志 | 端点/实例标签强制（§2.6 处理项 #6 同款）：client_index（= instance_id）进 metrics label 与日志前缀，N 个端点的输出可区分 |
 
@@ -1189,7 +1185,7 @@ per-channel ZMQ（每 channel 独立 `queue.Queue(1000)` + 独立 pub/sub 线程
 - EngineCore spawn 链（CoreEngineProcManager）、shared-model executor、边↔云 PRE_OUT/云侧 PassiveEC--零改
 - shutdown / 进程监控（wait_for_completion_or_failure）--零改
 
-**配置面**：`--api-server-count N` 沿用上游参数（不新增）；新增 N 个监听端口的表达（显式列表优先）。与 §2.1「零新增显式实例配置」不冲突的理由：监听端口是**前端部署参数**，不是实例身份编码--instance_id 仍由 `node_rank-1` 推导，边云两侧的世界组/通道推导不受影响。
+**配置面**：`--api-server-count N` 沿用上游参数（不新增）；新增 N 个监听端口的表达（显式列表优先）。与 §2.1 显式实例配置的关系：监听端口是**前端部署参数**，不是实例身份编码--边云侧实例身份由 `--instance-parallel-size/start-rank` 编码，世界组/通道推导不受影响；端点序 i 与实例 start-rank i 的对应（端点 i ↔ 实例 i）由部署侧在 N 个端口与 N 个实例的映射中保证。
 
 **风险与部署约束**：
 
@@ -1225,7 +1221,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 
 **代码缺口（启动期核实，2026-08 补）**：
 
-- 云侧 executor 的全局 rank 起点现**硬编码**单实例：`global_start_rank = edge_npu_count`（patch_multiproc_executor.py:161-165），`_is_driver_worker` 同样只认 `rank == edge_npu_count`（:281-288）。多实例必须改为 `E + i·D·C + j·C`（i = instance_id = node_rank-1、j = dp start-rank），这是 §4.1 rank 公式落地的**第一改动点**
+- 云侧 executor 的全局 rank 起点现**硬编码**单实例：`global_start_rank = edge_npu_count`（patch_multiproc_executor.py:161-165），`_is_driver_worker` 同样只认 `rank == edge_npu_count`（:281-288）。多实例必须改为 `E + i·D·C + j·C`（i = instance_id = instance-parallel-start-rank、j = dp start-rank），这是 §4.1 rank 公式落地的**第一改动点**
 - 现有 group 派生按 dp 实例交错 `instance0_edge, instance0_cloud, instance1_edge, ...`（vllm/distributed/parallel_state.py:1988-2109、vllm_ascend MC2 同构 parallel_state.py:572-605），即上文①的重写对象
 - `edge_npu_count/cloud_npu_count` 现为 DP 实例总量口径、`__post_init__` 除以 dp_size 成 per-DP 值（config/parallel.py:200-233）；多实例下 cloud-npu-count 语义扩为 N·D·C 总量，post_init 除法口径需连带调整
 - **同机共置不影响本节任何派生**：G0-G5 全部是逻辑 rank 区间划分，与 rank 落在哪台物理服务器无关（§2.6 支持项 #1）；instance -> 物理服务器映射由拉起脚本维护，不进 group 派生
@@ -2110,6 +2106,7 @@ dp=2 不影响 R（边云 per-dp 同除）。
 | #1 | 同 batch_type 跨实例尾层组批 | **不做**，各实例尾层独立处理；后续需要再考虑 |
 | #6 | 实例调度决策机制 | **方案 c**：leader 决策 + all_reduce 分发 |
 | #5 | prefill_inflight_limit 作用域 | **per-(instance,dp)**，共 4N |
+| - | 实例配置形态（2026-08） | **显式实例配置**（§2.1）：`--instance-parallel-size`（N 总数，边云三侧同值）+ `--instance-parallel-start-rank`（实例编号，云侧 0..N-1）；nnodes 恒 2、node_rank 回归边/云角色，三轴正交（node_rank × instance-start-rank × dp-start-rank）；原「node_rank 推导/节点维度=实例维度/一机多逻辑 node-rank」口径作废 |
 | - | 边侧前端形态（2026-08） | **一实例一 API 端点 + 上游网关选实例**（§3.12）：`--api-server-count N` + 每子进程独立监听端口，`instance_id = client_index` 请求自带 pin；InstanceDispatcher 默认策略 RequestPinned；dp>1 = 「端点定实例、负载定 dp」（ApiServer=N，dp 归前端 internal LB，§3.12.1 场景四），方案 c 的 all_reduce 保留为 2DP 协调通道 |
 
 ### 7.2 待后续
