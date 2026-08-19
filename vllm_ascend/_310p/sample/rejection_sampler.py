@@ -68,6 +68,7 @@ class AscendRejectionSampler310(AscendRejectionSampler):
         target_indices: torch.Tensor | None = None,
         global_vocab_size: int | None = None,
         enable_reduce_sampling: bool = False,
+        debug_tensors: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
         batch_size = len(num_draft_tokens)
         vocab_size = target_probs.shape[-1]
@@ -80,6 +81,8 @@ class AscendRejectionSampler310(AscendRejectionSampler):
         num_draft_tensor = torch.tensor(num_draft_tokens, pin_memory=True).to(device, non_blocking=True)
         has_draft_mask = num_draft_tensor > 0
         fill_exponential_310p(q, sampling_metadata.generators, has_draft_mask)
+        if debug_tensors is not None:
+            debug_tensors["q"] = q
 
         recovered_token_ids = torch.empty_like(draft_token_ids)
         if use_block_verify:

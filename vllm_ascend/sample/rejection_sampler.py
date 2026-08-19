@@ -336,6 +336,225 @@ def apply_sampling_constraints(
         return apply_top_k_top_p(logits, k, p)
 
 
+def _debug_tensor_stats(
+    tensor: torch.Tensor | None,
+) -> dict[str, int | float | None]:
+    if tensor is None:
+        return {
+            "numel": 0,
+            "finite": 0,
+            "nan": 0,
+            "pos_inf": 0,
+            "neg_inf": 0,
+            "finite_min": None,
+            "finite_max": None,
+        }
+
+    flat = tensor.flatten()
+    finite_mask = torch.isfinite(flat)
+    finite_values = flat[finite_mask]
+    return {
+        "numel": flat.numel(),
+        "finite": int(finite_mask.sum().item()),
+        "nan": int(torch.isnan(flat).sum().item()),
+        "pos_inf": int((flat == float("inf")).sum().item()),
+        "neg_inf": int((flat == -float("inf")).sum().item()),
+        "finite_min": (
+            None
+            if finite_values.numel() == 0
+            else float(finite_values.min().item())
+        ),
+        "finite_max": (
+            None
+            if finite_values.numel() == 0
+            else float(finite_values.max().item())
+        ),
+    }
+
+
+def _debug_sampling_row_value(
+    tensor: torch.Tensor | None,
+    row: int,
+) -> int | float | None:
+    if tensor is None or row >= tensor.shape[0]:
+        return None
+    return tensor[row].detach().cpu().item()
+
+
+def _log_recovered_root_cause(
+    *,
+    row: int,
+    token_idx: int,
+    draft_token_ids: torch.Tensor,
+    recovered_token_ids: torch.Tensor,
+    draft_probs: torch.Tensor | None,
+    raw_target_logits: torch.Tensor | None,
+    selected_target_logits: torch.Tensor,
+    target_probs: torch.Tensor,
+    target_indices: torch.Tensor | None,
+    q: torch.Tensor | None,
+    sampling_metadata: SamplingMetadata,
+) -> None:
+    """Dump one abnormal recovered-token row without mutating sampler state."""
+    try:
+        if not 0 <= token_idx < target_probs.shape[0]:
+            logger.error(
+                "[EC-RECOVER-ROOT] diagnostic index out of range: "
+                "row=%d token_idx=%d target_rows=%d",
+                row,
+                token_idx,
+                target_probs.shape[0],
+            )
+            return
+
+        raw_logits_cpu = (
+            None
+            if raw_target_logits is None
+            else raw_target_logits[token_idx]
+            .detach()
+            .to(device="cpu", dtype=torch.float32)
+        )
+        selected_logits_cpu = (
+            selected_target_logits[token_idx]
+            .detach()
+            .to(device="cpu", dtype=torch.float32)
+        )
+        target_probs_cpu = (
+            target_probs[token_idx]
+            .detach()
+            .to(device="cpu", dtype=torch.float32)
+        )
+        q_cpu = (
+            None
+            if q is None or not 0 <= row < q.shape[0]
+            else q[row].detach().to(device="cpu", dtype=torch.float32)
+        )
+
+        if target_indices is None:
+            candidate_ids_cpu = torch.arange(
+                target_probs_cpu.numel(), dtype=torch.int64
+            )
+        else:
+            candidate_ids_cpu = (
+                target_indices[token_idx]
+                .detach()
+                .to(device="cpu", dtype=torch.int64)
+            )
+
+        if candidate_ids_cpu.shape != target_probs_cpu.shape:
+            logger.error(
+                "[EC-RECOVER-ROOT] candidate shape mismatch: "
+                "row=%d token_idx=%d candidate_shape=%s prob_shape=%s",
+                row,
+                token_idx,
+                tuple(candidate_ids_cpu.shape),
+                tuple(target_probs_cpu.shape),
+            )
+            return
+
+        draft_token_id = int(draft_token_ids[token_idx].item())
+        candidate_valid = candidate_ids_cpu >= 0
+        if draft_probs is not None:
+            candidate_valid &= candidate_ids_cpu < draft_probs.shape[1]
+
+        recovery_probs_cpu = target_probs_cpu.clone()
+        if draft_probs is None:
+            recovery_probs_cpu[candidate_ids_cpu == draft_token_id] = 0.0
+        else:
+            draft_probs_cpu = (
+                draft_probs[token_idx]
+                .detach()
+                .to(device="cpu", dtype=torch.float32)
+            )
+            candidate_draft_probs = torch.zeros_like(recovery_probs_cpu)
+            candidate_draft_probs[candidate_valid] = draft_probs_cpu[
+                candidate_ids_cpu[candidate_valid]
+            ]
+            recovery_probs_cpu = torch.clamp(
+                recovery_probs_cpu - candidate_draft_probs,
+                min=0.0,
+            )
+
+        expected_recovered_token = None
+        score_stats = _debug_tensor_stats(None)
+        if q_cpu is not None and q_cpu.shape == recovery_probs_cpu.shape:
+            score_valid = (
+                candidate_valid
+                & torch.isfinite(recovery_probs_cpu)
+                & torch.isfinite(q_cpu)
+                & (q_cpu > 0)
+            )
+            scores_cpu = torch.full_like(
+                recovery_probs_cpu, -float("inf")
+            )
+            scores_cpu[score_valid] = (
+                recovery_probs_cpu[score_valid] / q_cpu[score_valid]
+            )
+            score_stats = _debug_tensor_stats(scores_cpu)
+            if score_valid.numel() > 0 and score_valid.all():
+                best_position = int(scores_cpu.argmax().item())
+                expected_recovered_token = int(
+                    candidate_ids_cpu[best_position].item()
+                )
+
+        top_count = min(5, target_probs_cpu.numel())
+        top_candidates: list[tuple[int, float]] = []
+        if top_count > 0:
+            safe_target_probs = torch.nan_to_num(
+                target_probs_cpu,
+                nan=-float("inf"),
+                posinf=float("inf"),
+                neginf=-float("inf"),
+            )
+            top_positions = torch.topk(
+                safe_target_probs, k=top_count
+            ).indices
+            top_candidates = [
+                (
+                    int(candidate_ids_cpu[position].item()),
+                    float(target_probs_cpu[position].item()),
+                )
+                for position in top_positions
+            ]
+
+        logger.error(
+            "[EC-RECOVER-ROOT] row=%d token_idx=%d draft_id=%d "
+            "recovered_id=%d expected_recovered=%s raw_logits=%s "
+            "selected_logits=%s target_probs=%s target_prob_sum=%s "
+            "q=%s scores=%s candidate_valid=%d/%d "
+            "contains_draft=%s top_candidates=%s temperature=%s "
+            "top_k=%s top_p=%s repetition_penalty=%s",
+            row,
+            token_idx,
+            draft_token_id,
+            int(recovered_token_ids[token_idx].item()),
+            expected_recovered_token,
+            _debug_tensor_stats(raw_logits_cpu),
+            _debug_tensor_stats(selected_logits_cpu),
+            _debug_tensor_stats(target_probs_cpu),
+            float(target_probs_cpu.sum().item()),
+            _debug_tensor_stats(q_cpu),
+            score_stats,
+            int(candidate_valid.sum().item()),
+            candidate_valid.numel(),
+            bool((candidate_ids_cpu == draft_token_id).any().item()),
+            top_candidates,
+            _debug_sampling_row_value(sampling_metadata.temperature, row),
+            _debug_sampling_row_value(sampling_metadata.top_k, row),
+            _debug_sampling_row_value(sampling_metadata.top_p, row),
+            _debug_sampling_row_value(
+                sampling_metadata.repetition_penalties, row
+            ),
+        )
+    except Exception:
+        # A diagnostic must never turn an accuracy issue into a worker crash.
+        logger.exception(
+            "[EC-RECOVER-ROOT] diagnostic failed: row=%d token_idx=%d",
+            row,
+            token_idx,
+        )
+
+
 def rejection_sample(
     # [num_tokens]
     draft_token_ids: torch.Tensor,
@@ -536,6 +755,8 @@ def rejection_sample(
         if sampling_metadata.all_greedy:
             return output_token_ids[:batch_size]
 
+    recovered_debug_tensors: dict[str, torch.Tensor] = {}
+
     # For random sampling with selected logits
     # target_logits is [num_tokens, top_k*tp_size] with indices [num_tokens, top_k*tp_size]
     if target_indices is not None:
@@ -569,6 +790,7 @@ def rejection_sample(
             target_indices=target_indices,
             global_vocab_size=global_vocab_size,
             enable_reduce_sampling=True,
+            debug_tensors=recovered_debug_tensors,
         )
 
         if not using_block_verify:
@@ -712,6 +934,7 @@ def rejection_sample(
             target_indices=None,
             global_vocab_size=vocab_size,
             enable_reduce_sampling=False,
+            debug_tensors=recovered_debug_tensors,
         )
 
         if not using_block_verify:
@@ -834,6 +1057,21 @@ def rejection_sample(
                 row,
                 recovered_token_ids[start:end].tolist(),
             )
+            q = recovered_debug_tensors.get("q")
+            for token_idx in range(start, end):
+                _log_recovered_root_cause(
+                    row=row,
+                    token_idx=token_idx,
+                    draft_token_ids=draft_token_ids,
+                    recovered_token_ids=recovered_token_ids,
+                    draft_probs=draft_probs,
+                    raw_target_logits=ori_target_logits,
+                    selected_target_logits=target_logits,
+                    target_probs=target_probs,
+                    target_indices=target_indices,
+                    q=q,
+                    sampling_metadata=sampling_metadata,
+                )
 
     return output_token_ids
 
@@ -903,6 +1141,7 @@ def sample_recovered_tokens(
     target_indices: torch.Tensor | None = None,
     global_vocab_size: int | None = None,
     enable_reduce_sampling: bool = False,
+    debug_tensors: dict[str, torch.Tensor] | None = None,
 ) -> torch.Tensor:
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
@@ -921,6 +1160,11 @@ def sample_recovered_tokens(
         temp_q = torch.empty_like(q[i])
         temp_q.exponential_(generator=generator)
         q[i] = torch.where(has_draft_mask[i], temp_q, q[i])
+
+    if debug_tensors is not None:
+        # Keep a device reference only. It is copied to CPU exclusively when
+        # rejection sampling later detects an all-placeholder output row.
+        debug_tensors["q"] = q
 
     recovered_token_ids = torch.empty_like(draft_token_ids)
     if HAS_TRITON:
