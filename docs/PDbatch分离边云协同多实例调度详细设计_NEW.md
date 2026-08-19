@@ -679,7 +679,7 @@ dp=1、边 2 卡做边内 TP=2（同 §2.4 形态一模式），E=2，world 均�
 | # | 项 | 依据 |
 |---|----|------|
 | 1 | group 派生（G0-G5）按 rank 区间切分，共置无影响 | §4.2 是逻辑 rank 划分，与物理位置无关 |
-| 2 | 实例间松耦合：无集合通信跨实例，同机共置无正确性影响 | §3.2/§8 实例间无协调/无 barrier |
+| 2 | 实例间松耦合：无集合通信跨实例，同机共置无正确性影响 | §3.2/§9 实例间无协调/无 barrier |
 | 3 | 数据面 G2 / hidden channel / 2P1D per-instance 隔离 | §4.3/§4.4 per-instance 子组+池，逻辑隔离 |
 | 4 | 调度 / KV 分区 / prefill_inflight per-(instance,dp) 独立 | §3.1/§6.1/§6.4 与物理位置无关 |
 | 5 | NPU 算力/显存无竞争（**前提：卡按实例静态划分**，实例0 卡0-7、实例1 卡8-15，不共卡） | profile/KV 分配各自 8 卡 |
@@ -1810,6 +1810,8 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 
 ## 5 调度层面方案
 
+> 本章保留推导过程与备选方案分析；**最终定案规格见 §7**（实例间调度方案，自包含）。
+
 ### 5.1 两级调度总览
 
 | 层 | 机制 | 同步 |
@@ -1862,11 +1864,13 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 - **HEAD 与 TAIL 策略解耦**：HEAD 是 per-step 决策（coord 分发，2DP 一致），TAIL 是事件驱动（recv fence 就绪序），两个策略接口独立可插拔
 - TAIL 侧任何策略必须遵守三条硬约束：实例内保序、2DP lockstep、队首不跳队--策略只能在「实例间先后」上做选择
 - 与 §3.11 状态源打通（InstanceLoadStats 复用），扩展时只加策略实现、不动分发通道
-- **2026-08 定案**：HEAD 策略 = ArrivalFIFO（原始请求全局按谁先来，替代 v1 InOrder 轮转）；TAIL 策略 = RecvReadyFirst 且 **DRL 提为全局最高优先**（详见 §5.1.1）；另设备选 **§5.1.2 方案 1**（两阶段：实例内单实例逻辑 + 实例间薄仲裁，首尾决策=全局 prefill 在途个数）
+- **2026-08 定案（最终收口）**：实例间调度采用**全局调度**路线（§5.1.1 详案 = §5.1.3 方案 2 的一组旋钮实例化）--所有实例的 running/waiting/尾 ready 队列进同一全局视图决策；**两阶段结构**：Stage A 用「单实例策略的全局化扩展」决策**调度什么**（单实例看自己状态，多实例看全部实例聚合状态，策略同源），Stage B 按序键选**调度哪个实例**（尾类 = ready 时间、首段 = 请求到达时间 original_seq）；**MTP 尾（DRL）全局最优先**（其上仅 per-instance 链完整性不变量的插队例外，见 §5.1.1）。HEAD 策略 = ArrivalFIFO、TAIL 策略 = RecvReadyFirst + DRL 全局最高，均落在 §5.1 预留可插拔位。**§5.1.2 方案 1（薄仲裁）降级为未采用备选**
 
 #### 5.1.1 实例间调度次序（2026-08 定案：全局视图 + DRL 优先 + ready-first 尾 + arrival-FIFO 首段）
 
 **需求语义**：所有实例的 running/waiting 等队列一起调度；MTP 尾（DRL）优先；PL/DL 尾按实例谁先 ready 谁先；原始请求（首段）实例间按谁先来。
+
+**两阶段决策结构（2026-08 定案表述，等价于下方 S0/S1 的结构化说法）**：**Stage A「调度什么」**--单实例策略（水位状态机、层间次序、delay 窗、准入门）原样泛化到全局聚合状态上跑：单实例 = 只看自己的 running/waiting/尾 ready，多实例 = 看全部 N 份合并后的视图，策略本体同源扩展（三类形态：序合并 / per-instance 过滤器 / 聚合量+阈值，见 §5.1.3 模式 A/B/C）；**Stage B「调度哪个实例」**--层定了之后按序键选实例：尾类 = ready 时间（per-instance D-dp AND，取较晚 dp），首段 = 请求到达时间（original_seq，已是全局计数器）。running 队列不进合并序，以准入门过滤器（per-instance 保留）+ 水位计数聚合（进 Stage A）两种形态参与。插队例外（占位 D首/first_only 窗）在 DRL 之上，是 per-instance 链完整性不变量（模式 C），非策略层。
 
 **现状基线复用**（均代码核实，pd_separated_scheduler.py）：
 - 尾 ready 队列：每实例 3 条 deque（prefills/decodes/drafts_last_ready，:226-228），SO 预构建、EngineCore 从云返回填入 -> leader 聚合 N×3 条即天然全局视图；
@@ -1949,7 +1953,7 @@ inst_i = [edge_cnt + Σ(prev_sizes), + size_i)
 └─────────────────┴─────────────────────────────┴─────────────────────────────────┘
 ```
 
-#### 5.1.2 实例间调度次序·方案 1（2026-08 另设：两阶段 = 实例内单实例逻辑 + 实例间薄仲裁；与 §5.1.1 并列备选）
+#### 5.1.2 实例间调度次序·方案 1（2026-08 另设；**同月定案收口后未采用，留档备查**：两阶段 = 实例内单实例逻辑 + 实例间薄仲裁，输给 §5.1.1 全局调度路线）
 
 **设计原则**：per-instance 调度逻辑**零改动**直接复用单实例代码；实例间只加一层薄仲裁。不再建全局合并 waiting 索引（首段"谁先来"只需各实例 waiting 队首的 original_seq 取 min）。
 
@@ -2074,6 +2078,8 @@ force 机制出 SO（本地候选不一致时强制对齐/出 dummy，现有 2DP
 - **K5** delay 窗全局语义（per-instance 保留 vs 全局错峰）
 - **K6** MTP 链推进自由度（chain-aware vs 纯 ready 序）
 - 附加：running 容量配额（均分 vs 全局共享）、dp1 摘要载体
+
+**旋钮定值（2026-08 定案收口，全局调度路线确认时一并落定）**：K1 = 水位状态机全局泛化（全局 IDLE/HIGH，防饿语义保留 + 首段年龄阈值兜底）；K2 = **类型主序全局保留，DRL 全局最高**（DRL > DRF > DL > DF > PL，层内才比实例）；K3 = original_seq 全局 FIFO（首段实例选择 = 请求到达时间）；K4 = ready 时间（尾实例选择，D-dp AND 取较晚 dp）；K5 = per-instance 保留（10ms 各自计时）；K6 = per-instance 不变量保留 + 链龄监控兜底（tail-wait age 进 InstanceLoadStats）。即 §5.1.1 就是本框架在这些定值下的实例化，方案 1（决策分布 + 薄仲裁）路线未采用。
 
 ### 5.2 调度层计算/通信分离（核心改造）
 
@@ -2507,7 +2513,7 @@ dummy 走 instance i 的 channel 池（§4.4 per-(instance,dp) 池隔离）。co
 | 全池共享地址空间、各实例 manager 独立分配 | ✗（**正确性**） | block id 冲突：实例0/1 同时分配 id=5 -> 同一物理块双写，KV 串台 |
 | 全池共享 + 原子分配器 + 全局引用计数 + 水位全取 C_b、无准入协调 | △ 勉强成立 | 分配失败 -> 本实例自 preemption 兜底，但代价见下 |
 
-第三种形态的代价：① 共享 free-list/引用计数跨实例并发安全 = KVCacheManager per-EngineCore 的**结构性改动**（§7.3 “最大风险”原封不动，只是砍掉准入层没砍深水区主体）；② 过载靠 preemption 兜底：decode 中断重算、尾延迟抖动、被挤实例随机；③ 公平性无保障（长上下文大户占满全池，其他实例进 preemption 循环）；④ prefix cache 变全局共享（跨实例命中是收益，但 §6.5 KV 不迁移 + 网关 prefix 亲和口径需重核）。
+第三种形态的代价：① 共享 free-list/引用计数跨实例并发安全 = KVCacheManager per-EngineCore 的**结构性改动**（§8.3 “最大风险”原封不动，只是砍掉准入层没砍深水区主体）；② 过载靠 preemption 兜底：decode 中断重算、尾延迟抖动、被挤实例随机；③ 公平性无保障（长上下文大户占满全池，其他实例进 preemption 循环）；④ prefix cache 变全局共享（跨实例命中是收益，但 §6.5 KV 不迁移 + 网关 prefix 亲和口径需重核）。
 
 **结论**：“不做准入共享 + 云侧 block 生效” = 过载时无人让步，数学上必翻车；边 32G 时 v1 维持 min 汇聚取边侧（限制的是单实例边侧 KV 窗口，总吞吐由 N 补偿；单实例窗口不够的正交手段是降 N）。
 
@@ -2573,9 +2579,113 @@ dp=2 不影响 R（边云 per-dp 同除）。
 
 ---
 
-## 7 open items / 风险
 
-### 7.1 已决（v1）
+## 7 实例间调度方案（定案规格）
+
+> 本章是实例间调度的**最终方案规格**（自包含，可直接作为实现依据）。实现细节的推导过程、被否决的备选路线与风险分析见 §5.1/§5.1.1-§5.1.3。
+
+### 7.1 总则
+
+两级调度结构：
+
+| 层 | 机制 | 同步 |
+|----|------|------|
+| 实例间（N） | 全局调度（本章）：单点决策 (instance_id, batch_type)，每 step 一次 | as-arrived，无跨实例 barrier |
+| 实例内（D） | coord batch_type 协调 + lockstep（现有机制不变） | lockstep |
+
+- **决策单点**：leader = dp0。每 step 由 leader 提议 `(instance_id, batch_type)`，经 §3.4 all_reduce 分发；follower dp 不做实例间决策，按分发结果用现有 force 机制对齐出 SO，本 dp 无工作出 dummy。
+- **决策与分发解耦于请求亲和**：请求进哪个实例的队列由前端 pin 决定（§3.12，`instance_id = client_index`）；本章只决定「何时调度哪个实例的什么」。
+
+### 7.2 全局视图
+
+leader 维护全部 N 个实例的下列状态（per-instance scheduler 只出候选/指针，簿记仍在原处，不上收）：
+
+| 状态 | 形态 | 来源 |
+|---|---|---|
+| 尾 ready 队列 ×3（prefills / decodes / drafts_last_ready） | **序合并**：N×3 条 deque 聚合，带 ready 时间戳 | 云返回驱动，recv fence 就绪（§5.2 COMM_RECV） |
+| waiting 队列 | **序合并**：按 original_seq 建全局合并索引（只建指针，不迁移请求）；original_seq 为全局计数器 | 请求到达 |
+| running 簿记 | **不合并**：per-instance 保留，以两种方式参与决策（准入门过滤器、水位计数） | 现有簿记 |
+| chunked prefill 在途计数 | **聚合量**：全局水位输入 | per-instance 计数求和/求全态 |
+
+**尾 ready 判定**：per-instance、per-dp AND（该实例全部 dp 的 recv fence 完成才算 ready）；ready 时间戳取各 dp 中较晚者。dp1 的 ready 位经 §3.4 all_reduce payload 捎带 N-bit bitmap（不新增通道）。
+
+### 7.3 两阶段决策
+
+**Stage A「调度什么」**--单实例策略泛化到全局聚合状态上运行（策略同源：单实例看自己一份状态，多实例看 N 份合并视图）：
+
+层间优先级（自上而下，首个有候选的层胜出）：
+
+| 序 | 层 | 说明 |
+|---|---|---|
+| 1 | 插队例外 | 占位 D首（DRL 后紧跟的 verify 占位）、`first_only` 保留窗内的 D首/DR首；per-instance 链完整性不变量，跨实例按各自触发序 |
+| 2 | 首段 PF（仅全局 IDLE） | 全局 IDLE = 所有实例 chunked prefill 在途数为 0；waiting 全局队首的 PF 最优先（防饿语义） |
+| 3 | DRL（MTP 尾） | **全局最高优先的常规层，任何水位下先于一切其他首段与尾** |
+| 4 | DRF（MTP 首/draft） | 受 per-instance 交替不变量约束（DRF 在飞禁再发 DRF） |
+| 5 | DL（decode 尾） | |
+| 6 | DF（decode 首） | |
+| 7 | PL（prefill 尾） | |
+
+全局 HIGH（任一实例 chunked prefill 在飞）：跳过第 2 层，从插队例外/DRL 起向下。
+
+**Stage B「调度哪个实例」**--层内按序键选实例：
+
+| 层类 | 实例选择键 |
+|---|---|
+| 尾类（DRL / DL / PL） | **ready 时间最早**（D-dp AND 后取较晚 dp 的时间戳）；并列按层序再按 instance_id（确定性 tie-break） |
+| 首段（PF / DF / DRF） | **请求到达时间**：original_seq 全局 FIFO；首段落到其 pin 实例 |
+
+### 7.4 全局化规则（单实例机制 -> 多实例形态）
+
+| 单实例机制 | 多实例形态 |
+|---|---|
+| 尾优先级 DRL>DL>PL、首段层序 | 层间次序全局保留（§7.3 表），实例比较只在层内 |
+| 尾 ready deque ×3 | N 份序合并，合并键 = ready 时间 |
+| waiting FIFO | N 份序合并，合并键 = original_seq |
+| 水位状态机（inflight vs limit） | 全局水位：全局 IDLE / HIGH 定义见 §7.3；首段年龄阈值兜底（见 §7.6） |
+| running 准入门（max_num_running_reqs） | per-instance 原样保留，作为全局决策的**过滤器** |
+| DL/DRL delay 窗（10ms） | per-instance 各自计时，窗内视为未 ready |
+| decode/draft 单飞门 | per-instance 原样保留（计数不跨实例合并） |
+| chunked prefill 状态机 | per-instance 原样保留；续 chunk 必须 pin 原实例 |
+
+### 7.5 硬约束（任何策略不可违反）
+
+1. **实例内保序**：token 序 + 与云 bt 配对，队首不跳队；
+2. **2DP lockstep**：2DP fence 都 ready 才 forward（ready = per-instance D-dp AND）；
+3. **尾批不可丢弃/取消**：尾 SO 是云已算完的接收侧（KV 已写），ready 后必须最终被调度；
+4. **请求不迁移**：chunked 续 chunk、MTP 链、decode 全程 pin 原实例；
+5. **MTP 链不变量**：DRF->DRL 交替（`_force_draft_last`）、占位 D首紧跟 DRL、pregenerated 严格 FIFO--全部 per-instance。
+
+### 7.6 兜底与无候选
+
+- **首段年龄阈值 T**：任一水位下，全局 waiting 队首等待超 T 强制调度 PF（防个别实例长 chunk 频繁打破全局 IDLE 造成首段饿死）；
+- **尾链龄监控**：per-instance tail-wait age 进 InstanceLoadStats（§3.11），超龄 DL 可先于新 DRL（防 MTP 链串行阻塞扩散为跨实例停顿）；
+- **队头阻塞有界跳过**：全局 FIFO 队首 pin 实例不可调度（KV 满/长 chunk 占用）时，最多跳过 K 个候选，不会全局卡死；
+- **无候选**：coord EMPTY + sleep 等云（不 self-drive dummy）。
+
+### 7.7 算法伪代码
+
+```
+每 step（leader dp0）：
+  S0  聚合：N×3 尾 ready 队列（ready ts）+ waiting 全局索引（original_seq）
+      + dp1 捎带的 N-bit ready bitmap（per-instance D-dp AND 后）
+  S1  Stage A（层间首个有候选者胜出）：
+      1 插队例外（占位D首 / first_only 窗）          -- 不变量层
+      2 if 全局 IDLE: 全局 waiting 队首 PF           -- 防饿
+      3 DRL（delay 窗外） -> 4 DRF（交替不变量内）
+      -> 5 DL -> 6 DF -> 7 PL
+  S2  Stage B（层内选实例）：
+      尾类  = argmin_i ready_ts[i]（D-dp AND，取较晚 dp）
+      首段  = argmin original_seq（落 pin 实例；不可调度则有界跳过 K 个）
+  S3  提议 (instance_id, bt) -> all_reduce 分发
+      follower：force 对齐出 SO / 无工作出 dummy
+  S4  无候选 -> coord EMPTY + sleep 等云
+```
+
+---
+
+## 8 open items / 风险
+
+### 8.1 已决（v1）
 
 | # | 项 | 决定 |
 |---|----|------|
@@ -2585,7 +2695,7 @@ dp=2 不影响 R（边云 per-dp 同除）。
 | - | 实例配置形态（2026-08） | **显式实例配置**（§2.1）：`--instance-parallel-size`（N 总数，边云三侧同值）+ `--instance-parallel-start-rank`（实例编号，云侧 0..N-1）；nnodes 恒 2、node_rank 回归边/云角色，三轴正交（node_rank × instance-start-rank × dp-start-rank）；原「node_rank 推导/节点维度=实例维度/一机多逻辑 node-rank」口径作废 |
 | - | 边侧前端形态（2026-08） | **一实例一 API 端点 + 上游网关选实例**（§3.12）：`--api-server-count N` + 每子进程独立监听端口，`instance_id = client_index` 请求自带 pin；InstanceDispatcher 默认策略 RequestPinned；dp>1 = 「端点定实例、负载定 dp」（ApiServer=N，dp 归前端 internal LB，§3.12.1 场景四），方案 c 的 all_reduce 保留为 2DP 协调通道 |
 
-### 7.2 待后续
+### 8.2 待后续
 
 | # | 项 | 说明 |
 |---|----|------|
@@ -2600,7 +2710,7 @@ dp=2 不影响 R（边云 per-dp 同除）。
 | - | 边侧 KV 动态配额（v1.x 候选，2026-08） | 软分区 + 借用：静态 id 分区不变、只读占用计数共享、向空闲实例借配额抬水位，失败退回静态（§6.2.1）；前置 = 实测分区不够且单实例窗口真实成瓶颈；完整 §6.2 共享池仍为最终演进 |
 | - | 网关负载/KV 感知（2026-08） | v1 网关纯 LB（轮询/最小连接数）；v1.x = §3.5 前端发布扩 instance_id + 端点 metrics，网关 least-loaded / prefix 亲和（§3.12 风险 #2、§1.4 问题 1 的完整落点）；网关请求级分发为部署硬约束 |
 
-### 7.3 风险性质汇总
+### 8.3 风险性质汇总
 
 | 风险 | 性质 | 说明 |
 |------|------|------|
@@ -2618,7 +2728,7 @@ dp=2 不影响 R（边云 per-dp 同除）。
 
 ---
 
-## 8 与现有边云 DP 工作的正交性
+## 9 与现有边云 DP 工作的正交性
 
 多实例调度与现有边云 DP 工作**正交**：
 
