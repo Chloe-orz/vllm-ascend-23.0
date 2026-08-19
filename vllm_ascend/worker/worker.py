@@ -1644,14 +1644,46 @@ class NPUWorker(WorkerBase):
             req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
         )
 
+    def _dummy_draft_head_payload(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> IntermediateTensors:
+        """Zero payload matching the scheduled-draft e2c wire shape.
+
+        Used for dead draft chains (all covered requests finished or were
+        aborted): the draft context is already gone, but the cloud's
+        pre-posted recv and the channel's seqno sequence must still be
+        satisfied — zeros need no context.
+        """
+        meta = self._scheduled_draft_tensor_meta(scheduler_output, "e2c")
+        if meta is None:
+            raise RuntimeError(
+                "dummy draft head payload requires a static draft wire "
+                "meta (unavailable with SP/dynamic draft transport)"
+            )
+        metas = dict(meta.metadata_list)
+        tensor_dict = {}
+        for key in meta.send_tensor_keys:
+            tm = metas[key]
+            tensor_dict[key] = torch.zeros(
+                tm.size, dtype=tm.dtype, device=self.device
+            )
+        return IntermediateTensors(tensor_dict)
+
     def _execute_model_edge_draft_head(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput:
         """Run and send one edge-side scheduled draft first segment."""
         logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
-        output = self.model_runner._run_edge_cloud_draft_first_segment(
-            scheduler_output
-        )
+        if scheduler_output.draft_chain_dead:
+            # Dead chain (all covered requests finished/aborted): skip the
+            # draft forward — its context is gone — and send zeros of the
+            # exact wire shape so the channel seqno sequence and the
+            # cloud's pre-posted recvs stay paired.
+            output = self._dummy_draft_head_payload(scheduler_output)
+        else:
+            output = self.model_runner._run_edge_cloud_draft_first_segment(
+                scheduler_output
+            )
         if not isinstance(output, IntermediateTensors):
             raise RuntimeError("DRAFT_FIRST did not produce intermediates")
         if get_pp_group().world_size == 2:

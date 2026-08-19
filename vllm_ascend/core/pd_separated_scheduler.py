@@ -298,6 +298,13 @@ class PDSeparatedScheduler(Scheduler):
         # request, then re-emit it on the next published batch.
         self._cloud_withheld_finished_req_ids: set[str] = set()
         self._cloud_released_finished_req_ids: set[str] = set()
+        # Draft chains whose covered requests have ALL finished/aborted.
+        # Dead chains are never dropped mid-flight: their comm seqnos were
+        # reserved and their recvs pre-posted at parent publish time, so
+        # dropping a queued step would leave a hole on the channel and
+        # stall every later chain.  The worker drains the remaining steps
+        # with dummy payloads (draft_chain_dead=True on the SO).
+        self._dead_draft_task_ids: set[str] = set()
 
     def invalidate_cloud_draft_tasks(self, task_ids: list[str]) -> None:
         """Queue cloud-side draft metadata invalidations (edge only)."""
@@ -839,7 +846,19 @@ class PDSeparatedScheduler(Scheduler):
             self.decodes_first_ready
             and self.draft_remote_pending_count == 0
         ):
-            return self.decodes_first_ready.popleft()
+            placeholder = self.decodes_first_ready.popleft()
+            # The placeholder was pre-built at chain end without a comm
+            # seqno (a drop in the window would have left a hole on the
+            # channel); stamp it now, at dispatch time, along with its
+            # self-posted DECODE_LAST copy.
+            placeholder.comm_seqno = self._decode_comm_seqno
+            self._decode_comm_seqno += 1
+            self._reserve_draft_seqnos(placeholder)
+            for tail in self.decodes_last_ready:
+                if tail.head_token == placeholder.head_token:
+                    tail.comm_seqno = placeholder.comm_seqno
+                    break
+            return placeholder
 
         if ready_only:
             first_only = self._pick_decode_or_draft_first_only_or_empty()
@@ -1438,33 +1457,23 @@ class PDSeparatedScheduler(Scheduler):
         while self.drafts_first_ready:
             scheduler_output = self.drafts_first_ready.popleft()
             if self._is_stale_draft_output(scheduler_output):
+                # Never drop a stale DRAFT_FIRST: its comm seqno was
+                # reserved and its recvs were pre-posted when the parent
+                # batch was published, so dropping it would leave a hole
+                # on the channel and stall every later chain.  Drain the
+                # chain with dummy payloads instead (draft_chain_dead):
+                # the draft context is gone, but zeros need no context.
+                scheduler_output.draft_chain_dead = True
                 if scheduler_output.draft_task_id:
-                    self._pregenerated_draft_task_ids.discard(
+                    self._dead_draft_task_ids.add(
                         scheduler_output.draft_task_id
                     )
-                    self._pregenerated_draft_req_ids.pop(
-                        scheduler_output.draft_task_id, None
-                    )
-                    self._reserved_draft_seqno_base.pop(
-                        scheduler_output.draft_task_id, None
-                    )
-                    # Report the cut chain so EngineCore can release the
-                    # retained KV blocks and invalidate the cloud-side
-                    # cached draft metadata (which will never be fully
-                    # consumed now).
-                    self._dropped_draft_task_ids_to_report.append(
-                        scheduler_output.draft_task_id
-                    )
-                if scheduler_output is self._draft_first_cloud_publish_pending:
-                    self._draft_first_cloud_publish_pending = None
-                    self._draft_first_scalars_patched = False
-                    self._draft_first_dispatched = False
                 logger.info(
-                    "[PD] drop stale DRAFT_FIRST task_id=%s step=%s",
+                    "[PD] stale DRAFT_FIRST drains as dummy: task_id=%s "
+                    "step=%s",
                     scheduler_output.draft_task_id,
                     scheduler_output.draft_step_idx,
                 )
-                continue
             break
         else:
             return self._make_empty_batch()
@@ -1478,6 +1487,11 @@ class PDSeparatedScheduler(Scheduler):
         scheduler_output.batch_type = BatchType.DRAFT_FIRST
         if scheduler_output.head_token is None:
             scheduler_output.head_token = uuid4().hex
+        # Dead-chain drain: every remaining step of a chain whose requests
+        # all finished executes with dummy payloads (see the stale branch
+        # above and _drop_stale_drafts_for_req_ids).
+        if scheduler_output.draft_task_id in self._dead_draft_task_ids:
+            scheduler_output.draft_chain_dead = True
         # The chain's seqno range was reserved at parent PF/DF pick time
         # (draft_seqno_base on the parent SO); steps consume
         # base + draft_step_idx so the pre-posted recv requests match.
@@ -1608,13 +1622,19 @@ class PDSeparatedScheduler(Scheduler):
         ):
             return
         req_ids = list(target_tail.num_scheduled_tokens)
-        if not req_ids or any(
-            req_id not in self.requests for req_id in req_ids
-        ):
+        if not req_ids:
             return
         task_id = target_tail.head_token
         if not task_id:
             return
+        # Requests genuinely gone (aborted before the parent tail was
+        # processed): the chain can never produce real payloads, but its
+        # reserved seqnos and pre-posted recvs must still be consumed —
+        # pre-generate the chain as dead; the worker drains it with dummy
+        # payloads.
+        chain_dead = any(req_id not in self.requests for req_id in req_ids)
+        if chain_dead:
+            self._dead_draft_task_ids.add(task_id)
 
         for step_idx in range(self.num_spec_tokens):
             draft_first = replace(
@@ -1627,6 +1647,7 @@ class PDSeparatedScheduler(Scheduler):
                 draft_prefill_phase=(
                     target_tail.batch_type == BatchType.PREFILL_LAST
                 ),
+                draft_chain_dead=chain_dead,
                 num_accepted_tokens=None,
                 valid_sampled_token_count=None,
             )
@@ -1712,18 +1733,17 @@ class PDSeparatedScheduler(Scheduler):
         are derived directly from the completed DRAFT_LAST.
         """
         req_ids = list(source.num_scheduled_tokens)
-        # With KV retention, finished requests stay in self.requests until
-        # their draft chain releases them, so this refusal only fires when
-        # a request is genuinely gone (e.g. aborted before the parent
-        # output was processed).  The chain then can never (fully) run:
-        # report the task so EngineCore releases the retained KV blocks
-        # and invalidates the cloud-side cached metadata.
-        if not req_ids or any(
-            req_id not in self.requests for req_id in req_ids
-        ):
-            if draft_task_id:
-                self._dropped_draft_task_ids_to_report.append(draft_task_id)
+        if not req_ids:
             return False
+        # With KV retention, finished requests stay in self.requests until
+        # their draft chain releases them, so requests being genuinely gone
+        # (e.g. aborted before the parent output was processed) means the
+        # chain can never produce real payloads.  Enqueue the step as a
+        # dead-chain dummy anyway: its comm seqno is reserved and its
+        # recvs pre-posted, and the worker drains it with zeros.
+        chain_dead = any(req_id not in self.requests for req_id in req_ids)
+        if chain_dead and draft_task_id:
+            self._dead_draft_task_ids.add(draft_task_id)
 
         draft_first = replace(
             source,
@@ -1739,6 +1759,7 @@ class PDSeparatedScheduler(Scheduler):
                 if source.batch_type == BatchType.DRAFT_LAST
                 else source.batch_type == BatchType.PREFILL_LAST
             ),
+            draft_chain_dead=chain_dead,
             num_accepted_tokens=num_accepted_tokens,
             valid_sampled_token_count=valid_sampled_token_count,
         )
@@ -1871,7 +1892,7 @@ class PDSeparatedScheduler(Scheduler):
             # path schedules the verify instead.
             return
 
-        next_decode = self._pick_decode_first_batch()
+        next_decode = self._pick_decode_first_batch(defer_seqno=True)
         if (
             next_decode is not None
             and next_decode.batch_type == BatchType.DECODE_FIRST
@@ -2024,25 +2045,26 @@ class PDSeparatedScheduler(Scheduler):
         # attention metadata is whole-batch and cannot be re-sliced.
         # Dropped task ids are reported to the runner (which may still
         # hold the enqueued context) via take_dropped_draft_task_ids().
-        kept_first: deque[SchedulerOutput] = deque()
+        # Never drop queued DRAFT_FIRSTs of finished requests: their comm
+        # seqnos were reserved and their recvs pre-posted at parent publish
+        # time, so a drop would leave holes on the channel and stall every
+        # later chain.  Mark the chain dead instead — the worker drains
+        # the remaining steps with dummy payloads, the reserved seqnos get
+        # consumed, and the pre-posted recvs pair off normally.
         for output in self.drafts_first_ready:
             if (
                 self._scheduler_output_intersects_req_ids(output, req_ids)
                 and self._scheduler_output_all_requests_finished(output)
             ):
-                task_id = output.draft_task_id
-                if task_id is not None:
-                    self._pregenerated_draft_task_ids.discard(task_id)
-                    self._pregenerated_draft_req_ids.pop(task_id, None)
-                    self._reserved_draft_seqno_base.pop(task_id, None)
-                    self._dropped_draft_task_ids_to_report.append(task_id)
-                if output is self._draft_first_cloud_publish_pending:
-                    self._draft_first_cloud_publish_pending = None
-                    self._draft_first_scalars_patched = False
-                    self._draft_first_dispatched = False
-            else:
-                kept_first.append(output)
-        self.drafts_first_ready = kept_first
+                output.draft_chain_dead = True
+                if output.draft_task_id is not None:
+                    self._dead_draft_task_ids.add(output.draft_task_id)
+                logger.info(
+                    "[PD] mark draft chain dead (drain as dummies): "
+                    "task_id=%s step=%s",
+                    output.draft_task_id,
+                    output.draft_step_idx,
+                )
 
         self.decodes_first_ready = deque(
             output
@@ -2099,11 +2121,13 @@ class PDSeparatedScheduler(Scheduler):
         self, scheduler_output: SchedulerOutput
     ) -> bool:
         # A draft output is stale when EVERY backing request has finished.
-        # This drives the DRAFT_FIRST skip in _pick_draft_first_batch:
-        # once all owning requests are gone, future (not-yet-dispatched)
-        # draft heads must not be picked -- the edge can no longer produce
-        # their payload (the draft context was cleared on finish/abort) and
-        # the cloud would be left waiting for data that never arrives.
+        # This drives the DRAFT_FIRST dead-chain marking in
+        # _pick_draft_first_batch: once all owning requests are gone, the
+        # edge can no longer produce a real payload (the draft context was
+        # cleared on finish/abort), so the remaining steps drain as dummies
+        # (draft_chain_dead) -- they are never dropped, because their comm
+        # seqnos were reserved and their recvs pre-posted at parent publish
+        # time, and a drop would hole the channel.
         # Partial finishes keep the draft alive: the cloud-side cached
         # attention metadata is whole-batch and cannot be re-sliced, so the
         # chain runs to completion and the dead rows' draft tokens are
@@ -2180,7 +2204,9 @@ class PDSeparatedScheduler(Scheduler):
                 cached_reqs.all_token_ids[req_id] = (
                     self.requests[req_id].cached_all_token_ids_np)
 
-    def _pick_decode_first_batch(self) -> SchedulerOutput:
+    def _pick_decode_first_batch(
+        self, defer_seqno: bool = False
+    ) -> SchedulerOutput:
         if not self.running:
             return self._make_empty_batch()
 
@@ -2207,9 +2233,15 @@ class PDSeparatedScheduler(Scheduler):
                 else:
                     scheduler_output.batch_type = BatchType.DECODE_FIRST
                     scheduler_output.head_token = uuid4().hex
-                    scheduler_output.comm_seqno = self._decode_comm_seqno
-                    self._decode_comm_seqno += 1
-                    self._reserve_draft_seqnos(scheduler_output)
+                    # Placeholder verify DFs are pre-built behind a draft
+                    # chain and may be dropped before dispatch; stamping
+                    # their comm_seqno at creation would leave a hole on
+                    # the channel.  defer_seqno defers the stamp (and the
+                    # draft-chain reservation) to the pop in _pick_by_state.
+                    if not defer_seqno:
+                        scheduler_output.comm_seqno = self._decode_comm_seqno
+                        self._decode_comm_seqno += 1
+                        self._reserve_draft_seqnos(scheduler_output)
                     self._ensure_cached_all_token_ids(scheduler_output)
                     self.decode_or_draft_inflight_count += 1
                     self.decode_head_inflight_count += 1
