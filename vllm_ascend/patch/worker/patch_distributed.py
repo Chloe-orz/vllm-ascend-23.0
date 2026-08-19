@@ -439,20 +439,27 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         torch.distributed.new_group creates the process-group bookkeeping
         only; the HCCL communicator (streams, buffers, links) is allocated
-        lazily on first communication.  To make the memory measurement
-        meaningful, exchange a tiny tensor on every dummy channel and log
-        the NPU memory delta.
+        lazily on first communication, so without this warmup the dummy
+        channels would occupy almost no device memory and the measurement
+        would be meaningless.
 
-        The edge-cloud interconnect (edge host-RDMA NIC <-> cloud NPU NIC)
-        only supports P2P send/recv -- collectives such as all_reduce are
-        NOT supported on it.  So each dummy channel is warmed with an
-        isend/irecv ring over the group members: group-rank r exchanges a
-        tensor with (r+1) % world_size, exactly like the first-use
-        rendezvous of a real hidden channel.  Every rank posts both ops
-        before waiting, and all ranks iterate the groups in the same
-        order, so the ring cannot deadlock.
+        Mirrors warmup_edge_cloud_hidden_channels(): the edge-cloud RDMA
+        link only supports P2P (no collectives such as all_reduce) and is
+        only reachable between edge card 0 and cloud card 0 (group ranks 0
+        and 1 in the 2P1D layout).  So per dummy channel only rank 0 and
+        its peer exchange a tiny tensor, in both directions, in a fixed
+        global order (0 -> peer, then peer -> 0) so the two sides never
+        rendezvous on mismatched ops.  All ranks iterate the channels in
+        the same order; non-participating ranks skip the P2P entirely.
         """
         if not self._dummy_device_groups or self.world_size <= 1:
+            return
+        if self.world_size != 2:
+            logger.warning(
+                "[PP Group] dummy-channel warmup skipped: PP group size=%s, "
+                "expected 2 (edge card0 <-> cloud card0 only)",
+                self.world_size,
+            )
             return
 
         def _npu_mem_free_mb() -> float | None:
@@ -463,35 +470,42 @@ class GroupCoordinatorPatch(GroupCoordinator):
                 return None
 
         free_before = _npu_mem_free_mb()
-        dst = (self.rank_in_group + 1) % self.world_size
-        src = (self.rank_in_group - 1) % self.world_size
+        rank = self.rank_in_group
+        peer = 1
         for i, device_group in enumerate(self._dummy_device_groups, start=1):
-            send_tensor = torch.zeros(
-                8, dtype=torch.bfloat16, device="npu"
-            )
-            recv_tensor = torch.zeros(
-                8, dtype=torch.bfloat16, device="npu"
-            )
-            send_handle = torch.distributed.isend(
-                send_tensor, dst=dst, group=device_group
-            )
-            recv_handle = torch.distributed.irecv(
-                recv_tensor, src=src, group=device_group
-            )
-            send_handle.wait()
-            recv_handle.wait()
-            free_now = _npu_mem_free_mb()
-            if free_before is not None and free_now is not None:
-                logger.error(
-                    "[PP Group] pp_dummy%d warmed up: cumulative HCCL "
-                    "device-memory cost of %d dummy channels = %.1f MB",
-                    i, i, free_before - free_now,
-                )
-            else:
-                logger.error(
-                    "[PP Group] pp_dummy%d warmed up (mem_get_info "
-                    "unavailable)", i,
-                )
+            # Both directions in a fixed global order (edge -> cloud, then
+            # cloud -> edge), matching warmup_edge_cloud_hidden_channels.
+            for sender_rank, receiver_rank in ((0, peer), (peer, 0)):
+                handles = []
+                if rank == sender_rank:
+                    send_tensor = torch.zeros(
+                        8, dtype=torch.bfloat16, device="npu"
+                    )
+                    handles.append(torch.distributed.isend(
+                        send_tensor, dst=receiver_rank, group=device_group
+                    ))
+                elif rank == receiver_rank:
+                    recv_tensor = torch.zeros(
+                        8, dtype=torch.bfloat16, device="npu"
+                    )
+                    handles.append(torch.distributed.irecv(
+                        recv_tensor, src=sender_rank, group=device_group
+                    ))
+                for handle in handles:
+                    handle.wait()
+            if rank in (0, peer):
+                free_now = _npu_mem_free_mb()
+                if free_before is not None and free_now is not None:
+                    logger.error(
+                        "[PP Group] pp_dummy%d warmed up: cumulative HCCL "
+                        "device-memory cost of %d dummy channels = %.1f MB",
+                        i, i, free_before - free_now,
+                    )
+                else:
+                    logger.error(
+                        "[PP Group] pp_dummy%d warmed up (mem_get_info "
+                        "unavailable)", i,
+                    )
 
     @property
     def alt_device_group(self) -> torch.distributed.ProcessGroup | None:
