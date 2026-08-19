@@ -2261,33 +2261,6 @@ class NPUModelRunner(GPUModelRunner):
                 or correction.generation != latest_generation
                 or correction.num_draft_tokens != num_draft
             ):
-                logger.error(
-                    "[EC-MTP-CORR] consume failed: req=%s batch_type=%s "
-                    "reason=%s expected_num_draft=%d correction_task=%s "
-                    "correction_generation=%s latest_generation=%s "
-                    "correction_num_draft=%s pending_reqs=%s",
-                    req_id,
-                    scheduler_output.batch_type,
-                    (
-                        "missing"
-                        if correction is None
-                        else (
-                            "generation_mismatch"
-                            if correction.generation != latest_generation
-                            else "num_draft_mismatch"
-                        )
-                    ),
-                    num_draft,
-                    None if correction is None else correction.task_id,
-                    None if correction is None else correction.generation,
-                    latest_generation,
-                    (
-                        None
-                        if correction is None
-                        else correction.num_draft_tokens
-                    ),
-                    tuple(self._cloud_pending_request_corrections),
-                )
                 return False
 
             req_index = self.input_batch.req_id_to_index[req_id]
@@ -2298,15 +2271,12 @@ class NPUModelRunner(GPUModelRunner):
                 correction.optimistic_num_computed_tokens,
                 correction.actual_num_computed_tokens,
             ):
-                logger.error(
-                    "[EC-MTP-CORR] consume failed: "
-                    "reason=cpu_state_mismatch req=%s task=%s "
-                    "generation=%d num_draft=%d cpu=%d optimistic=%d "
-                    "actual=%d",
+                logger.warning(
+                    "Cloud request correction does not match scheduler "
+                    "state; leaving the request-keyed correction pending: "
+                    "req=%s task=%s cpu=%d optimistic=%d actual=%d",
                     req_id,
                     correction.task_id,
-                    correction.generation,
-                    correction.num_draft_tokens,
                     cpu_value,
                     correction.optimistic_num_computed_tokens,
                     correction.actual_num_computed_tokens,
@@ -2326,16 +2296,6 @@ class NPUModelRunner(GPUModelRunner):
                 correction.num_accepted_tokens
             )
             self._cloud_pending_request_corrections.pop(req_id, None)
-            logger.debug(
-                "[EC-MTP-CORR] consumed: req=%s task=%s generation=%d "
-                "num_draft=%d actual=%d accepted=%d",
-                req_id,
-                correction.task_id,
-                correction.generation,
-                correction.num_draft_tokens,
-                actual,
-                correction.num_accepted_tokens,
-            )
 
         return True
     def _strip_tail_new_block_ids(
@@ -6749,19 +6709,6 @@ class NPUModelRunner(GPUModelRunner):
         """
         task_id = scheduler_output.draft_task_id
         if task_id is None or valid_sampled_values is None:
-            logger.error(
-                "[EC-MTP-CORR] record skipped: reason=%s task=%s step=%s "
-                "has_num_accepted=%s has_valid_sampled=%s",
-                (
-                    "missing_task_id"
-                    if task_id is None
-                    else "missing_valid_sampled_count"
-                ),
-                task_id,
-                scheduler_output.draft_step_idx,
-                num_accepted_values is not None,
-                valid_sampled_values is not None,
-            )
             return 0
         target_output = self._cloud_scheduler_output_by_task.get(task_id)
         position_state = self._cloud_draft_position_state_by_task.get(task_id)
@@ -6771,16 +6718,6 @@ class NPUModelRunner(GPUModelRunner):
             or position_state is None
             or generation is None
         ):
-            logger.error(
-                "[EC-MTP-CORR] record skipped: reason=missing_task_metadata "
-                "task=%s step=%s has_target_output=%s "
-                "has_position_state=%s generation=%s",
-                task_id,
-                scheduler_output.draft_step_idx,
-                target_output is not None,
-                position_state is not None,
-                generation,
-            )
             return 0
 
         req_ids = position_state.req_ids
@@ -6814,25 +6751,14 @@ class NPUModelRunner(GPUModelRunner):
         for req_id, valid_value in valid_by_req.items():
             num_draft = len(spec_tokens.get(req_id, ()))
             if num_draft <= 0 or req_id not in start_by_req:
-                logger.error(
-                    "[EC-MTP-CORR] record skipped: "
-                    "reason=missing_request_state task=%s req=%s "
-                    "generation=%d num_draft=%d has_start=%s",
-                    task_id,
-                    req_id,
-                    generation,
-                    num_draft,
-                    req_id in start_by_req,
-                )
                 continue
             valid_count = int(valid_value)
             if not 1 <= valid_count <= num_draft + 1:
-                logger.error(
-                    "[EC-MTP-CORR] record skipped: reason=invalid_count "
-                    "task=%s req=%s generation=%d valid=%d num_draft=%d",
+                logger.warning(
+                    "Ignoring invalid cloud accepted count: task=%s req=%s "
+                    "valid=%d num_draft=%d",
                     task_id,
                     req_id,
-                    generation,
                     valid_count,
                     num_draft,
                 )
@@ -6841,9 +6767,8 @@ class NPUModelRunner(GPUModelRunner):
                 self._cloud_latest_target_generation_by_req.get(req_id)
                 != generation
             ):
-                logger.error(
-                    "[EC-MTP-CORR] record skipped: "
-                    "reason=generation_mismatch task=%s req=%s "
+                logger.warning(
+                    "Ignoring late cloud accepted state: task=%s req=%s "
                     "generation=%d latest=%s",
                     task_id,
                     req_id,
@@ -6877,29 +6802,6 @@ class NPUModelRunner(GPUModelRunner):
                     actual,
                 )
                 recorded += 1
-                logger.debug(
-                    "[EC-MTP-CORR] recorded: task=%s req=%s "
-                    "generation=%d num_draft=%d valid=%d accepted=%d "
-                    "optimistic=%d actual=%d",
-                    task_id,
-                    req_id,
-                    generation,
-                    num_draft,
-                    valid_count,
-                    pending.num_accepted_tokens,
-                    optimistic,
-                    actual,
-                )
-            else:
-                logger.error(
-                    "[EC-MTP-CORR] record skipped: "
-                    "reason=newer_pending_exists task=%s req=%s "
-                    "generation=%d pending_generation=%d",
-                    task_id,
-                    req_id,
-                    generation,
-                    previous.generation,
-                )
         return recorded
 
     def _run_edge_cloud_draft_middle_segment(
@@ -6936,18 +6838,10 @@ class NPUModelRunner(GPUModelRunner):
         num_accepted_values = scheduler_output.num_accepted_tokens
         valid_sampled_values = scheduler_output.valid_sampled_token_count
         if num_accepted_values is not None:
-            recorded = self._record_cloud_request_corrections(
+            self._record_cloud_request_corrections(
                 scheduler_output,
                 num_accepted_values,
                 valid_sampled_values,
-            )
-            logger.debug(
-                "[EC-MTP-CORR] record attempt complete: task=%s step=%d "
-                "num_spec=%d recorded=%d",
-                scheduler_output.draft_task_id,
-                spec_step_idx,
-                self.num_spec_tokens,
-                recorded,
             )
             if spec_step_idx != 0:
                 logger.warning(
@@ -6955,16 +6849,6 @@ class NPUModelRunner(GPUModelRunner):
                     "expected step 0",
                     spec_step_idx,
                 )
-        elif spec_step_idx == 0:
-            logger.error(
-                "[EC-MTP-CORR] record skipped: "
-                "reason=missing_num_accepted task=%s step=%d num_spec=%d "
-                "has_valid_sampled=%s",
-                scheduler_output.draft_task_id,
-                spec_step_idx,
-                self.num_spec_tokens,
-                valid_sampled_values is not None,
-            )
 
         token_tensor_key = (
             "input_embeds"
