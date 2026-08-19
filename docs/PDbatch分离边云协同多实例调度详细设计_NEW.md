@@ -925,6 +925,96 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 - **dp=1**：无 internal LB、无云双机 coord / IP broker；`pre_out_ports` 单值
 - DS 的 §6.3 原口径「每服务器 1 实例」是 8 卡服务器部署；本场景 16 卡服务器同机 2 实例，其余结论（R=17.56、容量安全）不变
 
+#### 场景三：kimi25_w4a8_static_m6，embedding_only，边 1 卡，云 4 台 8 卡服务器 × 2 实例（N=2，dp=2 云双机，单实例 16 卡）
+
+**基本量**：E=1（边单 rank host 2 virtual worker，embedding_only **无边侧 KV**）、N=2、D=2（每实例 16 卡 = 云双机各 1 dp × tp8）、C=8；world = 1+2·2·8 = **33**；G2 共 N=2 个（shared-model/embedding_only 口径：每实例一个 {边 rank0} ∪ 实例 i 云 16 rank，size 1+16，**dp 维度在 channel 切分层消化**，§2.5）；边云算力比 1:32（§1.4 embedding_only 满配口径）。
+
+**拉起配置**（§2.1 口径；实例/dp 双 start-rank 叠加，全部云机同 node_rank 1）：
+
+| 侧 | 配置 |
+|----|------|
+| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 1 --cloud-npu-count 32`，边模式 `embedding_only`；前端 `--api-server-count 2` + 2 个监听端口显式列表（§3.12）；`pre_out_ports = [P0, P1]`（D=2 两个显示值，§3.7.1） |
+| 云服务器1（实例0 dp0） | `--nnodes 2 --node-rank 1 --instance-parallel-size 2 --instance-parallel-start-rank 0 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-start-rank 0`（整机 8 卡，无切片） |
+| 云服务器2（实例0 dp1） | 同上，`--data-parallel-start-rank 1` |
+| 云服务器3（实例1 dp0） | `--instance-parallel-start-rank 1 --data-parallel-start-rank 0`，其余同服务器1 |
+| 云服务器4（实例1 dp1） | `--instance-parallel-start-rank 1 --data-parallel-start-rank 1`，其余同服务器2 |
+
+每台服务器 = 恰好 1 个 (实例, dp) 进程组（K=1，**无同机共置**：无卡切片、无同机端口偏移/错峰需求）；实例内 dp 双机靠 `--data-parallel-start-rank 0/1` 区分，实例间靠 `--instance-parallel-start-rank 0/1`。
+
+**编队 / rank 清单**（§4.1 公式：云 (实例 i, dp j) 首 rank = E+i·D·C+j·C = 1+16i+8j）：
+
+| 实例 i | dp j | start-rank / dp-rank | 服务器 | 云 rank | DEALER 连接 | G2_i |
+|--------|------|----------------------|--------|---------|------------|------|
+| 0 | 0 | inst 0 / dp 0 | 服务器1 | 1-8 | P0，id="0" | {0} ∪ {1..16} |
+| 0 | 1 | inst 0 / dp 1 | 服务器2 | 9-16 | P1，id="0" | 同上（channel 按 dp 切） |
+| 1 | 0 | inst 1 / dp 0 | 服务器3 | 17-24 | P0，id="1" | {0} ∪ {17..32} |
+| 1 | 1 | inst 1 / dp 1 | 服务器4 | 25-32 | P1，id="1" | 同上（channel 按 dp 切） |
+
+跨 socket 的 (dp, instance) 二元组全局唯一：id="0" 在 P0 = 实例0.dp0、在 P1 = 实例0.dp1（§2.2.3 硬约束：两个 ROUTER 的 readiness 表必须同为 {0,1}）。
+
+**边云通信全图**：
+
+```
+              上游 API 网关（请求级分发：选端点 = 选实例，§3.12）
+                │ HTTP ×2（端点 i ↔ 实例 i）
+                ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ 边侧服务器（node_rank 0，1 卡，master_addr，embedding_only）          │
+│                                                                  │
+│  ApiServer_0..1 ×2（各独立 ip:port）──「端点定实例」                  │
+│    │ ZMQ input/output + 前端 internal LB「负载定 dp」：              │
+│    │ DPLBAsyncMPClient 按 score=waiting×4+running 选 dp            │
+│    ▼   （DPCoordinator 汇聚两 EngineCore 统计）                     │
+│  EngineCore(dp0) + EngineCore(dp1) ×2（边内 2 进程、1 个 HCCL rank    │
+│    host 2 virtual worker；scheduler 组 = N×D = 4 per-(instance,dp)）│
+│    │ G1 gloo：两 EngineCore all_reduce（§3.4 2DP 同 (实例,bt) 配对；  │
+│    │   §3.12 下 instance_id 请求自带，all_reduce 保留为配对通道）      │
+│    ├─ PRE_OUT ROUTER ×2：dp0 bind tcp://*:P0、dp1 bind tcp://*:P1    │
+│    │    readiness 两表均 {0,1}（4 个 HELLO 齐才放行，G0 barrier）     │
+│    ├─ PD TCPStore（master_port，边 rank0 host）：G0=33 rendezvous     │
+│    │    + G2 prefix key ×2；另 host IP broker store 供云双机发现      │
+│    ├─ rpc_broadcast_mq / response_mq（启动期 method 链）              │
+│    └─ 边卡0 [rank0]：hidden channel 池 = 4 manager（per-(实例,dp)）    │
+│         × (2 prefill + 1 decode)，HCCL isend/irecv 定向              │
+└──────┬───────────────────────┬──────────────────────┬──────────────┘
+       │ P0（实例0/1 的 dp0）     │ P1（实例0/1 的 dp1）    │ HCCL 数据面
+       │ ZMQ DEALER id=start-rank│                      │（2 个 G2 按 dp 切 channel）
+┌──────┴─────────┐ ┌───────────┴────────┐ ┌────────────┴───┐ ┌────────┴──────┐
+│云服务器1         │ │云服务器2             │ │云服务器3          │ │云服务器4         │
+│实例0 dp0        │ │实例0 dp1            │ │实例1 dp0         │ │实例1 dp1       │
+│rank1-8 tp8     │ │rank9-16 tp8        │ │rank17-24 tp8    │ │rank25-32 tp8  │
+│PassiveEC       │ │PassiveEC           │ │PassiveEC        │ │PassiveEC      │
+│ DEALER id="0"  │ │ DEALER id="0"      │ │ DEALER id="1"   │ │ DEALER id="1" │
+│ →P0            │ │ →P1                │ │ →P0             │ │ →P1           │
+│     ╲          │ │      ╱             │ │     ╲           │ │      ╱        │
+│      ╲─ gloo coord 组（实例0：dp0↔dp1，master_port+201+0，─────────┘        │
+│         云双机直连、边只做 IP broker；实例1 同款 +201+1）                      │
+│ （每机 1 个进程组，K=1 无共置；云不 bind 端口）                              │
+└────────────────┘ └────────────────────┘ └────────────────┘ └───────────────┘
+```
+
+**通道明细**（§2.2.1 六类通道、形态 b 定案；dp=2 新增项加粗）：
+
+| 通道 | 本场景形态 | 量 / 端口 |
+|------|-----------|----------|
+| HTTP（网关->端点） | 2 端点，请求级分发 | 2 × ip:port |
+| ZMQ input/output + **前端 internal LB** | ApiServer×2 -> DPLBAsyncMPClient 选 dp -> EngineCore×2；client_index = instance_id（端点定实例、负载定 dp，§3.12.1 场景四） | ×2 端点 |
+| PRE_OUT（ROUTER/DEALER） | 边 **2 个 ROUTER（P0/P1 per dp）**；4 个 PassiveEC DEALER = 每服务器 1 个，connect `tcp://master_addr:P{dp}`，IDENTITY = start-rank；跨 socket (dp,instance) 二元组唯一 | 2 端口、4 连接 |
+| PD TCPStore | 边 rank0 host；G0 world=33 rendezvous + 启动 barrier；**另 host 云双机 coord 的 IP broker store** | 1 store |
+| rpc_broadcast_mq / response | 边 leader 广播、云 32 worker 按 rank 回收 | 随机端口 |
+| HCCL hidden channel | **2 个 G2（每实例 {边0}∪16 云 rank）按 dp 切 channel**：4 个 per-(实例,dp) manager × 2P1D；边↔4 机定向 | 2 组、12 channel |
+| **gloo coord group（云双机 dp0↔dp1，per instance）** | 实例内跨 DP 协调（EP all-toall 配对 / batch_type 协调）；端口 master_port+201+i（i=start-rank）；云到云直连、**边只做 IP broker 不进组**；IP 发现 = 现状 IP-exchange store（多实例 +i 偏移）/ 形态 b 显式配置 | 2 组 |
+| **G1 gloo（边内 2 EngineCore）** | §3.4 all_reduce：2DP 同 (实例,bt) 配对云 EP；§3.12 下 instance_id 请求自带（pin 透传），本通道保留为配对协调 | 1 组 |
+| cloud_ip store | **无**（形态 b 已删） | - |
+
+**embedding_only / kimi / dp=2 特有注记**：
+
+- **无边侧 KV**：§6.1 分区准入免；§6.6 边报虚拟大值 -> num_blocks 恒取云侧（kimi R 待实测，§6.3；N=2 任意 R 下容量安全，kimi 行结论不变）
+- **dp=2 的三层新增通信**（相对场景一/二）：①前端 internal LB（端点定实例、负载定 dp）；②云双机 gloo coord per-instance（EP 配对/bt 协调，端口 +i 偏移，边只 IP broker）；③边内 G1 all_reduce（2DP 配对通道）。数据面 hidden channel 仍是 per-(实例,dp) 定向、无跨实例集合通信
+- **算力比 1:32**：§1.4 embedding_only 满配口径；边 1 卡 host 2 virtual worker 服务 N×D = 4 条流，inflight = 2×N×D = 8 个 prefill 在飞（§6.4）
+- **K=1 无共置**：每服务器恰好 1 个 (实例,dp) 进程组，§2.6 同机共置处理项（#2 端口偏移/#5 错峰）不适用；**关注点转为实例内跨机带宽**（dp 双机 coord + EP all-toall + 边↔双机 hidden 流量，§6.3 kimi 行：跨机 tp/EP 通信带宽是设计关注点而非 KV 容量）
+- **kimi 单实例 16 卡跨 2 服务器**：实例 = 2 台整机，故障域 = 2 台服务器同时影响 1 实例（v1 任一实例挂整体挂口径不变，§2.6 #4）
+
 ---
 
 ## 3 控制面方案
