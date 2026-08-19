@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import BatchType
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec, KVCacheTensor
 
@@ -35,6 +36,182 @@ class TestEdgeCloudMoEStartIndex(unittest.TestCase):
             _get_edge_cloud_moe_start_index(None, start_layer=60),
             0,
         )
+
+
+class TestDeepSeekV4MTPDraftSequenceParallel(unittest.TestCase):
+    def _build_runner(self, role: str) -> NPUModelRunner:
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.drafter = SimpleNamespace(
+            model=SimpleNamespace(
+                edge_cloud_draft_kind="deepseek_v4_mtp"
+            )
+        )
+        runner.edge_cloud_cfg = SimpleNamespace(role=role)
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(tensor_parallel_size=8)
+        )
+        return runner
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.enable_sp",
+        return_value=True,
+    )
+    @patch(
+        "vllm_ascend.worker.model_runner_v1."
+        "get_tensor_model_parallel_world_size",
+        return_value=8,
+    )
+    @patch(
+        "vllm_ascend.worker.model_runner_v1."
+        "tensor_model_parallel_all_gather"
+    )
+    def test_gather_materializes_full_wire_tensor(
+        self,
+        mock_all_gather,
+        _mock_tp_size,
+        _mock_enable_sp,
+    ):
+        runner = self._build_runner("edge")
+        local = torch.arange(32 * 4 * 2).view(32, 4, 2)
+        gathered = torch.cat([local + rank * 1000 for rank in range(8)])
+        mock_all_gather.return_value = gathered
+
+        result = runner._gather_deepseek_v4_mtp_draft_tensors(
+            {"hidden_states": local},
+            num_actual_tokens=256,
+        )
+
+        self.assertEqual(result["hidden_states"].shape, (256, 4, 2))
+        self.assertTrue(torch.equal(result["hidden_states"], gathered))
+        mock_all_gather.assert_called_once()
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.enable_sp",
+        return_value=True,
+    )
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    def test_cloud_chunks_full_wire_tensor_before_segment_c(
+        self,
+        mock_get_tp_group,
+        _mock_enable_sp,
+    ):
+        runner = self._build_runner("cloud")
+        mock_get_tp_group.return_value = SimpleNamespace(
+            world_size=8,
+            rank_in_group=1,
+        )
+        runner._edge_cloud_draft_intermediate_buffers = IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    32, 4, 2, dtype=torch.long
+                )
+            }
+        )
+        full_hidden = torch.arange(256 * 4 * 2).view(256, 4, 2)
+        full_positions = torch.arange(256)
+
+        result = runner._sync_edge_cloud_draft_intermediate_tensors(
+            256,
+            IntermediateTensors(
+                {
+                    "hidden_states": full_hidden,
+                    "positions": full_positions,
+                }
+            ),
+        )
+
+        self.assertTrue(
+            torch.equal(result["hidden_states"], full_hidden[32:64])
+        )
+        self.assertTrue(
+            torch.equal(result["positions"], full_positions[32:64])
+        )
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.enable_sp",
+        return_value=True,
+    )
+    def test_edge_keeps_full_cloud_reply_for_segment_e(
+        self,
+        _mock_enable_sp,
+    ):
+        runner = self._build_runner("edge")
+        runner._edge_cloud_draft_intermediate_buffers = IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    256, 4, 2, dtype=torch.long
+                )
+            }
+        )
+        full_hidden = torch.arange(256 * 4 * 2).view(256, 4, 2)
+
+        result = runner._sync_edge_cloud_draft_intermediate_tensors(
+            256,
+            IntermediateTensors({"hidden_states": full_hidden}),
+        )
+
+        self.assertEqual(result["hidden_states"].shape, (256, 4, 2))
+        self.assertTrue(torch.equal(result["hidden_states"], full_hidden))
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    def test_cloud_chunk_pads_three_dimensional_hc_tensor_on_token_axis(
+        self,
+        mock_get_tp_group,
+    ):
+        mock_get_tp_group.return_value = SimpleNamespace(
+            world_size=8,
+            rank_in_group=7,
+        )
+        full_hidden = torch.ones(10, 4, 2)
+
+        local_hidden = (
+            NPUModelRunner._chunk_deepseek_v4_mtp_draft_tensor(
+                full_hidden
+            )
+        )
+
+        self.assertEqual(local_hidden.shape, (2, 4, 2))
+        self.assertEqual(torch.count_nonzero(local_hidden).item(), 0)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    def test_localize_leaves_existing_sp_shard_unchanged(
+        self,
+        mock_get_tp_group,
+    ):
+        runner = self._build_runner("edge")
+        mock_get_tp_group.return_value = SimpleNamespace(
+            world_size=2,
+            rank_in_group=1,
+        )
+        local_hidden = torch.arange(4 * 4 * 2).view(4, 4, 2)
+
+        result = runner._localize_deepseek_v4_mtp_draft_tensor(
+            local_hidden,
+            num_actual_tokens=8,
+        )
+
+        self.assertIs(result, local_hidden)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    def test_localize_full_positions_on_last_token_axis(
+        self,
+        mock_get_tp_group,
+    ):
+        runner = self._build_runner("edge")
+        runner.uses_mrope = True
+        mock_get_tp_group.return_value = SimpleNamespace(
+            world_size=2,
+            rank_in_group=1,
+        )
+        full_positions = torch.arange(3 * 8).view(3, 8)
+
+        result = runner._localize_deepseek_v4_mtp_draft_tensor(
+            full_positions,
+            num_actual_tokens=8,
+            token_dim=1,
+        )
+
+        self.assertTrue(torch.equal(result, full_positions[:, 4:8]))
 
 
 class TestNPUModelRunnerKVCache(unittest.TestCase):

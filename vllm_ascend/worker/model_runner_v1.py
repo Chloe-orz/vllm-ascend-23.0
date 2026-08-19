@@ -161,6 +161,7 @@ from vllm_ascend.compilation.edge_cloud_compiler import (
 from vllm_ascend.edge_cloud_materialized import (
     supports_materialized_boundary_for_config,
 )
+from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -2111,7 +2112,18 @@ class NPUModelRunner(GPUModelRunner):
         ) or getattr(draft_model, "make_empty_intermediate_tensors", None)
         if make_empty_fn is not None:
             max_draft_tokens = self.max_num_tokens
-            if enable_sp():
+            # DeepSeek-V4 MTP has asymmetric draft boundaries under SP:
+            # cloud segment C consumes a local sequence shard, while edge
+            # segment E consumes the full sequence for hc_head / sampling.
+            # Keep the old sizing for the other draft adapters until they
+            # adopt the same full-on-wire contract.
+            if (
+                enable_sp()
+                and (
+                    not self._is_deepseek_v4_mtp_edge_cloud_draft()
+                    or self.edge_cloud_cfg.role == "cloud"
+                )
+            ):
                 tp_size = self.vllm_config.parallel_config.tensor_parallel_size
                 max_draft_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
             self._edge_cloud_draft_intermediate_buffers = make_empty_fn(
@@ -2140,6 +2152,157 @@ class NPUModelRunner(GPUModelRunner):
             self._edge_cloud_draft_segments["c"] = self._wrap_segment_if_needed(
                 seg_c, is_draft=True)
 
+    def _is_deepseek_v4_mtp_edge_cloud_draft(self) -> bool:
+        """Whether the active edge-cloud drafter is DeepSeek-V4 MTP."""
+        draft_model = getattr(self.drafter, "model", None)
+        return (
+            getattr(draft_model, "edge_cloud_draft_kind", None)
+            == "deepseek_v4_mtp"
+        )
+
+    def _gather_deepseek_v4_mtp_draft_tensors(
+        self,
+        tensor_dict: dict[str, Any],
+        num_actual_tokens: int,
+    ) -> dict[str, Any]:
+        """Materialize full DeepSeek-V4 MTP draft tensors for the wire.
+
+        The edge-cloud wire contract is independent of either peer's TP size:
+        every sequence tensor is sent with ``num_actual_tokens`` rows. Inputs
+        that are already full are left untouched; local SP shards are gathered
+        and their padding tail is removed.
+        """
+        if not (
+            self._is_deepseek_v4_mtp_edge_cloud_draft() and enable_sp()
+        ):
+            return tensor_dict
+
+        tp_size = get_tensor_model_parallel_world_size()
+        padded_tokens = round_up(num_actual_tokens, tp_size)
+        local_tokens = padded_tokens // tp_size
+        gathered: dict[str, Any] = {}
+        for key, value in tensor_dict.items():
+            if (
+                not isinstance(value, torch.Tensor)
+                or value.ndim == 0
+                or value.numel() == 0
+            ):
+                gathered[key] = value
+                continue
+            if value.shape[0] == num_actual_tokens:
+                gathered[key] = value
+                continue
+            if value.shape[0] != local_tokens:
+                raise RuntimeError(
+                    "DeepSeek-V4 MTP draft tensor has neither full nor local "
+                    f"SP shape: key={key}, rows={value.shape[0]}, "
+                    f"actual_tokens={num_actual_tokens}, "
+                    f"local_tokens={local_tokens}, tp_size={tp_size}"
+                )
+            full = tensor_model_parallel_all_gather(
+                value.contiguous(), dim=0
+            )
+            gathered[key] = full[:num_actual_tokens]
+        return gathered
+
+    def _chunk_deepseek_v4_mtp_draft_positions(
+        self,
+        positions: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the local SP position shard for a DSV4 MTP segment."""
+        if not (
+            self._is_deepseek_v4_mtp_edge_cloud_draft()
+            and enable_sp()
+        ):
+            return positions
+        if self.uses_mrope and positions.ndim > 1:
+            chunked = self._chunk_deepseek_v4_mtp_draft_tensor(
+                positions.movedim(-1, 0)
+            )
+            return chunked.movedim(0, -1)
+        return self._chunk_deepseek_v4_mtp_draft_tensor(positions)
+
+    def _localize_deepseek_v4_mtp_draft_tensor(
+        self,
+        tensor: torch.Tensor,
+        num_actual_tokens: int,
+        *,
+        token_dim: int = 0,
+    ) -> torch.Tensor:
+        """Accept a full or already-local tensor and return the local shard."""
+        tp_size = get_tp_group().world_size
+        if tp_size <= 1:
+            return tensor
+        token_dim %= tensor.ndim
+        rows = tensor.shape[token_dim]
+        local_rows = (num_actual_tokens + tp_size - 1) // tp_size
+        if rows == local_rows:
+            return tensor
+        if rows != num_actual_tokens:
+            raise RuntimeError(
+                "DeepSeek-V4 MTP tensor has neither full nor local SP "
+                f"shape: rows={rows}, actual_tokens={num_actual_tokens}, "
+                f"local_tokens={local_rows}, token_dim={token_dim}"
+            )
+        if token_dim:
+            tensor = tensor.movedim(token_dim, 0)
+        tensor = self._chunk_deepseek_v4_mtp_draft_tensor(tensor)
+        if token_dim:
+            tensor = tensor.movedim(0, token_dim)
+        return tensor
+
+    def _materialize_deepseek_v4_mtp_draft_tensor(
+        self,
+        tensor: torch.Tensor,
+        num_actual_tokens: int,
+        *,
+        token_dim: int = 0,
+    ) -> torch.Tensor:
+        """Accept a full or local SP tensor and return the unpadded full one."""
+        token_dim %= tensor.ndim
+        if tensor.shape[token_dim] == num_actual_tokens:
+            return tensor
+        if token_dim:
+            tensor = tensor.movedim(token_dim, 0)
+        tensor = self._gather_deepseek_v4_mtp_draft_tensors(
+            {"value": tensor}, num_actual_tokens
+        )["value"]
+        if token_dim:
+            tensor = tensor.movedim(0, token_dim)
+        return tensor
+
+    @staticmethod
+    def _chunk_deepseek_v4_mtp_draft_tensor(
+        tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        """Pad along the token axis and return this TP rank's draft shard.
+
+        ``sequence_parallel_chunk`` uses a 2-D ``F.pad`` tuple and therefore
+        pads the hc_mult axis for DeepSeek-V4's 3-D HC tensors. Positions are
+        1-D and are not compatible with that padding tuple either. Do the
+        dim-0 padding explicitly so every draft tensor follows the same token
+        layout.
+        """
+        tp_group = get_tp_group()
+        tp_size = tp_group.world_size
+        if tp_size <= 1:
+            return tensor
+        remainder = tensor.shape[0] % tp_size
+        if remainder:
+            pad_shape = (
+                tp_size - remainder,
+                *tensor.shape[1:],
+            )
+            padding = torch.zeros(
+                pad_shape,
+                dtype=tensor.dtype,
+                device=tensor.device,
+            )
+            tensor = torch.cat((tensor, padding), dim=0)
+        chunk_size = tensor.shape[0] // tp_size
+        start = tp_group.rank_in_group * chunk_size
+        return tensor.narrow(0, start, chunk_size).clone()
+
     def _sync_edge_cloud_draft_intermediate_tensors(
         self,
         num_tokens: int,
@@ -2153,15 +2316,42 @@ class NPUModelRunner(GPUModelRunner):
         (sized to max_num_tokens) and return sliced views with stable
         addresses for the current num_tokens.
         """
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        dsv4_mtp_sp = (
+            self._is_deepseek_v4_mtp_edge_cloud_draft() and enable_sp()
+        )
+        chunk_on_cloud = (
+            dsv4_mtp_sp and self.edge_cloud_cfg.role == "cloud"
+        )
+        copy_len = (
+            (num_tokens + tp_size - 1) // tp_size
+            if enable_sp() and (not dsv4_mtp_sp or chunk_on_cloud)
+            else num_tokens
+        )
+
+        prepared: dict[str, torch.Tensor | Any] = {}
+        for key, value in intermediate_tensors.items():
+            if (
+                chunk_on_cloud
+                and isinstance(value, torch.Tensor)
+                and value.ndim > 0
+                and value.numel() > 0
+            ):
+                if value.shape[0] != num_tokens:
+                    raise RuntimeError(
+                        "DeepSeek-V4 MTP cloud expected a full draft tensor "
+                        f"before SP chunking: key={key}, rows={value.shape[0]}, "
+                        f"tokens={num_tokens}"
+                    )
+                value = self._chunk_deepseek_v4_mtp_draft_tensor(value)
+            prepared[key] = value
+
         buffers = self._edge_cloud_draft_intermediate_buffers
         if buffers is None:
-            return intermediate_tensors
-
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        copy_len = (num_tokens + tp_size - 1) // tp_size if enable_sp() else num_tokens
+            return IntermediateTensors(prepared)
 
         synced: dict[str, torch.Tensor | Any] = {}
-        for key, value in intermediate_tensors.items():
+        for key, value in prepared.items():
             if key not in buffers.tensors or not isinstance(value, torch.Tensor):
                 # positions/spec_step_idx or any non-tensor metadata pass through
                 synced[key] = value
@@ -4265,12 +4455,10 @@ class NPUModelRunner(GPUModelRunner):
         _run_edge_cloud_draft_last_segment).
 
         ``force_drop_task_ids`` carries chains the scheduler cut from its
-        ready queues (all requests finished): their contexts are dropped
-        unconditionally.  Dropping a context whose DRAFT_FIRST already
-        executed is safe — the matching DRAFT_LAST drains through the
-        context-is-None path in _run_edge_cloud_draft_last_segment, and
-        worker FIFO ordering guarantees an already-dispatched DRAFT_FIRST
-        ran before this RPC arrives.
+        ready queues (all requests finished). A context with a suspended
+        DRAFT_FIRST is retained even then: its cloud peer already received
+        the control task and is waiting for the payload, so the preceding
+        tail must resume that head before the chain can be drained safely.
         """
         req_id_set = set(req_ids)
         for req_id in req_id_set:
@@ -4289,6 +4477,10 @@ class NPUModelRunner(GPUModelRunner):
                     continue
             elif task_id not in force_dropped:
                 continue
+            if context.get("deferred_draft_first_steps"):
+                # The cloud has already entered recv for this head. Keep the
+                # causal state until the prior tail resumes and sends it.
+                continue
             self._pending_edge_cloud_draft_contexts.pop(task_id, None)
 
     def _get_pending_edge_cloud_draft_context(
@@ -4304,6 +4496,52 @@ class NPUModelRunner(GPUModelRunner):
                 f"task_id={task_id}"
             )
         return context
+
+    def is_edge_cloud_draft_step_ready(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> bool:
+        """Whether this edge draft head's causal inputs are materialized."""
+        step = int(scheduler_output.draft_step_idx or 0)
+        if step == 0:
+            return True
+        task_id = scheduler_output.draft_task_id
+        if task_id is None:
+            return False
+        context = self._pending_edge_cloud_draft_contexts.get(task_id)
+        if context is None or int(context.get("draft_step_idx", 0)) < step:
+            return False
+        return all(
+            key in context
+            for key in (
+                "last_draft_token_ids",
+                "last_draft_positions",
+                "last_draft_hidden_states",
+            )
+        )
+
+    def mark_edge_cloud_draft_step_deferred(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Pin a context whose already-dispatched head awaits its prior tail."""
+        context = self._get_pending_edge_cloud_draft_context(
+            scheduler_output
+        )
+        context.setdefault("deferred_draft_first_steps", set()).add(
+            int(scheduler_output.draft_step_idx or 0)
+        )
+
+    def unmark_edge_cloud_draft_step_deferred(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        task_id = scheduler_output.draft_task_id
+        if task_id is None:
+            return
+        context = self._pending_edge_cloud_draft_contexts.get(task_id)
+        if context is None:
+            return
+        deferred = context.get("deferred_draft_first_steps")
+        if deferred is not None:
+            deferred.discard(int(scheduler_output.draft_step_idx or 0))
 
     def _prepare_edge_cloud_draft_step_inputs(
         self, scheduler_output: "SchedulerOutput"
@@ -4328,6 +4566,9 @@ class NPUModelRunner(GPUModelRunner):
                 f"extra_in_so={sorted(so_req_ids - context_req_ids)}"
             )
         if draft_step_idx > 0:
+            context["current_draft_full_positions"] = (
+                context["last_draft_full_positions"] + 1
+            )
             return (
                 context["last_draft_token_ids"],
                 context["last_draft_positions"] + 1,
@@ -4382,6 +4623,41 @@ class NPUModelRunner(GPUModelRunner):
         input_ids, positions, hidden_states, draft_step_idx = (
             self._prepare_edge_cloud_draft_step_inputs(scheduler_output)
         )
+        full_num_tokens = int(
+            scheduler_output.total_num_scheduled_tokens
+            if draft_step_idx == 0
+            else len(scheduler_output.num_scheduled_tokens)
+        )
+        if (
+            self._is_deepseek_v4_mtp_edge_cloud_draft()
+            and enable_sp()
+        ):
+            # The embedding lookup reduces/scatters full input_ids under SP.
+            # Segment A must receive positions and target hidden states with
+            # the same rank-local token layout. Keep full positions for E,
+            # which samples the full cloud reply before re-sharding it.
+            position_token_dim = (
+                positions.ndim - 1 if self.uses_mrope else 0
+            )
+            full_positions = context.get("current_draft_full_positions")
+            if full_positions is None:
+                full_positions = (
+                    self._materialize_deepseek_v4_mtp_draft_tensor(
+                        positions,
+                        full_num_tokens,
+                        token_dim=position_token_dim,
+                    )
+                )
+            positions = self._localize_deepseek_v4_mtp_draft_tensor(
+                full_positions,
+                full_num_tokens,
+                token_dim=position_token_dim,
+            )
+            hidden_states = self._localize_deepseek_v4_mtp_draft_tensor(
+                hidden_states,
+                full_num_tokens,
+            )
+            context["current_draft_full_positions"] = full_positions
         num_tokens = positions.shape[-1] if self.uses_mrope else positions.shape[0]
         segment = self._edge_cloud_draft_segments["a"]
         # Independently scheduled draft batches do not enter
@@ -4550,12 +4826,18 @@ class NPUModelRunner(GPUModelRunner):
                 req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
             )
         draft_step_idx = int(scheduler_output.draft_step_idx or 0)
-        positions = context.get("current_draft_positions")
+        positions = context.get("current_draft_full_positions")
+        if positions is None:
+            positions = context.get("current_draft_positions")
         if positions is None:
             positions = intermediate_tensors.tensors.get("positions")
         if positions is None:
             raise RuntimeError("DRAFT_LAST missing positions")
-        num_tokens = positions.shape[-1] if self.uses_mrope else positions.shape[0]
+        num_tokens = int(
+            scheduler_output.total_num_scheduled_tokens
+            if draft_step_idx == 0
+            else len(scheduler_output.num_scheduled_tokens)
+        )
         intermediate_tensors = (
             self._sync_edge_cloud_draft_intermediate_tensors(
                 num_tokens, intermediate_tensors
@@ -4616,11 +4898,47 @@ class NPUModelRunner(GPUModelRunner):
             logits_hidden_states = last_hidden_states
             next_hidden_states = hidden_states
             step_positions = positions
+        if (
+            self._is_deepseek_v4_mtp_edge_cloud_draft()
+            and enable_sp()
+        ):
+            # Segment E validates the full cloud reply. Sampling rows are
+            # selected globally above; hc_head/logits then operate on the
+            # rank-local request shard, matching ordinary SP draft semantics.
+            position_token_dim = (
+                step_positions.ndim - 1 if self.uses_mrope else 0
+            )
+            full_step_positions = step_positions
+            logits_hidden_states = (
+                self._localize_deepseek_v4_mtp_draft_tensor(
+                    logits_hidden_states,
+                    num_reqs,
+                )
+            )
+            next_hidden_states = (
+                self._localize_deepseek_v4_mtp_draft_tensor(
+                    next_hidden_states,
+                    num_reqs,
+                )
+            )
+            step_positions = self._localize_deepseek_v4_mtp_draft_tensor(
+                step_positions,
+                num_reqs,
+                token_dim=position_token_dim,
+            )
+        else:
+            full_step_positions = step_positions
         draft_token_ids = self._compute_edge_cloud_draft_token_ids(
             logits_hidden_states, draft_step_idx
         )
+        draft_token_ids = self._gather_deepseek_v4_mtp_draft_tensors(
+            {"draft_token_ids": draft_token_ids}, num_reqs
+        )["draft_token_ids"]
         context["last_draft_hidden_states"] = next_hidden_states.clone()
         context["last_draft_positions"] = step_positions.clone()
+        context["last_draft_full_positions"] = (
+            full_step_positions.clone()
+        )
         context["last_draft_token_ids"] = draft_token_ids.clone()
         draft_steps = context.setdefault("draft_token_id_steps", [])
         if len(draft_steps) != draft_step_idx:
@@ -6960,8 +7278,12 @@ class NPUModelRunner(GPUModelRunner):
         positions = self._reconstruct_cloud_draft_positions(
             scheduler_output, num_tokens
         )
+        full_positions = positions
         intermediate = self._sync_edge_cloud_draft_intermediate_tensors(
             num_tokens, intermediate_tensors
+        )
+        positions = self._chunk_deepseek_v4_mtp_draft_positions(
+            full_positions
         )
         model_kwargs = {
             "intermediate_tensors": intermediate,
@@ -6983,7 +7305,7 @@ class NPUModelRunner(GPUModelRunner):
                 is_first_step=spec_step_idx == 0,
             )
         draft_attn_metadata = self._build_edge_cloud_draft_attn_metadata(
-            positions, spec_step_idx, scheduler_output
+            full_positions, spec_step_idx, scheduler_output
         )
 
         if is_forward_context_available():

@@ -226,6 +226,13 @@ class NPUWorker(WorkerBase):
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
         self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
+        # A pre-generated MTP DRAFT_FIRST may overtake the DRAFT_LAST that
+        # produces its inputs in the async executor queue. Do not block that
+        # head in-place (the tail could be queued behind it); suspend its
+        # control state and let the preceding tail resume it locally.
+        self._deferred_edge_draft_heads: dict[
+            tuple[str, int], SchedulerOutput
+        ] = {}
 
         # [CHER/EHER] Cloud-side hidden early-receive (and its edge-side
         # mirror) cache.  The guard thread posts irecv ahead of the batch's
@@ -1342,12 +1349,15 @@ class NPUWorker(WorkerBase):
     ) -> ScheduledDraftTensorMeta | None:
         """Derive the scheduled draft wire schema on both peers.
 
-        Sequence-parallel draft tensors currently retain their dynamic
-        sender-side shard shapes, which can differ between heterogeneous edge
-        and cloud TP groups. Keep that configuration on the compatibility path
-        until draft transfer mirrors the main model's all-gather/re-chunk flow.
+        DeepSeek-V4 MTP uses a full-sequence wire contract under SP, so its
+        shape is independent of either peer's TP size and can use this static
+        schema. Other draft adapters still retain sender-side shard shapes and
+        remain on the dynamic compatibility path.
         """
-        if enable_sp():
+        if (
+            enable_sp()
+            and not self.model_runner._is_deepseek_v4_mtp_edge_cloud_draft()
+        ):
             return None
 
         speculative_config = self.model_runner.speculative_config
@@ -1360,11 +1370,7 @@ class NPUWorker(WorkerBase):
             return None
 
         draft_step_idx = int(scheduler_output.draft_step_idx or 0)
-        num_tokens = (
-            scheduler_output.total_num_scheduled_tokens
-            if draft_step_idx == 0
-            else len(scheduler_output.num_scheduled_tokens)
-        )
+        num_tokens = self._scheduled_draft_num_tokens(scheduler_output)
         hidden_size = drafter.hidden_size
         hc_mult = 1
         draft_model = getattr(drafter, "model", None)
@@ -1384,6 +1390,17 @@ class NPUWorker(WorkerBase):
             hidden_size=hidden_size,
             dtype=self.model_runner.dtype,
             hc_mult=hc_mult,
+        )
+
+    @staticmethod
+    def _scheduled_draft_num_tokens(
+        scheduler_output: "SchedulerOutput",
+    ) -> int:
+        draft_step_idx = int(scheduler_output.draft_step_idx or 0)
+        return int(
+            scheduler_output.total_num_scheduled_tokens
+            if draft_step_idx == 0
+            else len(scheduler_output.num_scheduled_tokens)
         )
 
     def _execute_model_cloud_draft(
@@ -1416,12 +1433,18 @@ class NPUWorker(WorkerBase):
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
         )
+        out_tensor_dict = (
+            self.model_runner._gather_deepseek_v4_mtp_draft_tensors(
+                output.tensors,
+                self._scheduled_draft_num_tokens(scheduler_output),
+            )
+        )
         if get_pp_group().world_size == 2:
             out_tensor_dict = {
                 key: value.contiguous()
                 if isinstance(value, torch.Tensor)
                 else value
-                for key, value in output.items()
+                for key, value in out_tensor_dict.items()
             }
             # Async send only -- record, do NOT wait.  See method docstring.
             send_tensor_meta = self._scheduled_draft_tensor_meta(
@@ -1453,17 +1476,64 @@ class NPUWorker(WorkerBase):
     ) -> ModelRunnerOutput:
         """Run and send one edge-side scheduled draft first segment."""
         logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
+        if not self.model_runner.is_edge_cloud_draft_step_ready(
+            scheduler_output
+        ):
+            task_id = scheduler_output.draft_task_id
+            if task_id is None:
+                raise RuntimeError("DRAFT_FIRST missing draft_task_id")
+            step = int(scheduler_output.draft_step_idx or 0)
+            key = (task_id, step)
+            if key in self._deferred_edge_draft_heads:
+                raise RuntimeError(
+                    "Duplicate deferred DRAFT_FIRST: "
+                    f"task_id={task_id}, step={step}"
+                )
+            self.model_runner.mark_edge_cloud_draft_step_deferred(
+                scheduler_output
+            )
+            self._deferred_edge_draft_heads[key] = scheduler_output
+            logger.info(
+                "[MTP-PIPE] suspended DRAFT_FIRST task_id=%s step=%d; "
+                "waiting for preceding DRAFT_LAST",
+                task_id,
+                step,
+            )
+            req_ids = list(scheduler_output.num_scheduled_tokens)
+            return ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={
+                    req_id: i for i, req_id in enumerate(req_ids)
+                },
+            )
+        self._run_and_send_edge_draft_head(scheduler_output)
+        req_ids = list(scheduler_output.num_scheduled_tokens)
+        return ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        )
+
+    def _run_and_send_edge_draft_head(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> None:
+        """Execute a ready draft head and publish its cloud-bound payload."""
         output = self.model_runner._run_edge_cloud_draft_first_segment(
             scheduler_output
         )
         if not isinstance(output, IntermediateTensors):
             raise RuntimeError("DRAFT_FIRST did not produce intermediates")
+        tensor_dict = (
+            self.model_runner._gather_deepseek_v4_mtp_draft_tensors(
+                output.tensors,
+                self._scheduled_draft_num_tokens(scheduler_output),
+            )
+        )
         if get_pp_group().world_size == 2:
             tensor_dict = {
                 key: value.contiguous()
                 if isinstance(value, torch.Tensor)
                 else value
-                for key, value in output.items()
+                for key, value in tensor_dict.items()
             }
             send_tensor_meta = self._scheduled_draft_tensor_meta(
                 scheduler_output,
@@ -1480,10 +1550,33 @@ class NPUWorker(WorkerBase):
                 "Send intermediate tensors to cloud, "
                 f"hidden_channel: {HiddenChannelType.DECODE.value}"
             )
-        req_ids = list(scheduler_output.num_scheduled_tokens)
-        return ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+
+    def _resume_deferred_edge_draft_head(
+        self, completed_tail: "SchedulerOutput"
+    ) -> None:
+        task_id = completed_tail.draft_task_id
+        if task_id is None:
+            return
+        next_step = int(completed_tail.draft_step_idx or 0) + 1
+        key = (task_id, next_step)
+        deferred = self._deferred_edge_draft_heads.get(key)
+        if deferred is None:
+            return
+        if not self.model_runner.is_edge_cloud_draft_step_ready(deferred):
+            raise RuntimeError(
+                "Deferred DRAFT_FIRST is still not ready after its "
+                "preceding tail completed: "
+                f"task_id={task_id}, step={next_step}"
+            )
+        self._deferred_edge_draft_heads.pop(key)
+        self.model_runner.unmark_edge_cloud_draft_step_deferred(deferred)
+        self._run_and_send_edge_draft_head(deferred)
+        logger.info(
+            "[MTP-PIPE] resumed DRAFT_FIRST task_id=%s step=%d from "
+            "DRAFT_LAST step=%d",
+            task_id,
+            next_step,
+            next_step - 1,
         )
 
     def _execute_model_edge_draft_tail(
@@ -1509,9 +1602,11 @@ class NPUWorker(WorkerBase):
             f"hidden_channel: {HiddenChannelType.DECODE.value}"
         )
         assert tensor_dict is not None
-        return self.model_runner._run_edge_cloud_draft_last_segment(
+        output = self.model_runner._run_edge_cloud_draft_last_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
         )
+        self._resume_deferred_edge_draft_head(scheduler_output)
+        return output
 
     def _execute_model_legacy(
         self,

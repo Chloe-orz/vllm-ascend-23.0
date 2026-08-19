@@ -1070,24 +1070,21 @@ class PDSeparatedScheduler(Scheduler):
             next_output.draft_task_id in self._pregenerated_draft_task_ids
         )
         if is_pregenerated:
-            # The edge and cloud workers consume the pre-generated chain in
-            # strict FIFO order.  Do not wait for a DRAFT_FIRST result merely
-            # to decrement draft_inflight_count; bound the amount of queued
-            # work using the remote-pending credit instead.
+            # Permit one look-ahead draft head while the previous tail is in
+            # flight. If it overtakes that tail in the async executor queue,
+            # the edge worker suspends the head and the preceding DRAFT_LAST
+            # resumes it locally after materializing ``last_draft_*``. This
+            # overlaps control/communication without violating MTP's causal
+            # compute dependency.
             # `not self._force_draft_last` enforces the DRAFT_FIRST ->
             # DRAFT_LAST alternation invariant the same way the legacy
             # branch does: once a DRAFT_FIRST is picked, the next draft head
             # may not be picked until its DRAFT_LAST is picked (which clears
             # the flag).  Without it, a DRAFT_LAST dropped/drained without
             # clearing the flag would let a second DRAFT_FIRST through.
-            # `decode_head_inflight_count == 0` (not total inflight == 0)
-            # gates only on DECODE_FIRST heads: a DRAFT_FIRST is an edge->cloud
-            # send while a DRAFT_LAST is a cloud->edge recv, so a second
-            # DRAFT_FIRST may be dispatched while the previous DRAFT_LAST is
-            # still in flight (draft pipelining).  But DRAFT_FIRST and
-            # DECODE_FIRST use different recv primitives on the same stream,
-            # so they must never be in flight together -- hence gate on decode
-            # heads only, allowing draft+draft but not draft+decode.
+            # ``decode_head_inflight_count == 0`` also prevents a draft head
+            # from crossing an in-flight target decode head: the two paths use
+            # different recv primitives on the shared DECODE stream.
             return bool(
                 self.decode_head_inflight_count == 0
                 and self.draft_remote_pending_count
@@ -1252,6 +1249,24 @@ class PDSeparatedScheduler(Scheduler):
 
     def _can_schedule_draft_last(self) -> bool:
         """Return True if the delay since DRAFT_FIRST has elapsed."""
+        if self.drafts_last_ready:
+            next_tail = self.drafts_last_ready[0]
+            is_pregenerated_followup = (
+                next_tail.draft_task_id
+                in self._pregenerated_draft_task_ids
+                and int(next_tail.draft_step_idx or 0) > 0
+            )
+            if (
+                is_pregenerated_followup
+                and self.draft_remote_pending_count > 1
+            ):
+                # Its head may be suspended behind the preceding tail on the
+                # edge worker. Dispatching this tail as well could put it in
+                # front of the preceding tail and deadlock both directions:
+                # edge waits for C(n+1), cloud waits for A(n+1). Keep the
+                # look-ahead head/control overlap, but serialize dependent
+                # tails until the preceding DRAFT_LAST completes.
+                return False
         if self._draft_last_delay_start_ts is None:
             return True
         elapsed_ms = (time.monotonic() - self._draft_last_delay_start_ts) * 1000

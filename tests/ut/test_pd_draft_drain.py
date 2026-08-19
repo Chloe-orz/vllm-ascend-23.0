@@ -5,12 +5,10 @@ finishes or is aborted mid-chain.
 
 Regression coverage for the edge-side MTP draft deadlock fixes:
 
-  * ``_can_schedule_draft_first`` (pre-generated branch) now respects
-    ``_force_draft_last`` -- a second DRAFT_FIRST may not be picked until the
-    preceding DRAFT_LAST is picked (which clears the flag).  Previously the
-    pre-generated branch omitted this guard, so a DRAFT_LAST dropped without
-    clearing the flag let a second DRAFT_FIRST through (two heads with no tail
-    on the shared DECODE channel -> cloud ``irecv`` deadlock).
+  * ``_can_schedule_draft_first`` permits one pre-generated look-ahead head.
+    The worker suspends it if its preceding DRAFT_LAST has not materialized
+    ``last_draft_*`` yet, then resumes it from that tail without blocking the
+    worker queue.
   * ``_is_stale_draft_output`` no longer exempts pre-generated dispatched
     chains: once the owning request is gone, future (not-yet-dispatched)
     DRAFT_FIRST heads are stale and must be skipped -- the edge can no longer
@@ -163,19 +161,17 @@ class TestCanScheduleDraftFirstForceGuard:
         s.decode_head_inflight_count = 0
         assert s._can_schedule_draft_first() is True
 
-    def test_preGen_allows_draft_pipeline_while_draft_in_flight(self):
-        """The next DRAFT_FIRST MAY be dispatched while a previous DRAFT_FIRST
-        is still in flight (draft pipelining): DRAFT_FIRST is an edge->cloud
-        send while DRAFT_LAST is a cloud->edge recv (opposite stream
-        directions), and draft+draft uses the same recv primitive (FIFO).
-        Only a DECODE_FIRST head blocks it, not another DRAFT_FIRST."""
+    def test_preGen_allows_one_deferred_lookahead_head(self):
+        """The worker-side suspended-head state makes one-step lookahead safe."""
         s = self._setup(pregenerated=True)
         s._force_draft_last = False  # previous DRAFT_LAST already picked
         s.drafts_last_ready = deque()  # previous DRAFT_LAST popped (in flight)
         s.decode_head_inflight_count = 0  # no DECODE_FIRST in flight
-        s.decode_or_draft_inflight_count = 1  # a DRAFT_FIRST in flight
-        s.draft_remote_pending_count = 1  # under the pipeline credit (<2)
+        s.draft_remote_pending_count = 1  # one slot remains under limit=2
         assert s._can_schedule_draft_first() is True
+
+        s.draft_remote_pending_count = 2
+        assert s._can_schedule_draft_first() is False
 
     def test_legacy_branch_also_blocked_by_force_draft_last(self):
         """Non-pre-generated branch already had the guard (unchanged)."""
@@ -185,8 +181,7 @@ class TestCanScheduleDraftFirstForceGuard:
 
 
 class TestDraftFirstLastAlternation:
-    """End-to-end gate check: a second DRAFT_FIRST is blocked while the first
-    DRAFT_LAST is pending, and admitted only after the tail is picked."""
+    """A second head is admitted after the first tail is picked, not before."""
 
     def test_second_head_blocked_until_tail_picked(self):
         s = _make_bare_scheduler()
@@ -194,17 +189,83 @@ class TestDraftFirstLastAlternation:
         # step-0 head already picked; step-1 is next in drafts_first_ready.
         s.drafts_first_ready.append(_make_draft_first(step=1))
         s._force_decode_last = False
-        s.draft_remote_pending_count = 0
+        s.draft_remote_pending_count = 1
 
         # DRAFT_FIRST step-0 in force + its DRAFT_LAST pending -> step-1 blocked.
         s._force_draft_last = True
         s.drafts_last_ready.append(_make_draft_last(step=0))
         assert s._can_schedule_draft_first() is False
 
-        # DRAFT_LAST step-0 picked -> flag cleared, no tail pending -> allowed.
+        # Once the tail is picked, worker-side suspension safely carries the
+        # causal dependency until that tail actually completes.
         s._force_draft_last = False
         s.drafts_last_ready.clear()
         assert s._can_schedule_draft_first() is True
+
+    def test_lookahead_tail_waits_for_preceding_tail_completion(self):
+        s = _make_bare_scheduler()
+        s._pregenerated_draft_task_ids.add("task-0")
+        s._draft_last_delay_start_ts = None
+        s.drafts_last_ready.append(_make_draft_last(step=1))
+
+        # Both step 0 and the look-ahead step 1 are still remote.
+        s.draft_remote_pending_count = 2
+        assert s._can_schedule_draft_last() is False
+
+        # Completion of step 0 releases only step 1's remote credit.
+        s.draft_remote_pending_count = 1
+        assert s._can_schedule_draft_last() is True
+
+
+class TestDeferredDraftHeadPipeline:
+    """Worker-side suspended heads preserve E(n) -> A(n+1) causality."""
+
+    @staticmethod
+    def _make_worker():
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_runner = MagicMock()
+        worker._deferred_edge_draft_heads = {}
+        worker._run_and_send_edge_draft_head = MagicMock()
+        return worker
+
+    def test_unready_head_is_suspended_without_running_segment_a(self):
+        worker = self._make_worker()
+        worker.model_runner.is_edge_cloud_draft_step_ready.return_value = (
+            False
+        )
+        head = _make_draft_first(step=1)
+
+        output = worker._execute_model_edge_draft_head(head)
+
+        assert output.req_ids == ["req-0"]
+        assert worker._deferred_edge_draft_heads[("task-0", 1)] is head
+        worker._run_and_send_edge_draft_head.assert_not_called()
+        worker.model_runner.mark_edge_cloud_draft_step_deferred.assert_called_once_with(
+            head
+        )
+
+    def test_preceding_tail_resumes_suspended_head_once(self):
+        worker = self._make_worker()
+        worker.model_runner.is_edge_cloud_draft_step_ready.return_value = True
+        head = _make_draft_first(step=1)
+        worker._deferred_edge_draft_heads[("task-0", 1)] = head
+
+        worker._resume_deferred_edge_draft_head(
+            _make_draft_last(step=0)
+        )
+
+        assert worker._deferred_edge_draft_heads == {}
+        worker.model_runner.unmark_edge_cloud_draft_step_deferred.assert_called_once_with(
+            head
+        )
+        worker._run_and_send_edge_draft_head.assert_called_once_with(head)
+
+        worker._resume_deferred_edge_draft_head(
+            _make_draft_last(step=0)
+        )
+        worker._run_and_send_edge_draft_head.assert_called_once_with(head)
 
 
 class TestMidPrefillDraftChain:
@@ -474,7 +535,19 @@ class TestRunDraftLastSegmentDrain:
         assert result.req_ids == ["req-0"]
         assert result.req_id_to_index == {"req-0": 0}
 
-        assert result.req_id_to_index == {"req-0": 0}
+    def test_finished_context_is_pinned_by_suspended_head(self):
+        runner = self._make_runner(context_present=False)
+        runner._worker_draft_token_ids_by_req = {}
+        runner._pending_edge_cloud_draft_contexts["task-0"] = {
+            "req_ids": ("req-0",),
+            "deferred_draft_first_steps": {1},
+        }
+
+        runner.clear_pending_edge_cloud_draft_for_req_ids(
+            {"req-0"}, force_drop_task_ids={"task-0"}
+        )
+
+        assert "task-0" in runner._pending_edge_cloud_draft_contexts
 
     def test_drains_when_task_id_none(self):
         from vllm.v1.outputs import ModelRunnerOutput
