@@ -753,7 +753,7 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 
 | 侧 | 配置 |
 |----|------|
-| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 8 --edge-npu-count 1 --cloud-npu-count 16`，边模式 `embedding_only`；前端 `--api-server-count 8` + 8 个监听端口显式列表（§3.12）；`pre_out_ports = [P0]`（D=1 仅 1 个显示值，§3.7.1） |
+| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 8 --edge-npu-count 1 --cloud-npu-count 16`，边模式 `embedding_only`；前端 `--api-server-count 8` + 8 个监听端口显式列表（形态 A，§3.12/§3.12.2）；`pre_out_ports = [P0]`（D=1 仅 1 个显示值，§3.7.1） |
 | 云服务器A 实例0 | `--nnodes 2 --node-rank 1 --instance-parallel-size 8 --instance-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0,1` |
 | 云服务器A 实例1 | 同上，`--instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=2,3` |
 | 云服务器A 实例2 | 同上，`--instance-parallel-start-rank 2` + `ASCEND_RT_VISIBLE_DEVICES=4,5` |
@@ -845,7 +845,7 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 
 | 侧 | 配置 |
 |----|------|
-| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首3尾1）；前端 `--api-server-count 4` + 4 个监听端口显式列表（§3.12）；`pre_out_ports = [P0]`（D=1 单值，§3.7.1） |
+| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 4 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首3尾1）；前端 `--api-server-count 4` + 4 个监听端口显式列表（形态 A，§3.12/§3.12.2）；`pre_out_ports = [P0]`（D=1 单值，§3.7.1） |
 | 云服务器A 实例0 | `--nnodes 2 --node-rank 1 --instance-parallel-size 4 --instance-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
 | 云服务器A 实例1 | 同上，`--instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=8-15` |
 | 云服务器B 实例2 | 同上，`--instance-parallel-start-rank 2` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
@@ -933,7 +933,7 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 
 | 侧 | 配置 |
 |----|------|
-| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 1 --cloud-npu-count 32`，边模式 `embedding_only`；前端 `--api-server-count 2` + 2 个监听端口显式列表（§3.12）；`pre_out_ports = [P0, P1]`（D=2 两个显示值，§3.7.1） |
+| 边（1 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 1 --cloud-npu-count 32`，边模式 `embedding_only`；前端 `--api-server-count 2` + 2 个监听端口显式列表（形态 A，§3.12/§3.12.2）；`pre_out_ports = [P0, P1]`（D=2 两个显示值，§3.7.1） |
 | 云服务器1（实例0 dp0） | `--nnodes 2 --node-rank 1 --instance-parallel-size 2 --instance-parallel-start-rank 0 --data-parallel-size 2 --data-parallel-size-local 1 --data-parallel-start-rank 0`（整机 8 卡，无切片） |
 | 云服务器2（实例0 dp1） | 同上，`--data-parallel-start-rank 1` |
 | 云服务器3（实例1 dp0） | `--instance-parallel-start-rank 1 --data-parallel-start-rank 0`，其余同服务器1 |
@@ -1025,7 +1025,7 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 
 | 侧 | 配置 |
 |----|------|
-| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首1尾1）；前端 `--api-server-count 2` + 2 个监听端口显式列表（§3.12）；`pre_out_ports = [P0..P3]`（D=4 四个显示值，§3.7.1） |
+| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首1尾1）；前端 `--api-server-count 2` + 2 个监听端口显式列表（形态 A，§3.12/§3.12.2）；`pre_out_ports = [P0..P3]`（D=4 四个显示值，§3.7.1） |
 | 云服务器A 实例0（dp0/dp1） | `--nnodes 2 --node-rank 1 --instance-parallel-size 2 --instance-parallel-start-rank 0 --data-parallel-size 4 --data-parallel-size-local 2 --data-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
 | 云服务器A 实例1（dp0/dp1） | 同上，`--instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=8-15` |
 | 云服务器B 实例0（dp2/dp3） | `--instance-parallel-start-rank 0 --data-parallel-start-rank 2`，其余同服务器A 实例0 |
@@ -1567,7 +1567,7 @@ per-channel ZMQ（每 channel 独立 `queue.Queue(1000)` + 独立 pub/sub 线程
 - EngineCore spawn 链（CoreEngineProcManager）、shared-model executor、边↔云 PRE_OUT/云侧 PassiveEC--零改
 - shutdown / 进程监控（wait_for_completion_or_failure）--零改
 
-**配置面**：`--api-server-count N` 沿用上游参数（不新增）；新增 N 个监听端口的表达（显式列表优先）。与 §2.1 显式实例配置的关系：监听端口是**前端部署参数**，不是实例身份编码--边云侧实例身份由 `--instance-parallel-size/start-rank` 编码，世界组/通道推导不受影响；端点序 i 与实例 start-rank i 的对应（端点 i ↔ 实例 i）由部署侧在 N 个端口与 N 个实例的映射中保证。
+**配置面**：`--api-server-count N` 沿用上游参数（不新增）；新增 N 个监听端口的表达（显式列表优先，即形态 A 的 `--api-server-endpoints`；多命令 attach 形态 B 见 §3.12.2）。与 §2.1 显式实例配置的关系：监听端口是**前端部署参数**，不是实例身份编码--边云侧实例身份由 `--instance-parallel-size/start-rank` 编码，世界组/通道推导不受影响；端点序 i 与实例 start-rank i 的对应（端点 i ↔ 实例 i）由部署侧在 N 个端口与 N 个实例的映射中保证。
 
 **风险与部署约束**：
 
@@ -1579,6 +1579,80 @@ per-channel ZMQ（每 channel 独立 `queue.Queue(1000)` + 独立 pub/sub 线程
 | 4 | 1:1 退化 | 无 | N=1 时单端点单 client_index，与现网行为一致（部署差异只在端口数随 N） |
 
 **否决的替代路线**：①dp_supervisor 式 N 个独立 `vllm serve`--每 serve spawn 自己的 EngineCore -> N 个 EngineCore 各占边卡，算力不共享，直接违背需求；②单端点 + 请求头传实例（`x-instance-id` 类）--网关/客户端要懂 header、端点即实例的运维语义弱，留作 v1.x 无网关直连场景补充；③纯 §3.4 方案 c 单端点 leader 决策--最省，但与「一实例一端点、网关选实例」的部署预期不符。
+
+#### 3.12.2 边侧前端两种拉起形态：单命令 vs 多命令（2026-08 补充）
+
+§3.12/§3.12.1 定的是**运行时拓扑**（一实例一端点、网关选实例、ci=i）；端点/ApiServer 怎么**产生**有两种等价形态，内部机制（admission、pin、输出回投）完全共享，差异只在前端进程的拉起方式。
+
+**两条硬前提（两形态共同约束，先于形态选择）**：
+
+1. **边侧算力共享必须发生在一个 EngineCore 进程组内**（scheduler 时分复用 + KV 簿记，§3.1）--无论几条命令，EngineCore 只能被拉起**一次**；
+2. **边云是一个 G0 世界组**（rank 编排、通道、启动 barrier，§2.2/§4.1）--rendezvous 只能发生一次。
+
+因此「边侧 N 条命令」绝不能是 N 条对等的完整 `vllm serve`（各自 spawn EngineCore -> N 个孤立 1:1 栈，即否决路线①）；只能是「**1 条主命令起 EngineCore + 其余命令只起前端 attach**」。
+
+**形态 A：单命令（推荐，改动最小）**--launcher 父进程一次拉起 N 个 ApiServer 子进程（上游 `run_multi_api_server` 原生顺序：EngineCore 先、ApiServer 子进程后）：
+
+```
+vllm serve /models/<model> \
+  --instance-parallel-size 4 \
+  --nnodes 2 --node-rank 0 \
+  <边云角色/模型常规配置，同现网单实例写法> \
+  --api-server-count 4 \
+  --api-server-endpoints 10.0.0.1:9001,10.0.0.2:9002,10.0.0.3:9003,10.0.0.4:9004
+```
+
+- `--api-server-endpoints`：**新参数**（存量 `--host/--port` 单值，无法表达 N 个 ip:port）；实例号 i = 列表下标（隐式）。
+- `<常规配置>` 指模型路径、TP/DP、KV cache、边云角色标识等现网 1:1 部署本来就要写的参数，与形态 B 完全相同，非差异项。
+
+**形态 B：多命令（1 主 + N-1 attach，运维与云侧对称）**--主命令起 EngineCore + 实例 0 前端；其余 N-1 条各起 1 个 ApiServer，attach 到主命令的 coordinator：
+
+```
+# 命令 1（主命令：EngineCore 进程组 + 实例 0 前端）
+vllm serve /models/<model> \
+  --instance-parallel-size 4 --instance-parallel-start-rank 0 \
+  --nnodes 2 --node-rank 0 \
+  <边云角色/模型常规配置> \
+  --api-server-count 4 --host 10.0.0.1 --port 9001
+
+# 命令 2..4（attach 前端：各起 1 个 ApiServer，i = 1,2,3）
+vllm serve /models/<model> \
+  --instance-parallel-size 4 --instance-parallel-start-rank 1 \
+  <边云角色/模型常规配置，须与命令 1 逐字一致> \
+  --api-server-count 4 --api-server-attach 10.0.0.1:<rpc_port> \
+  --host 10.0.0.2 --port 9002
+```
+
+- attach 命令**不起 engine、不进 rendezvous**（不带 `--node-rank`），只向主命令注册；边侧命令数 = N，与云侧 N 条命令对称（每实例一条命令/一份配置）。
+- **上游先例**：`run_headless`（serve.py:173-229，api_server_count=0 只起 engine 经 handshake 注册）+ external LB 模式（每命令 1 个 api server、经 DPCoordinator 拿 engine ZMQ 地址，utils.py:1106-1111）--「只起前端 attach 已有 engine」与「只起 engine 无前端」均有现成机制，组合即得。
+- **「N 条到齐才真正启动服务」= 两级 barrier 天然存在**：①前端注册计数 barrier（EngineCore 侧等 client_count = N 个注册，上游 handshake 本就数连接数，utils.py:1211-1226）；②G0 启动 barrier（云侧 HELLO 齐，§3.10）。任一 attach 命令未执行 -> 整体阻塞（与 v1 故障模型一致），超时 fail-fast。注意 client_count 现网是启动时传入的定值，attach 模式需改为「数到 N 才放行」的注册制。
+
+**形态 B 需新增的胶水（4 项）**：
+
+| # | 项 | 说明 |
+|---|---|---|
+| 1 | 前端注册/发现 | coordinator 分发 engine ZMQ 地址 + client_index 申领（显式 `--instance-parallel-start-rank i` 即前端序，对齐云侧风格；或原子递增分配） |
+| 2 | client_count 改注册制 | 从构造定值改为「数到 N 才放行」（见上） |
+| 3 | attach 入口 | `--api-server-attach <ip:rpc_port>`：跳过 engine/rendezvous，只起 ApiServer + 注册；每命令自带 `--host/--port`（存量单值参数即可，**不需要 endpoints 列表**） |
+| 4 | 顺序约束 | 主命令必须先行（起 store/coordinator）；attach 命令可乱序、可间隔执行；公共配置逐字一致需校验（不一致 fail-fast） |
+
+**配置面对比**：
+
+| 维度 | 形态 A：单命令 | 形态 B：多命令（1 主 + N-1 attach） |
+|---|---|---|
+| 命令数（边侧） | 1 | N |
+| 实例号来源 | endpoints 列表下标（隐式） | `--instance-parallel-start-rank i`（显式，与云侧同款参数） |
+| ip:port 表达 | `--api-server-endpoints` 列表（**新参数**） | 每条命令自带 `--host/--port`（**存量参数**；新参数仅 `--api-server-attach`） |
+| 模型/部署参数 | 1 份，天然无漂移 | N 份，除 host/port/start-rank/attach 外须逐字一致（启动校验兜底） |
+| 命令顺序约束 | 无 | 主命令先行；attach 可乱序 |
+| 到齐 barrier | launcher 进程内 spawn 完即齐 | coordinator 前端注册计数（跨进程） |
+| EngineCore 归属 | 父进程 1 次拉起 N 个前端子进程 | 主命令拉起；attach 命令不碰 engine |
+| 单前端故障 | 子进程挂 = launcher 拉停全体 | 该条命令可单独重执行（engine 不动；v1 故障模型下仍整体挂） |
+| 与云侧对称性 | 边 1 : 云 N | 边 N : 云 N，每实例一条命令一份配置 |
+| 新增胶水 | endpoints 解析 + per-child bind/地址下发（§3.12 改动 1/2） | 上表 4 项（含 coordinator 注册协议） |
+| 脚本/编排面 | 1 个 systemd/supervisor 单元 | N 个单元（或 1 个脚本顺序拉起） |
+
+**定位**：形态 A 为 v1 默认（改动最小，即 §3.12 修改点 1/2 的口径）；形态 B 为等价可选形态，收益是运维对称性与每实例独立配置文件，代价是多一个前端注册协议。两形态可并存（差异封装在 launcher/前端产生层，EngineCore 与云端零感知）。
 
 ---
 
