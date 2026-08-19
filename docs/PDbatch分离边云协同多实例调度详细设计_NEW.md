@@ -1015,6 +1015,114 @@ qwen3.6-27b 计算基线 2 卡 -> 云实例 = 2 卡 tp2，8 卡 A2 推理服务�
 - **K=1 无共置**：每服务器恰好 1 个 (实例,dp) 进程组，§2.6 同机共置处理项（#2 端口偏移/#5 错峰）不适用；**关注点转为实例内跨机带宽**（dp 双机 coord + EP all-toall + 边↔双机 hidden 流量，§6.3 kimi 行：跨机 tp/EP 通信带宽是设计关注点而非 KV 容量）
 - **kimi 单实例 16 卡跨 2 服务器**：实例 = 2 台整机，故障域 = 2 台服务器同时影响 1 实例（v1 任一实例挂整体挂口径不变，§2.6 #4）
 
+#### 场景四：kimi25_w4a8_static_m6，head_tail 首1尾1，边 2 卡，云 2 台 16 卡服务器 × 2 实例（N=2，dp=4 云双机 local 2，单实例 16 卡）
+
+**基本量**：E=2（边 2 卡，首1尾1，**有边侧 KV**）、N=2、D=4（单实例 16 卡 = 云双机各 2 dp × tp4）、C=4；world = 2+2·4·4 = **34**；G2 共 N×D = 8 个（per-(instance,dp)，各 = 承载该 dp 的边 rank ∪ 实例 i 的 dp j 云 4 rank，size 1+4）；边云算力比 2:32 = 1:16。
+
+**边侧 4 DP / 2 卡的承载**：每边 rank host D/E = 2 个 virtual worker（shared-model 多卡扩展：边卡0 承载 DP0/DP1、边卡1 承载 DP2/DP3，4 个 EngineCore 进程分布在 2 个 HCCL rank 上，§2.3/§2.5 同构推广；vworker->边卡映射连续/交错为实现期细节）。
+
+**拉起配置**（§2.1 口径；三轴叠加 + dp local 2）：
+
+| 侧 | 配置 |
+|----|------|
+| 边（2 卡） | `--nnodes 2 --node-rank 0 --instance-parallel-size 2 --edge-npu-count 2 --cloud-npu-count 32`，边模式 `head_tail`（首1尾1）；前端 `--api-server-count 2` + 2 个监听端口显式列表（§3.12）；`pre_out_ports = [P0..P3]`（D=4 四个显示值，§3.7.1） |
+| 云服务器A 实例0（dp0/dp1） | `--nnodes 2 --node-rank 1 --instance-parallel-size 2 --instance-parallel-start-rank 0 --data-parallel-size 4 --data-parallel-size-local 2 --data-parallel-start-rank 0` + `ASCEND_RT_VISIBLE_DEVICES=0-7` |
+| 云服务器A 实例1（dp0/dp1） | 同上，`--instance-parallel-start-rank 1` + `ASCEND_RT_VISIBLE_DEVICES=8-15` |
+| 云服务器B 实例0（dp2/dp3） | `--instance-parallel-start-rank 0 --data-parallel-start-rank 2`，其余同服务器A 实例0 |
+| 云服务器B 实例1（dp2/dp3） | `--instance-parallel-start-rank 1 --data-parallel-start-rank 2`，其余同服务器A 实例1 |
+
+每服务器 = 2 个进程组（实例0 + 实例1 各 8 卡，**K=2 同机共置**：卡切片、端口/store 偏移、错峰启动适用，§2.6）；实例内 4 dp 跨双机：服务器A 起 dp0/dp1（start-rank 0）、服务器B 起 dp2/dp3（start-rank 2）。
+
+**编队 / rank 清单**（§4.1 公式：云 (实例 i, dp j) 首 rank = E+i·D·C+j·C = 2+16i+4j）：
+
+| 实例 i | dp j | 服务器 | 卡切片 | 云 rank | DEALER 连接 | 承载边 rank |
+|--------|------|--------|--------|---------|------------|------------|
+| 0 | 0 | A | 0-3 | 2-5 | P0，id="0" | 边卡0（DP0） |
+| 0 | 1 | A | 4-7 | 6-9 | P1，id="0" | 边卡0（DP1） |
+| 0 | 2 | B | 0-3 | 10-13 | P2，id="0" | 边卡1（DP2） |
+| 0 | 3 | B | 4-7 | 14-17 | P3，id="0" | 边卡1（DP3） |
+| 1 | 0 | A | 8-11 | 18-21 | P0，id="1" | 边卡0（DP0） |
+| 1 | 1 | A | 12-15 | 22-25 | P1，id="1" | 边卡0（DP1） |
+| 1 | 2 | B | 8-11 | 26-29 | P2，id="1" | 边卡1（DP2） |
+| 1 | 3 | B | 12-15 | 30-33 | P3，id="1" | 边卡1（DP3） |
+
+跨 socket 的 (dp, instance) 二元组全局唯一；4 个 ROUTER（P0..P3）的 readiness 表均须为 {0,1}（§2.2.3 硬约束推广到 D=4）。
+
+**边云通信全图**：
+
+```
+              上游 API 网关（请求级分发：选端点 = 选实例，§3.12）
+                │ HTTP ×2（端点 i ↔ 实例 i）
+                ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ 边侧服务器（node_rank 0，2 卡，master_addr，head_tail 首1尾1）         │
+│                                                                  │
+│  ApiServer_0..1 ×2 ──「端点定实例」                                 │
+│    │ 前端 internal LB「负载定 dp」：DPLBAsyncMPClient 在 D=4 个       │
+│    │ EngineCore 中按 score=waiting×4+running 选（DPCoordinator 汇聚） │
+│    ▼                                                             │
+│  EngineCore ×4（DP0..DP3；边卡0 host DP0/DP1、边卡1 host DP2/DP3，    │
+│    2 个 HCCL rank × 各 2 virtual worker）                          │
+│    │ scheduler 组 = N×D = 8 per-(instance,dp)                      │
+│    │ G1 gloo：4 EngineCore all_reduce（D 路配对云 EP，§3.4/§5.4      │
+│    │   推广；§3.12 下 instance_id 请求自带，本通道保留为 D 路配对）      │
+│    ├─ PRE_OUT ROUTER ×4：dp_j bind tcp://*:P_j（j=0..3）            │
+│    │    readiness 4 表均 {0,1}（8 个 HELLO 齐才放行，G0 barrier）     │
+│    ├─ PD TCPStore（master_port，边 rank0 host）：G0=34 rendezvous     │
+│    │    + G2 prefix key ×8 + 云双机 coord IP broker                 │
+│    ├─ rpc_broadcast_mq / response_mq（启动期 method 链）              │
+│    └─ 边卡0/1：hidden channel 池 = 8 manager（per-(实例,dp)）          │
+│         × (2 prefill + 1 decode)；边侧 KV 分区准入（§6.1，            │
+│           per-dp_num_blocks/N，kimi 边块数待实测 §6.3）               │
+└──────┬──────────┬──────────┬──────────┬─────────────────────────────┘
+       │ P0       │ P1       │ P2       │ P3（ZMQ DEALER，id=start-rank）
+       │          │          │          │        + HCCL 数据面（8 个 G2）
+┌──────┴──────────┴─────────┐  ┌────────┴──────────┴──────────────────┐
+│ 云服务器A（node_rank 1）     │  │ 云服务器B（node_rank 1）               │
+│ 实例0: dp0 卡0-3 rank2-5   │  │ 实例0: dp2 卡0-3 rank10-13           │
+│         dp1 卡4-7 rank6-9  │  │         dp3 卡4-7 rank14-17          │
+│ 实例1: dp0 卡8-11 rank18-21│  │ 实例1: dp2 卡8-11 rank26-29          │
+│         dp1 卡12-15 rank22-25│  │       dp3 卡12-15 rank30-33        │
+│ （每实例 1 进程组 local 2 dp； │  │ （同左；K=2 共置、卡切片、错峰）        │
+│   两进程组共置；云不 bind）    │  │                                    │
+│   gloo coord：实例0 组 +201+0 │  │   gloo coord：connect 实例0/1 组     │
+│   （dp0 host）、实例1 组 +201+1│  │                                    │
+└────────────────────────────┘  └────────────────────────────────────┘
+```
+
+**通道明细**（§2.2.1 六类通道、形态 b 定案；D=4 差异项）：
+
+| 通道 | 本场景形态 | 量 / 端口 |
+|------|-----------|----------|
+| HTTP（网关->端点） | 2 端点，请求级分发 | 2 × ip:port |
+| ZMQ input/output + 前端 internal LB | ApiServer×2 -> DPLBAsyncMPClient 在 4 EngineCore 中选 dp；client_index = instance_id | ×2 端点 |
+| PRE_OUT（ROUTER/DEALER） | 边 **4 个 ROUTER（P0..P3 per dp）**；8 条 DEALER = 每 (实例,dp) 一条，connect `tcp://master_addr:P{dp}`，IDENTITY = start-rank | 4 端口、8 连接 |
+| PD TCPStore | 边 rank0 host；G0 world=34 rendezvous + 启动 barrier + coord IP broker | 1 store |
+| rpc_broadcast_mq / response | 边 leader 广播、云 32 worker 按 rank 回收 | 随机端口 |
+| HCCL hidden channel | 8 个 G2（per-(实例,dp)，各 1+4 rank）× 2P1D；边 rank 按承载 dp 参与对应 4 个 G2（每边 rank × 2 实例 × 2 dp） | 8 组、24 channel |
+| gloo coord group（云双机 per instance） | 实例内 4 dp 协调（EP all-toall 配对/bt）；master_port+201+i（i=0/1）；dp0 host、其余 connect；边只 IP broker | 2 组 |
+| G1 gloo（边内 4 EngineCore） | D=4 路 all_reduce 配对通道（§3.4/§5.4 推广；§3.12 下 pin 透传） | 1 组 |
+| cloud_ip store | **无**（形态 b 已删） | - |
+
+**head_tail / kimi / dp=4 特有注记**：
+
+- **有边侧 KV，分区准入**（§6.1）：per-instance 分区 = 边块数/N（kimi 待实测，§6.3）；N=2 容量安全结论不变；§6.6 min 汇聚按实测 R 判定边/云何侧生效
+- **边侧 D=4/E=2 承载**：每边 rank host 2 virtual worker（4 EngineCore 分布在 2 HCCL rank），边卡时分复用 2 实例 × 本卡 2 dp = 4 条流；inflight = 2×N×D = 16 个 prefill 在飞（§6.4）；边侧首/尾吞吐 ≥ 8 流喂入速率（§1.2/§1.3）是重叠收益前提--**本场景边侧算力压力为四个场景之最**（E=2 承载 N×D=8 条流，对比场景二 E=2 承载 4 条流）
+- **D=4 通信放大**：PRE_OUT 4 端口 8 连接；G1 all_reduce D 路（coord payload +1 int32 机制不变，§5.4）；云侧 EP all-toall 4 dp 跨双机（每实例 coord 组内），实例内跨机带宽 = kimi 关注点（§6.3）且与共置叠加：每服务器网口承载 2 实例 × (hidden 流量 + EP all-toall + coord)，**per-server 聚合带宽评估 ×2**（§2.6 #3）
+- **K=2 同机共置**：每服务器 2 进程组（实例0/1 各 8 卡），§2.6 #2 端口/store 偏移、#5 错峰、#6 标签适用；kimi 单实例权重 16 卡 w4a8 加载 ×2 = host RAM 压力项
+- **算力比 2:32**；kimi 单实例跨 2 服务器 + 每机承载双实例 -> 故障域 = 任一服务器挂影响 2 个实例各半 dp（v1 任一实例挂整体挂口径不变）
+
+#### 汇总对比（§2.7 四场景）
+
+| 场景 | 模型 / 边模式 | E | N | D | C | world | G2 数/大小 | 端口数 | DEALER 连接 | 边 KV | 边侧承载流数 | 关注点 |
+|------|-----------|---|---|---|---|-------|---------|------|-----------|--------|------------|------|
+| 一 | qwen3.6-27B / embedding_only | 1 | 8 | 1 | 2 | 17 | 8 × (1+2) | 1 | 8 | 无（恒云侧） | 8 | 边 1 卡吞吐天花板；同机 K=4 |
+| 二 | DS-v4-flash-w8a8 / head_tail 首3尾1 | 2 | 4 | 1 | 8 | 34 | 4 × (2+8) | 1 | 4 | 有（cloud-bound 4.39×） | 4 | 容量安全；同机 K=2 |
+| 三 | kimi25 / embedding_only | 1 | 2 | 2 | 8 | 33 | 2 × (1+16)，dp 切 channel | 2 | 4 | 无（恒云侧） | 4 | 实例内跨机带宽；K=1 无共置 |
+| 四 | kimi25 / head_tail 首1尾1 | 2 | 2 | 4 | 4 | 34 | 8 × (1+4) | 4 | 8 | 有（R 待实测） | 8 | 边侧压力最大；D=4 通信放大；K=2 |
+
+共性规则（四场景通用）：`nnodes` 恒 2、云全部 node_rank 1；实例/实例内 dp 均靠 start-rank 双轴区分；ApiServer = N（端点定实例、负载定 dp）；同机共置（K>1）时端口/store 偏移 + 错峰 + instance 标签强制；云不 bind 任何端口、同 IP 多 DEALER 仅靠 IDENTITY 区分；v1 故障模型 = 任一实例挂整体挂。
+
 ---
 
 ## 3 控制面方案
