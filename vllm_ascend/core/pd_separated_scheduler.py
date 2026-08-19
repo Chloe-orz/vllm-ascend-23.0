@@ -729,7 +729,18 @@ class PDSeparatedScheduler(Scheduler):
 
     def _schedule_pd_separated(self) -> SchedulerOutput:
         state = self._prefill_state()
-        scheduler_output = self._pick_by_state(state)
+        scheduler_output = self._pick_by_state(state, ready_only=True)
+        if scheduler_output.batch_type == BatchType.EMPTY and (
+            self.prefills_last_ready
+            or self.decodes_last_ready
+            or self.drafts_last_ready
+        ):
+            # Nothing is data-ready but tails are in flight: fall back to
+            # the original priority order and dispatch anyway — the payload
+            # wait happens device-side (wait_event on the pre-posted recv),
+            # never a host block.  This keeps single-stream latency off the
+            # report->drain->dispatch confirmation chain.
+            scheduler_output = self._pick_by_state(state, ready_only=False)
         has_work = scheduler_output.total_num_scheduled_tokens > 0
         is_tail = scheduler_output.batch_type in (
             BatchType.PREFILL_LAST,
@@ -794,7 +805,9 @@ class PDSeparatedScheduler(Scheduler):
             return self._pick_decode_first_batch()
         return self._make_empty_batch()
 
-    def _pick_by_state(self, state: PrefillState) -> SchedulerOutput:
+    def _pick_by_state(
+        self, state: PrefillState, ready_only: bool = True
+    ) -> SchedulerOutput:
         if self._decode_first_placeholder_parent is not None:
             self._prepare_next_decode_first_placeholder(
                 self._decode_first_placeholder_parent
@@ -828,9 +841,32 @@ class PDSeparatedScheduler(Scheduler):
         ):
             return self.decodes_first_ready.popleft()
 
-        first_only = self._pick_decode_or_draft_first_only_or_empty()
-        if first_only is not None:
-            return first_only
+        if ready_only:
+            first_only = self._pick_decode_or_draft_first_only_or_empty()
+            if first_only is not None:
+                return first_only
+
+        # Two-pass readiness semantics: with ready_only=True an unready
+        # tail is treated as absent (schedule among data-ready tasks);
+        # the fallback pass (ready_only=False, taken only when nothing
+        # was ready) dispatches the highest-priority pending tail by the
+        # original order — its payload wait is covered device-side by
+        # wait_event on the pre-posted recv, never a host block.
+        has_drl = (
+            self._has_actionable_draft_tail()
+            if ready_only
+            else bool(self.drafts_last_ready)
+        )
+        has_dl = (
+            self._has_actionable_decode_tail()
+            if ready_only
+            else bool(self.decodes_last_ready)
+        )
+        has_pl = (
+            self._has_actionable_prefill_tail()
+            if ready_only
+            else bool(self.prefills_last_ready)
+        )
 
         if state == PrefillState.IDLE:
             # IDLE: P首/chunk0首 > Draft尾 > Draft首 > Decode尾 > Decode首 > Empty
@@ -844,7 +880,7 @@ class PDSeparatedScheduler(Scheduler):
                     "requests. Prefill work will be deferred until resources are freed."
                 )
                 self.finished_req_ids.update(so.finished_req_ids)
-            if self._has_actionable_draft_tail():
+            if has_drl:
                 return self._pick_draft_last_batch()
             if self._can_schedule_draft_first():
                 return self._pick_draft_first_batch()
@@ -852,33 +888,27 @@ class PDSeparatedScheduler(Scheduler):
             # into decodes_last_ready at creation time; while the head is
             # gated above, the tail must not overtake it (the worker would
             # find no suspended HeadState for it).
-            if (
-                self._has_actionable_decode_tail()
-                and not self.decodes_first_ready
-            ):
+            if has_dl and not self.decodes_first_ready:
                 return self._pick_decode_last_batch()
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
-            if self.prefills_last_ready:
-                return self._pick_prefill_last_batch()
+            if has_pl:
+                return self._pick_prefill_last_batch(ready_only=ready_only)
             return self._make_empty_batch()
 
         # HIGH: Draft尾 > Draft首 > D尾 > D首 > P尾 > Empty
-        if self._has_actionable_draft_tail():
+        if has_drl:
             return self._pick_draft_last_batch()
         if self._can_schedule_draft_first():
             return self._pick_draft_first_batch()
         # Same overtake guard as the IDLE branch above: a queued placeholder
         # DECODE_FIRST's self-posted tail must wait for its head.
-        if (
-            self._has_actionable_decode_tail()
-            and not self.decodes_first_ready
-        ):
+        if has_dl and not self.decodes_first_ready:
             return self._pick_decode_last_batch()
         if self._can_schedule_decode_first():
             return self._pick_decode_first_batch()
-        if self.prefills_last_ready:
-            return self._pick_prefill_last_batch()
+        if has_pl:
+            return self._pick_prefill_last_batch(ready_only=ready_only)
         return self._make_empty_batch()
 
     def is_waiting_for_remote_tail(self) -> bool:
@@ -1335,7 +1365,9 @@ class PDSeparatedScheduler(Scheduler):
             self.drafts_last_ready[0]
         )
 
-    def _pick_prefill_last_batch(self) -> SchedulerOutput:
+    def _pick_prefill_last_batch(
+        self, ready_only: bool = True
+    ) -> SchedulerOutput:
         """Pop one cloud-returned SchedulerOutput from prefills_last_ready.
 
         The cloud has already rewritten ``batch_type=PREFILL_LAST`` and kept
@@ -1346,12 +1378,16 @@ class PDSeparatedScheduler(Scheduler):
         """
         if not self.prefills_last_ready:
             return self._make_empty_batch()
-        # Peek before popping: when the decoupled-irecv coordination is
-        # active, a PL whose tail payload has not finished arriving stays
-        # queued and this round yields an EMPTY batch instead of blocking
-        # the worker on recv.  PL is the lowest-priority pick in every
-        # state, so skipping here needs no caller-side handling.
-        if not self._prefill_tail_data_ready(self.prefills_last_ready[0]):
+        # Peek before popping: in the ready pass (ready_only=True) a PL
+        # whose tail payload has not finished arriving stays queued and
+        # this round yields an EMPTY batch instead of blocking the worker
+        # on recv.  PL is the lowest-priority pick in every state, so
+        # skipping here needs no caller-side handling.  The fallback pass
+        # (ready_only=False) dispatches regardless — the payload wait is
+        # covered device-side by wait_event on the pre-posted recv.
+        if ready_only and not self._prefill_tail_data_ready(
+            self.prefills_last_ready[0]
+        ):
             return self._make_empty_batch()
         so = self.prefills_last_ready.popleft()
         assert so.batch_type == BatchType.PREFILL_LAST, (
