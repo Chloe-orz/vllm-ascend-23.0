@@ -2739,5 +2739,84 @@ leader 维护全部 N 个实例的下列状态（per-instance scheduler 只出�
 
 ---
 
+## 10 可靠性方案（2026-08 新增）
+
+### 10.1 故障模型
+
+| 故障 | v1 行为 | 说明 |
+|---|---|---|
+| 边侧故障（EngineCore / launcher） | **整体故障，接受** | 边是单点算力（1-2 卡时分复用 N 实例），无可降级对象 |
+| 云侧某实例故障 | **v1 = 整体故障（fast-fail + 重启）**；v1.x = 降级运行 N->N-1（§10.4） | 现状无运行期活性检测，实际形态可能是 hang 而非 fail（见下） |
+| 一机多实例（K>1）服务器故障 | 该机 K 实例齐挂 | 相关性故障域 = 服务器（§2.6 处理项 #4 同款结论），N=8 同机 2 台时实际仅 2 个故障域 |
+
+**运行期故障传导**（v1 耦合点）：
+
+| 耦合点 | 失败传导 |
+|---|---|
+| G0 世界组 + 启动 barrier | 编队期挂 -> barrier 不齐 -> 拉起失败（fail-fast，这层是好的） |
+| 运行期通道（PRE_OUT / hidden ×2P1D / coord gloo） | 实例 i 死后，边对它的 isend/irecv/配对永远等不到 -> **不主动检测则是 hang，不是 fail** |
+| 边调度全局视图（§7） | 实例 i 的尾永远不 ready、其 pin 请求永远排队 -> 网关端点 i 流量全部超时 |
+
+**核心问题**：整体故障本身不是最大代价（v1 故障域一致是简化决策），**「整体故障但表现为 hang」才是**--无跨实例活性检测时，失败暴露取决于最底层谁先超时（HCCL watchdog / TCP keepalive / ZMQ），可能分钟级甚至不触发。可靠性方案的第一目标 = **把 hang 变成有界 RTO 的 fail**。
+
+### 10.2 v1 方案：检测 + 整体重启（fast-fail + supervised restart）
+
+**检测源（多源取最快）**：
+
+| 层 | 机制 | 覆盖 |
+|---|---|---|
+| 进程级 | 每台云机器 launcher/agent 监视本机 EngineCore 子进程退出（现成：`wait_for_completion_or_failure`） | 进程崩溃/OOM/被杀 |
+| 通道级 | 边↔云轻量 heartbeat：云 PassiveEC 每 X 秒回 echo（PRE_OUT 同链路或独立 ZMQ），边侧 X×3 未收到 = 判死 | **进程活着但 HCCL 假死 / NPU hang**（进程级检测不到的关键类） |
+| 集合通信级 | HCCL/torch watchdog（collective 超时 abort 进程）兜底 | 把 hang 转成进程退出，回到进程级 |
+
+**决策与拆链**：
+
+1. 决策单点 = 边主命令（形态 A 的 launcher / 形态 B 的命令 1）；
+2. 判死某云实例后：本机先 teardown 全部边侧进程（EngineCore/ApiServer），再经控制通道（G0 store 或 ssh/systemd）通知其余云机器 launcher 各自 teardown；
+3. **杀干净是重启成功的前提**：孤儿 EngineCore、NPU 显存残留、HCCL context 残留是重启失败头号原因--每机 systemd `KillMode=control-group` + 重启前 `npu-smi` 显存检查，残留即拒拉并告警。
+
+**重拉编排**：全停 -> 全拉。形态 A 天然整体重启（1 条命令 + systemd 单元）；形态 B 需编排脚本保证先杀全部 N 条边命令、再按主->attach 顺序重拉；云侧 N 条命令由本机 systemd 拉起，编队靠 G0 rendezvous 重新收敛（现有机制零改）。
+
+**RTO 与请求面**：重启耗时 ≈ 模型加载 + 编队 + barrier（分钟级，kimi 16 卡最慢）；在飞请求全部失败，客户端/网关重试；网关服务级 readiness = N 端点全活才恢复引流（复用 §3.12.2 的 N 到齐 barrier 语义）。
+
+### 10.3 非边云集群对照
+
+| 系统/生态 | 做法 | 与本设计可比性 |
+|---|---|---|
+| Kubernetes + vLLM | liveness probe 失败 -> kubelet 杀 pod -> 重建；无成员级热剔除 | 即「检测 + 整体重启」，分布式标准答案 |
+| torch elastic（torchrun --max-restarts） | agent 监视 worker，死亡 -> 杀其余 worker -> 重新 rendezvous 全量重启 | 与 G0 重新编队同构，agent/watchdog 分层可借鉴 |
+| Ray / Ray Serve | actor/engine 死 -> 副本级重启，请求 fail-fast 客户端重试 | 同为副本级重启，非原地修复 |
+| NCCL 生态 | `TORCH_NCCL_ASYNC_ERROR_HANDLING`：watchdog 超时 abort 进程 | 检测兜底标准件；HCCL 对应能力需核实（open item） |
+| vLLM dp external LB（松耦合 dp） | 每 rank 独立进程组，LB 摘死成员，其余继续 | **唯一「不重启只降级」先例**--前提成员间无共享 communicator；本设计实例间恰好也满足（§9） |
+| HPC（Slurm） | fail-fast + requeue 整作业重启 | 同 |
+
+业界共识：**紧耦合 GPU 集群不做原地成员修复（communicator 不可部分重组），一律 fast-fail + 监督重启；「不重启只降级」只出现在成员间无集合通信的松耦合形态。**
+
+### 10.4 v1.x 路线：降级运行 N->N-1（架构前提已具备）
+
+§9 的核心结论--**实例间无集合通信**（所有 HCCL 组在实例子组内，G0 只管编队）--意味着云实例 i 死亡**不污染其他实例的通信子**，架构上具备摘除实例 i、其余 N-1 继续服务的前提，优于一般紧耦合集群。需补机制：
+
+1. **死实例标记与隔离**：heartbeat 判死 -> 边调度全局视图加 per-instance alive 位（§7.2），Stage A/B 跳过其队列/候选；网关摘端点 i（复用 §3.12 端点语义）；其上在飞请求快速失败返回；
+2. **边侧记账回收**：实例 i 的 edge KV 份额、pending_tails、通道池 slot 回收；ZMQ/TCP 断连检测（RST/heartbeat 超时）触发；
+3. **容量无需重算**：cloud-bound 下 per-instance num_blocks 与 N 无关（§6.3），摘实例只减并发不减单实例容量；
+4. **恢复仍走整体重启**：死实例重加入需重新编队（G0 rank 空洞、通道重建），v1.x 不做热重入；降级态持续到维护窗。
+
+**分层结论**：
+
+| 阶段 | 手段 |
+|---|---|
+| v1 | 检测（多源）+ 整体重启：把 hang 变成有界 RTO 的 fail |
+| v1.x | 降级运行：摘除死实例继续服务（补隔离/回收机制） |
+| 不做 | 原地修复死实例（communicator 重组，紧耦合集群业界均不做） |
+
+### 10.5 open items
+
+- HCCL watchdog 超时 abort 能力与默认值核实（对标 `TORCH_NCCL_ASYNC_ERROR_HANDLING`）；
+- heartbeat 通道选型：PRE_OUT 同链路复用 vs 独立 ZMQ（同机端口规划需并入 §2.2 端口清单）；
+- 降级运行的 edge KV 回收与 block_table 跨实例簿记（与 §6.2/§6.5 口径联动）；
+- systemd/编排脚本模板（形态 A/B 两套）。
+
+---
+
 > 本文档为方案设计阶段产出，所有结论经代码核实。实现期需对 open items 逐项验证，
 > 特别是 NPU event 轮询机制（§5.2.3 改造点 1）与 batch_queue_size 调优（§5.3.4）。
