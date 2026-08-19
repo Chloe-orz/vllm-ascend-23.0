@@ -146,6 +146,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP": lambda: bool(
         int(os.getenv("VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP", "1"))
     ),
+    # Edge-cloud: number of EXTRA dummy data channels to create at startup
+    # purely for measuring per-channel HCCL device-memory cost.  The dummy
+    # channels are never used for data transfer; each one only gets a
+    # device/cpu process-group pair (same ranks & pg_options scheme as the
+    # real hidden channels) plus one tiny allreduce warmup so the HCCL
+    # communicator resources are actually allocated instead of lazily
+    # created on first use.  Default 0 (disabled).
+    "VLLM_ASCEND_EDGE_CLOUD_DUMMY_CHANNELS": lambda: int(
+        os.getenv("VLLM_ASCEND_EDGE_CLOUD_DUMMY_CHANNELS", "0")
+    ),
 }
 
 # end-env-vars-definition

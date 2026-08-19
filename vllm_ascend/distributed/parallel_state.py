@@ -633,6 +633,18 @@ def init_ascend_model_parallel(
                 pp_group.create_hidden_channel_groups(
                     backend, num_prefill, num_decode,
                 )
+                # Measurement-only dummy channels: create extra data
+                # channels that are never used for transfer, to verify how
+                # much device memory the service occupies at startup as the
+                # channel count grows (VLLM_ASCEND_EDGE_CLOUD_DUMMY_CHANNELS).
+                num_dummy = envs.VLLM_ASCEND_EDGE_CLOUD_DUMMY_CHANNELS
+                if num_dummy > 0 and hasattr(pp_group, "create_dummy_channel_groups"):
+                    logger.info(
+                        "[PD] creating %d dummy data channels for device "
+                        "memory measurement", num_dummy,
+                    )
+                    pp_group.create_dummy_channel_groups(backend, num_dummy)
+                    pp_group.warmup_dummy_channels()
             else:
                 HiddenChannelType.init(dp_size=1)
             # Pre-establish the HCCL/gloo links of every hidden channel so

@@ -172,6 +172,12 @@ class GroupCoordinatorPatch(GroupCoordinator):
             self._prefill_cpu_groups: list[torch.distributed.ProcessGroup] = []
             self._decode_device_groups: list[torch.distributed.ProcessGroup] = []
             self._decode_cpu_groups: list[torch.distributed.ProcessGroup] = []
+            # Measurement-only dummy channels (see
+            # VLLM_ASCEND_EDGE_CLOUD_DUMMY_CHANNELS).  Kept in separate
+            # lists so the prefill/decode indices used by the real hidden
+            # channels are untouched.
+            self._dummy_device_groups: list[torch.distributed.ProcessGroup] = []
+            self._dummy_cpu_groups: list[torch.distributed.ProcessGroup] = []
 
             # Seed index-0 with the primary PP group (PREFILL_1) so that
             # len(_prefill_device_groups) is 1 and the range in
@@ -277,7 +283,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
 
         # Destroy hidden channel groups (array-based).
         for groups in (self._prefill_device_groups, self._prefill_cpu_groups,
-                       self._decode_device_groups, self._decode_cpu_groups):
+                       self._decode_device_groups, self._decode_cpu_groups,
+                       self._dummy_device_groups, self._dummy_cpu_groups):
             for pg in groups:
                 if pg is not None:
                     torch.distributed.destroy_process_group(pg)
@@ -285,6 +292,8 @@ class GroupCoordinatorPatch(GroupCoordinator):
         self._prefill_cpu_groups.clear()
         self._decode_device_groups.clear()
         self._decode_cpu_groups.clear()
+        self._dummy_device_groups.clear()
+        self._dummy_cpu_groups.clear()
 
     def destroy_hccl(self) -> bool:
         """Release the HCCL process group."""
@@ -405,6 +414,67 @@ class GroupCoordinatorPatch(GroupCoordinator):
             "[PP Group] %s hidden channel: ranks=%s size=%d backend=%s",
             pg_name, self.ranks, self.world_size, self.backend,
         )
+
+    def create_dummy_channel_groups(
+        self,
+        torch_distributed_backend: str | Backend,
+        count: int,
+    ) -> None:
+        """Create *count* measurement-only dummy data channels.
+
+        Each dummy channel reuses the exact same construction path as the
+        real hidden channels (same ranks, unique HCCL pg_options name for
+        stream isolation), so the device-memory footprint per channel is
+        representative.  The channels are never registered in the
+        prefill/decode arrays and never used for data transfer.
+        """
+        for i in range(1, count + 1):
+            self._create_one_hidden_channel(
+                f"pp_dummy{i}", torch_distributed_backend,
+                self._dummy_device_groups, self._dummy_cpu_groups,
+            )
+
+    def warmup_dummy_channels(self) -> None:
+        """Force HCCL resource allocation on every dummy channel.
+
+        torch.distributed.new_group creates the process-group bookkeeping
+        only; the HCCL communicator (streams, buffers, links) is allocated
+        lazily on first collective.  To make the memory measurement
+        meaningful, run one tiny allreduce per dummy channel and log the
+        NPU memory delta.  All ranks iterate the groups in the same order,
+        and every rank of a group joins the allreduce, so this cannot
+        deadlock.
+        """
+        if not self._dummy_device_groups:
+            return
+
+        def _npu_mem_free_mb() -> float | None:
+            try:
+                free, _total = torch.npu.mem_get_info()
+                return free / 1024 / 1024
+            except Exception:
+                return None
+
+        free_before = _npu_mem_free_mb()
+        for i, device_group in enumerate(self._dummy_device_groups, start=1):
+            if self.world_size <= 1:
+                break
+            warmup_tensor = torch.zeros(
+                8, dtype=torch.bfloat16, device="npu"
+            )
+            torch.distributed.all_reduce(warmup_tensor, group=device_group)
+            free_now = _npu_mem_free_mb()
+            if free_before is not None and free_now is not None:
+                logger.error(
+                    "[PP Group] pp_dummy%d warmed up: cumulative HCCL "
+                    "device-memory cost of %d dummy channels = %.1f MB",
+                    i, i, free_before - free_now,
+                )
+            else:
+                logger.error(
+                    "[PP Group] pp_dummy%d warmed up (mem_get_info "
+                    "unavailable)", i,
+                )
 
     @property
     def alt_device_group(self) -> torch.distributed.ProcessGroup | None:
