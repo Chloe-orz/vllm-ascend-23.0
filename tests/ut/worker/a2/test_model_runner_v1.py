@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -172,6 +173,98 @@ class TestDeepSeekV4MTPDraftSequenceParallel(unittest.TestCase):
 
         self.assertEqual(local_hidden.shape, (2, 4, 2))
         self.assertEqual(torch.count_nonzero(local_hidden).item(), 0)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    def test_segment_a_pads_full_input_ids_for_embedding_reduce_scatter(
+        self,
+        mock_get_tp_group,
+    ):
+        mock_get_tp_group.return_value = SimpleNamespace(world_size=8)
+        input_ids = torch.arange(10, dtype=torch.long)
+
+        padded = NPUModelRunner._pad_deepseek_v4_mtp_draft_input_ids(
+            input_ids,
+            num_actual_tokens=10,
+        )
+
+        self.assertEqual(padded.shape, (16,))
+        self.assertTrue(torch.equal(padded[:10], input_ids))
+        self.assertEqual(torch.count_nonzero(padded[10:]).item(), 0)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    def test_segment_a_keeps_aligned_full_input_ids(
+        self,
+        mock_get_tp_group,
+    ):
+        mock_get_tp_group.return_value = SimpleNamespace(world_size=8)
+        input_ids = torch.arange(16, dtype=torch.long)
+
+        padded = NPUModelRunner._pad_deepseek_v4_mtp_draft_input_ids(
+            input_ids,
+            num_actual_tokens=16,
+        )
+
+        self.assertIs(padded, input_ids)
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.set_ascend_forward_context"
+    )
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.enable_sp",
+        return_value=True,
+    )
+    @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
+    def test_segment_a_forward_context_uses_padded_full_token_count(
+        self,
+        mock_get_tp_group,
+        _mock_enable_sp,
+        mock_forward_context,
+    ):
+        runner = self._build_runner("edge")
+        runner.device = torch.device("cpu")
+        runner.uses_mrope = False
+        runner.speculative_config = SimpleNamespace(method="mtp")
+        runner.drafter.supports_mm_inputs = False
+        runner._pending_edge_cloud_draft_contexts = {"task-0": {}}
+        runner._prepare_edge_cloud_draft_step_inputs = MagicMock(
+            return_value=(
+                torch.arange(10, dtype=torch.long),
+                torch.arange(10),
+                torch.ones(10, 4, 2),
+                0,
+            )
+        )
+        segment = MagicMock(
+            return_value=IntermediateTensors(
+                {"hidden_states": torch.ones(2, 4, 2)}
+            )
+        )
+        runner._edge_cloud_draft_segments = {"a": segment}
+        mock_get_tp_group.return_value = SimpleNamespace(
+            world_size=8,
+            rank_in_group=0,
+        )
+        mock_forward_context.return_value = nullcontext()
+        scheduler_output = SimpleNamespace(
+            draft_task_id="task-0",
+            draft_step_idx=0,
+            total_num_scheduled_tokens=10,
+            num_scheduled_tokens={"req-0": 10},
+        )
+
+        runner._run_edge_cloud_draft_first_segment(scheduler_output)
+
+        context_kwargs = mock_forward_context.call_args.kwargs
+        self.assertEqual(context_kwargs["num_tokens"], 16)
+        self.assertEqual(context_kwargs["num_actual_tokens"], 10)
+        self.assertEqual(
+            context_kwargs["batch_descriptor"].num_tokens,
+            16,
+        )
+        segment_kwargs = segment.call_args.kwargs
+        self.assertEqual(segment_kwargs["input_ids"].shape, (16,))
+        self.assertEqual(segment_kwargs["positions"].shape, (2,))
+        self.assertEqual(segment_kwargs["hidden_states"].shape[0], 2)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_tp_group")
     def test_localize_leaves_existing_sp_shard_unchanged(

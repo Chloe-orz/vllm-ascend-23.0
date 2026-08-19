@@ -2303,6 +2303,37 @@ class NPUModelRunner(GPUModelRunner):
         start = tp_group.rank_in_group * chunk_size
         return tensor.narrow(0, start, chunk_size).clone()
 
+    @staticmethod
+    def _pad_deepseek_v4_mtp_draft_input_ids(
+        input_ids: torch.Tensor,
+        num_actual_tokens: int,
+    ) -> torch.Tensor:
+        """Pad full Segment-A token ids for embedding reduce-scatter.
+
+        The vocab-parallel embedding receives the same full token sequence on
+        every TP rank and reduce-scatters its output along the token axis.  Its
+        input length must therefore be divisible by the TP world size.  The
+        companion positions and hidden states are padded by the SP chunking
+        helper; pad input ids to the identical global length before either the
+        in-segment or the multimodal pre-embedding path runs.
+        """
+        if input_ids.ndim != 1 or input_ids.shape[0] != num_actual_tokens:
+            raise RuntimeError(
+                "DeepSeek-V4 MTP Segment A expected full input ids: "
+                f"shape={tuple(input_ids.shape)}, "
+                f"actual_tokens={num_actual_tokens}"
+            )
+        tp_size = get_tp_group().world_size
+        remainder = num_actual_tokens % tp_size
+        if tp_size <= 1 or remainder == 0:
+            return input_ids
+        padding = torch.zeros(
+            tp_size - remainder,
+            dtype=input_ids.dtype,
+            device=input_ids.device,
+        )
+        return torch.cat((input_ids, padding), dim=0)
+
     def _sync_edge_cloud_draft_intermediate_tensors(
         self,
         num_tokens: int,
@@ -4628,11 +4659,18 @@ class NPUModelRunner(GPUModelRunner):
             if draft_step_idx == 0
             else len(scheduler_output.num_scheduled_tokens)
         )
-        if (
+        dsv4_mtp_sp = (
             self._is_deepseek_v4_mtp_edge_cloud_draft()
             and enable_sp()
-        ):
+        )
+        if dsv4_mtp_sp:
             # The embedding lookup reduces/scatters full input_ids under SP.
+            # Pad that full input first: the reduce-scatter collective itself
+            # requires a dim-0 length divisible by TP size.
+            input_ids = self._pad_deepseek_v4_mtp_draft_input_ids(
+                input_ids,
+                full_num_tokens,
+            )
             # Segment A must receive positions and target hidden states with
             # the same rank-local token layout. Keep full positions for E,
             # which samples the full cloud reply before re-sharding it.
@@ -4659,6 +4697,15 @@ class NPUModelRunner(GPUModelRunner):
             )
             context["current_draft_full_positions"] = full_positions
         num_tokens = positions.shape[-1] if self.uses_mrope else positions.shape[0]
+        # Match the main-model SP contract: the forward context describes the
+        # padded full embedding input, while num_actual_tokens records the
+        # unpadded full sequence.  Using the local SP row count here makes the
+        # embedding custom op derive a second pad_size and append it to the
+        # already-padded input before reduce-scatter.
+        forward_num_tokens = input_ids.shape[0] if dsv4_mtp_sp else num_tokens
+        forward_num_actual_tokens = (
+            full_num_tokens if dsv4_mtp_sp else num_tokens
+        )
         segment = self._edge_cloud_draft_segments["a"]
         # Independently scheduled draft batches do not enter
         # execute_model(), so they do not inherit its forward context. Keep
@@ -4667,9 +4714,9 @@ class NPUModelRunner(GPUModelRunner):
         with set_ascend_forward_context(
             attn_metadata=None,
             vllm_config=self.vllm_config,
-            num_tokens=num_tokens,
-            num_actual_tokens=num_tokens,
-            batch_descriptor=BatchDescriptor(num_tokens),
+            num_tokens=forward_num_tokens,
+            num_actual_tokens=forward_num_actual_tokens,
+            batch_descriptor=BatchDescriptor(forward_num_tokens),
             aclgraph_runtime_mode=CUDAGraphMode.NONE,
             is_draft_model=True,
         ):
