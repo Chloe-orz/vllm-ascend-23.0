@@ -904,7 +904,7 @@ class NPUWorker(WorkerBase):
         while True:
             try:
                 method, args, _kwargs, _output_rank = hint_mq.dequeue(
-                    timeout=0.002
+                    timeout=0.0005
                 )
             except TimeoutError:
                 pass
@@ -929,7 +929,7 @@ class NPUWorker(WorkerBase):
             # does NOT bound CPU usage -- this sleep does.  Keeps the comm
             # thread off the GIL/driver-lock while preserving ~10ms-scale
             # hint/watermark latency.
-            time.sleep(0.005)
+            time.sleep(0.002)
 
     def _report_irecv_completions(self) -> None:
         """Report every completed registered recv on irecv_done_mq.
