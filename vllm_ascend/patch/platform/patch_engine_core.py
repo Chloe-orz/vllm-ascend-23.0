@@ -383,6 +383,12 @@ def _maybe_publish_pre_out(
         return
     bt = scheduler_output.batch_type
     if bt == BatchType.DRAFT_FIRST:
+        if scheduler_output.draft_chain_dead:
+            # Dead chains never wait for scalar patching (their parent
+            # produces none): publish immediately so the cloud runs the
+            # middle and the channel seqno sequence stays intact.
+            self._publish_to_cloud(scheduler_output)
+            return
         is_pregenerated = getattr(
             self.scheduler, "is_pre_generated_draft", lambda _so: False
         )(scheduler_output)
@@ -693,6 +699,25 @@ def _advance_edge_cloud_draft(
         self.scheduler.update_draft_token_ids(draft_token_ids)
 
 
+def _release_dead_chain_pre_out(self, draft_task_id: str) -> None:
+    """Release a dead chain's deferred cloud controls with neutral scalars.
+
+    The deferral exists to patch step-0's accepted-token scalars before
+    the cloud sees them; a dead parent never produces them, so patch
+    zeros (no acceptance) before publishing — the cloud's draft state
+    upkeep requires the fields to be non-None.
+    """
+    deferred = getattr(self, "_pd_deferred_draft_pre_out", None)
+    queued = deferred.get(draft_task_id, []) if deferred else []
+    for so in queued:
+        n = len(so.num_scheduled_tokens)
+        if getattr(so, "num_accepted_tokens", None) is None:
+            so.num_accepted_tokens = [0] * n
+        if getattr(so, "valid_sampled_token_count", None) is None:
+            so.valid_sampled_token_count = [0] * n
+    self._release_deferred_draft_pre_out(draft_task_id)
+
+
 def _clear_pending_edge_cloud_draft_for_finished_requests(self) -> None:
     """Push draft lifecycle events across the executor boundary.
 
@@ -718,6 +743,19 @@ def _clear_pending_edge_cloud_draft_for_finished_requests(self) -> None:
     sched_dropped = (
         take_sched_dropped() if take_sched_dropped is not None else []
     )
+    # Release deferred cloud controls of chains that were just marked
+    # dead: a dead parent never produces the scalars their step-0
+    # publication was waiting for, so without this the SOs would sit in
+    # the deferred queue forever and the cloud would never run the
+    # middle (channel seqno stall).
+    take_dead_releases = getattr(
+        self.scheduler, "take_dead_chain_publish_releases", None
+    )
+    dead_releases = (
+        take_dead_releases() if take_dead_releases is not None else []
+    )
+    for task_id in dead_releases:
+        self._release_dead_chain_pre_out(task_id)
     release = getattr(
         self.scheduler, "release_draft_retained_blocks", None
     )
@@ -1230,6 +1268,7 @@ def install() -> None:
     EngineCore._release_deferred_draft_pre_out = (
         _release_deferred_draft_pre_out
     )
+    EngineCore._release_dead_chain_pre_out = _release_dead_chain_pre_out
     EngineCore._close_draft_pre_out = _close_draft_pre_out
     EngineCore._ensure_pd_head_token = _ensure_pd_head_token
     EngineCore._needs_sample_tokens = _needs_sample_tokens

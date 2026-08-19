@@ -305,6 +305,11 @@ class PDSeparatedScheduler(Scheduler):
         # stall every later chain.  The worker drains the remaining steps
         # with dummy payloads (draft_chain_dead=True on the SO).
         self._dead_draft_task_ids: set[str] = set()
+        # Dead-chain task ids whose deferred cloud control (step-0 awaits
+        # scalars a dead parent never produces) must be released for
+        # immediate publication.  Drained by the EngineCore patch, which
+        # calls _release_deferred_draft_pre_out for each.
+        self._dead_chain_publish_to_release: list[str] = []
 
     def invalidate_cloud_draft_tasks(self, task_ids: list[str]) -> None:
         """Queue cloud-side draft metadata invalidations (edge only)."""
@@ -1468,6 +1473,17 @@ class PDSeparatedScheduler(Scheduler):
                     self._dead_draft_task_ids.add(
                         scheduler_output.draft_task_id
                     )
+                    # Its step-0 cloud control may sit in the deferred
+                    # pre-out queue waiting for scalars that a dead parent
+                    # never produces — release it (engine core drains this
+                    # list and publishes immediately).
+                    self._dead_chain_publish_to_release.append(
+                        scheduler_output.draft_task_id
+                    )
+                if scheduler_output is self._draft_first_cloud_publish_pending:
+                    self._draft_first_cloud_publish_pending = None
+                    self._draft_first_scalars_patched = False
+                    self._draft_first_dispatched = False
                 logger.info(
                     "[PD] stale DRAFT_FIRST drains as dummy: task_id=%s "
                     "step=%s",
@@ -1663,7 +1679,7 @@ class PDSeparatedScheduler(Scheduler):
                 tuple(target_tail.num_scheduled_tokens),
             )
             self.drafts_first_ready.append(draft_first)
-            if step_idx == 0:
+            if step_idx == 0 and not chain_dead:
                 self._draft_first_cloud_publish_pending = draft_first
                 self._draft_first_scalars_patched = False
                 self._draft_first_dispatched = False
@@ -2059,6 +2075,18 @@ class PDSeparatedScheduler(Scheduler):
                 output.draft_chain_dead = True
                 if output.draft_task_id is not None:
                     self._dead_draft_task_ids.add(output.draft_task_id)
+                    # Release any deferred cloud control for this chain —
+                    # a dead parent never produces the scalars the deferral
+                    # waits for, so without the release the SO would sit in
+                    # the deferred queue forever and the cloud would never
+                    # run the middle (channel stall).
+                    self._dead_chain_publish_to_release.append(
+                        output.draft_task_id
+                    )
+                if output is self._draft_first_cloud_publish_pending:
+                    self._draft_first_cloud_publish_pending = None
+                    self._draft_first_scalars_patched = False
+                    self._draft_first_dispatched = False
                 logger.info(
                     "[PD] mark draft chain dead (drain as dummies): "
                     "task_id=%s step=%s",
@@ -2116,6 +2144,14 @@ class PDSeparatedScheduler(Scheduler):
         dropped = self._dropped_draft_task_ids_to_report
         self._dropped_draft_task_ids_to_report = []
         return dropped
+
+    def take_dead_chain_publish_releases(self) -> list[str]:
+        """Drain dead-chain task ids whose deferred cloud control must be
+        released for immediate publication (EngineCore patch forwards them
+        to _release_deferred_draft_pre_out)."""
+        items = self._dead_chain_publish_to_release
+        self._dead_chain_publish_to_release = []
+        return items
 
     def _is_stale_draft_output(
         self, scheduler_output: SchedulerOutput
