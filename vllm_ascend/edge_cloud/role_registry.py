@@ -62,8 +62,15 @@ class RoleRegistry:
         self._clouds = {int(c["id"]): PeerInfo(ranks=list(c["ranks"]), **{
             k: v for k, v in c.items() if k != "ranks"})
             for c in cfg["clouds"]}
-        kp = cfg["kv_partition"]
-        self._kv_partition = KvPartition.from_config(kp)
+        # kv_partition supports two YAML forms:
+        #   ratio: {0: 0.5, 1: 0.5}          (preferred — resolved at startup
+        #                                     once the cloud's real block
+        #                                     count is known)
+        #   num_blocks_total + split: {...}  (absolute, pre-computed)
+        self._kv_partition_raw = cfg.get("kv_partition")
+        self._kv_partition: KvPartition | None = None
+        if self._kv_partition_raw is not None and "split" in self._kv_partition_raw:
+            self._kv_partition = KvPartition.from_config(self._kv_partition_raw)
         # Canonical digest of the whole config; all instances must compute
         # the same value (startup consistency check).
         self._config_digest = hashlib.sha256(
@@ -84,6 +91,31 @@ class RoleRegistry:
 
     @property
     def kv_partition(self) -> KvPartition:
+        """The materialized partition.  When the YAML used ratios, call
+        ``resolve_kv_partition(num_blocks_total)`` first (once the cloud's
+        real block count is known)."""
+        if self._kv_partition is None:
+            raise RuntimeError(
+                "kv_partition is ratio-based and not yet resolved; call "
+                "resolve_kv_partition(num_blocks_total) first"
+            )
+        return self._kv_partition
+
+    def resolve_kv_partition(self, num_blocks_total: int) -> KvPartition:
+        """Materialize ratio-based partition into absolute block ranges."""
+        if self._kv_partition is not None:
+            return self._kv_partition
+        raw = self._kv_partition_raw
+        if raw is None:
+            raise RuntimeError("no kv_partition in registry")
+        self._kv_partition = KvPartition.from_ratios(
+            {int(k): float(v) for k, v in raw["ratio"].items()},
+            num_blocks_total,
+        )
+        logger.info(
+            "kv partition resolved: total=%d split=%s",
+            num_blocks_total, self._kv_partition.split,
+        )
         return self._kv_partition
 
     @property
