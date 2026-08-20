@@ -5158,7 +5158,12 @@ class NPUModelRunner(GPUModelRunner):
                     # there should be a corresponding 'postprocess_mamba'. However, it is called inside
                     # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
                     # We simply utilize the implementation in vLLM.
-                    if self.cache_config.mamba_cache_mode == "align":
+                    # need_accepted_tokens is false when this worker owns no
+                    # local Mamba cache, notably on an embedding-only edge.
+                    if (
+                        self.cache_config.mamba_cache_mode == "align"
+                        and self.need_accepted_tokens
+                    ):
                         # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                         # to decide copy operations, so we must apply deferred
                         # corrections before it runs.
@@ -7462,7 +7467,11 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             # --- mamba align preprocess (same as slow path) ---
-            if self.cache_config.mamba_cache_mode == "align":
+            # Keep the local-cache ownership guard in sync with the slow path.
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and self.need_accepted_tokens
+            ):
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                 # to decide copy operations, so we must apply deferred
                 # corrections before it runs.
