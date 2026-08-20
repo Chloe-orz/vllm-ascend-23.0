@@ -158,11 +158,30 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         success = False
         try:
             if self.parallel_config.enable_edge_cloud:
-                global_start_rank = (
-                    0
-                    if self.parallel_config.is_edge_node
-                    else self.parallel_config.edge_npu_count
-                )
+                if getattr(self.parallel_config, "role_registry", None):
+                    # Multi-instance (2E1C): this instance's global ranks come
+                    # from the registry — E0 starts at 0, E1 at 1, cloud at 2,
+                    # instead of "edge always starts at 0" which collided the
+                    # second edge with the first.
+                    import yaml as _yaml
+                    with open(self.parallel_config.role_registry,
+                              encoding="utf-8") as _f:
+                        _reg = _yaml.safe_load(_f)
+                    if self.parallel_config.is_edge_node:
+                        _eid = self.parallel_config.edge_id
+                        _entry = next(e for e in _reg["edges"]
+                                      if int(e["id"]) == _eid)
+                    else:
+                        _cid = self.parallel_config.cloud_id
+                        _entry = next(c for c in _reg["clouds"]
+                                      if int(c["id"]) == _cid)
+                    global_start_rank = int(_entry["ranks"][0])
+                else:
+                    global_start_rank = (
+                        0
+                        if self.parallel_config.is_edge_node
+                        else self.parallel_config.edge_npu_count
+                    )
             else:
                 global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
 
@@ -201,7 +220,35 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
             self.response_mqs = []
             # Only leader node have remote response mqs
-            if self.parallel_config.node_rank_within_dp == 0 and (
+            if getattr(self.parallel_config, "role_registry", None) and (
+                self.parallel_config.is_edge_node
+            ):
+                # Multi-instance (2E1C): every edge is the leader of its own
+                # pipeline.  Collect response queues for *its own* worker
+                # ranks plus the cloud workers serving it — NOT for other
+                # edges' workers (a naive range(world_size) would wire E1 to
+                # E0's worker outputs).
+                import yaml as _yaml
+                with open(self.parallel_config.role_registry,
+                          encoding="utf-8") as _f:
+                    _reg = _yaml.safe_load(_f)
+                _my_ranks = list(
+                    next(e for e in _reg["edges"]
+                         if int(e["id"]) == self.parallel_config.edge_id
+                         )["ranks"])
+                for _c in _reg["clouds"]:
+                    _my_ranks += list(_c["ranks"])
+                for rank in _my_ranks:
+                    local_idx = rank - global_start_rank
+                    if 0 <= local_idx < self.local_world_size:
+                        local_message_queue = self.workers[local_idx].worker_response_mq
+                        assert local_message_queue is not None
+                        self.response_mqs.append(local_message_queue)
+                    else:
+                        remote_message_queue = self.workers[0].peer_worker_response_mqs[rank]
+                        assert remote_message_queue is not None
+                        self.response_mqs.append(remote_message_queue)
+            elif self.parallel_config.node_rank_within_dp == 0 and (
                 not self.parallel_config.enable_edge_cloud
                 or self.parallel_config.is_edge_node
             ):
