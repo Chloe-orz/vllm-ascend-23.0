@@ -545,7 +545,24 @@ def init_ascend_model_parallel(
         backend = torch.distributed.get_backend(get_world_group().device_group)
         edge_npu_count = parallel_config.edge_npu_count
         cloud_npu_count = parallel_config.cloud_npu_count
-        if parallel_config.is_shared_model_edge:
+
+        # Multi-instance (2E1C): EP/MC2 membership comes from the registry
+        # (all edge ranks in one group, all cloud ranks in another), NOT from
+        # the legacy contiguous [edge..., cloud...] arithmetic — that formula
+        # silently mis-assigns ranks once a second edge exists (cloud rank 5
+        # fell outside every group and crashed GroupCoordinator init).
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry, init_role_registry)
+        _registry = get_role_registry()
+        if _registry is None and getattr(
+                parallel_config, "role_registry", None):
+            _registry = init_role_registry(parallel_config.role_registry)
+        if _registry is not None:
+            ep_edge_ranks = [r for e in _registry.edge_ids
+                             for r in _registry.edge(e).ranks]
+            ep_cloud_ranks = [r for c in _registry.cloud_ids
+                              for r in _registry.cloud(c).ranks]
+        elif parallel_config.is_shared_model_edge:
             # Shared-model edge-cloud topology: the edge has a
             # single distributed rank (rank 0) and the cloud
             # occupies ranks 1..1 + N*C.
