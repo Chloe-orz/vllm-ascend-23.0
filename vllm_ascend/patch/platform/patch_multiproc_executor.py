@@ -224,30 +224,16 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 self.parallel_config.is_edge_node
             ):
                 # Multi-instance (2E1C): every edge is the leader of its own
-                # pipeline.  Collect response queues for *its own* worker
-                # ranks plus the cloud workers serving it — NOT for other
-                # edges' workers (a naive range(world_size) would wire E1 to
-                # E0's worker outputs).
-                import yaml as _yaml
-                with open(self.parallel_config.role_registry,
-                          encoding="utf-8") as _f:
-                    _reg = _yaml.safe_load(_f)
-                _my_ranks = list(
-                    next(e for e in _reg["edges"]
-                         if int(e["id"]) == self.parallel_config.edge_id
-                         )["ranks"])
-                for _c in _reg["clouds"]:
-                    _my_ranks += list(_c["ranks"])
-                for rank in _my_ranks:
-                    local_idx = rank - global_start_rank
-                    if 0 <= local_idx < self.local_world_size:
-                        local_message_queue = self.workers[local_idx].worker_response_mq
-                        assert local_message_queue is not None
-                        self.response_mqs.append(local_message_queue)
-                    else:
-                        remote_message_queue = self.workers[0].peer_worker_response_mqs[rank]
-                        assert remote_message_queue is not None
-                        self.response_mqs.append(remote_message_queue)
+                # pipeline and drives ONLY its own local workers — cloud
+                # workers are driven by the cloud's own PassiveEngineCore, so
+                # their response queues are not the edge's business.
+                # Collecting them (legacy range(world_size)) both mis-indexes
+                # peer_worker_response_mqs and wires E1 to E0's outputs.
+                for local_idx in range(self.local_world_size):
+                    local_message_queue = (
+                        self.workers[local_idx].worker_response_mq)
+                    assert local_message_queue is not None
+                    self.response_mqs.append(local_message_queue)
             elif self.parallel_config.node_rank_within_dp == 0 and (
                 not self.parallel_config.enable_edge_cloud
                 or self.parallel_config.is_edge_node

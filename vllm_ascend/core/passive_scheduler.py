@@ -144,14 +144,20 @@ class PassiveScheduler:
             queue.Queue())
         self._me_edge_head: dict[int, int] = {}
         self._me_seq = 0
+        self._me_registry = None
         self._me_partition = None
+        self._me_vllm_config = vllm_config
         try:
             from vllm_ascend.edge_cloud.role_registry import (
                 get_role_registry)
             _registry = get_role_registry()
             if _registry is not None and len(_registry.edge_ids) > 1:
                 self._me_enabled = True
-                self._me_partition = _registry.kv_partition
+                # NOTE: do NOT touch _registry.kv_partition here — ratio-based
+                # partitions only resolve once the real block count is known
+                # (after KV sizing).  Resolved lazily on first ingress.
+                self._me_registry = _registry
+                self._me_vllm_config = vllm_config
                 logger.info(
                     "PassiveScheduler multi-edge mode enabled: %d edges "
                     "(registry digest=%s)",
@@ -418,6 +424,20 @@ class PassiveScheduler:
                 so.batch_type.value if so.batch_type else "<none>",
             )
 
+    def _me_get_partition(self):
+        """Lazily resolve the static KV partition (ratio-based in the
+        registry; only materializable once the cloud's real num_blocks is
+        known — i.e. after KV sizing, which precedes any segment ingress)."""
+        if self._me_partition is None:
+            kv_cfg = getattr(self._me_vllm_config, "kv_cache_config", None)
+            num_blocks = getattr(kv_cfg, "num_blocks", None)
+            assert num_blocks, (
+                "multi-edge ingress before KV sizing: kv_cache_config missing"
+            )
+            self._me_partition = self._me_registry.resolve_kv_partition(
+                num_blocks)
+        return self._me_partition
+
     def _wrap_segment(self, edge_id: int, so: SchedulerOutput) -> None:
         """Wrap all req_id/head_token fields with the edge prefix (F6) and
         translate edge-local block ids to cloud-physical ids (F2).
@@ -433,11 +453,12 @@ class PassiveScheduler:
             wrap_req_id(edge_id, rid): n
             for rid, n in so.num_scheduled_tokens.items()
         }
+        partition = self._me_get_partition() if self._me_registry else None
         for req_data in so.scheduled_new_reqs or []:
             req_data.req_id = wrap_req_id(edge_id, req_data.req_id)
-            if self._me_partition is not None and req_data.block_ids:
+            if partition is not None and req_data.block_ids:
                 req_data.block_ids = tuple(
-                    self._me_partition.to_physical(edge_id, list(ids))
+                    partition.to_physical(edge_id, list(ids))
                     for ids in req_data.block_ids
                 )
         cached = so.scheduled_cached_reqs
@@ -450,13 +471,13 @@ class PassiveScheduler:
                     wrap_req_id(edge_id, rid)
                     for rid in cached.resumed_req_ids
                 }
-            if self._me_partition is not None and getattr(
+            if partition is not None and getattr(
                     cached, "new_block_ids", None):
                 # new_block_ids: list per request of (tuple of per-group
                 # list[int] | None) — translate each per-group list.
                 cached.new_block_ids = [
                     (tuple(
-                        self._me_partition.to_physical(edge_id, list(g))
+                        partition.to_physical(edge_id, list(g))
                         for g in ids)
                      if ids is not None else None)
                     for ids in cached.new_block_ids
