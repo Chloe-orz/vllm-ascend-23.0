@@ -1266,6 +1266,13 @@ class NPUModelRunner(GPUModelRunner):
         self._ec_hidden_trace_by_task: dict[str, dict[str, Any]] = {}
         self._ec_hidden_trace_cache_max: int = 8
         self._ec_sampler_empty_rows: list[int] = []
+        # DSV4 MTP=1 edge-cloud lifecycle trace. Keep a short, host-only
+        # history per request so an eventual sampler anomaly can show whether
+        # the preceding one-step DRAFT context was completed or force-cleared
+        # before the matching DECODE FIRST/LAST pair. Nothing is logged on the
+        # normal hot path.
+        self._ec_mtp1_lifecycle_by_req: dict[str, deque[dict[str, Any]]] = {}
+        self._ec_mtp1_lifecycle_seq: int = 0
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1545,6 +1552,237 @@ class NPUModelRunner(GPUModelRunner):
             and scheduler_output.head_token is not None
         )
 
+    def _is_dsv4_mtp1_edge_probe_enabled(self) -> bool:
+        """Whether the narrowly scoped DSV4 MTP=1 probe is enabled."""
+        return bool(
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and self._is_deepseek_v4
+            and self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and self.num_spec_tokens == 1
+        )
+
+    def _record_dsv4_mtp1_lifecycle(
+        self,
+        event: str,
+        task_id: str | None,
+        req_ids: tuple[str, ...] | list[str],
+        **details: Any,
+    ) -> None:
+        """Record bounded host-side state transitions without printing."""
+        if not self._is_dsv4_mtp1_edge_probe_enabled():
+            return
+        self._ec_mtp1_lifecycle_seq += 1
+        entry = {
+            "seq": self._ec_mtp1_lifecycle_seq,
+            "event": event,
+            "task": task_id,
+            **details,
+        }
+        for req_id in req_ids:
+            if (
+                req_id not in self._ec_mtp1_lifecycle_by_req
+                and len(self._ec_mtp1_lifecycle_by_req) >= 256
+            ):
+                oldest_req_id = next(iter(self._ec_mtp1_lifecycle_by_req))
+                self._ec_mtp1_lifecycle_by_req.pop(oldest_req_id, None)
+            history = self._ec_mtp1_lifecycle_by_req.setdefault(
+                req_id, deque(maxlen=16)
+            )
+            history.append(entry)
+
+    @staticmethod
+    def _collect_dsv4_mtp1_metadata_tensors(
+        value: Any,
+        root: str,
+    ) -> dict[str, torch.Tensor]:
+        """Collect the tensor fields that control DECODE LAST row/KV layout."""
+        collected: dict[str, torch.Tensor] = {}
+        visited_objects: set[int] = set()
+        visited_storage: set[tuple[int, tuple[int, ...], torch.dtype]] = set()
+        field_hints = (
+            "position",
+            "slot_mapping",
+            "block_table",
+            "seq_len",
+            "query_start",
+            "context_len",
+            "start_pos",
+            "sas_metadata",
+            "qli_metadata",
+            "cu_",
+            "batch_seq_mask",
+        )
+
+        def visit(item: Any, path: str) -> None:
+            if item is None:
+                return
+            if isinstance(item, torch.Tensor):
+                path_lower = path.lower()
+                selected = (
+                    root in ("positions", "logits_indices")
+                    or "spec_decode" in root
+                    or any(hint in path_lower for hint in field_hints)
+                )
+                if not selected:
+                    return
+                storage_key = (
+                    item.data_ptr(),
+                    tuple(item.shape),
+                    item.dtype,
+                )
+                if storage_key in visited_storage:
+                    return
+                visited_storage.add(storage_key)
+                collected[path] = item
+                return
+
+            item_id = id(item)
+            if item_id in visited_objects:
+                return
+            visited_objects.add(item_id)
+            if is_dataclass(item) and not isinstance(item, type):
+                field_names = {field.name for field in fields(item)}
+                for name in field_names:
+                    visit(getattr(item, name), f"{path}.{name}")
+                for name, child in getattr(item, "__dict__", {}).items():
+                    if name not in field_names and name != "_buffer_slot":
+                        visit(child, f"{path}.{name}")
+            elif isinstance(item, dict):
+                for key, child in item.items():
+                    visit(child, f"{path}[{key!r}]")
+            elif isinstance(item, (list, tuple)):
+                for index, child in enumerate(item):
+                    visit(child, f"{path}[{index}]")
+
+        visit(value, root)
+        return collected
+
+    def _capture_dsv4_mtp1_metadata_integrity(
+        self,
+        scheduler_output: "SchedulerOutput",
+        first_cache: dict[str, Any] | None,
+        positions: torch.Tensor,
+        attn_metadata: Any,
+        logits_indices: torch.Tensor,
+        spec_decode_metadata: Any,
+        spec_decode_common_attn_metadata: Any,
+        fast_path: bool,
+    ) -> None:
+        """Compare DECODE LAST metadata with the matching FIRST snapshot.
+
+        The hot path stores tensor references only. Exact comparisons and D2H
+        copies run only if the sampler later reports an empty row, so the
+        probe does not enqueue extra NPU work before the failure is known.
+        """
+        if not self._should_trace_dsv4_mtp_decode_last(scheduler_output):
+            return
+
+        task_id = scheduler_output.head_token
+        assert task_id is not None
+        trace = self._ec_hidden_trace_by_task.setdefault(
+            task_id,
+            {
+                "req_ids": tuple(
+                    scheduler_output.num_scheduled_tokens.keys()
+                ),
+                "num_scheduled_tokens": dict(
+                    scheduler_output.num_scheduled_tokens
+                ),
+                "stages": {},
+            },
+        )
+        integrity: dict[str, Any] = {
+            "fast_path": fast_path,
+            "first_cache_present": first_cache is not None,
+            "tensor_checks": [],
+            "structural_mismatches": [],
+        }
+        trace["metadata_integrity"] = integrity
+        self._record_dsv4_mtp1_lifecycle(
+            "decode_last_metadata_ready",
+            task_id,
+            tuple(scheduler_output.num_scheduled_tokens),
+            fast_path=fast_path,
+            first_cache_present=first_cache is not None,
+        )
+        if first_cache is None:
+            return
+
+        first_diag = first_cache.get("_ec_mtp1_first_diag", {})
+        integrity["first_diag"] = first_diag
+        integrity["last_req_ids"] = tuple(
+            scheduler_output.num_scheduled_tokens.keys()
+        )
+        integrity["last_num_scheduled_tokens"] = dict(
+            scheduler_output.num_scheduled_tokens
+        )
+        pairs = (
+            ("positions", first_cache.get("positions"), positions),
+            (
+                "attn_metadata",
+                first_cache.get("attn_metadata"),
+                attn_metadata,
+            ),
+            (
+                "logits_indices",
+                first_cache.get("logits_indices"),
+                logits_indices,
+            ),
+            (
+                "spec_decode_metadata",
+                first_cache.get("spec_decode_metadata"),
+                spec_decode_metadata,
+            ),
+            (
+                "spec_decode_common_attn_metadata",
+                first_cache.get("spec_decode_common_attn_metadata"),
+                spec_decode_common_attn_metadata,
+            ),
+        )
+        for root, expected_value, actual_value in pairs:
+            expected = self._collect_dsv4_mtp1_metadata_tensors(
+                expected_value, root
+            )
+            actual = self._collect_dsv4_mtp1_metadata_tensors(
+                actual_value, root
+            )
+            for path in sorted(set(expected) | set(actual)):
+                expected_tensor = expected.get(path)
+                actual_tensor = actual.get(path)
+                if expected_tensor is None or actual_tensor is None:
+                    integrity["structural_mismatches"].append(
+                        f"{path}: present only in "
+                        f"{'LAST' if expected_tensor is None else 'FIRST'}"
+                    )
+                    continue
+                if (
+                    expected_tensor.shape != actual_tensor.shape
+                    or expected_tensor.dtype != actual_tensor.dtype
+                    or expected_tensor.device != actual_tensor.device
+                ):
+                    integrity["structural_mismatches"].append(
+                        f"{path}: FIRST(shape={tuple(expected_tensor.shape)}, "
+                        f"dtype={expected_tensor.dtype}, "
+                        f"device={expected_tensor.device}) != "
+                        f"LAST(shape={tuple(actual_tensor.shape)}, "
+                        f"dtype={actual_tensor.dtype}, "
+                        f"device={actual_tensor.device})"
+                    )
+                    continue
+                integrity["tensor_checks"].append(
+                    (
+                        path,
+                        tuple(actual_tensor.shape),
+                        actual_tensor.dtype,
+                        actual_tensor.data_ptr()
+                        == expected_tensor.data_ptr(),
+                        expected_tensor,
+                        actual_tensor,
+                    )
+                )
+
     def _capture_dsv4_mtp_finite_rows(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1677,6 +1915,65 @@ class NPUModelRunner(GPUModelRunner):
                     nonfinite_rows,
                     task_id,
                 )
+
+        integrity = trace.get("metadata_integrity")
+        if integrity is None:
+            logger.error(
+                "[EC-MTP1-STATE] task=%s has no FIRST/LAST metadata "
+                "integrity record",
+                task_id,
+            )
+        else:
+            mismatched_paths: list[str] = []
+            tensor_results: list[dict[str, Any]] = []
+            for (
+                path,
+                shape,
+                dtype,
+                same_storage,
+                expected_tensor,
+                actual_tensor,
+            ) in integrity["tensor_checks"]:
+                mismatch = not torch.equal(
+                    actual_tensor.cpu(), expected_tensor.cpu()
+                )
+                if mismatch:
+                    mismatched_paths.append(path)
+                tensor_results.append({
+                    "path": path,
+                    "shape": shape,
+                    "dtype": str(dtype),
+                    "same_storage": same_storage,
+                    "mismatch": mismatch,
+                })
+            logger.error(
+                "[EC-MTP1-STATE] FIRST-LAST metadata check: task=%s "
+                "fast_path=%s first_cache_present=%s first=%s "
+                "last_req_ids=%s last_num_scheduled_tokens=%s "
+                "structural_mismatches=%s mismatched_paths=%s "
+                "tensor_results=%s",
+                task_id,
+                integrity["fast_path"],
+                integrity["first_cache_present"],
+                integrity.get("first_diag"),
+                integrity.get("last_req_ids"),
+                integrity.get("last_num_scheduled_tokens"),
+                integrity["structural_mismatches"],
+                mismatched_paths,
+                tensor_results,
+            )
+
+        for req_id in trace["req_ids"]:
+            history = list(
+                self._ec_mtp1_lifecycle_by_req.get(req_id, ())
+            )
+            logger.error(
+                "[EC-MTP1-LIFECYCLE] anomaly task=%s req=%s "
+                "recent_events=%s",
+                task_id,
+                req_id,
+                history,
+            )
 
     def _create_raw_segment_callable(
         self,
@@ -4431,6 +4728,15 @@ class NPUModelRunner(GPUModelRunner):
             ),
         }
         self._pending_edge_cloud_draft_contexts[task_id] = context
+        self._record_dsv4_mtp1_lifecycle(
+            "draft_context_stashed",
+            task_id,
+            req_ids,
+            draft_step_idx=0,
+            pending_contexts=len(
+                self._pending_edge_cloud_draft_contexts
+            ),
+        )
 
         if torch.is_tensor(sampled_token_ids):
             assert self.drafter is not None
@@ -4518,6 +4824,16 @@ class NPUModelRunner(GPUModelRunner):
                     continue
             elif task_id not in force_dropped:
                 continue
+            self._record_dsv4_mtp1_lifecycle(
+                "draft_context_cleared",
+                task_id,
+                tuple(ctx_req_ids),
+                reason=(
+                    "force_drop"
+                    if task_id in force_dropped
+                    else "all_requests_finished"
+                ),
+            )
             self._pending_edge_cloud_draft_contexts.pop(task_id, None)
 
     def _get_pending_edge_cloud_draft_context(
@@ -4977,6 +5293,13 @@ class NPUModelRunner(GPUModelRunner):
                 )
             task_id = scheduler_output.draft_task_id
             assert task_id is not None
+            self._record_dsv4_mtp1_lifecycle(
+                "draft_context_completed",
+                task_id,
+                req_ids,
+                draft_step_idx=draft_step_idx,
+                next_step_idx=next_step_idx,
+            )
             self._pending_edge_cloud_draft_contexts.pop(task_id, None)
 
         output = ModelRunnerOutput(
@@ -5754,6 +6077,17 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     positions = cache["positions"]
 
+            self._capture_dsv4_mtp1_metadata_integrity(
+                scheduler_output,
+                _edge_cache_entry,
+                positions,
+                attn_metadata,
+                logits_indices,
+                spec_decode_metadata,
+                spec_decode_common_attn_metadata,
+                _fast_path,
+            )
+
             # Save the cloud target metadata and the exact positions passed
             # to the model. The scheduled draft can then reconstruct its
             # positions locally instead of receiving them from the edge.
@@ -5842,6 +6176,32 @@ class NPUModelRunner(GPUModelRunner):
                 ],
             }
             frozen_entry = _freeze_scheduled_state(cache_entry)
+            if (
+                self._is_dsv4_mtp1_edge_probe_enabled()
+                and scheduler_output.batch_type == BatchType.DECODE_FIRST
+            ):
+                first_diag = {
+                    "req_ids": tuple(self.input_batch.req_ids),
+                    "num_scheduled_tokens": dict(
+                        scheduler_output.num_scheduled_tokens
+                    ),
+                    "total_num_scheduled_tokens": (
+                        total_num_scheduled_tokens
+                    ),
+                    "num_tokens_padded": num_tokens_padded,
+                    "cudagraph_mode": str(cudagraph_mode),
+                }
+                frozen_entry["_ec_mtp1_first_diag"] = first_diag
+                self._record_dsv4_mtp1_lifecycle(
+                    "decode_first_cached",
+                    scheduler_output.head_token,
+                    tuple(self.input_batch.req_ids),
+                    total_num_scheduled_tokens=(
+                        total_num_scheduled_tokens
+                    ),
+                    num_tokens_padded=num_tokens_padded,
+                    cudagraph_mode=str(cudagraph_mode),
+                )
             # Keep the original (view-based) objects alive next to the
             # frozen snapshot. Their tensors reference the persistent
             # buffers the ACL graph captured (block_table / seq_lens /
