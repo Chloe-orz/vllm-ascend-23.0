@@ -105,6 +105,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # fails with "Cannot assign requested address" (E0's IP is not
             # local to E1).
             _connect_ip = self.parallel_config.master_addr
+            _mq_readers = self.world_size
             if _is_registry_edge:
                 from vllm_ascend.edge_cloud.role_registry import (
                     get_role_registry, init_role_registry)
@@ -116,8 +117,14 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 if _reg is not None:
                     _connect_ip = _reg.edge(
                         self.parallel_config.edge_id).addr
+                    # Each edge drives ONLY its own local workers in 2E1C —
+                    # cloud workers are driven by the cloud's passive engine.
+                    # A world-sized reader set would broadcast this edge's
+                    # local kv_cache_configs to cloud workers and crash them
+                    # (list shorter than their global rank).
+                    _mq_readers = self.local_world_size
             self.rpc_broadcast_mq = MessageQueue(
-                self.world_size,
+                _mq_readers,
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
                 connect_ip=_connect_ip,
