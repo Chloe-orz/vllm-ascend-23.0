@@ -88,9 +88,17 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        if self.parallel_config.node_rank_within_dp == 0:
+        _is_registry_edge = bool(
+            getattr(self.parallel_config, "role_registry", None)
+            and self.parallel_config.is_edge_node)
+        if self.parallel_config.node_rank_within_dp == 0 or _is_registry_edge:
             # For leader node within each dp rank,
             # each dp will have its own leader multiproc executor.
+            # Multi-instance (2E1C): EVERY edge is the leader of its own
+            # pipeline (its own engine core + broadcast MQ), even when its
+            # node_rank_within_dp != 0 — otherwise a second edge can never
+            # issue collective_rpc (its EngineCore dies on the follower
+            # assert at get_kv_cache_specs).
             max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
             self.rpc_broadcast_mq = MessageQueue(
                 self.world_size,
