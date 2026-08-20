@@ -608,6 +608,20 @@ def init_ascend_model_parallel(
             if envs.VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP:
                 warmup_edge_cloud_hidden_channels(parallel_config)
 
+        # Multi-instance (2E1C): per-(edge, cloud) pair groups with their own
+        # hidden channels.  Legacy single-pair mode is untouched when no role
+        # registry is configured.
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry, init_role_registry)
+        _registry = get_role_registry()
+        if _registry is None and getattr(
+                parallel_config, "role_registry", None):
+            _registry = init_role_registry(parallel_config.role_registry)
+        if _registry is not None and len(_registry.edge_ids) > 1:
+            create_edge_cloud_pair_groups(parallel_config)
+            if envs.VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP:
+                warmup_edge_cloud_pair_channels()
+
         # Ascend-specific groups that are currently disabled by default
         # in edge-cloud mode. If enabled in the future, they must follow
         # the same edge/cloud separation principle:
@@ -1024,7 +1038,7 @@ def warmup_edge_cloud_hidden_channels(
     global order -- moves that first-use rendezvous to init time, where
     both sides are guaranteed to arrive in the same order.
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     if pp_group.world_size <= 1:
         return
     if not hasattr(pp_group, "isend_tensor_dict_on_hidden_channel"):
@@ -1194,7 +1208,7 @@ def edge_cloud_isend_tensor_dict(
             sides must pass the same value (derived from
             step_has_multimodal_req) so sender/receiver agree on the key set.
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     if pp_group.world_size <= 1:
         return []
 
@@ -1459,7 +1473,7 @@ def edge_cloud_irecv_tensor_dict(
             argument (both derived from step_has_multimodal_req). When False,
             mrope_positions is neither received nor broadcast (text-only batch).
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     if not torch.distributed.is_initialized() or pp_group.world_size == 1:
         return {}, [], []
 
@@ -1630,7 +1644,7 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
     tensor_meta: ScheduledDraftTensorMeta | None = None,
 ) -> list[Handle]:
     """Send a scheduled draft payload, avoiding metadata sync when possible."""
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     if tensor_meta is not None:
         if pp_group.world_size <= 1:
             return []
@@ -1786,7 +1800,7 @@ def edge_cloud_broadcast_recv(
             argument (both derived from step_has_multimodal_req). When False,
             mrope_positions is neither received nor broadcast (text-only batch).
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size > 1
     ec_meta = _select_edge_cloud_meta_for_recv()
@@ -2011,7 +2025,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
     implementation around — renamed — for the draft callers while the
     non-draft edge-cloud worker path keeps the optimized one.
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
 
@@ -2086,7 +2100,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
     exchange and the local TP object broadcast. ``None`` retains the dynamic
     compatibility path.
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
 
@@ -2242,3 +2256,143 @@ def edge_cloud_broadcast_recv_scheduled_draft(
             handle.wait()
 
     return recv_tensor_dict, [], [broadcast_postprocess]
+
+
+# ---------------------------------------------------------------------------
+# Multi-edge pair groups (2E1C scenario)
+#
+# Legacy edge-cloud mode has exactly one (edge, cloud) pair, so the default PP
+# group doubles as the pair group.  In multi-instance mode each edge-cloud
+# pair gets its own 2-rank group (edge NPU0 + cloud NPU0 of that instance)
+# with its own hidden-channel groups; the worker send/recv path picks the
+# pair group from the segment's source edge id instead of using the global
+# PP group.  The legacy single-pair path is completely unchanged when no
+# role registry is configured.
+# ---------------------------------------------------------------------------
+
+# (edge_id, cloud_id) -> pair PP group (2-rank: edge NPU0, cloud NPU0)
+_PAIR_PP_GROUPS: dict[tuple[int, int], GroupCoordinator] = {}
+# (edge_id, cloud_id) -> {channel -> device_group}
+_PAIR_CHANNEL_GROUPS: dict[tuple[int, int], Any] = {}
+# The pair this process is currently executing against.  Workers set it
+# around each segment execution via ``active_pair``.
+_ACTIVE_PAIR: tuple[int, int] | None = None
+
+
+@contextlib.contextmanager
+def active_pair(edge_id: int, cloud_id: int):
+    """Scope the current thread's edge-cloud pair for send/recv resolution."""
+    global _ACTIVE_PAIR
+    prev = _ACTIVE_PAIR
+    _ACTIVE_PAIR = (edge_id, cloud_id)
+    try:
+        yield
+    finally:
+        _ACTIVE_PAIR = prev
+
+
+def get_pair_pp_group(edge_id: int, cloud_id: int) -> GroupCoordinator:
+    """Return the 2-rank pair group for (edge_id, cloud_id)."""
+    return _PAIR_PP_GROUPS[(edge_id, cloud_id)]
+
+
+def pair_group_count() -> int:
+    return len(_PAIR_PP_GROUPS)
+
+
+def create_edge_cloud_pair_groups(parallel_config) -> None:
+    """Create per-(edge, cloud) pair PP groups + hidden channel groups.
+
+    Called once from ``init_ascend_model_parallel`` when a role registry is
+    configured (multi-instance mode).  All ranks must call ``new_group`` in
+    the same global order, so we iterate pairs in sorted order and every
+    rank (member or not) participates in every creation call.
+
+    Pair layout per (edge, cloud) pair: ``[edge_npu0_global_rank,
+    cloud_npu0_global_rank]`` — mirroring the legacy PP pair where NPU0 of
+    each side forms the PP pair and other TP ranks receive via intra-TP
+    broadcast.  Channel groups per pair follow the legacy convention:
+    PREFILL_1 (default device group), PREFILL_2 (first extra hidden channel),
+    DECODE (alternate group).
+    """
+    from vllm_ascend.edge_cloud.role_registry import (
+        get_role_registry, init_role_registry)
+    registry = get_role_registry()
+    if registry is None and getattr(
+            parallel_config, "role_registry", None):
+        registry = init_role_registry(parallel_config.role_registry)
+    if registry is None:
+        return
+    backend = torch.distributed.get_backend(get_world_group().device_group)
+
+    for edge_id in registry.edge_ids:
+        for cloud_id in registry.cloud_ids:
+            edge_rank0 = registry.edge(edge_id).ranks[0]
+            cloud_rank0 = registry.cloud(cloud_id).ranks[0]
+            # init_model_parallel_group requires every rank covered exactly
+            # once per call: pair + singletons for all other ranks.
+            world_size = torch.distributed.get_world_size()
+            group_ranks: list[list[int]] = [[edge_rank0, cloud_rank0]]
+            for r in range(world_size):
+                if r != edge_rank0 and r != cloud_rank0:
+                    group_ranks.append([r])
+            pair = init_model_parallel_group(
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                group_name=f"ec_pair_e{edge_id}_c{cloud_id}",
+            )
+            if pair is not None:  # non-member ranks get None
+                _PAIR_PP_GROUPS[(edge_id, cloud_id)] = pair
+                # Alternate + hidden channel groups on the pair group,
+                # mirroring the legacy single-pair setup (2 prefill +
+                # 1 decode channels).
+                if hasattr(pair, "create_alternate_groups"):
+                    pair.create_alternate_groups(backend)
+                if hasattr(pair, "create_hidden_channel_groups"):
+                    pair.create_hidden_channel_groups(
+                        backend, num_prefill=2, num_decode=1)
+
+    logger.info(
+        "[edge-cloud] multi-instance pair groups created: %d pairs (%s)",
+        len(_PAIR_PP_GROUPS),
+        sorted(_PAIR_PP_GROUPS.keys()),
+    )
+
+
+def _effective_pp_group() -> GroupCoordinator:
+    """Resolve the PP group for the current send/recv.
+
+    Multi-instance mode: the active pair group (set by the worker around
+    each segment execution) — but only when this rank is actually a member
+    (non-members, e.g. cloud TP non-first ranks, keep their default
+    singleton PP group so TP-internal broadcast logic is unchanged).
+    Legacy mode: the global PP group.
+    """
+    if _ACTIVE_PAIR is not None:
+        pair = _PAIR_PP_GROUPS.get(_ACTIVE_PAIR)
+        if pair is not None:
+            return pair
+    return get_pp_group()
+
+
+def warmup_edge_cloud_pair_channels() -> None:
+    """Warm up every hidden channel of every pair group (multi-instance).
+
+    Same motivation as ``warmup_edge_cloud_hidden_channels``: the first
+    isend/irecv on a channel rendezvous the two peers and blocks the host;
+    doing it at init in a fixed global order avoids mid-pipeline deadlock.
+    Here we iterate pairs in sorted order and warm each pair's channels
+    through its own pair group.
+    """
+    for pair_key in sorted(_PAIR_PP_GROUPS):
+        pair = _PAIR_PP_GROUPS[pair_key]
+        # Reuse the legacy warmup body against the pair group by temporarily
+        # scoping the active pair, so the legacy warmup resolves groups via
+        # _effective_pp_group().
+        with active_pair(*pair_key):
+            warmup_edge_cloud_hidden_channels(get_current_vllm_config().parallel_config)
+    logger.info(
+        "[edge-cloud] pair channel warmup done for %d pairs",
+        len(_PAIR_PP_GROUPS),
+    )

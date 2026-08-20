@@ -1,0 +1,32 @@
+# 两边一云（2E1C）静态注册表实例
+# 三个实例（E0/E1/C）挂载同一份本文件；修改后需重启全员。
+#
+# 注意：ranks 是【全局 rank】（HCCL 建组用），不是物理 NPU 号；
+# 物理选卡在各实例启动命令里用 ASCEND_RT_VISIBLE_DEVICES 指定，
+# 且进程的全局 RANK 必须与这里的 ranks 一致（否则建组错位）。
+world:
+  master_addr: 10.0.0.13      # rendezvous 锚点（取云实例地址）
+  master_port: 29600
+
+edges:
+  - id: 0
+    addr: 10.0.0.11
+    ranks: [0]                # 全局 rank（物理卡见启动脚本）
+    zmq_base_port: 5560       # 该边 PRE_OUT（边→云）bind 端口
+  - id: 1
+    addr: 10.0.0.12
+    ranks: [1]
+    zmq_base_port: 5660
+
+clouds:
+  - id: 0
+    addr: 10.0.0.13
+    ranks: [2, 3, 4, 5]       # TP=4，4 个全局 rank
+    zmq_base_port: 5760       # 云 POST_OUT bind 起始端口（每边 +2 偏移）
+
+# KV 静态均分（临时方案）：云物理 100000 块，E0/E1 各半
+kv_partition:
+  num_blocks_total: 100000
+  split:
+    0: [0, 50000]
+    1: [50000, 100000]

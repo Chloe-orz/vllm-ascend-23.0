@@ -791,6 +791,55 @@ class NPUWorker(WorkerBase):
             )
             self._pp_send_work_by_channel[channel.value] = handles
 
+    # ------------------------------------------------------------------ #
+    # Multi-instance (2E1C) pair resolution helpers
+    # ------------------------------------------------------------------ #
+    def _edge_instance_id(self) -> int | None:
+        """This worker's edge instance id (edge side), None in legacy mode."""
+        return getattr(self.parallel_config, "edge_id", None)
+
+    def _cloud_instance_id(self) -> int | None:
+        """This worker's cloud instance id (cloud side), None in legacy mode."""
+        return getattr(self.parallel_config, "cloud_id", None)
+
+    def _resolve_segment_edge_id(self, scheduler_output) -> int | None:
+        """Cloud side: resolve the source edge of a segment from its wrapped
+        req_id prefix (ids are wrapped at the cloud ingress adapter, F6).
+        Returns None in legacy single-pair mode (no registry / single edge).
+        """
+        from vllm_ascend.edge_cloud.role_registry import get_role_registry
+        registry = get_role_registry()
+        if registry is None or len(registry.edge_ids) <= 1:
+            return None
+        req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+        if not req_ids:
+            return None
+        from vllm_ascend.edge_cloud.id_adapter import parse_req_edge_id
+        return parse_req_edge_id(req_ids[0])
+
+    @staticmethod
+    def _pair_scope(edge_id: int | None):
+        """Enter the pair-group scope for send/recv resolution.
+
+        edge side: ``active_pair(edge_id, cloud_id=0)`` (2E1C: single cloud).
+        cloud side: ``active_pair(edge_id, cloud_id=self.cloud_id)``.
+        No-op unless multi-instance pair groups actually exist — legacy and
+        registry-absent modes must never touch the pair table.
+        """
+        import contextlib
+        if edge_id is None:
+            return contextlib.nullcontext()
+        from vllm_ascend.distributed.parallel_state import (
+            _PAIR_PP_GROUPS, active_pair)
+        from vllm_ascend.edge_cloud.role_registry import get_role_registry
+        registry = get_role_registry()
+        if registry is None:
+            return contextlib.nullcontext()
+        cloud_id = registry.cloud_ids[0]
+        if (edge_id, cloud_id) not in _PAIR_PP_GROUPS:
+            return contextlib.nullcontext()
+        return active_pair(edge_id, cloud_id)
+
     def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
         if channel is None:
             for handle in self._pp_send_work:
@@ -833,12 +882,27 @@ class NPUWorker(WorkerBase):
         do_sp_chunk = enable_sp() and (
             self.model_runner.edge_cloud_cfg.mode != "embedding_only"
             or not self.model_runner.supports_mm_inputs)
-        tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-            num_tokens=num_tokens,
-            channel=channel,
-            sp_chunk=do_sp_chunk,
-            include_mrope = include_mrope,
-        )
+        # Multi-instance (2E1C): the wrapped head_token carries the source
+        # edge id ("{edge_id}:{token}") — post the irecv on that pair's
+        # group.  Legacy mode: unwrapped token, no scope (default PP group).
+        _pair_edge_id = None
+        try:
+            from vllm_ascend.edge_cloud.role_registry import (
+                get_role_registry)
+            _registry = get_role_registry()
+            if _registry is not None and len(_registry.edge_ids) > 1:
+                from vllm_ascend.edge_cloud.id_adapter import (
+                    parse_token_edge_id)
+                _pair_edge_id = parse_token_edge_id(ht)
+        except Exception:
+            _pair_edge_id = None
+        with self._pair_scope(_pair_edge_id):
+            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+                num_tokens=num_tokens,
+                channel=channel,
+                sp_chunk=do_sp_chunk,
+                include_mrope = include_mrope,
+            )
         entry = AsyncIntermediateTensors(
             tensor_dict,
             comm_handles=comm_handles,
@@ -1129,11 +1193,12 @@ class NPUWorker(WorkerBase):
             )
         if get_pp_group().world_size == 2:
             channel = self._hidden_channel_for(scheduler_output)
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
-                channel=channel,
-            )
+            with self._pair_scope(self._edge_instance_id()):
+                self._record_pp_send_work(
+                    edge_cloud_send_tensor_dict(_gathered, channel=channel,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
+                    channel=channel,
+                )
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
         # because sampling happens in the tail segment (PL/DL).
@@ -1158,12 +1223,15 @@ class NPUWorker(WorkerBase):
         # this recv stays correct if the c2e meta ever gains an mrope key --
         # with the default True, the edge would irecv a tensor the cloud
         # never sends and deadlock on the channel.
-        tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-            num_tokens=scheduler_output.total_num_scheduled_tokens,
-            channel=channel,
-            sp_chunk=edge_sp,
-            include_mrope=False,
-        )
+        tensor_dict, comm_handles, comm_postprocess = None, None, None
+        # Multi-instance (2E1C): scope the recv to this edge's pair group.
+        with self._pair_scope(self._edge_instance_id()):
+            tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                channel=channel,
+                sp_chunk=edge_sp,
+                include_mrope=False,
+            )
 
         intermediate_tensors = AsyncIntermediateTensors(
             tensor_dict,
@@ -1204,6 +1272,9 @@ class NPUWorker(WorkerBase):
             layer_slice_info is None or layer_slice_info.is_first_slice
         )
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        # Multi-instance (2E1C): resolve the source pair once for both the
+        # recv path (fallback sync recv below) and the c2e send path.
+        _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
         # Always run _update_states for the first slice (or unsliced batch),
         # even when total_num_scheduled_tokens==0.  Some requests may not
         # contribute tokens to this slice but their state must still be
@@ -1277,13 +1348,14 @@ class NPUWorker(WorkerBase):
                 # standard (non-shared-model) topology src=None suffices: it
                 # resolves to the implicit "previous PP rank" which IS the edge.
                 _recv_src = 0 if self.parallel_config.is_shared_model_edge else None
-                tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
-                    num_tokens=scheduler_output.total_num_scheduled_tokens,
-                    channel=channel,
-                    sp_chunk=do_sp_chunk,
-                    src=_recv_src,
-                    include_mrope=_cloud_include_mrope,
-                )
+                with self._pair_scope(_pair_edge_id):
+                    tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
+                        num_tokens=scheduler_output.total_num_scheduled_tokens,
+                        channel=channel,
+                        sp_chunk=do_sp_chunk,
+                        src=_recv_src,
+                        include_mrope=_cloud_include_mrope,
+                    )
 
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
@@ -1323,15 +1395,20 @@ class NPUWorker(WorkerBase):
         # Send intermediate tensors to edge.  In the shared-model topology the
         # edge sits at in-group rank 0, so dst=0 is needed.  Otherwise dst=None
         # resolves to the implicit "next PP rank" which IS the edge.
+        # only ranks in a real PP pair ever send (legacy guard).  In 2E1C the
+        # cloud's PP-active rank has world_size==2 (its default PP group IS
+        # the pair group), and pair scoping only selects WHICH pair group the
+        # send goes on — never whether to send.
         if get_pp_group().world_size > 1:
             channel = self._hidden_channel_for(scheduler_output)
             _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                                            num_tokens=scheduler_output.total_num_scheduled_tokens,
-                                            dst=_send_dst),
-                channel=channel,
-            )
+            with self._pair_scope(_pair_edge_id):
+                self._record_pp_send_work(
+                    edge_cloud_send_tensor_dict(_gathered, channel=channel,
+                                                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                                                dst=_send_dst),
+                    channel=channel,
+                )
         return output
 
     def _scheduled_draft_tensor_meta(
