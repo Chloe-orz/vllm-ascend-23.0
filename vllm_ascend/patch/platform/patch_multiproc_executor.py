@@ -100,11 +100,23 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # issue collective_rpc (its EngineCore dies on the follower
             # assert at get_kv_cache_specs).
             max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+            # Bind on THIS instance's own address — master_addr is the world
+            # rendezvous anchor (rank 0 host = E0), and binding to it from E1
+            # fails with "Cannot assign requested address" (E0's IP is not
+            # local to E1).
+            _connect_ip = self.parallel_config.master_addr
+            if _is_registry_edge:
+                from vllm_ascend.edge_cloud.role_registry import (
+                    get_role_registry)
+                _reg = get_role_registry()
+                if _reg is not None:
+                    _connect_ip = _reg.edge(
+                        self.parallel_config.edge_id).addr
             self.rpc_broadcast_mq = MessageQueue(
                 self.world_size,
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
-                connect_ip=self.parallel_config.master_addr,
+                connect_ip=_connect_ip,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         elif envs.VLLM_PP_NON_LEADER_ENGINE_CORE:
