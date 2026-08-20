@@ -591,7 +591,17 @@ def init_ascend_model_parallel(
         # DECODE_1, and extra hidden-channel groups are created for
         # PREFILL_2..N and DECODE_2..M when dp_size > 1.
         pp_group = get_pp_group()
-        if pp_group.world_size > 1:
+        # Multi-instance (2E1C): skip legacy default-PP channel setup and
+        # warmup entirely — channels live on per-pair groups (created below).
+        # Running the legacy warmup here would rendezvous the two edges on
+        # DIFFERENT default groups (GroupCoordinator picks the LAST group
+        # containing a rank, so the cloud's default PP is the last pair),
+        # deadlocking the first edge.
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry as _get_reg)
+        _reg = _get_reg()
+        _multi_edge = _reg is not None and len(_reg.edge_ids) > 1
+        if pp_group.world_size > 1 and not _multi_edge:
             pp_group.create_alternate_groups(backend)
             if hasattr(pp_group, "create_hidden_channel_groups"):
                 dp_size = parallel_config.data_parallel_size
@@ -2341,6 +2351,9 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
     if registry is None:
         return
     backend = torch.distributed.get_backend(get_world_group().device_group)
+    # HiddenChannelType enum init (legacy does it on the default-PP path
+    # which multi-edge mode skips).
+    HiddenChannelType.init(dp_size=1)
 
     for edge_id in registry.edge_ids:
         for cloud_id in registry.cloud_ids:
@@ -2359,7 +2372,11 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
                 backend,
                 group_name=f"ec_pair_e{edge_id}_c{cloud_id}",
             )
-            if pair is not None:  # non-member ranks get None
+            # Store ONLY on the two member ranks: init_model_parallel_group
+            # returns a real (singleton) group to non-member ranks because we
+            # cover every rank in each call — storing those would make
+            # non-members believe they are pair members.
+            if torch.distributed.get_rank() in (edge_rank0, cloud_rank0):
                 _PAIR_PP_GROUPS[(edge_id, cloud_id)] = pair
                 # Alternate + hidden channel groups on the pair group,
                 # mirroring the legacy single-pair setup (2 prefill +
