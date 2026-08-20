@@ -107,8 +107,12 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             _connect_ip = self.parallel_config.master_addr
             if _is_registry_edge:
                 from vllm_ascend.edge_cloud.role_registry import (
-                    get_role_registry)
+                    get_role_registry, init_role_registry)
                 _reg = get_role_registry()
+                if _reg is None:
+                    # Engine-core process may not have loaded it yet.
+                    _reg = init_role_registry(
+                        self.parallel_config.role_registry)
                 if _reg is not None:
                     _connect_ip = _reg.edge(
                         self.parallel_config.edge_id).addr
