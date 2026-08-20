@@ -262,6 +262,8 @@ class PDSeparatedScheduler(Scheduler):
         # next scheduling opportunity for DECODE_FIRST or DRAFT_FIRST only.
         self._decode_or_draft_first_only_start_ts: float | None = None
         self._decode_or_draft_first_only_window_ms: int = 10
+        # Rate limiter for the [PD-STALL] empty-schedule probe.
+        self._last_stall_log_ts: float = 0.0
 
         # Async scheduled-MTP keeps real draft token IDs in the edge worker.
         # The scheduler only needs fixed-length placeholder SchedulerOutputs,
@@ -790,6 +792,8 @@ class PDSeparatedScheduler(Scheduler):
         )
         if has_work or is_tail:
             self._log_scheduler_state(state, scheduler_output.batch_type)
+        else:
+            self._log_stall_if_blocked(scheduler_output)
         # Stamp whether this batch carries any multimodal request so the
         # cloud's early-recv hint (built in PassiveEC.step from this SO)
         # can decide whether to irecv mrope_positions. The passive cloud has
@@ -810,6 +814,82 @@ class PDSeparatedScheduler(Scheduler):
                    for nr in scheduler_output.scheduled_new_reqs)
         )
         return scheduler_output
+
+    def _log_stall_if_blocked(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        """Rate-limited probe for EMPTY schedules with outstanding work.
+
+        Fires at most once per 10ms.  The snapshot covers every gate that
+        can hold back a dispatch: per-lane counters, force flags, queue
+        lengths, the placeholder DF state, and the watermark readiness of
+        each tail head — so a stall can be attributed to a specific gate
+        from a single log line.
+        """
+        if scheduler_output.batch_type != BatchType.EMPTY:
+            return
+        if not (
+            self.waiting
+            or self.chunk_prefill_first
+            or self.prefill_last_pending
+            or self.running
+            or self.prefills_last_ready
+            or self.decodes_first_ready
+            or self.decodes_last_ready
+            or self.prefill_drafts_first_ready
+            or self.prefill_drafts_last_ready
+            or self.decode_drafts_first_ready
+            or self.decode_drafts_last_ready
+            or self.prefill_inflight_count > 0
+            or self.decode_or_draft_inflight_count > 0
+            or self.decode_head_inflight_count > 0
+            or self.prefill_draft_remote_pending_count > 0
+            or self.decode_draft_remote_pending_count > 0
+        ):
+            # Genuinely idle: no requests, nothing in flight.
+            return
+        now = time.monotonic()
+        if now - self._last_stall_log_ts < 0.010:
+            return
+        self._last_stall_log_ts = now
+        logger.warning(
+            "[PD-STALL] empty schedule with outstanding work: "
+            "state=%s waiting=%d chunk_pf=%d pl_pending=%d running=%d | "
+            "counters: pf_inflight=%d/%d decode_inflight=%d "
+            "decode_head=%d p_pending=%d d_pending=%d | "
+            "force: dl=%s pdl=%s ddl=%s | "
+            "queues: pl_last=%d df_ph=%d dl_last=%d p_drf=%d p_drl=%d "
+            "d_drf=%d d_drl=%d | "
+            "tail_ready: pl=%s dl=%s p_drl=%s d_drl=%s | "
+            "placeholder_parent=%s publish_pending=%d",
+            self._prefill_state(),
+            len(self.waiting),
+            len(self.chunk_prefill_first),
+            len(self.prefill_last_pending),
+            len(self.running),
+            self.prefill_inflight_count,
+            self.prefill_inflight_limit,
+            self.decode_or_draft_inflight_count,
+            self.decode_head_inflight_count,
+            self.prefill_draft_remote_pending_count,
+            self.decode_draft_remote_pending_count,
+            self._force_decode_last,
+            self._force_prefill_draft_last,
+            self._force_decode_draft_last,
+            len(self.prefills_last_ready),
+            len(self.decodes_first_ready),
+            len(self.decodes_last_ready),
+            len(self.prefill_drafts_first_ready),
+            len(self.prefill_drafts_last_ready),
+            len(self.decode_drafts_first_ready),
+            len(self.decode_drafts_last_ready),
+            self._has_actionable_prefill_tail(),
+            self._has_actionable_decode_tail(),
+            self._has_actionable_prefill_draft_tail(),
+            self._has_actionable_decode_draft_tail(),
+            self._decode_first_placeholder_parent is not None,
+            len(self._draft_publish_pending),
+        )
 
     def _decode_or_draft_first_only_active(self) -> bool:
         started_at = self._decode_or_draft_first_only_start_ts
