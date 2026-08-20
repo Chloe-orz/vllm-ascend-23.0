@@ -1266,6 +1266,12 @@ class NPUModelRunner(GPUModelRunner):
         self._ec_hidden_trace_by_task: dict[str, dict[str, Any]] = {}
         self._ec_hidden_trace_cache_max: int = 8
         self._ec_sampler_empty_rows: list[int] = []
+        # CPU-only provenance for the shared input_batch block-table buffer.
+        # This deliberately records no device values: reading NPU tensors in
+        # the hot path would synchronize execution and could hide the race the
+        # DSV4 MTP=1 diagnostics are intended to expose.
+        self._ec_block_table_generation: int = 0
+        self._ec_block_table_last_writer: dict[str, Any] | None = None
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1545,6 +1551,113 @@ class NPUModelRunner(GPUModelRunner):
             and scheduler_output.head_token is not None
         )
 
+    def _should_trace_dsv4_mtp_block_table(self) -> bool:
+        return bool(
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and self._is_deepseek_v4
+            and self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and self.num_spec_tokens == 1
+        )
+
+    @staticmethod
+    def _target_block_table_ptrs(attn_metadata: Any) -> tuple[int, ...]:
+        """Get unique Target DSA block-table addresses without a device read."""
+        ptrs: set[int] = set()
+        groups = attn_metadata if isinstance(attn_metadata, list) else [attn_metadata]
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            for metadata in group.values():
+                decode = getattr(metadata, "decode", None)
+                block_table = getattr(decode, "block_table", None)
+                if isinstance(block_table, torch.Tensor):
+                    ptrs.add(block_table.data_ptr())
+        return tuple(sorted(ptrs))
+
+    def _block_table_snapshot(
+        self,
+        scheduler_output: "SchedulerOutput",
+        attn_metadata: Any,
+    ) -> dict[str, Any]:
+        """Snapshot CPU block IDs and tensor addresses without NPU sync."""
+        req_ids = tuple(scheduler_output.num_scheduled_tokens)
+        rows: dict[str, Any] = {}
+        live_ptrs: list[int] = []
+        block_tables = getattr(
+            self.input_batch.block_table, "block_tables", ()
+        )
+        for block_table in block_tables:
+            live_ptrs.append(block_table.block_table.gpu.data_ptr())
+        for req_id in req_ids:
+            row = self.input_batch.req_id_to_index.get(req_id)
+            if row is None:
+                rows[req_id] = None
+                continue
+            per_gid = []
+            for block_table in block_tables:
+                num_blocks = int(block_table.num_blocks_per_row[row])
+                block_ids = block_table.get_numpy_array()[row, :num_blocks]
+                per_gid.append(tuple(int(block_id) for block_id in block_ids))
+            rows[req_id] = tuple(per_gid)
+        return {
+            "generation": self._ec_block_table_generation,
+            "req_ids": req_ids,
+            "rows": rows,
+            "live_ptrs": tuple(live_ptrs),
+            "target_ptrs": self._target_block_table_ptrs(attn_metadata),
+        }
+
+    def _record_block_table_writer(
+        self,
+        scheduler_output: "SchedulerOutput",
+        stage: str,
+    ) -> None:
+        if not self._should_trace_dsv4_mtp_block_table():
+            return
+        self._ec_block_table_generation += 1
+        self._ec_block_table_last_writer = {
+            "generation": self._ec_block_table_generation,
+            "stage": stage,
+            "head_token": scheduler_output.head_token,
+            "batch_type": str(scheduler_output.batch_type),
+            "req_ids": tuple(scheduler_output.num_scheduled_tokens),
+        }
+
+    def _capture_fast_path_block_table_trace(
+        self,
+        scheduler_output: "SchedulerOutput",
+        cache: dict[str, Any],
+        attn_metadata: Any,
+    ) -> None:
+        if not self._should_trace_dsv4_mtp_decode_last(scheduler_output):
+            return
+        task_id = scheduler_output.head_token
+        assert task_id is not None
+        trace = self._ec_hidden_trace_by_task.setdefault(
+            task_id,
+            {
+                "req_ids": tuple(scheduler_output.num_scheduled_tokens),
+                "num_scheduled_tokens": dict(
+                    scheduler_output.num_scheduled_tokens
+                ),
+                "stages": {},
+            },
+        )
+        last = self._block_table_snapshot(scheduler_output, attn_metadata)
+        last["writer"] = self._ec_block_table_last_writer
+        trace["fast_path_block_table"] = {
+            "first": cache.get("_ec_bt_first"),
+            "writer_before_restore": cache.get(
+                "_ec_bt_writer_before_restore"
+            ),
+            "restore_enqueued": cache.get(
+                "_ec_bt_restore_enqueued", False
+            ),
+            "last": last,
+        }
+
     def _capture_dsv4_mtp_finite_rows(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1659,6 +1772,45 @@ class NPUModelRunner(GPUModelRunner):
             empty_rows,
             metadata_fields,
         )
+        block_table_trace = trace.get("fast_path_block_table")
+        if block_table_trace is not None:
+            first = block_table_trace.get("first") or {}
+            last = block_table_trace.get("last") or {}
+            first_rows = first.get("rows") or {}
+            last_rows = last.get("rows") or {}
+            changed_rows = {
+                req_id: {
+                    "first": first_rows.get(req_id),
+                    "last": last_rows.get(req_id),
+                }
+                for req_id in sorted(set(first_rows) | set(last_rows))
+                if first_rows.get(req_id) != last_rows.get(req_id)
+            }
+            last_target_ptrs = set(last.get("target_ptrs", ()))
+            logger.error(
+                "[EC-FAST-BT] task=%s req_ids_equal=%s "
+                "input_batch_blocks_equal=%s changed_rows=%s "
+                "restore_enqueued=%s first_generation=%s "
+                "last_generation=%s writer_before_restore=%s "
+                "last_writer=%s actual_uses_live=%s "
+                "actual_uses_first_view=%s actual_uses_frozen=%s",
+                task_id,
+                tuple(first.get("req_ids", ()))
+                == tuple(last.get("req_ids", ())),
+                first_rows == last_rows,
+                changed_rows,
+                block_table_trace.get("restore_enqueued"),
+                first.get("generation"),
+                last.get("generation"),
+                block_table_trace.get("writer_before_restore"),
+                last.get("writer"),
+                bool(last_target_ptrs & set(last.get("live_ptrs", ()))),
+                bool(last_target_ptrs & set(first.get("target_ptrs", ()))),
+                bool(
+                    last_target_ptrs
+                    & set(first.get("frozen_target_ptrs", ()))
+                ),
+            )
         for stage, stage_snapshot in trace["stages"].items():
             for name, (shape, finite_rows_gpu) in stage_snapshot.items():
                 finite_rows = finite_rows_gpu.cpu().tolist()
@@ -2841,6 +2993,9 @@ class NPUModelRunner(GPUModelRunner):
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
+        self._record_block_table_writer(
+            scheduler_output, "PREPARE_COMMIT"
+        )
 
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
@@ -5296,6 +5451,11 @@ class NPUModelRunner(GPUModelRunner):
             # Pop this head_token's cache so a later segment_a (different
             # head_token) does not hand the wrong attn_metadata to this PL.
             cache = _edge_cache_entry
+            cache["_ec_bt_writer_before_restore"] = (
+                dict(self._ec_block_table_last_writer)
+                if self._ec_block_table_last_writer is not None
+                else None
+            )
 
             # If intervening decode batches disrupted input_batch (req_ids no
             # longer match this tail's scheduled reqs), re-add the prefill req
@@ -5389,6 +5549,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._fast_path_view_restore_required()
                 and cudagraph_mode == CUDAGraphMode.FULL
             )
+            block_table_restore_enqueued = False
             if use_views:
                 restore_memo: set[tuple[int, tuple]] = set()
                 attn_metadata_views = cache.get("attn_metadata_views")
@@ -5397,6 +5558,7 @@ class NPUModelRunner(GPUModelRunner):
                         attn_metadata_views, attn_metadata,
                         memo=restore_memo)
                     attn_metadata = attn_metadata_views
+                    block_table_restore_enqueued = True
                 spec_decode_metadata_views = cache.get(
                     "spec_decode_metadata_views"
                 )
@@ -5422,6 +5584,13 @@ class NPUModelRunner(GPUModelRunner):
                     _restore_frozen_into_views(
                         positions_views, cache["positions"],
                         memo=restore_memo)
+            cache["_ec_bt_restore_enqueued"] = (
+                block_table_restore_enqueued
+            )
+            if block_table_restore_enqueued:
+                self._record_block_table_writer(
+                    scheduler_output, "FAST_RESTORE_ENQUEUED"
+                )
             # Re-sync num_computed_tokens from CPU: segment_a forward or
             # async state update may have modified the GPU buffer.
             # NOTE: In async speculative decoding, segment_a has already
@@ -5753,6 +5922,9 @@ class NPUModelRunner(GPUModelRunner):
                     positions = positions_views
                 else:
                     positions = cache["positions"]
+                self._capture_fast_path_block_table_trace(
+                    scheduler_output, cache, attn_metadata
+                )
 
             # Save the cloud target metadata and the exact positions passed
             # to the model. The scheduled draft can then reconstruct its
@@ -5842,6 +6014,17 @@ class NPUModelRunner(GPUModelRunner):
                 ],
             }
             frozen_entry = _freeze_scheduled_state(cache_entry)
+            if self._should_trace_dsv4_mtp_block_table():
+                first = self._block_table_snapshot(
+                    scheduler_output, attn_metadata
+                )
+                first["writer"] = self._ec_block_table_last_writer
+                first["frozen_target_ptrs"] = (
+                    self._target_block_table_ptrs(
+                        frozen_entry["attn_metadata"]
+                    )
+                )
+                frozen_entry["_ec_bt_first"] = first
             # Keep the original (view-based) objects alive next to the
             # frozen snapshot. Their tensors reference the persistent
             # buffers the ACL graph captured (block_table / seq_lens /
