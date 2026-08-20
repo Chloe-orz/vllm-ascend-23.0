@@ -121,9 +121,11 @@ class PassiveScheduler:
         pp_subscriber: "PPSchedulerZmqSubscriber",
         dispatch_policy: DispatchPolicy = DispatchPolicy.EXPECT_ALTERNATION,
         run_subscriber_thread: bool = True,
+        scheduler_output_handler=None,
     ) -> None:
         self.pp_subscriber = pp_subscriber
         self.dispatch_policy = dispatch_policy
+        self.scheduler_output_handler = scheduler_output_handler
         self.cloud_scheduling_state = CloudSchedulingState.EXPECT_EXECUTE_PREFILL
 
         self.ready_prefills: deque[SchedulerOutput] = deque()
@@ -273,6 +275,8 @@ class PassiveScheduler:
             except queue.Empty:
                 break
             self._remember_arrival_seq(scheduler_output, seq)
+            if self.scheduler_output_handler is not None:
+                scheduler_output = self.scheduler_output_handler(scheduler_output)
             bt = scheduler_output.batch_type
             # logger.info(
             #     "Received scheduler_output from edge, seq=%d, batch_type: %s",

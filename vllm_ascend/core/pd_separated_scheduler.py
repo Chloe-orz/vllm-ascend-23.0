@@ -4,22 +4,28 @@ import enum
 import os
 import time
 from collections import deque
-from dataclasses import dataclass, replace
-
-import numpy as np
 from collections.abc import Iterable
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from vllm.logger import logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import BatchType, HiddenChannelType, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    BatchType,
+    EdgeCloudFinishedRequest,
+    HiddenChannelType,
+    SchedulerOutput,
+)
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+
+from vllm_ascend.edge_cloud.prefix_protocol import PrefixHasher
 
 
 class PrefillState(enum.Enum):
@@ -216,6 +222,23 @@ class PDSeparatedScheduler(Scheduler):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._edge_cloud_prefix_hasher: PrefixHasher | None = None
+        self._edge_cloud_finished_request_data: dict[
+            str, EdgeCloudFinishedRequest
+        ] = {}
+        additional_config = self.vllm_config.additional_config or {}
+        edge_cloud_config = additional_config.get("edge_cloud_config", {})
+        coordination = edge_cloud_config.get("prefix_cache_coordination", {})
+        if coordination.get("enabled", False):
+            tenant_key_file = coordination.get("tenant_key_file")
+            if not tenant_key_file:
+                raise ValueError(
+                    "edge prefix cache coordination requires tenant_key_file"
+                )
+            self._edge_cloud_prefix_hasher = PrefixHasher(
+                Path(tenant_key_file).read_bytes().strip(),
+                self.vllm_config.cache_config.block_size,
+            )
         # Requests that have started their P-first segment but have not yet
         # been fully consumed (still chunking, or still in flight on cloud).
         self.chunk_prefill_first: list[Request] = []
@@ -486,8 +509,9 @@ class PDSeparatedScheduler(Scheduler):
         # Only FIRST-segment batches are published to the cloud over PRE_OUT
         # (the publish hook drops PL/DL/DRL tails), and only batches whose
         # cloud-side execution runs the purge hook can deliver the
-        # invalidations.  EMPTY batches are not broadcast either.  Stamping
-        # any other batch type would silently discard the pending list, so
+        # invalidations. EMPTY finish batches are broadcast to the control
+        # manager but do not execute a worker purge hook. Stamping any other
+        # batch type would silently discard the pending list, so
         # keep the invalidations queued until a cloud-bound batch can carry
         # them.
         if self._pending_cloud_draft_invalidations and (
@@ -502,6 +526,13 @@ class PDSeparatedScheduler(Scheduler):
                 self._pending_cloud_draft_invalidations
             )
             self._pending_cloud_draft_invalidations = []
+        finished_data = {
+            request_id: self._edge_cloud_finished_request_data.pop(request_id)
+            for request_id in scheduler_output.finished_req_ids
+            if request_id in self._edge_cloud_finished_request_data
+        }
+        if finished_data:
+            scheduler_output.edge_cloud_finished_requests = finished_data
         return scheduler_output
 
     # ------------------------------------------------------------------ #
@@ -2068,6 +2099,7 @@ class PDSeparatedScheduler(Scheduler):
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
     ) -> dict[str, Any] | None:
+        self._record_edge_cloud_finish(request)
         task_ids = (
             self._edge_cloud_draft_req_tasks.get(request.request_id)
             if self._edge_cloud_draft_retention_enabled
@@ -2085,6 +2117,24 @@ class PDSeparatedScheduler(Scheduler):
                 request.request_id
             ] = request
         return super()._free_request(request, delay_free_blocks=True)
+
+    def _record_edge_cloud_finish(self, request: Request) -> None:
+        control_request_id = request.edge_cloud_request_id
+        hasher = self._edge_cloud_prefix_hasher
+        if control_request_id is None or hasher is None:
+            return
+        manifest = hasher.build_manifest(
+            control_request_id,
+            request.all_token_ids,
+        )
+        self._edge_cloud_finished_request_data[request.request_id] = (
+            EdgeCloudFinishedRequest(
+                control_request_id=control_request_id,
+                prompt_tokens=request.num_prompt_tokens,
+                completion_tokens=request.num_output_tokens,
+                full_block_hashes=manifest.full_block_hashes,
+            )
+        )
 
     def release_draft_retained_blocks(self, task_id: str) -> None:
         """Free KV blocks retained for a completed/dropped draft task.

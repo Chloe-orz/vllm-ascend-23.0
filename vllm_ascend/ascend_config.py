@@ -956,6 +956,10 @@ class EdgeCloudConfig:
         self.pd_separation = PDSeparationConfig(
             user_config.get("pd_separation", {}) or {}
         )
+        self.prefix_cache_coordination = PrefixCacheCoordinationConfig(
+            user_config.get("prefix_cache_coordination", {}) or {},
+            role=self.role,
+        )
 
         # Keep a handle to vllm_config so _validate() can inspect orthogonal
         # parallel features (PCP/DCP) that are incompatible with edge-cloud's
@@ -997,6 +1001,48 @@ class EdgeCloudConfig:
             )
 
         self._validate_incompatible_parallel_features()
+        self._validate_prefix_cache_coordination()
+
+    def _validate_prefix_cache_coordination(self) -> None:
+        coordination = self.prefix_cache_coordination
+        if not coordination.enabled:
+            return
+        if not self.pd_separation.enabled:
+            raise ValueError(
+                "edge_cloud_config.prefix_cache_coordination.enabled=True "
+                "requires edge_cloud_config.pd_separation.enabled=True"
+            )
+        if self._vllm_config is None:
+            return
+
+        model_config = self._vllm_config.model_config
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        model_type = getattr(hf_text_config, "model_type", "")
+        if model_type not in ("qwen3_5", "qwen3_5_text"):
+            raise ValueError(
+                "prefix cache coordination currently supports only "
+                "Qwen3.5-Dense (model_type='qwen3_5' or 'qwen3_5_text'), got "
+                f"model_type={model_type!r}"
+            )
+        if getattr(model_config, "multimodal_config", None) is not None:
+            raise ValueError(
+                "prefix cache coordination currently supports text-only "
+                "Qwen3.5-Dense requests"
+            )
+        if self._vllm_config.lora_config is not None:
+            raise ValueError(
+                "prefix cache coordination does not currently support LoRA"
+            )
+        if self._vllm_config.speculative_config is not None:
+            raise ValueError(
+                "prefix cache coordination does not currently support "
+                "speculative decoding"
+            )
+        cache_config = self._vllm_config.cache_config
+        if not getattr(cache_config, "enable_prefix_caching", False):
+            raise ValueError(
+                "prefix cache coordination requires enable_prefix_caching=True"
+            )
 
     def _validate_incompatible_parallel_features(self):
         """Reject parallel features that break the metadata-free PP path.
@@ -1044,7 +1090,62 @@ class EdgeCloudConfig:
             f"EdgeCloudConfig(enabled={self.enabled}, role={self.role}, "
             f"mode={self.mode}, edge_head_tail_layers={self.edge_head_tail_layers}, "
             f"enable_decode_graph={self.enable_decode_graph}, "
-            f"pd_separation={self.pd_separation})"
+            f"pd_separation={self.pd_separation}, "
+            f"prefix_cache_coordination={self.prefix_cache_coordination})"
+        )
+
+
+class PrefixCacheCoordinationConfig:
+    """HTTP control-plane settings for shared cloud prefix caching.
+
+    The edge opens an OpenAI-compatible streaming request to ``control_url``.
+    The cloud exposes that endpoint on ``listen_host`` and ``listen_port``.
+    Only the edge reads ``tenant_key_file``; raw tenant key material never
+    crosses the trust boundary.
+    """
+
+    def __init__(self, user_config: dict | None = None, *, role: str = "edge"):
+        if user_config is None:
+            user_config = {}
+        self.enabled: bool = user_config.get("enabled", False)
+        self.control_url: str | None = user_config.get("control_url")
+        self.listen_host: str = user_config.get("listen_host", "0.0.0.0")
+        self.listen_port: int = int(user_config.get("listen_port", 8100))
+        self.instance_id: str = user_config.get("instance_id", "cloud-0")
+        self.tenant_key_file: str | None = user_config.get("tenant_key_file")
+        self.connect_timeout: float = float(user_config.get("connect_timeout", 5.0))
+
+        if self.enabled:
+            self._validate(role)
+
+    def _validate(self, role: str) -> None:
+        if role == "edge":
+            if not self.control_url:
+                raise ValueError(
+                    "edge prefix cache coordination requires control_url"
+                )
+            if not self.control_url.startswith(("http://", "https://")):
+                raise ValueError("control_url must use http:// or https://")
+            if not self.tenant_key_file:
+                raise ValueError(
+                    "edge prefix cache coordination requires tenant_key_file"
+                )
+        elif role == "cloud":
+            if not self.instance_id:
+                raise ValueError(
+                    "cloud prefix cache coordination requires instance_id"
+                )
+            if not 1 <= self.listen_port <= 65535:
+                raise ValueError("listen_port must be between 1 and 65535")
+        if self.connect_timeout <= 0:
+            raise ValueError("connect_timeout must be positive")
+
+    def __repr__(self) -> str:
+        return (
+            "PrefixCacheCoordinationConfig("
+            f"enabled={self.enabled}, control_url={self.control_url!r}, "
+            f"listen_host={self.listen_host!r}, listen_port={self.listen_port}, "
+            f"instance_id={self.instance_id!r})"
         )
 
 

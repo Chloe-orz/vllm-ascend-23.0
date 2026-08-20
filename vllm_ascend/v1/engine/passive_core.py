@@ -126,7 +126,7 @@ class PPSchedulerZmqPublisher:
         """Queue a SchedulerOutput for publishing. Non-blocking: drops the
         message if the bridge queue is full (back-pressure protection).
         """
-        if not self._running or scheduler_output.batch_type is BatchType.EMPTY:
+        if not self._running:
             return
         try:
             seq = self._seq
@@ -216,8 +216,6 @@ class PPSchedulerZmqSubscriber:
                 seq_bytes, data = self._pull.recv_multipart()
                 seq = int.from_bytes(seq_bytes, "big")
                 scheduler_output = pickle.loads(data)
-                if scheduler_output.batch_type is BatchType.EMPTY:
-                    continue
                 with self._lock:
                     self._received_outputs.append((seq, scheduler_output))
                 # logger.info(
@@ -475,6 +473,8 @@ class PassiveEngineCoreProc:
         scheduler_input,
         dispatch_policy=None,
         pp_pd_channel: Optional["PPSchedulerZmqChannel"] = None,
+        cloud_kv_manager=None,
+        cloud_control_processor=None,
     ) -> None:
         passive_scheduler_module = _import_passive_scheduler_module()
         if dispatch_policy is None:
@@ -485,8 +485,18 @@ class PassiveEngineCoreProc:
         self.executor = executor
         # scheduler_input is any object exposing consume_new_outputs(); in
         # PD-separation mode this is the cloud-side PPSchedulerZmqChannel.
+        self._cloud_kv_manager = cloud_kv_manager
+        self._cloud_control_processor = cloud_control_processor
+        scheduler_output_handler = (
+            self._handle_cloud_scheduler_output
+            if cloud_kv_manager is not None
+            else None
+        )
         self.passive_scheduler = passive_scheduler_module.PassiveScheduler(
-            vllm_config, scheduler_input, dispatch_policy=dispatch_policy
+            vllm_config,
+            scheduler_input,
+            dispatch_policy=dispatch_policy,
+            scheduler_output_handler=scheduler_output_handler,
         )
         # Optional POST_OUT (cloud → edge) channel. Only set on the cloud
         # side in PD-separation mode; left None for the legacy PP path.
@@ -538,6 +548,17 @@ class PassiveEngineCoreProc:
         self._prev_dispatch_req_ids: set[str] = set()
         self._pending_post_out_by_head_token: dict[str, SchedulerOutput] = {}
         self._published_post_out_tokens: set[str] = set()
+        self._cloud_kv_pending_by_head_token: dict[str, SchedulerOutput] = {}
+
+    def _handle_cloud_scheduler_output(
+        self, scheduler_output: SchedulerOutput
+    ) -> SchedulerOutput:
+        rewritten, finished_usage = (
+            self._cloud_kv_manager.rewrite_scheduler_output(scheduler_output)
+        )
+        for request_id, usage in finished_usage:
+            self._cloud_control_processor.publish_usage(request_id, usage)
+        return rewritten
 
     def _drain_worker_completion_acks(self) -> None:
         """Publish POST_OUT only after cloud workers complete the middle segment."""
@@ -557,12 +578,20 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
+                head_token = result.get("head_token")
+                completed_output = self._cloud_kv_pending_by_head_token.pop(
+                    head_token, None
+                )
+                if completed_output is not None:
+                    self._cloud_kv_manager.complete_scheduler_output(
+                        completed_output
+                    )
+
                 # Decode and draft tails are self-posted on the edge. Their
                 # worker acks are still drained from the response MQ, but do
                 # not drive a cloud -> edge POST_OUT control message.
                 if result.get("batch_type") != BatchType.PREFILL_FIRST:
                     continue
-                head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
                     continue
                 scheduler_output = self._pending_post_out_by_head_token.pop(
@@ -590,6 +619,9 @@ class PassiveEngineCoreProc:
             True if at least one payload was enqueued, False if the
             scheduler had nothing to dispatch.
         """
+        if self._cloud_control_processor is not None:
+            self._cloud_control_processor.poll(self._cloud_kv_manager)
+
         _t0 = time.monotonic()
         self._drain_worker_completion_acks()
         _dt_drain = (time.monotonic() - _t0) * 1000
@@ -763,6 +795,12 @@ class PassiveEngineCoreProc:
                     self._pending_post_out_by_head_token[head_token] = (
                         batch.scheduler_output
                     )
+            if slice_info is None or slice_info.is_last_slice:
+                head_token = getattr(batch.scheduler_output, "head_token", None)
+                if head_token and self._cloud_kv_manager is not None:
+                    self._cloud_kv_pending_by_head_token[head_token] = (
+                        batch.scheduler_output
+                    )
         return True
 
     def _maybe_publish_post_out(
@@ -786,9 +824,21 @@ class PassiveEngineCoreProc:
         from dataclasses import replace
         bt = scheduler_output.batch_type
         if bt == BatchType.PREFILL_FIRST:
-            tail = replace(
-                scheduler_output, batch_type=BatchType.PREFILL_LAST
+            additional_config = self.vllm_config.additional_config or {}
+            edge_cloud_config = additional_config.get("edge_cloud_config", {})
+            coordination = edge_cloud_config.get(
+                "prefix_cache_coordination", {}
             )
+            if coordination.get("enabled", False):
+                tail = SchedulerOutput.make_empty()
+                tail.batch_type = BatchType.PREFILL_LAST
+                tail.head_token = scheduler_output.head_token
+                tail.hidden_channel = scheduler_output.hidden_channel
+                tail.edge_cloud_ack_only = True
+            else:
+                tail = replace(
+                    scheduler_output, batch_type=BatchType.PREFILL_LAST
+                )
         elif bt == BatchType.DECODE_FIRST:
             # The edge pre-generates DECODE_LAST, so the cloud does not
             # publish another control-plane response for DECODE_FIRST.
@@ -844,6 +894,8 @@ class PassiveEngineCoreProc:
     def run_passive_engine_core(
         vllm_config: "VllmConfig",
         ready_pipe,  # multiprocessing.Connection for signaling readiness
+        cloud_control_command_queue=None,
+        cloud_control_event_queue=None,
     ):
         """Entry point for the passive EngineCore process.
 
@@ -891,9 +943,71 @@ class PassiveEngineCoreProc:
         try:
             executor = MultiprocExecutor(vllm_config, monitor_workers=False)
 
-            ready_pipe.send({"status": "READY"})
+            # The HTTP parent may start before the edge has sent the physical
+            # KV layout to cloud workers. Prefix probes remain queued until
+            # the manager below becomes ready, avoiding a cloud/edge startup
+            # ordering dependency.
+            ready_pipe.send(
+                {
+                    "status": "READY",
+                    "block_size": vllm_config.cache_config.block_size,
+                }
+            )
             ready_pipe.close()
             ready_pipe = None
+
+            from vllm_ascend.ascend_config import init_ascend_config
+
+            _ascend_config = init_ascend_config(vllm_config)
+            _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
+            _coordination = getattr(
+                _edge_cloud, "prefix_cache_coordination", None
+            )
+            _coordination_enabled = bool(
+                _edge_cloud is not None
+                and _edge_cloud.enabled
+                and _edge_cloud.role == "cloud"
+                and _coordination is not None
+                and _coordination.enabled
+            )
+            cloud_kv_manager = None
+            cloud_control_processor = None
+            if _coordination_enabled:
+                if (
+                    cloud_control_command_queue is None
+                    or cloud_control_event_queue is None
+                ):
+                    raise RuntimeError("cloud control IPC queues were not provided")
+                from vllm.v1.core.kv_cache_utils import (
+                    generate_scheduler_kv_cache_config,
+                )
+
+                from vllm_ascend.edge_cloud.cloud_control import (
+                    CloudControlProcessor,
+                )
+                from vllm_ascend.edge_cloud.cloud_kv import CloudKVRequestManager
+
+                physical_configs = None
+                while not physical_configs:
+                    replies = executor.collective_rpc(
+                        "get_initialized_kv_cache_config",
+                        local_only=True,
+                    )
+                    physical_configs = [config for config in replies if config]
+                    if not physical_configs:
+                        time.sleep(0.05)
+                scheduler_kv_config = generate_scheduler_kv_cache_config(
+                    physical_configs
+                )
+                cloud_kv_manager = CloudKVRequestManager(
+                    kv_cache_config=scheduler_kv_config,
+                    vllm_config=vllm_config,
+                    instance_id=_coordination.instance_id,
+                )
+                cloud_control_processor = CloudControlProcessor(
+                    cloud_control_command_queue,
+                    cloud_control_event_queue,
+                )
 
             passive_scheduler_module = _import_passive_scheduler_module()
             dispatch_policy_cls = passive_scheduler_module.DispatchPolicy
@@ -920,9 +1034,6 @@ class PassiveEngineCoreProc:
             # the ``_ASCEND_CONFIG`` singleton is empty; re-init from the
             # ``vllm_config`` we were handed. ``init_ascend_config`` is
             # idempotent on the singleton.
-            from vllm_ascend.ascend_config import init_ascend_config
-            _ascend_config = init_ascend_config(vllm_config)
-            _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
             _pd_enabled = bool(
                 _edge_cloud is not None
                 and getattr(_edge_cloud, "enabled", False)
@@ -986,6 +1097,8 @@ class PassiveEngineCoreProc:
                     vllm_config, executor, scheduler_input,
                     dispatch_policy=policy,
                     pp_pd_channel=pp_pd_channel,
+                    cloud_kv_manager=cloud_kv_manager,
+                    cloud_control_processor=cloud_control_processor,
                 )
                 proc.run_busy_loop()
             else:

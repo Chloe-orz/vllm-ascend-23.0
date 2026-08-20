@@ -1838,6 +1838,10 @@ class NPUWorker(WorkerBase):
             ):
                 self.model_runner._init_kv_zero_meta()
 
+    def get_initialized_kv_cache_config(self) -> KVCacheConfig | None:
+        """Return this worker's physical KV layout after initialization."""
+        return getattr(self.model_runner, "kv_cache_config", None)
+
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         # Check if profiling is enabled (RFC #6954 - align with upstream vLLM)
         if self.profiler_config is None or self.profiler_config.profiler is None:

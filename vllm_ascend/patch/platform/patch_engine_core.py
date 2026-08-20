@@ -63,14 +63,16 @@ source and re-apply the dest-only inserts.
 """
 from __future__ import annotations
 
-import functools
 import copy as _copy
+import functools
 from concurrent.futures import Future
 from typing import cast
 from uuid import uuid4
 
+import numpy as np
 from vllm.config import ParallelConfig
-from vllm.logger import init_logger, logger as vllm_logger
+from vllm.logger import init_logger
+from vllm.logger import logger as vllm_logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
@@ -191,6 +193,20 @@ def _drain_pd_channel_inbox(self) -> None:
         bt = so.batch_type
         logger.info(f"Received scheduler_output from cloud, batch_type: {bt}")
         if bt == BatchType.PREFILL_LAST:
+            if getattr(so, "edge_cloud_ack_only", False):
+                head_token = getattr(so, "head_token", None)
+                originals = getattr(
+                    self, "_edge_cloud_prefill_first_by_head_token", {}
+                )
+                original = originals.pop(head_token, None)
+                if original is None:
+                    logger.error(
+                        "PREFILL ACK has no saved edge FIRST for head_token=%s",
+                        head_token,
+                    )
+                    continue
+                so = _copy.copy(original)
+                so.batch_type = BatchType.PREFILL_LAST
             self.scheduler.prefills_last_ready.append(so)
         elif bt == BatchType.DECODE_LAST:
             self.scheduler.decodes_last_ready.append(so)
@@ -231,32 +247,87 @@ def _publish_to_cloud(
     original SchedulerOutput and cleans up its own batch immediately.
     """
     channel = self._pp_pd_channel
+    cloud_so = scheduler_output
     filter_finished = getattr(
         self.scheduler, "filter_cloud_finished_req_ids", None
     )
-    if filter_finished is None:
-        channel.publish(scheduler_output)
-        return
-    finished = set(getattr(scheduler_output, "finished_req_ids", None) or ())
-    released = getattr(
-        self.scheduler, "_cloud_released_finished_req_ids", None
-    )
-    if not finished and not released:
-        channel.publish(scheduler_output)
-        return
-    cloud_finished = filter_finished(finished)
-    if cloud_finished == finished:
-        channel.publish(scheduler_output)
-        return
-    # copy.copy (NOT dataclasses.replace): the SO carries dynamically
-    # attached attributes that replace() would silently drop -- has_mrope
-    # (stamped per-SO in _schedule_pd_separated; the cloud's CHER
-    # early-recv hint relies on it), is_last_prefill_chunk,
-    # draft_output_req_ids, etc.  A shallow copy preserves __dict__;
-    # only finished_req_ids is overridden with a fresh set.
-    cloud_so = _copy.copy(scheduler_output)
-    cloud_so.finished_req_ids = cloud_finished
+    if filter_finished is not None:
+        finished = set(getattr(scheduler_output, "finished_req_ids", None) or ())
+        released = getattr(
+            self.scheduler, "_cloud_released_finished_req_ids", None
+        )
+        if finished or released:
+            cloud_finished = filter_finished(finished)
+            if cloud_finished != finished:
+                # copy.copy (NOT dataclasses.replace): the SO carries
+                # dynamically attached attributes used by the cloud.
+                cloud_so = _copy.copy(scheduler_output)
+                cloud_so.finished_req_ids = cloud_finished
+                finished_data = getattr(
+                    scheduler_output, "edge_cloud_finished_requests", None
+                )
+                if finished_data is not None:
+                    cloud_so.edge_cloud_finished_requests = {
+                        request_id: data
+                        for request_id, data in finished_data.items()
+                        if request_id in cloud_finished
+                    }
+
+    edge_cloud = (
+        getattr(self.vllm_config, "additional_config", {}) or {}
+    ).get("edge_cloud_config", {})
+    coordination = edge_cloud.get("prefix_cache_coordination", {})
+    if coordination.get("enabled", False):
+        if cloud_so.batch_type == BatchType.PREFILL_FIRST:
+            head_token = getattr(cloud_so, "head_token", None)
+            if not head_token:
+                raise RuntimeError("PREFILL_FIRST has no head_token")
+            originals = getattr(
+                self, "_edge_cloud_prefill_first_by_head_token", None
+            )
+            if originals is None:
+                originals = {}
+                self._edge_cloud_prefill_first_by_head_token = originals
+            originals[head_token] = scheduler_output
+        cloud_so = _make_cloud_safe_scheduler_output(cloud_so)
     channel.publish(cloud_so)
+
+
+def _make_cloud_safe_scheduler_output(
+    scheduler_output: SchedulerOutput,
+) -> SchedulerOutput:
+    """Replace prompt and generated token IDs with same-length placeholders."""
+    cloud_so = _copy.copy(scheduler_output)
+    cloud_so.scheduled_new_reqs = []
+    for request_data in scheduler_output.scheduled_new_reqs:
+        if request_data.mm_features or request_data.prompt_embeds is not None:
+            raise ValueError(
+                "prefix cache coordination currently supports text-only requests"
+            )
+        cloud_request = _copy.copy(request_data)
+        if request_data.prompt_token_ids is not None:
+            cloud_request.prompt_token_ids = [0] * len(
+                request_data.prompt_token_ids
+            )
+        if request_data.prefill_token_ids is not None:
+            cloud_request.prefill_token_ids = [0] * len(
+                request_data.prefill_token_ids
+            )
+        cloud_so.scheduled_new_reqs.append(cloud_request)
+
+    cached = _copy.copy(scheduler_output.scheduled_cached_reqs)
+    cached.new_token_ids = [
+        [0] * len(token_ids)
+        for token_ids in scheduler_output.scheduled_cached_reqs.new_token_ids
+    ]
+    cached.all_token_ids = {
+        request_id: np.zeros_like(token_ids)
+        for request_id, token_ids in (
+            scheduler_output.scheduled_cached_reqs.all_token_ids.items()
+        )
+    }
+    cloud_so.scheduled_cached_reqs = cached
+    return cloud_so
 
 
 def _maybe_publish_pre_out(
@@ -298,8 +369,10 @@ def _maybe_publish_pre_out(
         BatchType.DECODE_FIRST,
     ):
         self._publish_to_cloud(scheduler_output)
+    elif bt == BatchType.EMPTY:
+        if scheduler_output.finished_req_ids:
+            self._publish_to_cloud(scheduler_output)
     elif bt in (
-        BatchType.EMPTY,
         BatchType.PREFILL_LAST,
         BatchType.DECODE_LAST,
         BatchType.DRAFT_LAST,
@@ -726,8 +799,8 @@ def _patched_step(self):
 
     # [ascend insert] Merge worker cleanup stashed from EMPTY batches
     # BEFORE publishing to the cloud, so the published SO also carries
-    # the finished_req_ids (EMPTY batches are dropped on the cloud, so
-    # otherwise the cloud runner never learns these finishes).
+    # the finished_req_ids. Coordination-enabled EMPTY batches now travel
+    # to the cloud too, but merging remains necessary for older peers.
     if scheduler_output.batch_type != BatchType.EMPTY:
         self._merge_pending_worker_cleanup(scheduler_output)
 
@@ -805,8 +878,8 @@ def _patched_step_with_batch_queue(self):
 
         # [ascend insert] Merge worker cleanup stashed from EMPTY batches
         # BEFORE publishing to the cloud, so the published SO also carries
-        # the finished_req_ids (EMPTY batches are dropped on the cloud, so
-        # otherwise the cloud runner never learns these finishes).
+        # the finished_req_ids. Coordination-enabled EMPTY batches now travel
+        # to the cloud too, but merging remains necessary for older peers.
         if scheduler_output.batch_type != BatchType.EMPTY:
             self._merge_pending_worker_cleanup(scheduler_output)
 
@@ -814,6 +887,9 @@ def _patched_step_with_batch_queue(self):
         # schedule time to keep the pipeline full.
         if scheduler_output.batch_type in (
             BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST, BatchType.DRAFT_FIRST
+        ) or (
+            scheduler_output.batch_type == BatchType.EMPTY
+            and scheduler_output.finished_req_ids
         ):
             self._maybe_publish_pre_out(scheduler_output)
 

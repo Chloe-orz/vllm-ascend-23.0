@@ -83,3 +83,4 @@ if envs.VLLM_ASCEND_APPLY_DSV4_PATCH:
 # requested — the flag is set on
 # the VllmConfig only and reaches us via ``EngineCore.__init__``.
 import vllm_ascend.patch.platform.patch_engine_core  # noqa
+import vllm_ascend.patch.platform.patch_async_llm_edge_cloud  # noqa
