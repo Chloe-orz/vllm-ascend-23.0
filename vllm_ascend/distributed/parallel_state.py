@@ -2372,20 +2372,24 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
                 backend,
                 group_name=f"ec_pair_e{edge_id}_c{cloud_id}",
             )
+            # create_alternate_groups / create_hidden_channel_groups call
+            # torch.distributed.new_group internally, which is a collective
+            # on the DEFAULT (world) group — EVERY rank must participate,
+            # even non-members of this pair (non-members run it on their
+            # singleton group, harmless).  Calling them member-only desyncs
+            # the world-wide new_group counter and deadlocks all later
+            # rendezvous.  Only the *registration* is member-scoped.
+            if hasattr(pair, "create_alternate_groups"):
+                pair.create_alternate_groups(backend)
+            if hasattr(pair, "create_hidden_channel_groups"):
+                pair.create_hidden_channel_groups(
+                    backend, num_prefill=2, num_decode=1)
             # Store ONLY on the two member ranks: init_model_parallel_group
             # returns a real (singleton) group to non-member ranks because we
             # cover every rank in each call — storing those would make
             # non-members believe they are pair members.
             if torch.distributed.get_rank() in (edge_rank0, cloud_rank0):
                 _PAIR_PP_GROUPS[(edge_id, cloud_id)] = pair
-                # Alternate + hidden channel groups on the pair group,
-                # mirroring the legacy single-pair setup (2 prefill +
-                # 1 decode channels).
-                if hasattr(pair, "create_alternate_groups"):
-                    pair.create_alternate_groups(backend)
-                if hasattr(pair, "create_hidden_channel_groups"):
-                    pair.create_hidden_channel_groups(
-                        backend, num_prefill=2, num_decode=1)
 
     logger.info(
         "[edge-cloud] multi-instance pair groups created: %d pairs (%s)",
