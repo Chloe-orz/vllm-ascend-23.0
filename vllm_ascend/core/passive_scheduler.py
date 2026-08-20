@@ -431,8 +431,16 @@ class PassiveScheduler:
         if self._me_partition is None:
             kv_cfg = getattr(self._me_vllm_config, "kv_cache_config", None)
             num_blocks = getattr(kv_cfg, "num_blocks", None)
+            if not num_blocks:
+                # Passive cloud may not have kv_cache_config set — fall back
+                # to cache_config.num_gpu_blocks (set by the engine after KV
+                # sizing).
+                num_blocks = getattr(
+                    getattr(self._me_vllm_config, "cache_config", None),
+                    "num_gpu_blocks", None)
             assert num_blocks, (
-                "multi-edge ingress before KV sizing: kv_cache_config missing"
+                "multi-edge ingress before KV sizing: no num_blocks on "
+                "kv_cache_config or cache_config"
             )
             self._me_partition = self._me_registry.resolve_kv_partition(
                 num_blocks)
