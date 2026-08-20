@@ -279,8 +279,11 @@ class PDSeparatedScheduler(Scheduler):
         self._pregenerated_draft_req_ids: dict[str, set[str]] = {}
         # Per-lane intra-chain pipelining credit: each draft lane may have
         # up to this many round trips outstanding (DRF picked, DRL not yet
-        # completed) at the same time.
-        self._draft_remote_pending_limit: int = 2
+        # completed) at the same time.  Sized to the chain length so a full
+        # chain can be dispatched without waiting for DRL updates; the
+        # credit then only bounds cross-chain backlog (a new chain's first
+        # DRF waits until the previous chain's tail updates land).
+        self._draft_remote_pending_limit: int = max(2, self.num_spec_tokens)
         self._decode_first_placeholder_parent: SchedulerOutput | None = None
 
         # ------------------------------------------------------------------ #
