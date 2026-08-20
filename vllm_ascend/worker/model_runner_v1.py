@@ -1260,6 +1260,12 @@ class NPUModelRunner(GPUModelRunner):
         self.query_lens: torch.Tensor | None = None
         self.sampling_done_event: torch.npu.Event | None = None
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
+        # DSV4 MTP edge-cloud diagnostic snapshots. The hot path stores only
+        # device-side per-row finite masks; they are copied to the host and
+        # logged only after the sampler has already produced an invalid row.
+        self._ec_hidden_trace_by_task: dict[str, dict[str, Any]] = {}
+        self._ec_hidden_trace_cache_max: int = 8
+        self._ec_sampler_empty_rows: list[int] = []
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1522,6 +1528,155 @@ class NPUModelRunner(GPUModelRunner):
             dtype=self.dtype,
             device=self.device,
         )
+
+    def _should_trace_dsv4_mtp_decode_last(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> bool:
+        """Whether this batch belongs to the targeted DSV4 MTP=1 probe."""
+        return bool(
+            self._edge_cloud_enabled
+            and self.edge_cloud_cfg.role == "edge"
+            and self._is_deepseek_v4
+            and self.speculative_config is not None
+            and self.speculative_config.method == "mtp"
+            and self.num_spec_tokens == 1
+            and scheduler_output.batch_type == BatchType.DECODE_LAST
+            and scheduler_output.head_token is not None
+        )
+
+    def _capture_dsv4_mtp_finite_rows(
+        self,
+        scheduler_output: "SchedulerOutput",
+        stage: str,
+        payload: Any,
+    ) -> None:
+        """Save device-side finite masks without introducing a D2H sync."""
+        if not self._should_trace_dsv4_mtp_decode_last(scheduler_output):
+            return
+
+        if isinstance(payload, torch.Tensor):
+            tensors = {stage: payload}
+        else:
+            tensors = getattr(payload, "tensors", None)
+            if tensors is None:
+                return
+
+        stage_snapshot: dict[
+            str, tuple[tuple[int, ...], torch.Tensor]
+        ] = {}
+        for name, tensor in tensors.items():
+            if not isinstance(tensor, torch.Tensor) or not (
+                tensor.is_floating_point() or tensor.is_complex()
+            ):
+                continue
+            finite_rows = torch.isfinite(tensor)
+            if finite_rows.ndim == 0:
+                finite_rows = finite_rows.reshape(1)
+            elif finite_rows.ndim > 1:
+                finite_rows = finite_rows.flatten(1).all(dim=1)
+            stage_snapshot[name] = (
+                tuple(tensor.shape),
+                finite_rows.detach(),
+            )
+
+        if not stage_snapshot:
+            return
+
+        task_id = scheduler_output.head_token
+        assert task_id is not None
+        if (
+            task_id not in self._ec_hidden_trace_by_task
+            and len(self._ec_hidden_trace_by_task)
+            >= self._ec_hidden_trace_cache_max
+        ):
+            oldest_task = next(iter(self._ec_hidden_trace_by_task))
+            self._ec_hidden_trace_by_task.pop(oldest_task, None)
+
+        trace = self._ec_hidden_trace_by_task.setdefault(
+            task_id,
+            {
+                "req_ids": tuple(
+                    scheduler_output.num_scheduled_tokens.keys()
+                ),
+                "num_scheduled_tokens": dict(
+                    scheduler_output.num_scheduled_tokens
+                ),
+                "stages": {},
+            },
+        )
+        trace["stages"][stage] = stage_snapshot
+
+    def _finish_dsv4_mtp_hidden_trace(
+        self,
+        scheduler_output: "SchedulerOutput",
+        spec_decode_metadata: SpecDecodeMetadata | None,
+        empty_rows: list[int],
+    ) -> None:
+        """Drop a normal trace or dump all snapshots after sampler failure."""
+        if not self._should_trace_dsv4_mtp_decode_last(scheduler_output):
+            return
+
+        task_id = scheduler_output.head_token
+        assert task_id is not None
+        trace = self._ec_hidden_trace_by_task.pop(task_id, None)
+        if not empty_rows:
+            return
+        if trace is None:
+            logger.error(
+                "[EC-HIDDEN-TRACE] sampler anomaly has no saved trace: "
+                "task=%s empty_rows=%s",
+                task_id,
+                empty_rows,
+            )
+            return
+
+        metadata_fields: dict[str, Any] = {}
+        if spec_decode_metadata is not None:
+            metadata_fields = {
+                "num_draft_tokens": list(
+                    spec_decode_metadata.num_draft_tokens
+                ),
+                "cu_num_draft_tokens": (
+                    spec_decode_metadata.cu_num_draft_tokens.tolist()
+                ),
+                "logits_indices": (
+                    spec_decode_metadata.logits_indices.tolist()
+                ),
+                "target_logits_indices": (
+                    spec_decode_metadata.target_logits_indices.tolist()
+                ),
+                "bonus_logits_indices": (
+                    spec_decode_metadata.bonus_logits_indices.tolist()
+                ),
+            }
+        logger.error(
+            "[EC-HIDDEN-TRACE] sampler anomaly: task=%s req_ids=%s "
+            "num_scheduled_tokens=%s empty_rows=%s metadata=%s",
+            task_id,
+            trace["req_ids"],
+            trace["num_scheduled_tokens"],
+            empty_rows,
+            metadata_fields,
+        )
+        for stage, stage_snapshot in trace["stages"].items():
+            for name, (shape, finite_rows_gpu) in stage_snapshot.items():
+                finite_rows = finite_rows_gpu.cpu().tolist()
+                nonfinite_rows = [
+                    row
+                    for row, is_finite in enumerate(finite_rows)
+                    if not is_finite
+                ]
+                logger.error(
+                    "[EC-HIDDEN-TRACE] stage=%s tensor=%s shape=%s "
+                    "finite_rows=%s nonfinite_rows=%s task=%s",
+                    stage,
+                    name,
+                    shape,
+                    finite_rows,
+                    nonfinite_rows,
+                    task_id,
+                )
 
     def _create_raw_segment_callable(
         self,
@@ -5547,6 +5702,11 @@ class NPUModelRunner(GPUModelRunner):
             # presence so this never KeyErrors regardless of whether the
             # edge/cloud include_mrope decision (CHER hint vs sync) agreed.
             recv_intermediate_tensors = intermediate_tensors
+            self._capture_dsv4_mtp_finite_rows(
+                scheduler_output,
+                "decode_last_received",
+                recv_intermediate_tensors,
+            )
             if (self._edge_cloud_enabled
                     and self.edge_cloud_cfg.role == "cloud"
                     and self.uses_mrope
@@ -5568,6 +5728,11 @@ class NPUModelRunner(GPUModelRunner):
             ) = self._preprocess(
                 scheduler_output,
                 num_tokens_padded,
+                intermediate_tensors,
+            )
+            self._capture_dsv4_mtp_finite_rows(
+                scheduler_output,
+                "decode_last_copied",
                 intermediate_tensors,
             )
             if _fast_path:
@@ -5771,6 +5936,11 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            self._capture_dsv4_mtp_finite_rows(
+                scheduler_output,
+                "decode_last_before_model",
+                intermediate_tensors,
+            )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors,
                 inputs_embeds, layer_slice_info=layer_slice_info,
@@ -5803,6 +5973,11 @@ class NPUModelRunner(GPUModelRunner):
                         self.pcp_manager.get_restore_hidden_states(aux_hidden_states_pcp)
                         for aux_hidden_states_pcp in aux_hidden_states
                     ]
+            self._capture_dsv4_mtp_finite_rows(
+                scheduler_output,
+                "decode_last_model_output",
+                hidden_states,
+            )
             
             # --- Layer slice: save intermediate state for non-last ---
             # Must happen BEFORE the edge-cloud early return below;
@@ -5896,6 +6071,17 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
+
+            self._capture_dsv4_mtp_finite_rows(
+                scheduler_output,
+                "decode_last_lm_head_input",
+                sample_hidden_states,
+            )
+            self._capture_dsv4_mtp_finite_rows(
+                scheduler_output,
+                "decode_last_logits",
+                logits,
+            )
 
             # Apply structured output bitmasks if present
             self.execute_model_state = ExecuteModelState(
@@ -6147,6 +6333,12 @@ class NPUModelRunner(GPUModelRunner):
 
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
+
+        self._finish_dsv4_mtp_hidden_trace(
+            scheduler_output,
+            spec_decode_metadata,
+            self._ec_sampler_empty_rows,
+        )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -7124,6 +7316,7 @@ class NPUModelRunner(GPUModelRunner):
     # overwrite _sample for lmhead_tp_enable and need_accepted_tokens
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
+        self._ec_sampler_empty_rows = []
         self.input_batch.update_async_output_token_ids()
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
@@ -7157,6 +7350,7 @@ class NPUModelRunner(GPUModelRunner):
             _empty_rows = (
                 (_st == -1).all(dim=1).nonzero().flatten().tolist()
             )
+            self._ec_sampler_empty_rows = _empty_rows
             if _empty_rows:
                 _ndt = list(spec_decode_metadata.num_draft_tokens)
                 _cu = spec_decode_metadata.cu_num_draft_tokens.tolist()
