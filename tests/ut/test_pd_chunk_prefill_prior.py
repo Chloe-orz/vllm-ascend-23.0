@@ -1297,3 +1297,108 @@ class TestPickPrefillFirstEmptyRestoresRunning:
         # Decode requests restored, mid-prefill candidate back in chunk_prefill.
         assert decode_req in s.running
         assert mid_prefill in s.chunk_prefill_first
+
+
+# ------------------------------------------------------------------ #
+# Test: pending sampled tokens gate PF under interleaving             #
+# ------------------------------------------------------------------ #
+
+
+class TestPendingSampledTokenPrefillGate:
+    """A subset PL must not overwrite tokens awaiting their consuming DF."""
+
+    def _make(self, *, decode_eligible: bool):
+        from vllm_ascend.core.pd_separated_scheduler import PDSeparatedScheduler
+
+        s = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+        s._disable_pd_interleave = False
+        s._sampled_pending_df = True
+        s._force_decode_last = False
+        s._force_draft_last = False
+        s.decodes_last_ready = []
+        s.drafts_last_ready = []
+        s.decodes_first_ready = []
+        s.chunk_prefill_first = [_make_mock_request(request_id="pf")]
+        s.waiting = []
+        s.running = [
+            _make_mock_request(
+                request_id="decode",
+                num_prompt_tokens=8,
+                num_computed_tokens=8 if decode_eligible else 7,
+                is_prefill_chunk=not decode_eligible,
+            )
+        ]
+        s.max_num_running_reqs = 8
+        s.prefill_inflight_count = 0
+        s.prefill_inflight_limit = 2
+        s.hidden_channel_manager = MagicMock()
+        s.hidden_channel_manager.has_free_prefill.return_value = True
+        return s
+
+    def test_interleaving_blocks_pf_until_df_consumes_sample(self):
+        scheduler = self._make(decode_eligible=True)
+
+        assert scheduler._can_schedule_prefill_first() is False
+
+    def test_pure_prefill_progresses_with_stale_pending_flag(self):
+        scheduler = self._make(decode_eligible=False)
+
+        assert scheduler._can_schedule_prefill_first() is True
+
+
+class TestScheduledMTPPrefillSerialization:
+    """Scheduled MTP must not cross an in-flight prefill batch."""
+
+    def _make(self, *, scheduled_mtp: bool):
+        from vllm_ascend.core.pd_separated_scheduler import PDSeparatedScheduler
+
+        scheduler = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+        scheduler._disable_pd_interleave = False
+        scheduler._edge_cloud_draft_retention_enabled = scheduled_mtp
+        scheduler.prefill_inflight_count = 1
+        scheduler.prefills_last_ready = []
+        scheduler.running = [
+            _make_mock_request(
+                request_id="decode",
+                num_prompt_tokens=8,
+                num_computed_tokens=8,
+                is_prefill_chunk=False,
+            )
+        ]
+        scheduler.decode_or_draft_inflight_count = 0
+        scheduler.draft_remote_pending_count = 0
+        scheduler.drafts_first_ready = []
+        scheduler.drafts_last_ready = []
+        scheduler._force_decode_last = False
+        scheduler._force_draft_last = False
+        return scheduler
+
+    def test_scheduled_mtp_blocks_decode_during_prefill_flight(self):
+        scheduler = self._make(scheduled_mtp=True)
+
+        assert scheduler._can_schedule_decode_first() is False
+
+    def test_scheduled_mtp_blocks_draft_during_prefill_flight(self):
+        scheduler = self._make(scheduled_mtp=True)
+        scheduler.drafts_first_ready = [SimpleNamespace(draft_task_id="draft")]
+
+        assert scheduler._can_schedule_draft_first() is False
+
+    def test_scheduled_mtp_blocks_prefill_during_decode_chain(self):
+        scheduler = self._make(scheduled_mtp=True)
+        scheduler._sampled_pending_df = False
+        scheduler._force_decode_last = True
+        scheduler.chunk_prefill_first = [_make_mock_request(request_id="prefill")]
+        scheduler.waiting = []
+        scheduler.max_num_running_reqs = 8
+        scheduler.prefill_inflight_count = 0
+        scheduler.prefill_inflight_limit = 2
+        scheduler.hidden_channel_manager = MagicMock()
+        scheduler.hidden_channel_manager.has_free_prefill.return_value = True
+
+        assert scheduler._can_schedule_prefill_first() is False
+
+    def test_non_mtp_pd_keeps_decode_prefill_interleave(self):
+        scheduler = self._make(scheduled_mtp=False)
+
+        assert scheduler._can_schedule_decode_first() is True

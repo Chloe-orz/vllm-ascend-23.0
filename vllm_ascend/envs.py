@@ -135,6 +135,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP": lambda: bool(
         int(os.getenv("VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP", "1"))
     ),
+    # Edge-cloud debug baseline: disable PREFILL/DECODE interleaving,
+    # including scheduled MTP draft chains. Default 0 keeps the normal
+    # scheduler policy; set to 1 to force strict FIRST/LAST progression.
+    # This legacy VLLM_EC_* name is retained for launch-command compatibility.
+    "VLLM_EC_DISABLE_PD_INTERLEAVE": lambda: bool(
+        int(os.getenv("VLLM_EC_DISABLE_PD_INTERLEAVE", "0"))
+    ),
 }
 
 # end-env-vars-definition
