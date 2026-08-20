@@ -1778,11 +1778,25 @@ class PDSeparatedScheduler(Scheduler):
             first_ready = self.decode_drafts_first_ready
             last_ready = self.decode_drafts_last_ready
         if first_ready or last_ready:
+            logger.info(
+                "[PD] skip pre-generation (lane busy), chain goes dynamic: "
+                "task_id=%s prefill_phase=%s lane_first=%d lane_last=%d",
+                target_tail.head_token,
+                prefill_phase,
+                len(first_ready),
+                len(last_ready),
+            )
             return
         if any(
             bool(so.draft_prefill_phase) == prefill_phase
             for so in self._draft_publish_pending.values()
         ):
+            logger.info(
+                "[PD] skip pre-generation (step-0 publish pending), chain "
+                "goes dynamic: task_id=%s prefill_phase=%s",
+                target_tail.head_token,
+                prefill_phase,
+            )
             return
         req_ids = list(target_tail.num_scheduled_tokens)
         if not req_ids:
@@ -1933,6 +1947,22 @@ class PDSeparatedScheduler(Scheduler):
             self.prefill_drafts_first_ready.append(draft_first)
         else:
             self.decode_drafts_first_ready.append(draft_first)
+        if (
+            draft_step_idx == 0
+            and draft_task_id not in self._pregenerated_draft_task_ids
+        ):
+            # A step-0 enqueue for a chain that was never pre-generated
+            # means the dynamic fallback path (pregenerated chains take
+            # finalize_pre_generated_draft_first instead).  Each of its
+            # steps costs a full engine round trip.
+            logger.info(
+                "[PD] dynamic draft chain start: task_id=%s "
+                "prefill_phase=%s parent_batch=%s chain_dead=%s",
+                draft_task_id,
+                bool(draft_first.draft_prefill_phase),
+                source.batch_type,
+                chain_dead,
+            )
         return True
 
     def _enqueue_next_draft_first(
