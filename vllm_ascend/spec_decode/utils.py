@@ -11,7 +11,9 @@ def update_num_computed_tokens_for_batch_change(
     valid_sampled_token_count: torch.Tensor,
     prev_num_draft_tokens: torch.Tensor,
     cpu_num_computed_tokens: torch.Tensor,
-) -> None:
+    *,
+    capture_intermediates: bool = False,
+) -> dict[str, torch.Tensor] | None:
     """Correct num_computed_tokens for async spec decode drift.
 
     Requests that had drafts: corrected = prev_gpu + valid_count.
@@ -30,6 +32,21 @@ def update_num_computed_tokens_for_batch_change(
     n = prev_positions.shape[0]
     num_computed_tokens[:n].copy_(torch.where(participating, corrected, cpu_num_computed_tokens))
     num_accepted_tokens.copy_(torch.where(participating, valid_counts, num_accepted_tokens))
+
+    if not capture_intermediates:
+        return None
+    # Advanced indexing above already materializes independent device
+    # tensors. Only prev_positions is a persistent-buffer view and therefore
+    # needs a clone before later batches can overwrite it. No D2H read occurs.
+    return {
+        "prev_positions": prev_positions.detach().clone(),
+        "prev_drafts": prev_drafts.detach(),
+        "participating": participating.detach(),
+        "valid_counts": valid_counts.detach(),
+        "prev_computed": prev_computed.detach(),
+        "so_npu": cpu_num_computed_tokens.detach(),
+        "corrected": corrected.detach(),
+    }
 
 
 def correct_optimistic_seq_lens_cpu(
