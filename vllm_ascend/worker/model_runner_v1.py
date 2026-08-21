@@ -1272,10 +1272,13 @@ class NPUModelRunner(GPUModelRunner):
         # DSV4 MTP=1 diagnostics are intended to expose.
         self._ec_block_table_generation: int = 0
         self._ec_block_table_last_writer: dict[str, Any] | None = None
-        # DSV4 MTP=1 diagnostic ledger for the worker-side deferred
-        # speculative correction. Entries are CPU scalars only and never
-        # participate in model input preparation.
-        self._ec_worker_rewind_audit: dict[str, dict[str, Any]] = {}
+        # Request-keyed SchedulerOutput history for aligning a deferred
+        # correction with the previous VERIFY that produced its valid count.
+        # These CPU scalars are diagnostic-only and never feed model inputs.
+        self._ec_last_so_num_computed: dict[str, int] = {}
+        self._ec_last_so_task: dict[str, str] = {}
+        self._ec_valid_count_task: str | None = None
+        self._ec_valid_count_req_ids: tuple[str, ...] = ()
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1737,19 +1740,32 @@ class NPUModelRunner(GPUModelRunner):
         task_id = scheduler_output.head_token
         assert task_id is not None
         trace = self._ec_hidden_trace_by_task.pop(task_id, None)
-        advance_suspects = (
-            trace.get("worker_advance_suspects", [])
+        correction_audit = (
+            trace.get("worker_correction_audit", [])
             if trace is not None
             else []
         )
-        if advance_suspects:
+        correction_errors = [
+            entry
+            for entry in correction_audit
+            if entry["status"]
+            not in (
+                "expected_optimistic_correction",
+                "expected_full_accept",
+                "insufficient_history",
+            )
+        ]
+        if correction_errors or (empty_rows and correction_audit):
             # Report only after this task has completed sampling. Printing in
             # _update_states would delay the model input path and could hide
             # the ordering bug this diagnostic is trying to reproduce.
             logger.error(
-                "[EC-WORKER-ADVANCE-AUDIT] task=%s suspects=%s",
+                "[EC-WORKER-CORRECTION-AUDIT] task=%s "
+                "sampler_anomaly=%s errors=%s entries=%s",
                 task_id,
-                advance_suspects,
+                bool(empty_rows),
+                correction_errors,
+                correction_audit,
             )
         if not empty_rows:
             return
@@ -2700,73 +2716,40 @@ class NPUModelRunner(GPUModelRunner):
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
 
-        trace_worker_rewind = bool(
+        trace_worker_correction = bool(
             self._edge_cloud_enabled
             and self.edge_cloud_cfg.role == "edge"
             and self._is_deepseek_v4
             and self.speculative_config is not None
             and self.speculative_config.method == "mtp"
             and self.num_spec_tokens == 1
+            and scheduler_output.batch_type == BatchType.DECODE_FIRST
+            and scheduler_output.head_token is not None
         )
         incoming_so_num_computed: dict[str, int] = {}
-        if trace_worker_rewind:
+        previous_so_num_computed: dict[str, int] = {}
+        previous_so_task: dict[str, str] = {}
+        if trace_worker_correction:
             incoming_so_num_computed = {
                 req_id: int(num_computed)
                 for req_id, num_computed in zip(
                     req_data.req_ids, req_data.num_computed_tokens
                 )
             }
-            for req_id in scheduler_output.finished_req_ids:
-                self._ec_worker_rewind_audit.pop(req_id, None)
+            previous_so_num_computed = {
+                req_id: self._ec_last_so_num_computed[req_id]
+                for req_id in incoming_so_num_computed
+                if req_id in self._ec_last_so_num_computed
+            }
+            previous_so_task = {
+                req_id: self._ec_last_so_task[req_id]
+                for req_id in incoming_so_num_computed
+                if req_id in self._ec_last_so_task
+            }
 
-            # For MTP=1 a request can advance by at most two valid tokens in
-            # one target VERIFY. An observed +3 means the previous worker
-            # baseline was one token below the scheduler's settled state.
-            advance_suspects: list[dict[str, Any]] = []
-            if scheduler_output.batch_type == BatchType.DECODE_FIRST:
-                for req_id, so_value in incoming_so_num_computed.items():
-                    previous = self._ec_worker_rewind_audit.pop(req_id, None)
-                    if previous is None:
-                        continue
-                    advance = so_value - previous["worker_after"]
-                    if advance > self.num_spec_tokens + 1:
-                        advance_suspects.append({
-                            "req": req_id,
-                            "previous_so": previous["so_value"],
-                            "worker_before_rewind": previous[
-                                "worker_before"
-                            ],
-                            "worker_after_rewind": previous["worker_after"],
-                            "cpu_before_rewind": previous["cpu_before"],
-                            "cpu_after_rewind": previous["cpu_after"],
-                            "rewind": previous["rewind"],
-                            "derived_valid": previous["derived_valid"],
-                            "incoming_so": so_value,
-                            "advance": advance,
-                            "previous_head_token": previous["head_token"],
-                        })
-            if advance_suspects and scheduler_output.head_token is not None:
-                task_id = scheduler_output.head_token
-                if (
-                    task_id not in self._ec_hidden_trace_by_task
-                    and len(self._ec_hidden_trace_by_task)
-                    >= self._ec_hidden_trace_cache_max
-                ):
-                    oldest_task = next(iter(self._ec_hidden_trace_by_task))
-                    self._ec_hidden_trace_by_task.pop(oldest_task, None)
-                trace = self._ec_hidden_trace_by_task.setdefault(
-                    task_id,
-                    {
-                        "req_ids": tuple(
-                            scheduler_output.num_scheduled_tokens.keys()
-                        ),
-                        "num_scheduled_tokens": dict(
-                            scheduler_output.num_scheduled_tokens
-                        ),
-                        "stages": {},
-                    },
-                )
-                trace["worker_advance_suspects"] = advance_suspects
+        for req_id in scheduler_output.finished_req_ids:
+            self._ec_last_so_num_computed.pop(req_id, None)
+            self._ec_last_so_task.pop(req_id, None)
 
         self._cloud_current_cpu_state_authoritative = False
         if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
@@ -2820,14 +2803,45 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.prev_req_id_to_index
             )
 
+        previous_draft_tokens = (
+            {
+                req_id: int(self.requests[req_id].prev_num_draft_len)
+                for req_id in incoming_so_num_computed
+                if req_id in self.requests
+            }
+            if trace_worker_correction
+            else {}
+        )
+
         result = super()._update_states(scheduler_output)
 
-        if trace_worker_rewind and result is not None:
+        if trace_worker_correction:
+            current_task = scheduler_output.head_token
+            assert current_task is not None
+            for req_id, so_value in incoming_so_num_computed.items():
+                self._ec_last_so_num_computed[req_id] = so_value
+                self._ec_last_so_task[req_id] = current_task
+
+        if trace_worker_correction and result is not None:
             deferred_correction = result
-            correction_head_token = scheduler_output.head_token
+            correction_task = scheduler_output.head_token
+            assert correction_task is not None
             correction_so_values = incoming_so_num_computed
+            correction_previous_so = previous_so_num_computed
+            correction_source_tasks = previous_so_task
+            correction_previous_drafts = previous_draft_tokens
 
             def trace_deferred_correction() -> None:
+                valid_count_task = self._ec_valid_count_task
+                valid_count_row_by_req = {
+                    req_id: row
+                    for row, req_id in enumerate(
+                        self._ec_valid_count_req_ids
+                    )
+                }
+                callback_prev_row_by_req = dict(
+                    self.input_batch.prev_req_id_to_index or {}
+                )
                 worker_before = {
                     req_id: int(req_state.num_computed_tokens)
                     for req_id in correction_so_values
@@ -2845,7 +2859,11 @@ class NPUModelRunner(GPUModelRunner):
 
                 deferred_correction()
 
+                audit_entries: list[dict[str, Any]] = []
                 for req_id, so_value in correction_so_values.items():
+                    num_draft = correction_previous_drafts.get(req_id, 0)
+                    if num_draft <= 0:
+                        continue
                     req_state = self.requests.get(req_id)
                     req_index = self.input_batch.req_id_to_index.get(req_id)
                     if req_state is None or req_index is None:
@@ -2857,23 +2875,103 @@ class NPUModelRunner(GPUModelRunner):
                     cpu_after = int(
                         self.input_batch.num_computed_tokens_cpu[req_index]
                     )
-                    rewind = before - worker_after
-                    if rewind <= 0:
-                        continue
-                    # Upstream correction is:
-                    # rewind = prev_draft + 1 - valid. For MTP=1 this gives
-                    # valid = 2 - rewind without another device/host read.
-                    derived_valid = self.num_spec_tokens + 1 - rewind
-                    self._ec_worker_rewind_audit[req_id] = {
-                        "so_value": so_value,
+                    cpu_before_value = cpu_before.get(req_id)
+                    correction = before - worker_after
+                    full_step = num_draft + 1
+                    derived_valid = full_step - correction
+                    previous_so = correction_previous_so.get(req_id)
+                    source_task = correction_source_tasks.get(req_id)
+                    valid_count_row = valid_count_row_by_req.get(req_id)
+                    callback_prev_row = callback_prev_row_by_req.get(req_id)
+                    optimistic_expected = (
+                        previous_so + full_step
+                        if previous_so is not None
+                        else None
+                    )
+                    settled_expected = (
+                        previous_so + derived_valid
+                        if previous_so is not None
+                        else None
+                    )
+
+                    if previous_so is None or source_task is None:
+                        status = "insufficient_history"
+                    elif valid_count_task != source_task:
+                        status = "valid_generation_mismatch"
+                    elif valid_count_row != callback_prev_row:
+                        status = "valid_row_mismatch"
+                    elif not 1 <= derived_valid <= full_step:
+                        status = "invalid_valid_count"
+                    elif before != so_value or cpu_before_value != so_value:
+                        status = "worker_baseline_mismatch"
+                    elif so_value == optimistic_expected:
+                        if (
+                            worker_after == settled_expected
+                            and cpu_after == settled_expected
+                        ):
+                            status = (
+                                "expected_full_accept"
+                                if correction == 0
+                                else "expected_optimistic_correction"
+                            )
+                        else:
+                            status = "correction_result_mismatch"
+                    elif so_value == settled_expected:
+                        # The scheduler already supplied the rejection-
+                        # settled count. Applying a positive correction again
+                        # is the double-rewind condition under investigation.
+                        status = (
+                            "expected_full_accept"
+                            if correction == 0
+                            else "double_rewind_suspect"
+                        )
+                    else:
+                        status = "so_generation_mismatch"
+
+                    audit_entries.append({
+                        "req": req_id,
+                        "source_task": source_task,
+                        "valid_count_task": valid_count_task,
+                        "current_task": correction_task,
+                        "valid_count_row": valid_count_row,
+                        "callback_prev_row": callback_prev_row,
+                        "previous_so": previous_so,
+                        "current_so": so_value,
+                        "num_draft": num_draft,
+                        "full_step": full_step,
+                        "derived_valid": derived_valid,
+                        "correction": correction,
                         "worker_before": before,
                         "worker_after": worker_after,
-                        "cpu_before": cpu_before.get(req_id),
+                        "cpu_before": cpu_before_value,
                         "cpu_after": cpu_after,
-                        "rewind": rewind,
-                        "derived_valid": derived_valid,
-                        "head_token": correction_head_token,
-                    }
+                        "optimistic_expected": optimistic_expected,
+                        "settled_expected": settled_expected,
+                        "status": status,
+                    })
+
+                if not audit_entries:
+                    return
+                if (
+                    correction_task not in self._ec_hidden_trace_by_task
+                    and len(self._ec_hidden_trace_by_task)
+                    >= self._ec_hidden_trace_cache_max
+                ):
+                    oldest_task = next(iter(self._ec_hidden_trace_by_task))
+                    self._ec_hidden_trace_by_task.pop(oldest_task, None)
+                trace = self._ec_hidden_trace_by_task.setdefault(
+                    correction_task,
+                    {
+                        "req_ids": tuple(
+                            scheduler_output.num_scheduled_tokens.keys()
+                        ),
+                        "num_scheduled_tokens": dict(
+                            scheduler_output.num_scheduled_tokens
+                        ),
+                        "stages": {},
+                    },
+                )
+                trace["worker_correction_audit"] = audit_entries
 
             result = trace_deferred_correction
 
@@ -4078,7 +4176,10 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def _copy_valid_sampled_token_count(
-        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
+        self,
+        next_token_ids: torch.Tensor,
+        valid_sampled_tokens_count: torch.Tensor,
+        source_scheduler_output: "SchedulerOutput | None" = None,
     ) -> None:
         if self.valid_sampled_token_count_event is None:
             return
@@ -4098,6 +4199,27 @@ class NPUModelRunner(GPUModelRunner):
             # Stash for GPU-side correction in _prepare_inputs.
             self.valid_sampled_token_count_gpu = valid_sampled_tokens_count # type: ignore[no-redef]
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+        if self._should_trace_dsv4_mtp_block_table():
+            if (
+                source_scheduler_output is not None
+                and source_scheduler_output.batch_type
+                == BatchType.DECODE_LAST
+                and source_scheduler_output.head_token is not None
+            ):
+                # Tag the device/host valid-count buffers at the point where
+                # this VERIFY actually produces them. The deferred callback
+                # runs before the next sample and can therefore distinguish
+                # the intended previous task from a stale or overwritten
+                # valid-count generation without reading the device.
+                self._ec_valid_count_task = (
+                    source_scheduler_output.head_token
+                )
+                self._ec_valid_count_req_ids = tuple(
+                    self.input_batch.req_ids[
+                        : valid_sampled_tokens_count.shape[0]
+                    ]
+                )
 
     # TODO: Once the PCP features are complete, it will fully inherit the classes from the VLLM community.
     def propose_draft_token_ids(
@@ -4220,7 +4342,11 @@ class NPUModelRunner(GPUModelRunner):
                     self.num_discarded_requests,
                 )
             )
-            self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
+            self._copy_valid_sampled_token_count(
+                next_token_ids,
+                valid_sampled_tokens_count,
+                scheduler_output,
+            )
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
@@ -4252,7 +4378,11 @@ class NPUModelRunner(GPUModelRunner):
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
                 )
-                self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
+                self._copy_valid_sampled_token_count(
+                    next_token_ids,
+                    valid_sampled_tokens_count,
+                    scheduler_output,
+                )
 
             req_scheduled_tokens = scheduler_output.num_scheduled_tokens
             if self.use_cp:
@@ -4832,7 +4962,9 @@ class NPUModelRunner(GPUModelRunner):
                 )
             )
             self._copy_valid_sampled_token_count(
-                next_token_ids, valid_sampled_tokens_count
+                next_token_ids,
+                valid_sampled_tokens_count,
+                scheduler_output,
             )
             context["next_token_ids"] = next_token_ids.clone()
         else:
