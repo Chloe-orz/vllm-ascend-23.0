@@ -1205,7 +1205,14 @@ class PDSeparatedScheduler(Scheduler):
             # A direct (non-placeholder) pick also records num_computed
             # into the SO; it must likewise wait for the previous chain's
             # DECODE_LAST settle or it bakes in the same optimistic phantom.
-            and self._unsettled_decode_tail_count == 0
+            # The phantom only exists with speculative decode (its rejection
+            # rewind is what makes the pre-settle value optimistic), so gate
+            # only then; otherwise this would just delay the next
+            # DECODE_FIRST by one settle turn for no benefit.
+            and (
+                self.num_spec_tokens <= 0
+                or self._unsettled_decode_tail_count == 0
+            )
         )
 
     def _can_schedule_prefill_draft_first(self) -> bool:
