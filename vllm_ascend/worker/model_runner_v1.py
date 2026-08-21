@@ -4798,6 +4798,15 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
+        # Mamba align preprocessing only collects copy metadata on Ascend; the
+        # actual state copy is deferred until the KV connector has loaded its
+        # blocks below. The normal path prepares the metadata in this call,
+        # while the cloud fast path restores metadata prepared by
+        # cloud_prepare_early. An edge tail fast path must leave this as None:
+        # segment_a already consumed its metadata, and the shared buffers may
+        # have been reused by an interleaved batch before segment_e runs.
+        mamba_preprocess_bufs = None
+
         # ---- segment_e fast path: reuse segment_a's cached prepare results ----
         # NOTE: if an intervening EMPTY batch cleared input_batch, we must
         # fall through to the normal path so _update_states can re-add the
@@ -4999,6 +5008,7 @@ class NPUModelRunner(GPUModelRunner):
         elif _cloud_fast_path:
             cache = self._cloud_prepare_cache
             self._cloud_prepare_cache = None  # consumed, clear for next iteration
+            mamba_preprocess_bufs = cache["mamba_preprocess_bufs"]
             total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
             num_tokens_padded = cache["num_tokens_padded"]
             num_tokens_across_dp = cache["num_tokens_across_dp"]
@@ -5148,7 +5158,12 @@ class NPUModelRunner(GPUModelRunner):
                     # there should be a corresponding 'postprocess_mamba'. However, it is called inside
                     # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
                     # We simply utilize the implementation in vLLM.
-                    if self.cache_config.mamba_cache_mode == "align":
+                    # need_accepted_tokens is false when this worker owns no
+                    # local Mamba cache, notably on an embedding-only edge.
+                    if (
+                        self.cache_config.mamba_cache_mode == "align"
+                        and self.need_accepted_tokens
+                    ):
                         # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                         # to decide copy operations, so we must apply deferred
                         # corrections before it runs.
@@ -5156,7 +5171,7 @@ class NPUModelRunner(GPUModelRunner):
                             deferred_state_corrections_fn()
                             deferred_state_corrections_fn = None
                         mamba_bufs = self._get_mamba_bufs()
-                        preprocess_bufs = mamba_bufs.preprocess
+                        mamba_preprocess_bufs = mamba_bufs.preprocess
                         mamba_utils.preprocess_mamba(
                             scheduler_output,
                             self.kv_cache_config,
@@ -5166,7 +5181,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.requests,
                             self.compilation_config.static_forward_context,
                             self.model.get_mamba_state_copy_func(),
-                            preprocess_bufs,
+                            mamba_preprocess_bufs,
                         )
                         # preprocess_mamba resets num_accepted_tokens_cpu to 1
                         # for requests whose state was copied to a new block.
@@ -5470,8 +5485,8 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
-            if self.cache_config.mamba_cache_mode == "align":
-                mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            if mamba_preprocess_bufs is not None:
+                mamba_utils.do_mamba_copy_block(mamba_preprocess_bufs)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors,
                 inputs_embeds, layer_slice_info=layer_slice_info,
@@ -7400,6 +7415,11 @@ class NPUModelRunner(GPUModelRunner):
         ):
             scheduler_output = deepcopy(scheduler_output)
 
+        # Passed to execute_model through _cloud_prepare_cache. Ascend's
+        # preprocess_mamba only fills this buffer; execute_model performs the
+        # copy after KV connector loading.
+        mamba_preprocess_bufs = None
+
         # cloud_prepare_early runs BEFORE the forward pass (outside
         # torch.inference_mode), but GDN attention builder does in-place
         # tensor copies that require inference mode.  Wrap the whole
@@ -7447,7 +7467,11 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             # --- mamba align preprocess (same as slow path) ---
-            if self.cache_config.mamba_cache_mode == "align":
+            # Keep the local-cache ownership guard in sync with the slow path.
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and self.need_accepted_tokens
+            ):
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                 # to decide copy operations, so we must apply deferred
                 # corrections before it runs.
@@ -7455,7 +7479,7 @@ class NPUModelRunner(GPUModelRunner):
                     deferred_state_corrections_fn()
                     deferred_state_corrections_fn = None
                 mamba_bufs = self._get_mamba_bufs()
-                preprocess_bufs = mamba_bufs.preprocess
+                mamba_preprocess_bufs = mamba_bufs.preprocess
                 mamba_utils.preprocess_mamba(
                     scheduler_output,
                     self.kv_cache_config,
@@ -7465,7 +7489,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.requests,
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
-                    preprocess_bufs,
+                    mamba_preprocess_bufs,
                 )
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1
                 # for requests whose state was copied to a new block.
@@ -7527,6 +7551,7 @@ class NPUModelRunner(GPUModelRunner):
         # fast path can apply them at the same post-launch point as the
         # slow path (execute_model applies it after the batch is launched).
         cache["deferred_state_corrections_fn"] = deferred_state_corrections_fn
+        cache["mamba_preprocess_bufs"] = mamba_preprocess_bufs
 
         # An early-returned batch can leave this cache alive until another
         # request reaches execute_model. Tag it with the exact request order

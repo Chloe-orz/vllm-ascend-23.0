@@ -1351,11 +1351,21 @@ class PDSeparatedScheduler(Scheduler):
                                 # Use pre-schedule num_computed_tokens
                                 # to avoid double-counting the current
                                 # chunk's tokens.
-                                num_comp_before = (
-                                    _num_computed_before.get(
-                                        req.request_id, 0
-                                    )
+                                num_comp_before = _num_computed_before.get(
+                                    req.request_id
                                 )
+                                if num_comp_before is None:
+                                    # A newly admitted waiting request was not
+                                    # present when the snapshot was taken.
+                                    # Upstream discovers its prefix-cache hit
+                                    # inside schedule(), then advances
+                                    # num_computed_tokens by this chunk before
+                                    # returning. Subtract the scheduled suffix
+                                    # to recover the true pre-schedule progress.
+                                    num_comp_before = (
+                                        req.num_computed_tokens
+                                        - num_scheduled
+                                    )
                                 remaining = (
                                     req.num_prompt_tokens
                                     - num_comp_before
