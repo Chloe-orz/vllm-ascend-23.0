@@ -11,20 +11,38 @@ def update_num_computed_tokens_for_batch_change(
     valid_sampled_token_count: torch.Tensor,
     prev_num_draft_tokens: torch.Tensor,
     cpu_num_computed_tokens: torch.Tensor,
+    prev_computed_by_req: torch.Tensor | None = None,
 ) -> None:
     """Correct num_computed_tokens for async spec decode drift.
 
-    Requests that had drafts: corrected = prev_gpu + valid_count.
-    New requests or non-draft (e.g. prefills): use CPU value directly.
+    Requests that had drafts: corrected = prev_num_computed + valid_count.
+    New requests or non-draft (e.g. prefills): use the CPU value directly.
+
+    ``prev_computed_by_req`` is the request-keyed snapshot of
+    num_computed_tokens taken before _update_states applied the current
+    SchedulerOutput, indexed by CURRENT batch row (-1 = no snapshot).
+    Prefer it over the positional GPU buffer whenever available: under PD
+    interleaving, an interleaved batch (e.g. another request's
+    PREFILL_FIRST) evicts and re-adds requests between two decode steps,
+    recycling rows of ``num_computed_tokens`` -- the positional gather
+    then reads another request's (near-zero) value and the correction
+    poisons positions/seq_lens (observed: a 1452-token request corrected
+    from a recycled 0 -> positions [2,3]/seq_len 4 -> misaligned attention
+    -> NaN logits rows on a neighbouring request).  The identity-keyed
+    snapshot is immune to row recycling.
     """
     # Clamp because prev_positions can be -1 for new requests
     gather_indices = prev_positions.clamp(min=0)
 
     valid_counts = valid_sampled_token_count[gather_indices]
-    prev_computed = num_computed_tokens[gather_indices]
     prev_drafts = prev_num_draft_tokens[gather_indices]
 
     participating = (prev_positions >= 0) & (prev_drafts > 0)
+    if prev_computed_by_req is not None:
+        participating = participating & (prev_computed_by_req >= 0)
+        prev_computed = prev_computed_by_req.clamp(min=0)
+    else:
+        prev_computed = num_computed_tokens[gather_indices]
     corrected = prev_computed + valid_counts.int()
 
     n = prev_positions.shape[0]
