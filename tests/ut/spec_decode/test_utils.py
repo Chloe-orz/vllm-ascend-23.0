@@ -184,3 +184,71 @@ def test_cpu_and_gpu_corrections_agree():
     gpu_seq_lens = num_computed_gpu.numpy() + num_scheduled_step_n
 
     np.testing.assert_array_equal(optimistic, gpu_seq_lens)
+
+
+def test_correction_base_survives_row_recycling():
+    """prev_computed_by_req must be immune to GPU positional-buffer recycling.
+
+    PD interleaving scenario: a long-running request occupied row 0 of the
+    GPU num_computed buffer with 1450.  An interleaved batch (another
+    request's PREFILL_FIRST) then ran with a different request set, its
+    single new request landing on row 0 and leaving a 0 behind.  With the
+    legacy positional gather, the correction would compute 0 + valid = 2
+    instead of 1450 + valid = 1452 (the EC NaN-row crash).  The
+    request-keyed snapshot must still produce the exact value.
+    """
+    num_reqs = 2
+    # Recycled GPU buffer: row 0 holds the evictor's 0, row 1 is intact.
+    num_computed_gpu = torch.tensor([0, 1460], dtype=torch.int32)
+    num_accepted_gpu = torch.zeros(num_reqs, dtype=torch.int32)
+    # Both requests were in the previous verify batch at rows 0 and 1.
+    prev_positions_t = torch.tensor([0, 1], dtype=torch.int32)
+    valid_count_t = torch.tensor([2, 1], dtype=torch.int32)
+    prev_drafts_t = torch.tensor([1, 1], dtype=torch.int32)
+    # Scheduler-bumped CPU values (would be used only for non-participants).
+    cpu_num_computed = torch.tensor([1452, 1462], dtype=torch.int32)
+    # Identity-keyed snapshot from before _update_states: the map batch's
+    # start-of-step values, by request identity.
+    prev_computed_by_req = torch.tensor([1450, 1460], dtype=torch.int32)
+
+    update_num_computed_tokens_for_batch_change(
+        num_computed_gpu,
+        num_accepted_gpu,
+        prev_positions_t,
+        valid_count_t,
+        prev_drafts_t,
+        cpu_num_computed,
+        prev_computed_by_req=prev_computed_by_req,
+    )
+
+    # Row 0 must be 1450 + 2 = 1452 (NOT the recycled 0 + 2 = 2);
+    # row 1 is the usual intact case: 1460 + 1 = 1461.
+    np.testing.assert_array_equal(
+        num_computed_gpu.numpy(), np.array([1452, 1461], dtype=np.int32))
+    np.testing.assert_array_equal(
+        num_accepted_gpu.numpy(), valid_count_t.numpy())
+
+
+def test_correction_base_snapshot_missing_falls_back_to_cpu():
+    """Rows absent from the snapshot (-1) use the CPU value directly."""
+    num_computed_gpu = torch.tensor([0, 60], dtype=torch.int32)
+    num_accepted_gpu = torch.zeros(2, dtype=torch.int32)
+    prev_positions_t = torch.tensor([0, 1], dtype=torch.int32)
+    valid_count_t = torch.tensor([2, 1], dtype=torch.int32)
+    prev_drafts_t = torch.tensor([1, 1], dtype=torch.int32)
+    cpu_num_computed = torch.tensor([1452, 62], dtype=torch.int32)
+    # Row 0 has no snapshot entry (e.g. request state was rebuilt).
+    prev_computed_by_req = torch.tensor([-1, 60], dtype=torch.int32)
+
+    update_num_computed_tokens_for_batch_change(
+        num_computed_gpu,
+        num_accepted_gpu,
+        prev_positions_t,
+        valid_count_t,
+        prev_drafts_t,
+        cpu_num_computed,
+        prev_computed_by_req=prev_computed_by_req,
+    )
+
+    np.testing.assert_array_equal(
+        num_computed_gpu.numpy(), np.array([1452, 61], dtype=np.int32))
