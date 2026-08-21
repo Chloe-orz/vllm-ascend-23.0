@@ -5429,6 +5429,10 @@ class NPUModelRunner(GPUModelRunner):
             and self._cloud_prepare_cache.get("req_ids_key")
             == tuple(scheduler_output.num_scheduled_tokens)
         )
+        # Diagnostic fence for the DSV4 MTP=1 interleaved VERIFY LAST path.
+        # It is created only when the fast path actually restores persistent
+        # graph-view buffers, then consumed immediately before model forward.
+        dsv4_mtp_restore_event: torch.npu.Event | None = None
         if _fast_path:
             # [ascend fix] The edge tail fast path runs OUTSIDE the
             # synchronize_input_prep/prepare_inputs_event protection that
@@ -5591,6 +5595,15 @@ class NPUModelRunner(GPUModelRunner):
                 self._record_block_table_writer(
                     scheduler_output, "FAST_RESTORE_ENQUEUED"
                 )
+                if self._should_trace_dsv4_mtp_decode_last(scheduler_output):
+                    # All restore copy_ operations above are asynchronous.
+                    # Record after the final restore so the diagnostic wait
+                    # below can prove whether VERIFY LAST was consuming the
+                    # persistent views before their restored contents became
+                    # visible on the device.
+                    dsv4_mtp_restore_event = (
+                        torch.npu.current_stream().record_event()
+                    )
             # Re-sync num_computed_tokens from CPU: segment_a forward or
             # async state update may have modified the GPU buffer.
             # NOTE: In async speculative decoding, segment_a has already
@@ -6119,6 +6132,17 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            if dsv4_mtp_restore_event is not None:
+                # Deliberately use a host-visible event wait for this A/B
+                # diagnosis. A same-stream wait_event would be a no-op and
+                # could not distinguish an ACL-graph/internal-stream race.
+                # Scope: edge DSV4 MTP, num_speculative_tokens=1, interleaved
+                # VERIFY LAST fast restore only.
+                dsv4_mtp_restore_event.synchronize()
+                logger.info_once(
+                    "[EC-BT-RESTORE-FENCE] synchronized DSV4 MTP=1 "
+                    "VERIFY LAST fast-path restore before model forward"
+                )
             self._capture_dsv4_mtp_finite_rows(
                 scheduler_output,
                 "decode_last_before_model",
