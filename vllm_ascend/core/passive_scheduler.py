@@ -155,6 +155,8 @@ class PassiveScheduler:
         # batch before falling back to another prefill-middle slice.
         self._prefill_middle_throttle_started_at: float | None = None
         self._prefill_middle_throttle_seconds = 0.010
+        # Rate limiter for the [PD-STALL-CLOUD] empty-dispatch probe.
+        self._last_stall_log_ts: float = 0.0
 
         # Bridge queue between the (optional) subscriber thread and the
         # main loop. When the thread is enabled, it drains
@@ -625,6 +627,7 @@ class PassiveScheduler:
                 # payload wait happens device-side (wait_event on the
                 # pre-posted recv), never a host block.
                 batch = self._schedule_expect_alternation(ready_only=False)
+            self._log_stall_if_blocked(batch)
             return batch
 
         for queue_name in self._POLICY_ORDER[self.dispatch_policy]:
@@ -641,7 +644,67 @@ class PassiveScheduler:
                 )
                 if not batch.is_empty():
                     return batch
-        return ScheduledBatch.empty()
+        batch = ScheduledBatch.empty()
+        self._log_stall_if_blocked(batch)
+        return batch
+
+    def _log_stall_if_blocked(self, batch: ScheduledBatch) -> None:
+        """Rate-limited probe for empty dispatches with queued work.
+
+        Fires at most once per 10ms.  Pure supply gaps (all queues empty)
+        are intentionally NOT logged here — those belong to the edge's own
+        [PD-STALL] probe.  This probe distinguishes the cloud-local causes:
+        watermark-not-ready heads, EED throttle waits, and the single
+        sliced-prefill constraint.
+        """
+        if not batch.is_empty():
+            return
+        if not (
+            self.ready_prefills
+            or self.ready_pdmixes
+            or self.ready_prefill_drafts
+            or self.ready_decode_drafts
+            or self.ready_decodes
+            or self._active_prefill_slices
+        ):
+            return
+        now = time.monotonic()
+        if now - self._last_stall_log_ts < 0.010:
+            return
+        self._last_stall_log_ts = now
+        throttle_remaining_ms: float | None = None
+        if self._prefill_middle_throttle_started_at is not None:
+            elapsed = now - self._prefill_middle_throttle_started_at
+            throttle_remaining_ms = max(
+                0.0,
+                (self._prefill_middle_throttle_seconds - elapsed) * 1000,
+            )
+        logger.warning(
+            "[PD-STALL-CLOUD] empty dispatch with queued work: "
+            "policy=%s state=%s | "
+            "queues: prefills=%d pdmixes=%d p_drafts=%d d_drafts=%d "
+            "decodes=%d active_slices=%d sliced_pf=%s | "
+            "head_ready: pf=%s dd=%s p_drf=%s d_drf=%s | "
+            "throttle_remaining_ms=%s",
+            self.dispatch_policy.value,
+            self.cloud_scheduling_state,
+            len(self.ready_prefills),
+            len(self.ready_pdmixes),
+            len(self.ready_prefill_drafts),
+            len(self.ready_decode_drafts),
+            len(self.ready_decodes),
+            len(self._active_prefill_slices),
+            self._active_sliced_prefill is not None,
+            self._prefill_head_data_ready(),
+            self._decode_head_data_ready(),
+            self._prefill_draft_head_data_ready(),
+            self._decode_draft_head_data_ready(),
+            (
+                f"{throttle_remaining_ms:.1f}"
+                if throttle_remaining_ms is not None
+                else "inactive"
+            ),
+        )
 
     @staticmethod
     def _compute_slice_boundaries(
