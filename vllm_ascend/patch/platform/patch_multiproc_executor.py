@@ -117,12 +117,19 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 if _reg is not None:
                     _connect_ip = _reg.edge(
                         self.parallel_config.edge_id).addr
-                    # Each edge drives ONLY its own local workers in 2E1C —
-                    # cloud workers are driven by the cloud's passive engine.
-                    # A world-sized reader set would broadcast this edge's
-                    # local kv_cache_configs to cloud workers and crash them
-                    # (list shorter than their global rank).
-                    _mq_readers = self.local_world_size
+                    if 0 not in _reg.edge(self.parallel_config.edge_id).ranks:
+                        # Non-rank0 edges (E1): a fully independent
+                        # engine↔worker pipeline — the MQ only serves this
+                        # instance's local workers, and nothing cross-node
+                        # ever reads it.
+                        _mq_readers = self.local_world_size
+                    # else: the rank0 edge (E0) feeds the world-group control
+                    # MQ — its worker (leader branch of _init_message_queues)
+                    # re-exports THIS handle to all remote readers, so the MQ
+                    # must stay remote-capable (world-sized reader set) or
+                    # every remote reader crashes on connect(None).  Cloud
+                    # workers' control RPCs (initialize_from_config etc.)
+                    # still arrive via this channel, exactly like 1-1.
             self.rpc_broadcast_mq = MessageQueue(
                 _mq_readers,
                 self.local_world_size,
@@ -255,16 +262,44 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 self.parallel_config.is_edge_node
             ):
                 # Multi-instance (2E1C): every edge is the leader of its own
-                # pipeline and drives ONLY its own local workers — cloud
-                # workers are driven by the cloud's own PassiveEngineCore, so
-                # their response queues are not the edge's business.
-                # Collecting them (legacy range(world_size)) both mis-indexes
-                # peer_worker_response_mqs and wires E1 to E0's outputs.
-                for local_idx in range(self.local_world_size):
-                    local_message_queue = (
-                        self.workers[local_idx].worker_response_mq)
-                    assert local_message_queue is not None
-                    self.response_mqs.append(local_message_queue)
+                # pipeline.  The rank0 edge (E0) additionally runs the
+                # 1-1-style world control plane: its collective_rpcs (KV
+                # sizing, initialize_from_config, warmup) execute on its own
+                # workers AND all cloud workers, so it collects replies from
+                # exactly that pipeline — own ranks + all cloud ranks.
+                # Other edges' workers are EXCLUDED: they shelve the
+                # world-group MQ reader (they serve their own engine), so
+                # they never execute E0's RPCs and never reply — including
+                # their queues here would deadlock get_response.
+                from vllm_ascend.edge_cloud.role_registry import (
+                    get_role_registry, init_role_registry)
+                _reg = get_role_registry()
+                if _reg is None:
+                    _reg = init_role_registry(
+                        self.parallel_config.role_registry)
+                _my_ranks = list(
+                    _reg.edge(self.parallel_config.edge_id).ranks)
+                if 0 in _my_ranks:
+                    _pipeline_ranks = sorted(
+                        set(_my_ranks)
+                        | {r for c_id in _reg.cloud_ids
+                           for r in _reg.cloud(c_id).ranks})
+                else:
+                    # Non-rank0 edge (E1): instance-local engine — collect
+                    # only its own workers' response queues.
+                    _pipeline_ranks = sorted(_my_ranks)
+                for rank in _pipeline_ranks:
+                    local_idx = rank - global_start_rank
+                    if 0 <= local_idx < self.local_world_size:
+                        local_message_queue = (
+                            self.workers[local_idx].worker_response_mq)
+                        assert local_message_queue is not None
+                        self.response_mqs.append(local_message_queue)
+                    else:
+                        remote_message_queue = (
+                            self.workers[0].peer_worker_response_mqs[rank])
+                        assert remote_message_queue is not None
+                        self.response_mqs.append(remote_message_queue)
             elif self.parallel_config.node_rank_within_dp == 0 and (
                 not self.parallel_config.enable_edge_cloud
                 or self.parallel_config.is_edge_node
