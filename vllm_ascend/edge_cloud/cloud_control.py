@@ -15,11 +15,14 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from vllm.logger import init_logger
+from vllm.logger import logger
 
-from vllm_ascend.edge_cloud.prefix_protocol import PrefixManifest, UsageInfo
-
-logger = init_logger(__name__)
+from vllm_ascend.edge_cloud.observability import format_event, log_event
+from vllm_ascend.edge_cloud.prefix_protocol import (
+    HEADER_REQUEST_ID,
+    PrefixManifest,
+    UsageInfo,
+)
 
 
 class CloudControlBridge:
@@ -45,6 +48,7 @@ class CloudControlBridge:
             name="edge-cloud-control-events",
         )
         self._thread.start()
+        log_event(logger, "info", "cloud_control_bridge_started")
 
     def close(self) -> None:
         """Stop dispatch and fail HTTP requests still waiting for the core."""
@@ -55,6 +59,13 @@ class CloudControlBridge:
         for future in [*self._probe_futures.values(), *self._usage_futures.values()]:
             if not future.done():
                 future.set_exception(error)
+        log_event(
+            logger,
+            "info",
+            "cloud_control_bridge_stopped",
+            pending_probes=len(self._probe_futures),
+            pending_usage=len(self._usage_futures),
+        )
 
     async def probe(self, manifest: PrefixManifest):
         """Ask PassiveEngineCore to find and pin a prefix."""
@@ -68,11 +79,28 @@ class CloudControlBridge:
         self._probe_futures[request_id] = probe_future
         self._usage_futures[request_id] = usage_future
         self.command_queue.put({"type": "probe", "manifest": manifest})
+        log_event(
+            logger,
+            "debug",
+            "cloud_probe_enqueued",
+            request_id=request_id,
+            prompt_tokens=manifest.prompt_tokens,
+            full_blocks=manifest.full_block_count,
+            has_tail=manifest.tail_hash is not None,
+            block_size=manifest.block_size,
+        )
         try:
             return await probe_future
-        except BaseException:
+        except BaseException as exc:
             self._probe_futures.pop(request_id, None)
             self._usage_futures.pop(request_id, None)
+            log_event(
+                logger,
+                "warning",
+                "cloud_probe_wait_failed",
+                request_id=request_id,
+                error_type=type(exc).__name__,
+            )
             raise
 
     async def wait_usage(self, request_id: str) -> UsageInfo:
@@ -80,7 +108,19 @@ class CloudControlBridge:
         try:
             future = self._usage_futures[request_id]
         except KeyError as exc:
+            log_event(
+                logger,
+                "warning",
+                "cloud_usage_unknown_request",
+                request_id=request_id,
+            )
             raise ValueError(f"unknown control request {request_id!r}") from exc
+        log_event(
+            logger,
+            "debug",
+            "cloud_usage_wait_started",
+            request_id=request_id,
+        )
         try:
             return await asyncio.shield(future)
         finally:
@@ -94,7 +134,12 @@ class CloudControlBridge:
             except queue.Empty:
                 continue
             if not isinstance(event, dict):
-                logger.error("Ignoring malformed cloud control event: %r", event)
+                log_event(
+                    logger,
+                    "error",
+                    "cloud_event_malformed",
+                    payload_type=type(event).__name__,
+                )
                 continue
             assert self._loop is not None
             self._loop.call_soon_threadsafe(self._deliver_event, event)
@@ -105,15 +150,54 @@ class CloudControlBridge:
         if event_type == "probe":
             future = self._probe_futures.pop(request_id, None)
             if future is None or future.done():
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_probe_event_orphaned",
+                    request_id=request_id,
+                )
                 return
             if event.get("ok"):
                 future.set_result(event["result"])
+                log_event(
+                    logger,
+                    "debug",
+                    "cloud_probe_event_delivered",
+                    request_id=request_id,
+                )
             else:
                 future.set_exception(RuntimeError(event.get("error", "probe failed")))
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_probe_event_failed",
+                    request_id=request_id,
+                )
         elif event_type == "usage":
             future = self._usage_futures.get(request_id)
             if future is not None and not future.done():
                 future.set_result(event["usage"])
+                log_event(
+                    logger,
+                    "debug",
+                    "cloud_usage_event_delivered",
+                    request_id=request_id,
+                )
+            else:
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_usage_event_orphaned",
+                    request_id=request_id,
+                )
+        else:
+            log_event(
+                logger,
+                "warning",
+                "cloud_event_unknown_type",
+                request_id=request_id,
+                event_type=event_type,
+            )
 
 
 class CloudControlProcessor:
@@ -131,10 +215,21 @@ class CloudControlProcessor:
             except queue.Empty:
                 return
             if command.get("type") != "probe":
-                logger.error("Ignoring unknown cloud control command: %r", command)
+                log_event(
+                    logger,
+                    "error",
+                    "cloud_command_unknown_type",
+                    command_type=command.get("type"),
+                )
                 continue
             manifest = command.get("manifest")
             request_id = getattr(manifest, "request_id", None)
+            log_event(
+                logger,
+                "debug",
+                "cloud_probe_dequeued",
+                request_id=request_id,
+            )
             try:
                 result = kv_manager.probe(manifest)
                 event = {
@@ -144,7 +239,14 @@ class CloudControlProcessor:
                     "result": result,
                 }
             except Exception as exc:
-                logger.exception("Cloud prefix probe failed for %s", request_id)
+                logger.exception(
+                    "%s",
+                    format_event(
+                        "cloud_probe_processing_failed",
+                        request_id=request_id,
+                        error_type=type(exc).__name__,
+                    ),
+                )
                 event = {
                     "type": "probe",
                     "request_id": request_id,
@@ -155,9 +257,16 @@ class CloudControlProcessor:
 
     def publish_usage(self, request_id: str, usage: UsageInfo) -> None:
         """Complete the matching OpenAI stream in the parent process."""
-        self.event_queue.put(
-            {"type": "usage", "request_id": request_id, "usage": usage}
+        log_event(
+            logger,
+            "debug",
+            "cloud_usage_published",
+            request_id=request_id,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            cached_tokens=usage.cached_tokens,
         )
+        self.event_queue.put({"type": "usage", "request_id": request_id, "usage": usage})
 
 
 def create_cloud_control_app(bridge: CloudControlBridge) -> FastAPI:
@@ -178,39 +287,99 @@ def create_cloud_control_app(bridge: CloudControlBridge) -> FastAPI:
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request):
+        request_id = request.headers.get(HEADER_REQUEST_ID)
         try:
             body = await request.json()
             manifest = PrefixManifest.from_openai_request(request.headers, body)
             probe = await bridge.probe(manifest)
         except ValueError as exc:
+            log_event(
+                logger,
+                "warning",
+                "cloud_http_request_rejected",
+                request_id=request_id,
+                error_type=type(exc).__name__,
+            )
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
+            logger.exception(
+                "%s",
+                format_event(
+                    "cloud_http_request_failed",
+                    request_id=request_id,
+                    error_type=type(exc).__name__,
+                ),
+            )
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+        log_event(
+            logger,
+            "info",
+            "cloud_http_probe_reserved",
+            request_id=manifest.request_id,
+            instance_id=probe.instance_id,
+            prompt_tokens=manifest.prompt_tokens,
+            hit_tokens=probe.hit_tokens,
+            hit_blocks=probe.hit_blocks,
+        )
 
         model = body.get("model", "edge-cloud-internal")
 
         async def events():
-            yield ": edge-cloud-prefix-reserved\n\n"
-            usage = await bridge.wait_usage(manifest.request_id)
-            chunk = {
-                "id": manifest.request_id,
-                "object": "chat.completion.chunk",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [],
-                "usage": usage.to_openai_dict(),
-            }
-            yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
-            yield "data: [DONE]\n\n"
+            try:
+                yield ": edge-cloud-prefix-reserved\n\n"
+                usage = await bridge.wait_usage(manifest.request_id)
+                log_event(
+                    logger,
+                    "info",
+                    "cloud_sse_usage_ready",
+                    request_id=manifest.request_id,
+                    prompt_tokens=usage.prompt_tokens,
+                    completion_tokens=usage.completion_tokens,
+                    cached_tokens=usage.cached_tokens,
+                )
+                chunk = {
+                    "id": manifest.request_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [],
+                    "usage": usage.to_openai_dict(),
+                }
+                yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
+                yield "data: [DONE]\n\n"
+            except asyncio.CancelledError:
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_sse_cancelled",
+                    request_id=manifest.request_id,
+                )
+                raise
+            except Exception as exc:
+                logger.exception(
+                    "%s",
+                    format_event(
+                        "cloud_sse_failed",
+                        request_id=manifest.request_id,
+                        error_type=type(exc).__name__,
+                    ),
+                )
+                raise
+            finally:
+                log_event(
+                    logger,
+                    "debug",
+                    "cloud_sse_closed",
+                    request_id=manifest.request_id,
+                )
 
         headers = {
             **probe.to_headers(),
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         }
-        return StreamingResponse(
-            events(), media_type="text/event-stream", headers=headers
-        )
+        return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
 
     return app
 
@@ -223,6 +392,14 @@ def run_cloud_control_server(
 ) -> None:
     """Run Uvicorn until the PassiveEngineCore child exits."""
     import uvicorn
+
+    log_event(
+        logger,
+        "info",
+        "cloud_http_server_starting",
+        host=host,
+        port=port,
+    )
 
     server = uvicorn.Server(
         uvicorn.Config(
@@ -249,3 +426,4 @@ def run_cloud_control_server(
         server.should_exit = True
         with suppress(RuntimeError):
             watcher.join(timeout=1.0)
+        log_event(logger, "info", "cloud_http_server_stopped")

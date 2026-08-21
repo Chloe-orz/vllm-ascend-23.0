@@ -61,6 +61,7 @@ The reimplementations of ``step()``, ``step_with_batch_queue()`` and
 a new minor version, re-diff these methods against the new upstream
 source and re-apply the dest-only inserts.
 """
+
 from __future__ import annotations
 
 import copy as _copy
@@ -71,16 +72,13 @@ from uuid import uuid4
 
 import numpy as np
 from vllm.config import ParallelConfig
-from vllm.logger import init_logger
-from vllm.logger import logger as vllm_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 
+from vllm_ascend.edge_cloud.observability import format_event, log_event
 from vllm_ascend.v1.engine.passive_core import PPSchedulerZmqChannel
-
-logger = init_logger(__name__)
-
 
 # Idempotency guard: re-importing this module (e.g. from a child process)
 # must not double-wrap the original methods.
@@ -110,6 +108,7 @@ def _patched_engine_core_init(self, *args, **kwargs):
     # in the main process; in a freshly-spawned subprocess it re-initializes
     # from the ``vllm_config`` we hold.
     from vllm_ascend.ascend_config import init_ascend_config
+
     ascend_config = init_ascend_config(self.vllm_config)
     edge_cloud = getattr(ascend_config, "edge_cloud_config", None)
     pd_enabled = bool(
@@ -127,6 +126,7 @@ def _patched_engine_core_init(self, *args, **kwargs):
 
     # Load PD-separation configuration from environment variables
     from vllm_ascend.pd_separation_config import PDSeparationConfig
+
     pd_config = PDSeparationConfig.from_env()
 
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
@@ -140,8 +140,10 @@ def _patched_engine_core_init(self, *args, **kwargs):
         # The cloud connects once per edge DP rank and writes its
         # ``get_ip()`` result. See passive_core.py for the
         # symmetric writer side.
-        import torch.distributed as dist
         from datetime import timedelta
+
+        import torch.distributed as dist
+
         _addr_store = dist.TCPStore(
             host_name=parallel_config.master_addr,
             port=parallel_config.master_port + 1 + dp_rank,
@@ -167,9 +169,10 @@ def _patched_engine_core_init(self, *args, **kwargs):
             name=f"pd-edge-dp{dp_rank}",
         )
         logger.info(
-            "PD-separation edge channel: PRE_OUT=%s, POST_OUT=%s "
-            "(cloud_addr=%s auto-discovered)",
-            pre_out, post_out, cloud_addr,
+            "PD-separation edge channel: PRE_OUT=%s, POST_OUT=%s (cloud_addr=%s auto-discovered)",
+            pre_out,
+            post_out,
+            cloud_addr,
         )
 
 
@@ -191,20 +194,28 @@ def _drain_pd_channel_inbox(self) -> None:
     new_outputs = self._pp_pd_channel.consume_new_outputs()
     for _seq, so in new_outputs:
         bt = so.batch_type
-        logger.info(f"Received scheduler_output from cloud, batch_type: {bt}")
+        logger.info("Received scheduler_output from cloud, batch_type: %s", bt)
         if bt == BatchType.PREFILL_LAST:
             if getattr(so, "edge_cloud_ack_only", False):
                 head_token = getattr(so, "head_token", None)
-                originals = getattr(
-                    self, "_edge_cloud_prefill_first_by_head_token", {}
-                )
+                originals = getattr(self, "_edge_cloud_prefill_first_by_head_token", {})
                 original = originals.pop(head_token, None)
                 if original is None:
-                    logger.error(
-                        "PREFILL ACK has no saved edge FIRST for head_token=%s",
-                        head_token,
+                    log_event(
+                        logger,
+                        "error",
+                        "edge_prefill_ack_missing",
+                        head_token=head_token,
                     )
                     continue
+                log_event(
+                    logger,
+                    "info",
+                    "edge_prefill_ack_received",
+                    head_token=head_token,
+                    scheduled_tokens=original.total_num_scheduled_tokens,
+                    request_count=len(original.num_scheduled_tokens),
+                )
                 so = _copy.copy(original)
                 so.batch_type = BatchType.PREFILL_LAST
             self.scheduler.prefills_last_ready.append(so)
@@ -216,8 +227,7 @@ def _drain_pd_channel_inbox(self) -> None:
             # cloud that still publishes it), drop it -- the edge already has
             # its own copy in drafts_last_ready.
             logger.debug(
-                "Dropping POST_OUT DRAFT_LAST head_token=%s "
-                "(edge self-posts DRAFT_LAST)",
+                "Dropping POST_OUT DRAFT_LAST head_token=%s (edge self-posts DRAFT_LAST)",
                 getattr(so, "head_token", None),
             )
         else:
@@ -229,9 +239,7 @@ def _drain_pd_channel_inbox(self) -> None:
             )
 
 
-def _publish_to_cloud(
-    self, scheduler_output: SchedulerOutput
-) -> None:
+def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
     """Publish one batch on PRE_OUT with the cloud-facing finish filter.
 
     The edge retains finished requests that are still referenced by an
@@ -248,14 +256,10 @@ def _publish_to_cloud(
     """
     channel = self._pp_pd_channel
     cloud_so = scheduler_output
-    filter_finished = getattr(
-        self.scheduler, "filter_cloud_finished_req_ids", None
-    )
+    filter_finished = getattr(self.scheduler, "filter_cloud_finished_req_ids", None)
     if filter_finished is not None:
         finished = set(getattr(scheduler_output, "finished_req_ids", None) or ())
-        released = getattr(
-            self.scheduler, "_cloud_released_finished_req_ids", None
-        )
+        released = getattr(self.scheduler, "_cloud_released_finished_req_ids", None)
         if finished or released:
             cloud_finished = filter_finished(finished)
             if cloud_finished != finished:
@@ -263,34 +267,63 @@ def _publish_to_cloud(
                 # dynamically attached attributes used by the cloud.
                 cloud_so = _copy.copy(scheduler_output)
                 cloud_so.finished_req_ids = cloud_finished
-                finished_data = getattr(
-                    scheduler_output, "edge_cloud_finished_requests", None
-                )
+                finished_data = getattr(scheduler_output, "edge_cloud_finished_requests", None)
                 if finished_data is not None:
                     cloud_so.edge_cloud_finished_requests = {
-                        request_id: data
-                        for request_id, data in finished_data.items()
-                        if request_id in cloud_finished
+                        request_id: data for request_id, data in finished_data.items() if request_id in cloud_finished
                     }
 
-    edge_cloud = (
-        getattr(self.vllm_config, "additional_config", {}) or {}
-    ).get("edge_cloud_config", {})
+    edge_cloud = (getattr(self.vllm_config, "additional_config", {}) or {}).get("edge_cloud_config", {})
     coordination = edge_cloud.get("prefix_cache_coordination", {})
-    if coordination.get("enabled", False):
+    coordination_enabled = coordination.get("enabled", False)
+    if coordination_enabled:
         if cloud_so.batch_type == BatchType.PREFILL_FIRST:
             head_token = getattr(cloud_so, "head_token", None)
             if not head_token:
                 raise RuntimeError("PREFILL_FIRST has no head_token")
-            originals = getattr(
-                self, "_edge_cloud_prefill_first_by_head_token", None
-            )
+            originals = getattr(self, "_edge_cloud_prefill_first_by_head_token", None)
             if originals is None:
                 originals = {}
                 self._edge_cloud_prefill_first_by_head_token = originals
             originals[head_token] = scheduler_output
         cloud_so = _make_cloud_safe_scheduler_output(cloud_so)
-    channel.publish(cloud_so)
+
+    try:
+        channel.publish(cloud_so)
+    except Exception as exc:
+        if coordination_enabled:
+            logger.exception(
+                "%s",
+                format_event(
+                    "edge_scheduler_publish_failed",
+                    batch_type=cloud_so.batch_type,
+                    head_token=getattr(cloud_so, "head_token", None),
+                    error_type=type(exc).__name__,
+                ),
+            )
+        raise
+
+    if coordination_enabled:
+        for request_data in cloud_so.scheduled_new_reqs:
+            log_event(
+                logger,
+                "info",
+                "edge_scheduler_request_published",
+                control_request_id=request_data.edge_cloud_request_id,
+                engine_request_id=request_data.req_id,
+                head_token=getattr(cloud_so, "head_token", None),
+            )
+        log_event(
+            logger,
+            "debug",
+            "edge_scheduler_output_published",
+            batch_type=cloud_so.batch_type,
+            head_token=getattr(cloud_so, "head_token", None),
+            new_requests=len(cloud_so.scheduled_new_reqs),
+            cached_requests=len(cloud_so.scheduled_cached_reqs.req_ids),
+            finished_requests=len(cloud_so.finished_req_ids),
+            scheduled_tokens=cloud_so.total_num_scheduled_tokens,
+        )
 
 
 def _make_cloud_safe_scheduler_output(
@@ -301,52 +334,50 @@ def _make_cloud_safe_scheduler_output(
     cloud_so.scheduled_new_reqs = []
     for request_data in scheduler_output.scheduled_new_reqs:
         if request_data.mm_features or request_data.prompt_embeds is not None:
-            raise ValueError(
-                "prefix cache coordination currently supports text-only requests"
+            log_event(
+                logger,
+                "error",
+                "edge_scheduler_scrub_rejected",
+                engine_request_id=request_data.req_id,
+                reason="multimodal_request",
             )
+            raise ValueError("prefix cache coordination currently supports text-only requests")
         cloud_request = _copy.copy(request_data)
         if request_data.prompt_token_ids is not None:
-            cloud_request.prompt_token_ids = [0] * len(
-                request_data.prompt_token_ids
-            )
+            cloud_request.prompt_token_ids = [0] * len(request_data.prompt_token_ids)
         if request_data.prefill_token_ids is not None:
-            cloud_request.prefill_token_ids = [0] * len(
-                request_data.prefill_token_ids
-            )
+            cloud_request.prefill_token_ids = [0] * len(request_data.prefill_token_ids)
         cloud_so.scheduled_new_reqs.append(cloud_request)
 
     cached = _copy.copy(scheduler_output.scheduled_cached_reqs)
-    cached.new_token_ids = [
-        [0] * len(token_ids)
-        for token_ids in scheduler_output.scheduled_cached_reqs.new_token_ids
-    ]
+    cached.new_token_ids = [[0] * len(token_ids) for token_ids in scheduler_output.scheduled_cached_reqs.new_token_ids]
     cached.all_token_ids = {
         request_id: np.zeros_like(token_ids)
-        for request_id, token_ids in (
-            scheduler_output.scheduled_cached_reqs.all_token_ids.items()
-        )
+        for request_id, token_ids in (scheduler_output.scheduled_cached_reqs.all_token_ids.items())
     }
     cloud_so.scheduled_cached_reqs = cached
+    log_event(
+        logger,
+        "debug",
+        "edge_scheduler_output_scrubbed",
+        batch_type=cloud_so.batch_type,
+        new_requests=len(cloud_so.scheduled_new_reqs),
+        cached_requests=len(cached.req_ids),
+    )
     return cloud_so
 
 
-def _maybe_publish_pre_out(
-    self, scheduler_output: SchedulerOutput
-) -> None:
+def _maybe_publish_pre_out(self, scheduler_output: SchedulerOutput) -> None:
     """Forward head-segment batches on the edge → cloud channel."""
     if getattr(self, "_pp_pd_channel", None) is None:
         return
     bt = scheduler_output.batch_type
     if bt == BatchType.DRAFT_FIRST:
-        is_pregenerated = getattr(
-            self.scheduler, "is_pre_generated_draft", lambda _so: False
-        )(scheduler_output)
+        is_pregenerated = getattr(self.scheduler, "is_pre_generated_draft", lambda _so: False)(scheduler_output)
         if is_pregenerated:
             task_id = scheduler_output.draft_task_id
             assert task_id is not None
-            opened = getattr(
-                self, "_pd_draft_pre_out_open_tasks", None
-            )
+            opened = getattr(self, "_pd_draft_pre_out_open_tasks", None)
             if opened is None:
                 opened = set()
                 self._pd_draft_pre_out_open_tasks = opened
@@ -355,9 +386,7 @@ def _maybe_publish_pre_out(
                 # readiness. Queue every cloud control in task order so later
                 # placeholder steps cannot overtake step 0 while its
                 # accepted-token scalars are still being finalized.
-                deferred = getattr(
-                    self, "_pd_deferred_draft_pre_out", None
-                )
+                deferred = getattr(self, "_pd_deferred_draft_pre_out", None)
                 if deferred is None:
                     deferred = {}
                     self._pd_deferred_draft_pre_out = deferred
@@ -385,9 +414,7 @@ def _maybe_publish_pre_out(
         )
 
 
-def _release_deferred_draft_pre_out(
-    self, draft_task_id: str
-) -> None:
+def _release_deferred_draft_pre_out(self, draft_task_id: str) -> None:
     """Open one cloud draft control stream and flush it in FIFO order."""
     opened = getattr(self, "_pd_draft_pre_out_open_tasks", None)
     if opened is None:
@@ -472,18 +499,18 @@ def _merge_pending_worker_cleanup(self, scheduler_output: SchedulerOutput) -> No
     """Attach cleanup skipped with EMPTY batches to the next worker batch."""
     pending_finished = getattr(self, "_pd_pending_finished_req_ids", None)
     if pending_finished:
-        scheduler_output.finished_req_ids = set(
-            scheduler_output.finished_req_ids
-        ).union(pending_finished)
+        scheduler_output.finished_req_ids = set(scheduler_output.finished_req_ids).union(pending_finished)
         pending_finished.clear()
 
     pending_mm_hashes = getattr(self, "_pd_pending_free_encoder_mm_hashes", None)
     if pending_mm_hashes:
         scheduler_output.free_encoder_mm_hashes = list(
-            dict.fromkeys([
-                *scheduler_output.free_encoder_mm_hashes,
-                *pending_mm_hashes,
-            ])
+            dict.fromkeys(
+                [
+                    *scheduler_output.free_encoder_mm_hashes,
+                    *pending_mm_hashes,
+                ]
+            )
         )
         pending_mm_hashes.clear()
 
@@ -501,9 +528,7 @@ def _finish_empty_batch(self, scheduler_output: SchedulerOutput):
         self.log_error_detail(scheduler_output),
         self.log_iteration_details(scheduler_output),
     ):
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT
-        )
+        engine_core_outputs = self.scheduler.update_from_output(scheduler_output, EMPTY_MODEL_RUNNER_OUTPUT)
     self._clear_pending_edge_cloud_draft_for_finished_requests()
     return engine_core_outputs, False
 
@@ -550,9 +575,7 @@ def _advance_edge_cloud_draft(
     """
     if not getattr(self, "use_spec_decode", False):
         return
-    enqueue_draft_first = getattr(
-        self.scheduler, "enqueue_draft_first", None
-    )
+    enqueue_draft_first = getattr(self.scheduler, "enqueue_draft_first", None)
     if enqueue_draft_first is None:
         return
 
@@ -570,9 +593,7 @@ def _advance_edge_cloud_draft(
             return
         task_id = state["draft_task_id"]
         num_accepted_tokens = state.get("num_accepted_tokens")
-        valid_sampled_token_count = state.get(
-            "valid_sampled_token_count"
-        )
+        valid_sampled_token_count = state.get("valid_sampled_token_count")
         if num_accepted_tokens is None:
             # AsyncModelRunnerOutput has already materialized and filtered
             # sampled_token_ids before EngineCore receives it. Their row
@@ -587,16 +608,13 @@ def _advance_edge_cloud_draft(
             # lens (observed as permanently frozen requests).
             num_accepted_tokens = {
                 req_id: len(token_ids)
-                for req_id, token_ids in zip(
-                    model_output.req_ids, model_output.sampled_token_ids
-                )
+                for req_id, token_ids in zip(model_output.req_ids, model_output.sampled_token_ids)
             }
             valid_sampled_token_count = dict(num_accepted_tokens)
-        finalize = getattr(
-            self.scheduler, "finalize_pre_generated_draft_first", None
-        )
+        finalize = getattr(self.scheduler, "finalize_pre_generated_draft_first", None)
         if (
-            batch_type in (
+            batch_type
+            in (
                 BatchType.PREFILL_LAST,
                 BatchType.DECODE_LAST,
             )
@@ -625,24 +643,16 @@ def _advance_edge_cloud_draft(
     if batch_type != BatchType.DRAFT_LAST:
         return
     draft_step_idx = int(completed_scheduler_output.draft_step_idx or 0)
-    if draft_step_idx + 1 >= getattr(
-        self.scheduler, "num_spec_tokens", 0
-    ):
-        self._close_draft_pre_out(
-            completed_scheduler_output.draft_task_id
-        )
+    if draft_step_idx + 1 >= getattr(self.scheduler, "num_spec_tokens", 0):
+        self._close_draft_pre_out(completed_scheduler_output.draft_task_id)
         # The draft chain has fully executed on the cloud; release the KV
         # blocks retained for requests that finished while the chain was
         # in flight.
-        release = getattr(
-            self.scheduler, "release_draft_retained_blocks", None
-        )
+        release = getattr(self.scheduler, "release_draft_retained_blocks", None)
         task_id = completed_scheduler_output.draft_task_id
         if release is not None and task_id:
             release(task_id)
-    draft_token_ids = getattr(
-        model_output, "edge_cloud_draft_token_ids", None
-    )
+    draft_token_ids = getattr(model_output, "edge_cloud_draft_token_ids", None)
     if draft_token_ids is not None:
         self.scheduler.update_draft_token_ids(draft_token_ids)
 
@@ -663,24 +673,14 @@ def _clear_pending_edge_cloud_draft_for_finished_requests(self) -> None:
     """
     if not getattr(self, "use_spec_decode", False):
         return
-    finished_req_ids = set(
-        getattr(self.scheduler, "finished_req_ids", set()) or ()
-    )
-    take_sched_dropped = getattr(
-        self.scheduler, "take_dropped_draft_task_ids", None
-    )
-    sched_dropped = (
-        take_sched_dropped() if take_sched_dropped is not None else []
-    )
-    release = getattr(
-        self.scheduler, "release_draft_retained_blocks", None
-    )
+    finished_req_ids = set(getattr(self.scheduler, "finished_req_ids", set()) or ())
+    take_sched_dropped = getattr(self.scheduler, "take_dropped_draft_task_ids", None)
+    sched_dropped = take_sched_dropped() if take_sched_dropped is not None else []
+    release = getattr(self.scheduler, "release_draft_retained_blocks", None)
     if release is not None:
         for task_id in sched_dropped:
             release(task_id)
-    invalidate = getattr(
-        self.scheduler, "invalidate_cloud_draft_tasks", None
-    )
+    invalidate = getattr(self.scheduler, "invalidate_cloud_draft_tasks", None)
     if invalidate is not None:
         invalidate(sched_dropped)
     if not finished_req_ids and not sched_dropped:
@@ -720,24 +720,16 @@ def _register_edge_cloud_draft_parent(
     task_id = state.get("draft_task_id")
     parent_task_id = getattr(scheduler_output, "head_token", None)
     if task_id != parent_task_id:
-        raise RuntimeError(
-            "Edge-cloud draft parent task mismatch: "
-            f"scheduler={parent_task_id}, worker={task_id}"
-        )
+        raise RuntimeError(f"Edge-cloud draft parent task mismatch: scheduler={parent_task_id}, worker={task_id}")
     req_ids = set(scheduler_output.num_scheduled_tokens)
-    register = getattr(
-        self.scheduler, "register_edge_cloud_draft_task", None
-    )
+    register = getattr(self.scheduler, "register_edge_cloud_draft_task", None)
     if register is not None and task_id and req_ids:
         register(task_id, req_ids)
 
 
 def _uses_scheduled_edge_cloud_draft(self) -> bool:
     speculative_config = self.vllm_config.speculative_config
-    if (
-        getattr(self, "_pp_pd_channel", None) is None
-        or speculative_config is None
-    ):
+    if getattr(self, "_pp_pd_channel", None) is None or speculative_config is None:
         return False
     method = getattr(speculative_config, "method", None)
     if method == "eagle3":
@@ -762,9 +754,8 @@ def _has_unresolved_edge_cloud_draft_parent(self) -> bool:
     if not batch_queue:
         return False
     for _future, scheduler_output, _exec_future in batch_queue:
-        if (
-            scheduler_output.batch_type == BatchType.PREFILL_LAST
-            and getattr(scheduler_output, "is_last_prefill_chunk", True)
+        if scheduler_output.batch_type == BatchType.PREFILL_LAST and getattr(
+            scheduler_output, "is_last_prefill_chunk", True
         ):
             is_pregenerated = getattr(
                 self.scheduler,
@@ -811,9 +802,7 @@ def _patched_step(self):
     if scheduler_output.batch_type == BatchType.EMPTY:
         return self._finish_empty_batch(scheduler_output)
 
-    future = self.model_executor.execute_model(
-        scheduler_output, non_block=True
-    )
+    future = self.model_executor.execute_model(scheduler_output, non_block=True)
     grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
     with (
         self.log_error_detail(scheduler_output),
@@ -829,9 +818,7 @@ def _patched_step(self):
     # requests referenced by this parent batch.
     self._register_edge_cloud_draft_parent(scheduler_output, model_output)
     self._process_aborts_queue()
-    engine_core_outputs = self.scheduler.update_from_output(
-        scheduler_output, model_output
-    )
+    engine_core_outputs = self.scheduler.update_from_output(scheduler_output, model_output)
     self._advance_edge_cloud_draft(scheduler_output, model_output)
     self._clear_pending_edge_cloud_draft_for_finished_requests()
 
@@ -863,9 +850,7 @@ def _patched_step_with_batch_queue(self):
         "_uses_async_scheduled_mtp_placeholders",
         lambda: False,
     )()
-    deferred_scheduler_output: tuple[
-        SchedulerOutput, Future
-    ] | None = None
+    deferred_scheduler_output: tuple[SchedulerOutput, Future] | None = None
 
     while (
         len(batch_queue) < self.batch_queue_size
@@ -885,11 +870,8 @@ def _patched_step_with_batch_queue(self):
 
         # [ascend insert] Publish head-segment batches immediately at
         # schedule time to keep the pipeline full.
-        if scheduler_output.batch_type in (
-            BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST, BatchType.DRAFT_FIRST
-        ) or (
-            scheduler_output.batch_type == BatchType.EMPTY
-            and scheduler_output.finished_req_ids
+        if scheduler_output.batch_type in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST, BatchType.DRAFT_FIRST) or (
+            scheduler_output.batch_type == BatchType.EMPTY and scheduler_output.finished_req_ids
         ):
             self._maybe_publish_pre_out(scheduler_output)
 
@@ -900,28 +882,18 @@ def _patched_step_with_batch_queue(self):
             return self._finish_empty_batch(scheduler_output)
 
         with self.log_error_detail(scheduler_output):
-            exec_future = self.model_executor.execute_model(
-                scheduler_output, non_block=True
-            )
+            exec_future = self.model_executor.execute_model(scheduler_output, non_block=True)
 
         scheduled_model_executed = False
         if self.is_ec_consumer:
-            scheduled_model_executed = (
-                scheduler_output.total_num_scheduled_tokens > 0
-            )
+            scheduled_model_executed = scheduler_output.total_num_scheduled_tokens > 0
             model_executed |= scheduled_model_executed
 
-        if self.is_pooling_model or not scheduled_model_executed:
-            future = cast(Future[ModelRunnerOutput], exec_future)
-        elif not self._needs_sample_tokens(scheduler_output):
+        if self.is_pooling_model or not scheduled_model_executed or not self._needs_sample_tokens(scheduler_output):
             future = cast(Future[ModelRunnerOutput], exec_future)
         elif not scheduler_output.pending_structured_output_tokens:
-            grammar_output = self.scheduler.get_grammar_bitmask(
-                scheduler_output
-            )
-            future = self.model_executor.sample_tokens(
-                grammar_output, non_block=True
-            )
+            grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
         else:
             # This execute must remain ordered in the worker MQ, but sampling
             # waits until the prior async output updates grammar state.
@@ -932,11 +904,8 @@ def _patched_step_with_batch_queue(self):
             break
 
         batch_queue.appendleft((future, scheduler_output, exec_future))
-        queue_types = [
-            so.batch_type.value
-            for _, so, _ in batch_queue
-        ]
-        vllm_logger.info(
+        queue_types = [so.batch_type.value for _, so, _ in batch_queue]
+        logger.info(
             "[BATCH_QUEUE] Enqueued %s, queue_len=%d, types=%s",
             scheduler_output.batch_type.value,
             len(batch_queue),
@@ -946,11 +915,7 @@ def _patched_step_with_batch_queue(self):
             # Preserve the upstream one-schedule-per-turn behavior for every
             # other mode. Only async scheduled-MTP needs one EngineCore turn
             # to materialize the complete placeholder chain.
-            if (
-                scheduled_model_executed
-                and len(batch_queue) < self.batch_queue_size
-                and not batch_queue[-1][0].done()
-            ):
+            if scheduled_model_executed and len(batch_queue) < self.batch_queue_size and not batch_queue[-1][0].done():
                 return None, True
             break
 
@@ -974,9 +939,7 @@ def _patched_step_with_batch_queue(self):
     # requests referenced by this parent batch.
     self._register_edge_cloud_draft_parent(scheduler_output, model_output)
     self._process_aborts_queue()
-    engine_core_outputs = self.scheduler.update_from_output(
-        scheduler_output, model_output
-    )
+    engine_core_outputs = self.scheduler.update_from_output(scheduler_output, model_output)
     self._advance_edge_cloud_draft(scheduler_output, model_output)
     self._clear_pending_edge_cloud_draft_for_finished_requests()
 
@@ -990,29 +953,18 @@ def _patched_step_with_batch_queue(self):
                         engine_core_outputs[client_index] = output
                     elif output.finished_requests:
                         existing_finished = existing.finished_requests or set()
-                        existing.finished_requests = existing_finished.union(
-                            output.finished_requests
-                        )
+                        existing.finished_requests = existing_finished.union(output.finished_requests)
             else:
                 engine_core_outputs = empty_outputs
 
     if deferred_scheduler_output is not None:
         deferred_output, deferred_exec_future = deferred_scheduler_output
-        if (
-            self.use_spec_decode
-            and not self._uses_scheduled_edge_cloud_draft()
-        ):
+        if self.use_spec_decode and not self._uses_scheduled_edge_cloud_draft():
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
-                self.scheduler.update_draft_token_ids_in_output(
-                    draft_token_ids, deferred_output
-                )
-        grammar_output = self.scheduler.get_grammar_bitmask(
-            deferred_output
-        )
-        deferred_future = self.model_executor.sample_tokens(
-            grammar_output, non_block=True
-        )
+                self.scheduler.update_draft_token_ids_in_output(draft_token_ids, deferred_output)
+        grammar_output = self.scheduler.get_grammar_bitmask(deferred_output)
+        deferred_future = self.model_executor.sample_tokens(grammar_output, non_block=True)
         batch_queue.appendleft(
             (
                 deferred_future,
@@ -1034,9 +986,7 @@ def _patched_engine_core_shutdown(self):
         try:
             ch.shutdown()
         except Exception:
-            logger.exception(
-                "Error while shutting down PD-separation ZMQ channel"
-            )
+            logger.exception("Error while shutting down PD-separation ZMQ channel")
         self._pp_pd_channel = None
 
     _ORIG_ENGINE_CORE_SHUTDOWN(self)
@@ -1045,14 +995,11 @@ def _patched_engine_core_shutdown(self):
 # =======================================================================#
 # EngineCoreProc.run_engine_core — keep child-process patch import.       #
 # =======================================================================#
-def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0,
-                             **kwargs):
+def _patched_run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Delegate to upstream while keeping this patch module as the process
     target so spawn-based child processes import and install the patches.
     """
-    return _ORIG_RUN_ENGINE_CORE(
-        *args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs
-    )
+    return _ORIG_RUN_ENGINE_CORE(*args, dp_rank=dp_rank, local_dp_rank=local_dp_rank, **kwargs)
 
 
 _patched_run_engine_core.__module__ = __name__
@@ -1077,16 +1024,15 @@ def _patched_process_engine_step(self) -> bool:
     for output in outputs.items() if outputs else ():
         self.output_queue.put_nowait(output)
     self.post_step(model_executed)
-    async_mtp_in_flight = bool(self.batch_queue) and getattr(
-        self.scheduler,
-        "_uses_async_scheduled_mtp_placeholders",
-        lambda: False,
-    )()
-    if (
-        not model_executed
-        and self.scheduler.has_unfinished_requests()
-        and not async_mtp_in_flight
-    ):
+    async_mtp_in_flight = (
+        bool(self.batch_queue)
+        and getattr(
+            self.scheduler,
+            "_uses_async_scheduled_mtp_placeholders",
+            lambda: False,
+        )()
+    )
+    if not model_executed and self.scheduler.has_unfinished_requests() and not async_mtp_in_flight:
         _time.sleep(0.001)
     return model_executed
 
@@ -1150,9 +1096,7 @@ def install() -> None:
     EngineCore._drain_pd_channel_inbox = _drain_pd_channel_inbox
     EngineCore._publish_to_cloud = _publish_to_cloud
     EngineCore._maybe_publish_pre_out = _maybe_publish_pre_out
-    EngineCore._release_deferred_draft_pre_out = (
-        _release_deferred_draft_pre_out
-    )
+    EngineCore._release_deferred_draft_pre_out = _release_deferred_draft_pre_out
     EngineCore._close_draft_pre_out = _close_draft_pre_out
     EngineCore._ensure_pd_head_token = _ensure_pd_head_token
     EngineCore._needs_sample_tokens = _needs_sample_tokens
@@ -1165,15 +1109,9 @@ def install() -> None:
     EngineCore._clear_pending_edge_cloud_draft_for_finished_requests = (
         _clear_pending_edge_cloud_draft_for_finished_requests
     )
-    EngineCore._register_edge_cloud_draft_parent = (
-        _register_edge_cloud_draft_parent
-    )
-    EngineCore._uses_scheduled_edge_cloud_draft = (
-        _uses_scheduled_edge_cloud_draft
-    )
-    EngineCore._has_unresolved_edge_cloud_draft_parent = (
-        _has_unresolved_edge_cloud_draft_parent
-    )
+    EngineCore._register_edge_cloud_draft_parent = _register_edge_cloud_draft_parent
+    EngineCore._uses_scheduled_edge_cloud_draft = _uses_scheduled_edge_cloud_draft
+    EngineCore._has_unresolved_edge_cloud_draft_parent = _has_unresolved_edge_cloud_draft_parent
     EngineCore.step = _patched_step
     EngineCore.step_with_batch_queue = _patched_step_with_batch_queue
     EngineCore.shutdown = _patched_engine_core_shutdown
@@ -1183,9 +1121,7 @@ def install() -> None:
     EngineCoreProc._process_engine_step = _patched_process_engine_step
 
     setattr(EngineCore, _INSTALLED_FLAG, True)
-    logger.info(
-        "vllm-ascend EngineCore PD/edge-cloud patch installed."
-    )
+    logger.info("vllm-ascend EngineCore PD/edge-cloud patch installed.")
 
 
 install()

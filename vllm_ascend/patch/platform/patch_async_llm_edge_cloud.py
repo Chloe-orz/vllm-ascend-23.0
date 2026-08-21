@@ -7,10 +7,12 @@ from collections.abc import Mapping
 from typing import Any
 
 from vllm.engine.protocol import EdgeCloudPrefixResult
+from vllm.logger import logger
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.edge_cloud.edge_client import EdgePrefixClient
+from vllm_ascend.edge_cloud.observability import log_event
 
 _INSTALLED_FLAG = "_vllm_ascend_edge_prefix_client_installed"
 
@@ -23,11 +25,7 @@ async def _negotiate_edge_cloud_prefix(
 ) -> EdgeCloudPrefixResult | None:
     edge_cloud_config = get_ascend_config().edge_cloud_config
     coordination = edge_cloud_config.prefix_cache_coordination
-    if (
-        not edge_cloud_config.enabled
-        or edge_cloud_config.role != "edge"
-        or not coordination.enabled
-    ):
+    if not edge_cloud_config.enabled or edge_cloud_config.role != "edge" or not coordination.enabled:
         return None
 
     client = getattr(self, "_edge_cloud_prefix_client", None)
@@ -41,7 +39,22 @@ async def _negotiate_edge_cloud_prefix(
             connect_timeout=coordination.connect_timeout,
         )
         self._edge_cloud_prefix_client = client
-    return await client.negotiate(request_id, prompt_token_ids, openai_request)
+        log_event(
+            logger,
+            "info",
+            "edge_admission_client_created",
+            block_size=client.block_size,
+        )
+    result = await client.negotiate(request_id, prompt_token_ids, openai_request)
+    log_event(
+        logger,
+        "info",
+        "edge_admission_complete",
+        request_id=request_id,
+        instance_id=result.instance_id,
+        cloud_hit_tokens=result.hit_tokens,
+    )
+    return result
 
 
 def install() -> None:

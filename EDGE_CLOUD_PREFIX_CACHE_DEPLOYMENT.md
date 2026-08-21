@@ -314,9 +314,68 @@ Higress 需要：
 当前内部 HTTP 场景不使用鉴权或 TLS。如果后续启用 Higress 鉴权、HTTPS 或
 mTLS，需要另外扩展 Edge HTTP Client 的认证配置。
 
-## 7. 常见问题
+## 7. 协商链路日志与排障
 
-### 7.1 启动时报模型不受支持
+所有 Prefix 协商、Cloud KV 预约和 usage 回传日志都带统一标记：
+
+```text
+[EDGE_CLOUD_PREFIX]
+```
+
+每条日志还包含稳定的 `event=<事件名>`，并尽量携带 `request_id`、
+`control_request_id`、`engine_request_id`、`head_token`、命中 token 数或请求数。
+日志不会记录原始 Prompt、token ID 列表、Hash 值、tenant key 或完整 HTTP body。
+
+默认 INFO 日志可以观察一次请求的关键状态转换：
+
+| 阶段 | Edge 事件 | Cloud 事件 |
+| --- | --- | --- |
+| HTTP 协商 | `edge_negotiate_start`、`edge_probe_response` | `cloud_http_probe_reserved`、`cloud_kv_probe_reserved` |
+| 数据面接入 | `edge_scheduler_request_published` | `cloud_kv_admission_start`、`cloud_kv_admission_complete` |
+| Prefill 完成 | `edge_prefill_ack_received` | `cloud_prefill_ack_published` |
+| 请求结束 | `edge_finish_manifest_created`、`edge_usage_received` | `cloud_kv_request_finished`、`cloud_sse_usage_ready` |
+
+查看两侧全部关键日志：
+
+```bash
+grep -F '[EDGE_CLOUD_PREFIX]' edge.log
+grep -F '[EDGE_CLOUD_PREFIX]' cloud.log
+```
+
+使用控制请求 ID 串联 Edge 和 Cloud 日志（日志中的字符串值带单引号）：
+
+```bash
+grep -F "request_id='REQUEST_ID'" edge.log cloud.log
+grep -F "control_request_id='REQUEST_ID'" edge.log cloud.log
+```
+
+`edge_scheduler_request_published` 会同时打印控制请求 ID 和 Engine 内部请求 ID；
+得到 Engine ID 后，可以继续检查 KV 分配和 finish 路径：
+
+```bash
+grep -F "engine_request_id='ENGINE_REQUEST_ID'" edge.log cloud.log
+```
+
+快速检查异常处理分支：
+
+```bash
+grep -E '\[EDGE_CLOUD_PREFIX\].*event=[^ ]*(failed|missing|without|orphaned|rejected|cancelled|duplicate|malformed|unknown)' edge.log cloud.log
+```
+
+需要观察每批 SchedulerOutput、KV slots 分配和 worker ACK 时，在 Edge 和 Cloud
+启动前设置：
+
+```bash
+export VLLM_LOGGING_LEVEL=DEBUG
+```
+
+DEBUG 模式会增加每个调度批次的日志量，只建议在复现窗口内开启。排障时应先确认
+同一请求依次出现预约、接入、ACK、finish 和 usage；缺少哪一个事件，故障通常就位于
+该事件与前一个事件之间。
+
+## 8. 常见问题
+
+### 8.1 启动时报模型不受支持
 
 典型错误包含：
 
@@ -326,7 +385,7 @@ prefix cache coordination currently supports only Qwen3.5-Dense
 
 检查实际 `hf_text_config.model_type`。不要通过删除校验强行运行未适配模型。
 
-### 7.2 Edge 无法连接 Cloud 8100
+### 8.2 Edge 无法连接 Cloud 8100
 
 检查：
 
@@ -336,17 +395,17 @@ prefix cache coordination currently supports only Qwen3.5-Dense
 - Cloud 配置启用了 `prefix_cache_coordination`；
 - Cloud 进程没有因模型或 KV 初始化失败而退出。
 
-### 7.3 tenant key 错误
+### 8.3 tenant key 错误
 
 检查密钥文件存在、运行用户可读，且去除首尾空白后至少为 16 bytes。Cloud
 不应持有或配置该密钥。
 
-### 7.4 Edge/Cloud block size 不一致
+### 8.4 Edge/Cloud block size 不一致
 
 协议会 fail closed。确保两侧 vLLM/vLLM-Ascend 版本、模型配置、KV cache
 配置和 block size 一致。
 
-### 7.5 重复请求仍然不命中
+### 8.5 重复请求仍然不命中
 
 检查：
 
@@ -356,7 +415,7 @@ prefix cache coordination currently supports only Qwen3.5-Dense
 - Cloud KV Cache 没有因容量压力淘汰对应 blocks；
 - 日志中的 request ID、Cloud instance ID 和 hit tokens 对应同一次请求。
 
-### 7.6 Mamba KeyError、未绑定变量或 Prefix suffix 请求悬挂
+### 8.6 Mamba KeyError、未绑定变量或 Prefix suffix 请求悬挂
 
 确认当前 vLLM-Ascend 分支包含以下修复：
 
@@ -369,7 +428,7 @@ fix(scheduler): classify cached suffix as final prefill chunk
 这些修复分别处理 Cloud Mamba fast path metadata、`embedding_only` Edge 的
 remote-only Mamba cache，以及 Prefix 命中后最终 suffix chunk 的状态转换。
 
-## 8. 生产化前置条件
+## 9. 生产化前置条件
 
 当前版本用于功能验证。在生产化之前至少需要完成：
 

@@ -13,11 +13,10 @@ from typing import Any
 
 import aiohttp
 from vllm.engine.protocol import EdgeCloudPrefixResult
-from vllm.logger import init_logger
+from vllm.logger import logger
 
+from vllm_ascend.edge_cloud.observability import format_event, log_event
 from vllm_ascend.edge_cloud.prefix_protocol import PrefixHasher, ProbeResult
-
-logger = init_logger(__name__)
 
 
 class EdgePrefixClient:
@@ -36,6 +35,13 @@ class EdgePrefixClient:
         self._control_url = control_url
         self._connect_timeout = connect_timeout
         self._streams: dict[str, asyncio.Task[None]] = {}
+        log_event(
+            logger,
+            "info",
+            "edge_client_initialized",
+            block_size=block_size,
+            connect_timeout=connect_timeout,
+        )
 
     @property
     def block_size(self) -> int:
@@ -66,9 +72,23 @@ class EdgePrefixClient:
     ) -> EdgeCloudPrefixResult:
         """Reserve a cloud prefix and leave its accounting stream open."""
         if request_id in self._streams:
+            log_event(
+                logger,
+                "warning",
+                "edge_duplicate_request",
+                request_id=request_id,
+            )
             raise ValueError(f"duplicate edge-cloud request ID {request_id!r}")
-        headers, body = self.build_control_request(
-            request_id, prompt_token_ids, openai_request
+        headers, body = self.build_control_request(request_id, prompt_token_ids, openai_request)
+        log_event(
+            logger,
+            "info",
+            "edge_negotiate_start",
+            request_id=request_id,
+            prompt_tokens=len(prompt_token_ids),
+            full_blocks=len(prompt_token_ids) // self.block_size,
+            tail_tokens=len(prompt_token_ids) % self.block_size,
+            block_size=self.block_size,
         )
         timeout = aiohttp.ClientTimeout(total=None, connect=self._connect_timeout)
         session = aiohttp.ClientSession(timeout=timeout)
@@ -79,24 +99,46 @@ class EdgePrefixClient:
                 json=body,
             )
             if response.status != 200:
-                detail = (await response.text())[:1024]
-                raise RuntimeError(
-                    "edge-cloud prefix negotiation failed with HTTP "
-                    f"{response.status}: {detail}"
+                log_event(
+                    logger,
+                    "warning",
+                    "edge_probe_http_failed",
+                    request_id=request_id,
+                    http_status=response.status,
                 )
+                response.close()
+                raise RuntimeError(f"edge-cloud prefix negotiation failed with HTTP {response.status}")
             probe = ProbeResult.from_headers(response.headers)
             if probe.request_id != request_id:
                 raise RuntimeError("cloud returned a different request ID")
             if probe.block_size != self.block_size:
                 raise RuntimeError(
-                    "edge/cloud KV block-size mismatch: "
-                    f"edge={self.block_size}, cloud={probe.block_size}"
+                    f"edge/cloud KV block-size mismatch: edge={self.block_size}, cloud={probe.block_size}"
                 )
             if probe.hit_tokens > len(prompt_token_ids):
                 raise RuntimeError("cloud prefix hit exceeds the prompt length")
-        except BaseException:
+        except BaseException as exc:
+            logger.exception(
+                "%s",
+                format_event(
+                    "edge_probe_failed",
+                    request_id=request_id,
+                    error_type=type(exc).__name__,
+                ),
+            )
             await session.close()
             raise
+
+        log_event(
+            logger,
+            "info",
+            "edge_probe_response",
+            request_id=request_id,
+            instance_id=probe.instance_id,
+            hit_tokens=probe.hit_tokens,
+            hit_blocks=probe.hit_blocks,
+            block_size=probe.block_size,
+        )
 
         task = asyncio.create_task(
             self._drain_stream(request_id, response, session),
@@ -104,6 +146,12 @@ class EdgePrefixClient:
         )
         self._streams[request_id] = task
         task.add_done_callback(lambda _task: self._streams.pop(request_id, None))
+        log_event(
+            logger,
+            "debug",
+            "edge_usage_stream_started",
+            request_id=request_id,
+        )
         return EdgeCloudPrefixResult(
             request_id=probe.request_id,
             instance_id=probe.instance_id,
@@ -130,39 +178,59 @@ class EdgePrefixClient:
                 if chunk.get("usage") is not None:
                     usage = chunk["usage"]
             if usage is None:
-                logger.error(
-                    "Edge-cloud stream ended without usage for request %s",
-                    request_id,
+                log_event(
+                    logger,
+                    "error",
+                    "edge_usage_missing",
+                    request_id=request_id,
                 )
             else:
-                logger.info(
-                    "Edge-cloud usage received for request %s: %s",
-                    request_id,
-                    usage,
+                details = usage.get("prompt_tokens_details") or {}
+                log_event(
+                    logger,
+                    "info",
+                    "edge_usage_received",
+                    request_id=request_id,
+                    prompt_tokens=usage.get("prompt_tokens"),
+                    completion_tokens=usage.get("completion_tokens"),
+                    total_tokens=usage.get("total_tokens"),
+                    cached_tokens=details.get("cached_tokens"),
                 )
         except asyncio.CancelledError:
+            log_event(
+                logger,
+                "warning",
+                "edge_usage_stream_cancelled",
+                request_id=request_id,
+            )
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception(
-                "Failed while draining edge-cloud stream for request %s",
-                request_id,
+                "%s",
+                format_event(
+                    "edge_usage_stream_failed",
+                    request_id=request_id,
+                    error_type=type(exc).__name__,
+                ),
             )
         finally:
             response.close()
             await session.close()
+            log_event(
+                logger,
+                "debug",
+                "edge_usage_stream_closed",
+                request_id=request_id,
+            )
 
     @staticmethod
     def _validate_phase_one_request(openai_request: Mapping[str, Any]) -> None:
         if openai_request.get("n", 1) != 1:
             raise ValueError("edge-cloud prefix coordination currently requires n=1")
         if openai_request.get("use_beam_search", False):
-            raise ValueError(
-                "edge-cloud prefix coordination does not support beam search"
-            )
+            raise ValueError("edge-cloud prefix coordination does not support beam search")
         if openai_request.get("prompt_logprobs") is not None:
-            raise ValueError(
-                "edge-cloud prefix coordination does not support prompt logprobs"
-            )
+            raise ValueError("edge-cloud prefix coordination does not support prompt logprobs")
         messages = openai_request.get("messages")
         if not isinstance(messages, list):
             raise ValueError("edge-cloud coordination requires chat messages")
