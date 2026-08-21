@@ -2783,6 +2783,20 @@ class PDSeparatedScheduler(Scheduler):
             req for req in self.running
             if req.request_id in self.requests
         ]
+        # A DECODE_LAST settle is the earliest moment the recorded
+        # num_computed values become exact.  If a placeholder prebuild was
+        # deferred by the unsettled-tail gate, fire it right here instead of
+        # waiting for the next scheduling turn's _pick_by_state retry, so
+        # the gate costs no extra pipeline delay.  Must run after the
+        # running[] cleanup above: the prebuild calls super().schedule().
+        if (
+            scheduler_output.batch_type == BatchType.DECODE_LAST
+            and self._unsettled_decode_tail_count == 0
+            and self._decode_first_placeholder_parent is not None
+        ):
+            self._prepare_next_decode_first_placeholder(
+                self._decode_first_placeholder_parent
+            )
         return outputs
 
     def get_request_counts(self) -> tuple[int, int]:
