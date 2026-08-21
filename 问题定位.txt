@@ -1,0 +1,32 @@
+Bug 3：占位符 DF 抢在 settle 之前创建，记录了乐观值
+引擎的fill循环（_patched_step_with_batch_queue）每个turn 连灌多个批次进队列、但只pop处理一个输出。而prepare next_decode_first_placeholder是在DRL被pick的调度时刻就创建下一个占位 DF并记录num_computed—此时同链DL
+的输出大概率还没被settle：
+-全accept步（valid=2）：乐观值=结算值，无错一所以大多数步看起来正常；
+-拒绝步（valid=1）：乐观值比真值多1 →phantom+1烧进占位符 SO，并遗传给之后每一步。
+实证（9e77f05b）:6a126a20的S0记录1531（e654f426拒绝步的乐观值），而结算真值是1530→workerkernel基准随之+1→该请求在ad79e9d5的kernel positions=[1532,1533]，比真值[1531,1532] 超前 1→KV读写错位→通往NaN的路。
+为什么只在draft穿插时出现：穿插让batch队列更满、settle滞后更严重，prebuild抢到settle
+之前的概率大增；不穿插时链式串行，settle 总是先落地，乐观值永远不被记录。
+本轮修复（pd_separated_scheduLer.py， 已编译通过）
+
+1.为什么DRL被pick时DL还没settle?settle的时机是什么？
+Settle的时机：update_from_output（应用拒绝rewind、提交token）只在patch_engine_core.py：965被调用一即某批次的输出从
+batch_queue 里被pop 出来、future.result(）收回来的时候。关键在于这个循环的结构：
+每个EngineCore turn：
+fit循环：whiLe队列不满：schedule+executemodelnonblock）调度/下发多个批次
+batch_queue.pop()→future.result()→update_from_output()
+←只结算一个批次
+调度是一turn多个，结算是一turn
+一个一这是异步流水线的本意（用调度深度隐藏执行时延），副作用就是结算天然滞后。一条链的四个批次
+DFCX)>DL(X)→DRF(X)→DRL(X)可以在同一个fiLL循环里全部被调度下发；而DL(X)的输出要在队列里按FIFO排队等
+pop，轮到它时往往已过了一两个turn。
+而prepare_next_decode_first_pLacehoLder 的触发点在_pick_draft_Last_batch(DRL 被 pick/调度的时刻，不是 DRL
+输出被处理的时刻）。所以时间线是：
+turn T:
+fiLL循环调度DF(X)，DL(X)，DRF(X)，DRL(X)
+DRL（X)pick时prebuild 创建DF（X+1）占位符，此刻记录num_computed
+←DL(X)的输出还躺在队列里没pop,rewind 没应用，记到的是乐观值
+turnT+1:popDF（x)的输出并处理
+turn T+2:pop DL(x) 的输出→这时才 settLe(应用拒绝 rewind)
+如果DL（x）那步全accept（valid=2），rewind=0，乐观值==结算值，早记录无害；一旦有拒绝（valid=1），乐观值比真值多1，这个+1
+就被烧进了占位符。这也回答了之前的疑问：draft穿插时队列里批次更多、pop等待更长，prebuild抢到 settle
+之前的概率大增；不穿插时队列浅，settle基本都能在DRLpick前落地一所以现象只在穿插时出现。
