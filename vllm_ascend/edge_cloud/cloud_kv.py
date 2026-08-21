@@ -84,6 +84,8 @@ class CloudKVRequestManager:
             instance_id=instance_id,
             block_size=self.block_size,
             kv_cache_groups=self._kv.num_kv_cache_groups,
+            kv_blocks_total=kv_cache_config.num_blocks,
+            kv_blocks_free=self._kv.block_pool.get_num_free_blocks(),
         )
 
     def probe(self, manifest: PrefixManifest) -> ProbeResult:
@@ -144,6 +146,11 @@ class CloudKVRequestManager:
         self, scheduler_output: SchedulerOutput
     ) -> tuple[SchedulerOutput, list[tuple[str, UsageInfo]]]:
         """Replace edge block tables with cloud-owned tables and scrub tokens."""
+        # This manager runs outside vLLM's Scheduler, which normally advances
+        # the KV manager lifecycle at the beginning of every scheduling step.
+        # In particular, Mamba uses this boundary to forget blocks cached by
+        # the preceding step so they can be reused by a later request.
+        self._kv.new_step_starts()
         usage = self._finish_requests(
             scheduler_output.finished_req_ids,
             scheduler_output.edge_cloud_finished_requests or {},
@@ -198,6 +205,8 @@ class CloudKVRequestManager:
                     "cloud_kv_allocation_failed",
                     engine_request_id=request_id,
                     num_scheduled_tokens=num_scheduled,
+                    kv_blocks_total=self._kv.block_pool.num_gpu_blocks,
+                    kv_blocks_free=self._kv.block_pool.get_num_free_blocks(),
                 )
                 raise RuntimeError("cloud KV cache has insufficient free blocks")
             cached.new_block_ids[index] = new_blocks.get_block_ids(allow_none=True)
@@ -328,6 +337,8 @@ class CloudKVRequestManager:
                     control_request_id=control_request_id,
                     engine_request_id=data.req_id,
                     num_scheduled_tokens=num_scheduled,
+                    kv_blocks_total=self._kv.block_pool.num_gpu_blocks,
+                    kv_blocks_free=self._kv.block_pool.get_num_free_blocks(),
                 )
                 raise RuntimeError("cloud KV cache has insufficient free blocks")
             request.num_computed_tokens = common_hit_tokens
