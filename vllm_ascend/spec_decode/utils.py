@@ -11,7 +11,6 @@ def update_num_computed_tokens_for_batch_change(
     valid_sampled_token_count: torch.Tensor,
     prev_num_draft_tokens: torch.Tensor,
     cpu_num_computed_tokens: torch.Tensor,
-    previous_num_computed_tokens: torch.Tensor | None = None,
 ) -> None:
     """Correct num_computed_tokens for async spec decode drift.
 
@@ -22,14 +21,7 @@ def update_num_computed_tokens_for_batch_change(
     gather_indices = prev_positions.clamp(min=0)
 
     valid_counts = valid_sampled_token_count[gather_indices]
-    if previous_num_computed_tokens is None:
-        prev_computed = num_computed_tokens[gather_indices]
-    else:
-        # The explicit baseline is already arranged in current-batch request
-        # order.  It is used by DSV4 edge-cloud MTP because the shared device
-        # buffer and req_state may both be changed after the preceding target
-        # SchedulerOutput (SO) was issued.
-        prev_computed = previous_num_computed_tokens
+    prev_computed = num_computed_tokens[gather_indices]
     prev_drafts = prev_num_draft_tokens[gather_indices]
 
     participating = (prev_positions >= 0) & (prev_drafts > 0)
@@ -46,8 +38,6 @@ def correct_optimistic_seq_lens_cpu(
     prev_num_draft_tokens_np: np.ndarray,
     valid_sampled_token_count_np: np.ndarray,
     num_reqs: int,
-    previous_num_computed_tokens_np: np.ndarray | None = None,
-    current_num_computed_tokens_np: np.ndarray | None = None,
 ) -> None:
     """Correct ``optimistic_seq_lens_cpu`` for async spec decode drift.
 
@@ -79,22 +69,5 @@ def correct_optimistic_seq_lens_cpu(
     participating = (prev_positions >= 0) & (prev_drafts > 0)
     # rejected_for_participating == correction; non-participating reqs end up
     # at zero via the mask multiply.
-    if previous_num_computed_tokens_np is None:
-        correction = (prev_drafts + 1 - valid_counts) * participating
-        optimistic_seq_lens_cpu_np[:num_reqs] -= correction.astype(
-            optimistic_seq_lens_cpu_np.dtype, copy=False
-        )
-        return
-
-    assert current_num_computed_tokens_np is not None
-    # The existing seq_lens were built from the current SO value. Replace that
-    # base with the preceding target SO value plus the actual valid-token count.
-    # This works whether the current SO is optimistic or has already been
-    # settled by the PD scheduler.
-    corrected_bases = previous_num_computed_tokens_np[:num_reqs] + valid_counts
-    base_delta = (
-        corrected_bases - current_num_computed_tokens_np[:num_reqs]
-    ) * participating
-    optimistic_seq_lens_cpu_np[:num_reqs] += base_delta.astype(
-        optimistic_seq_lens_cpu_np.dtype, copy=False
-    )
+    correction = (prev_drafts + 1 - valid_counts) * participating
+    optimistic_seq_lens_cpu_np[:num_reqs] -= correction.astype(optimistic_seq_lens_cpu_np.dtype, copy=False)

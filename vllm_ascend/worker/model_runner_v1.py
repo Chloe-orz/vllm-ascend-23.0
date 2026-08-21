@@ -920,15 +920,6 @@ class NPUModelRunner(GPUModelRunner):
         # and its first DECODE_FIRST).  Rows are views into the producing
         # chain's tensor, so later global overwrites do not corrupt them.
         self._worker_draft_token_ids_by_req: dict[str, torch.Tensor] = {}
-        # DSV4 edge-cloud async MTP must correct the next VERIFY from the
-        # preceding target SchedulerOutput (SO), not from req_state or the
-        # shared device buffer: both can be changed by deferred rejection
-        # correction or an interleaved batch before the next VERIFY starts.
-        self._last_so_num_computed: dict[str, int] = {}
-        self._previous_so_num_computed: dict[str, int] = {}
-        self._previous_so_num_computed_buffer = self._make_buffer(
-            self.max_num_reqs, dtype=torch.int32
-        )
 
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -2351,8 +2342,6 @@ class NPUModelRunner(GPUModelRunner):
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
 
-        self._rotate_dsv4_so_num_computed(scheduler_output)
-
         self._cloud_current_cpu_state_authoritative = False
         if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
             for req_id in scheduler_output.finished_req_ids:
@@ -2439,97 +2428,6 @@ class NPUModelRunner(GPUModelRunner):
             getattr(scheduler_output, "cloud_draft_invalidate_task_ids", None)
         )
         return result
-
-    def _uses_dsv4_edge_cloud_so_baseline(self) -> bool:
-        """Whether target correction must use the request-keyed SO baseline."""
-        speculative_config = self.speculative_config
-        return bool(
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "edge"
-            and self._is_deepseek_v4
-            and self.use_async_spec_decode
-            and speculative_config is not None
-            and getattr(speculative_config, "method", None) == "mtp"
-        )
-
-    def _rotate_dsv4_so_num_computed(
-        self, scheduler_output: "SchedulerOutput"
-    ) -> None:
-        """Rotate DSV4 target SO positions without reading mutable req_state."""
-        if not self._uses_dsv4_edge_cloud_so_baseline():
-            return
-
-        for req_id in scheduler_output.finished_req_ids:
-            self._last_so_num_computed.pop(req_id, None)
-            self._previous_so_num_computed.pop(req_id, None)
-
-        if scheduler_output.batch_type not in (
-            BatchType.PREFILL_FIRST,
-            BatchType.DECODE_FIRST,
-        ):
-            return
-
-        current_so_num_computed = {
-            req.req_id: int(req.num_computed_tokens)
-            for req in scheduler_output.scheduled_new_reqs
-        }
-        current_so_num_computed.update(
-            {
-                req_id: int(num_computed_tokens)
-                for req_id, num_computed_tokens in zip(
-                    scheduler_output.scheduled_cached_reqs.req_ids,
-                    scheduler_output.scheduled_cached_reqs.num_computed_tokens,
-                )
-            }
-        )
-        self._previous_so_num_computed = {
-            req_id: self._last_so_num_computed[req_id]
-            for req_id in current_so_num_computed
-            if req_id in self._last_so_num_computed
-        }
-        self._last_so_num_computed.update(current_so_num_computed)
-
-    def _prepare_dsv4_previous_so_num_computed(
-        self,
-        scheduler_output: "SchedulerOutput",
-        num_reqs: int,
-    ) -> torch.Tensor | None:
-        """Stage complete request-keyed SO baselines for target correction."""
-        if (
-            not self._uses_dsv4_edge_cloud_so_baseline()
-            or scheduler_output.batch_type
-            not in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST)
-        ):
-            return None
-
-        participating_req_ids: list[str] = []
-        for cur_index, req_id in enumerate(self.input_batch.req_ids):
-            if cur_index >= num_reqs:
-                break
-            prev_index = int(self.prev_positions.np[cur_index])
-            if (
-                prev_index >= 0
-                and self.prev_num_draft_tokens.np[prev_index] > 0
-            ):
-                participating_req_ids.append(req_id)
-        if not participating_req_ids or any(
-            req_id not in self._previous_so_num_computed
-            for req_id in participating_req_ids
-        ):
-            return None
-
-        baseline = self._previous_so_num_computed_buffer
-        baseline.np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-        )
-        for req_index, req_id in enumerate(self.input_batch.req_ids):
-            if req_index >= num_reqs:
-                break
-            previous_value = self._previous_so_num_computed.get(req_id)
-            if previous_value is not None:
-                baseline.np[req_index] = previous_value
-        baseline.copy_to_gpu(num_reqs)
-        return baseline.gpu[:num_reqs]
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -2737,11 +2635,6 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self.prev_positions.copy_to_gpu(num_reqs)
             prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
-        dsv4_previous_so_num_computed_gpu = (
-            self._prepare_dsv4_previous_so_num_computed(
-                scheduler_output, num_reqs
-            )
-        )
 
         # for pcp, prefill mtp should use origin scheduleroutput ,
         if self.speculative_config and self.use_cp:
@@ -3030,9 +2923,6 @@ class NPUModelRunner(GPUModelRunner):
                     valid_sampled_token_count_gpu,
                     self.prev_num_draft_tokens.gpu,
                     computed_token_tensor_cpu,
-                    previous_num_computed_tokens=(
-                        dsv4_previous_so_num_computed_gpu
-                    ),
                 )
                 # Edge-cloud cloud side: rows with no previous-batch mapping
                 # (prev_positions == -1) are skipped by the correction
@@ -3152,10 +3042,7 @@ class NPUModelRunner(GPUModelRunner):
             and not self._cloud_current_cpu_state_authoritative
         )
         if self._needs_seq_lens_cpu_sync and async_spec_decode_active:
-            self._correct_optimistic_seq_lens_cpu(
-                num_reqs,
-                dsv4_previous_so_num_computed_gpu,
-            )
+            self._correct_optimistic_seq_lens_cpu(num_reqs)
 
         # For non-PCP, compute slot_mapping on GPU. PCP slot_mapping was
         # already computed on GPU before PCP split the positions.
@@ -3497,11 +3384,7 @@ class NPUModelRunner(GPUModelRunner):
             logits_indices=logits_indices,
         )
 
-    def _correct_optimistic_seq_lens_cpu(
-        self,
-        num_reqs: int,
-        previous_so_num_computed_gpu: torch.Tensor | None = None,
-    ) -> None:
+    def _correct_optimistic_seq_lens_cpu(self, num_reqs: int) -> None:
         """Correct ``optimistic_seq_lens_cpu`` for async spec-decode drift.
 
         The valid-sampled-token counts that drive the correction are copied
@@ -3527,16 +3410,6 @@ class NPUModelRunner(GPUModelRunner):
             self.prev_num_draft_tokens.np,
             self.valid_sampled_token_count_cpu.numpy(),
             num_reqs,
-            previous_num_computed_tokens_np=(
-                self._previous_so_num_computed_buffer.np
-                if previous_so_num_computed_gpu is not None
-                else None
-            ),
-            current_num_computed_tokens_np=(
-                self.input_batch.num_computed_tokens_cpu
-                if previous_so_num_computed_gpu is not None
-                else None
-            ),
         )
 
     def _copy_valid_sampled_token_count(
