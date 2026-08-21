@@ -438,10 +438,29 @@ class PassiveScheduler:
                 num_blocks = getattr(
                     getattr(self._me_vllm_config, "cache_config", None),
                     "num_gpu_blocks", None)
-            assert num_blocks, (
-                "multi-edge ingress before KV sizing: no num_blocks on "
-                "kv_cache_config or cache_config"
-            )
+            if not num_blocks:
+                # The passive cloud engine never runs KV sizing itself — its
+                # workers are physically initialized by the rank0 edge's
+                # world-scoped broadcast, and neither local fallback above is
+                # ever populated.  The cloud's real pool size is published to
+                # the world TCPStore by the rank0 edge's sizing (its
+                # clamp-to-min over the world specs IS the cloud's value);
+                # read it from there.  Timing is safe: E0 publishes during
+                # its own engine startup, which necessarily precedes any
+                # segment ingress here.
+                pc = getattr(self._me_vllm_config, "parallel_config", None)
+                cloud_id = getattr(pc, "cloud_id", None) or 0
+                import torch.distributed as _dist
+                from datetime import timedelta as _td
+                _w = self._me_registry.world
+                _store = _dist.TCPStore(
+                    host_name=_w.master_addr, port=_w.master_port,
+                    is_master=False, timeout=_td(seconds=300))
+                num_blocks = int(
+                    _store.get(f"cloud_{cloud_id}_num_blocks"))
+                logger.info(
+                    "[ME] resolved cloud %d num_blocks=%d from world store",
+                    cloud_id, num_blocks)
             self._me_partition = self._me_registry.resolve_kv_partition(
                 num_blocks)
         return self._me_partition
