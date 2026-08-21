@@ -1051,7 +1051,46 @@ class PDSeparatedScheduler(Scheduler):
                 return self._pick_prefill_last_batch(ready_only=ready_only)
             return self._make_empty_batch()
 
-        # HIGH: PDraft尾 > DDraft尾 > PDraft首 > DDraft首 > D尾 > D首 > P尾 > Empty
+        if state == PrefillState.LOW:
+            # LOW: PDraft尾 > DDraft尾 > PDraft首 > DDraft首 > P首
+            #      > Decode尾 > Decode首 > P尾 > Empty
+            # One prefill is already in flight; the second PF fills the
+            # gaps behind draft work (2P pipelining) without delaying
+            # decode tails.  Drafts can never starve the PF here: no new
+            # prefill chain can form before the PF (PL ranks below it),
+            # and the decode lane's next round starts at DL/DF, which
+            # also rank below it.
+            if has_pdrl:
+                return self._pick_draft_last_batch(prefill_phase=True)
+            if has_ddrl:
+                return self._pick_draft_last_batch(prefill_phase=False)
+            if self._can_schedule_prefill_draft_first():
+                return self._pick_draft_first_batch(prefill_phase=True)
+            if self._can_schedule_decode_draft_first():
+                return self._pick_draft_first_batch(prefill_phase=False)
+            if self._can_schedule_prefill_first():
+                so = self._pick_prefill_first_batch()
+                if so.total_num_scheduled_tokens > 0:
+                    return so
+                logger.warning(
+                    "PREFILL_FIRST returned empty batch (total_num_scheduled_tokens=0). "
+                    "This usually means KV cache blocks are exhausted by running decode "
+                    "requests. Prefill work will be deferred until resources are freed."
+                )
+                self.finished_req_ids.update(so.finished_req_ids)
+            # Same overtake guard as the IDLE branch above: a queued
+            # placeholder DECODE_FIRST's self-posted tail must wait for
+            # its head.
+            if has_dl and not self.decodes_first_ready:
+                return self._pick_decode_last_batch()
+            if self._can_schedule_decode_first():
+                return self._pick_decode_first_batch()
+            if has_pl:
+                return self._pick_prefill_last_batch(ready_only=ready_only)
+            return self._make_empty_batch()
+
+        # HIGH (prefill_inflight >= limit): PDraft尾 > DDraft尾 > PDraft首
+        # > DDraft首 > D尾 > D首 > P尾 > Empty — no P首 slot left.
         if has_pdrl:
             return self._pick_draft_last_batch(prefill_phase=True)
         if has_ddrl:
