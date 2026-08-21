@@ -18,6 +18,32 @@ from vllm.logger import logger
 from vllm_ascend.edge_cloud.observability import format_event, log_event
 from vllm_ascend.edge_cloud.prefix_protocol import PrefixHasher, ProbeResult
 
+_UNSUPPORTED_CONTENT_TYPES = frozenset(
+    {
+        "input_image",
+        "image_url",
+        "image_pil",
+        "image_embeds",
+        "audio_url",
+        "input_audio",
+        "audio_embeds",
+        "video_url",
+        "prompt_embeds",
+    }
+)
+_UNSUPPORTED_CONTENT_FIELDS = frozenset(
+    {
+        "image_url",
+        "image_pil",
+        "image_embeds",
+        "audio_url",
+        "input_audio",
+        "audio_embeds",
+        "video_url",
+        "prompt_embeds",
+    }
+)
+
 
 class EdgePrefixClient:
     """Open and drain one internal OpenAI stream per external request."""
@@ -55,7 +81,17 @@ class EdgePrefixClient:
         openai_request: Mapping[str, Any],
     ) -> tuple[dict[str, str], dict[str, Any]]:
         """Scrub the prompt and build an OpenAI-compatible request."""
-        self._validate_phase_one_request(openai_request)
+        try:
+            self._validate_phase_one_request(openai_request)
+        except ValueError as exc:
+            log_event(
+                logger,
+                "warning",
+                "edge_request_rejected",
+                request_id=request_id,
+                reason=str(exc),
+            )
+            raise
         manifest = self._hasher.build_manifest(request_id, prompt_token_ids)
         body = dict(openai_request)
         body["messages"] = manifest.to_messages()
@@ -234,3 +270,26 @@ class EdgePrefixClient:
         messages = openai_request.get("messages")
         if not isinstance(messages, list):
             raise ValueError("edge-cloud coordination requires chat messages")
+        if EdgePrefixClient._contains_unsupported_content(messages):
+            raise ValueError(
+                "edge-cloud prefix coordination supports text-only requests; media and prompt embeds are not supported"
+            )
+
+    @staticmethod
+    def _contains_unsupported_content(messages: Sequence[Any]) -> bool:
+        for message in messages:
+            if not isinstance(message, Mapping):
+                continue
+            if message.get("audio") is not None:
+                return True
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, Mapping):
+                    continue
+                if part.get("type") in _UNSUPPORTED_CONTENT_TYPES:
+                    return True
+                if _UNSUPPORTED_CONTENT_FIELDS.intersection(part):
+                    return True
+        return False

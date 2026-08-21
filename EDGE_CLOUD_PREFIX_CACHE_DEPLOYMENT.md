@@ -9,7 +9,8 @@ Cloud HTTP 控制服务；第二阶段只将该连接切换到 Higress。
 当前实现支持以下组合：
 
 - Qwen3.5-Dense 文本模型，Hugging Face `model_type` 必须为 `qwen3_5`
-  或 `qwen3_5_text`。
+  或 `qwen3_5_text`。允许加载 `Qwen3_5ForConditionalGeneration` 这类统一多模态
+  制品，但当前只允许发起纯文本请求。
 - OpenAI Chat Completions API：`/v1/chat/completions`。
 - `embedding_only` 和 `head_tail` 边云切分配置。其中本文以
   `embedding_only` 为例。
@@ -21,7 +22,8 @@ Cloud HTTP 控制服务；第二阶段只将该连接切换到 Higress。
 当前不支持：
 
 - Qwen3.5 MoE、其他模型系列或未经校验的 `model_type`。
-- Multimodal、LoRA、prompt embeds。
+- Multimodal 请求、LoRA、prompt embeds。允许使用多模态模型制品，但不能传入
+  图片、音频、视频或预计算 embedding。
 - speculative decoding，包括 MTP、EAGLE/EAGLE3 和独立 Draft Model。
 - `n > 1`、beam search 和 prompt logprobs。
 - PCP/DCP 上下文并行。
@@ -63,7 +65,7 @@ vLLM-Ascend branch: feat/edge-cloud-prefix-negotiation
 模型配置：
 
 ```bash
-jq -r '.model_type, (.text_config.model_type // empty)' MODEL_PATH/config.json
+jq -r '.architectures[], .model_type, (.text_config.model_type // empty), (.language_model_only // empty)' MODEL_PATH/config.json
 ```
 
 输出必须包含以下值之一：
@@ -76,6 +78,19 @@ qwen3_5_text
 如果模型目录名是 `Qwen3.6-27B`，但配置仍为上述 Qwen3.5 model type，可以
 继续使用；如果实际 model type 是 `qwen3_6`，当前实现会拒绝启动，不能仅通过
 修改校验列表绕过。
+
+`Qwen3_5ForConditionalGeneration` 不会因为 `language_model_only` 为 `false` 被
+启动校验拒绝。只要请求中的 `messages` 全部是文本，Prefix Cache 协商即可运行。
+
+如果希望从进程层面禁用多模态输入并跳过视觉塔，可选择在 Edge 和 Cloud
+启动命令中同时增加：
+
+```bash
+--language-model-only
+```
+
+该参数是可选的省显存与强约束手段，不是文本请求运行的前提；无需修改模型
+目录中的 `config.json`。
 
 ### 3.3 模型与 Tokenizer 一致性
 
@@ -384,6 +399,18 @@ prefix cache coordination currently supports only Qwen3.5-Dense
 ```
 
 检查实际 `hf_text_config.model_type`。不要通过删除校验强行运行未适配模型。
+
+统一多模态模型制品可直接启动，但实际多模态请求会在 Edge 发起 Cloud HTTP
+预约前被拒绝，并记录：
+
+```text
+[EDGE_CLOUD_PREFIX] event=edge_request_rejected ...
+edge-cloud prefix coordination supports text-only requests;
+media and prompt embeds are not supported
+```
+
+当前验证请只发送纯文本 `messages`。如果希望让 vLLM 自身也拒绝多模态输入，
+可在 Edge 和 Cloud 命令中同时加入 `--language-model-only`。
 
 ### 8.2 Edge 无法连接 Cloud 8100
 

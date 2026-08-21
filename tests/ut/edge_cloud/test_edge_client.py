@@ -46,6 +46,58 @@ def test_build_control_request_removes_original_prompt(client):
     assert headers["X-Edge-Cloud-Request-ID"] == "req-1"
 
 
+def test_build_control_request_accepts_structured_text_content(client):
+    _, body = client.build_control_request(
+        "req-1",
+        [1, 2, 3, 4],
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "private prompt"},
+                        {"type": "thinking", "thinking": "private reasoning"},
+                    ],
+                }
+            ]
+        },
+    )
+
+    assert "private" not in str(body)
+
+
+@pytest.mark.parametrize(
+    "content_part",
+    [
+        {
+            "type": "image_url",
+            "image_url": {"url": "data:image/png;base64,AA=="},
+        },
+        {"type": "video_url", "video_url": {"url": "https://example/video.mp4"}},
+        {"type": "audio_url", "audio_url": {"url": "https://example/audio.wav"}},
+        {"type": "input_audio", "input_audio": {"data": "AA==", "format": "wav"}},
+        {"type": "image_embeds", "image_embeds": "AA=="},
+        {"type": "audio_embeds", "audio_embeds": "AA=="},
+        {"type": "prompt_embeds", "data": "AA=="},
+    ],
+)
+def test_phase_one_rejects_media_and_prompt_embeds(client, content_part):
+    request = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "describe this"},
+                    content_part,
+                ],
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match="text-only requests"):
+        client.build_control_request("req-1", [1], request)
+
+
 @pytest.mark.parametrize(
     ("request_field", "value", "message"),
     [
@@ -54,9 +106,7 @@ def test_build_control_request_removes_original_prompt(client):
         ("prompt_logprobs", 1, "prompt logprobs"),
     ],
 )
-def test_phase_one_rejects_unsupported_request_features(
-    client, request_field, value, message
-):
+def test_phase_one_rejects_unsupported_request_features(client, request_field, value, message):
     request = {"messages": [], request_field: value}
 
     with pytest.raises(ValueError, match=message):

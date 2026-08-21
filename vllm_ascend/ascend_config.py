@@ -1024,11 +1024,6 @@ class EdgeCloudConfig:
                 "Qwen3.5-Dense (model_type='qwen3_5' or 'qwen3_5_text'), got "
                 f"model_type={model_type!r}"
             )
-        if getattr(model_config, "multimodal_config", None) is not None:
-            raise ValueError(
-                "prefix cache coordination currently supports text-only "
-                "Qwen3.5-Dense requests"
-            )
         if self._vllm_config.lora_config is not None:
             raise ValueError(
                 "prefix cache coordination does not currently support LoRA"

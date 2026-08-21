@@ -27,9 +27,7 @@ def _vllm_config(
         ),
         lora_config=lora_config,
         speculative_config=speculative_config,
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=enable_prefix_caching
-        ),
+        cache_config=SimpleNamespace(enable_prefix_caching=enable_prefix_caching),
     )
 
 
@@ -54,9 +52,7 @@ def test_accepts_qwen35_dense_edge_configuration(model_type):
     config = EdgeCloudConfig(_config(), _vllm_config(model_type=model_type))
 
     assert config.prefix_cache_coordination.enabled
-    assert config.prefix_cache_coordination.control_url == (
-        "http://cloud.example/v1/chat/completions"
-    )
+    assert config.prefix_cache_coordination.control_url == ("http://cloud.example/v1/chat/completions")
 
 
 def test_accepts_qwen35_dense_cloud_configuration_without_tenant_key():
@@ -69,11 +65,23 @@ def test_accepts_qwen35_dense_cloud_configuration_without_tenant_key():
     assert parsed.prefix_cache_coordination.instance_id == "cloud-a"
 
 
+@pytest.mark.parametrize("language_model_only", [False, True])
+def test_accepts_qwen35_conditional_generation_checkpoint(language_model_only):
+    config = EdgeCloudConfig(
+        _config(),
+        _vllm_config(
+            model_type="qwen3_5",
+            multimodal_config=SimpleNamespace(language_model_only=language_model_only),
+        ),
+    )
+
+    assert config.prefix_cache_coordination.enabled
+
+
 @pytest.mark.parametrize(
     ("vllm_overrides", "message"),
     [
         ({"model_type": "qwen3_5_moe_text"}, "Qwen3.5-Dense"),
-        ({"multimodal_config": object()}, "text-only"),
         ({"lora_config": object()}, "LoRA"),
         ({"speculative_config": object()}, "speculative decoding"),
         ({"enable_prefix_caching": False}, "enable_prefix_caching"),
