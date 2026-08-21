@@ -661,22 +661,28 @@ class NPUWorker(WorkerBase):
             )
             # Max in-flight prefill batches on the cloud = prefill_inflight_limit
             # (2 when next_prefill_prior_enable, else 1).  At most that many
-            # early-recv entries are ever useful, so the guard thread caps the
-            # cache at this size (see start_early_irecv): it posts ahead-of-time
-            # for the P-middle batches that will actually run, and skips the rest
-            # (busy_loop posts those itself).  This keeps the cache bounded (no
-            # unbounded growth / OOM) and the guard draining fast (skipped hints
-            # cost no NPU alloc), so the small hint ring never fills.
+            # early-recv entries PER EDGE are ever useful, so the guard thread
+            # caps the cache at this size per source edge (see
+            # start_early_irecv): it posts ahead-of-time for the P-middle
+            # batches that will actually run, and skips the rest (busy_loop
+            # posts those itself).  The per-edge cap is load-bearing in
+            # multi-instance mode: it is what keeps the same-channel
+            # rendezvous cycle broken for EVERY pair, not just whichever
+            # edge grabbed a global slot first.  This keeps the cache bounded
+            # (no unbounded growth / OOM) and the guard draining fast
+            # (skipped hints cost no NPU alloc), so the small hint ring never
+            # fills.
             if self._cloud_hidden_early_recv_enabled:
-                # CHER early-recv cache cap.  Empirically (see logs) the guard
-                # thread posts one entry at a time: each chunk's POST is
-                # followed by a busy_loop HIT before the next POST, so the
-                # cache never holds more than 1 entry even when
-                # next_prefill_prior_enable (2P) is on.  Capping at 1 keeps
-                # exactly one recv buffer (~80MB at 8192 tokens) resident
-                # instead of two, reducing caching-allocator fragmentation in
-                # the "64k then 4k" workload (different-sized buffers in the
-                # free list could not be reused).
+                # CHER early-recv cache cap (per edge).  Empirically (see
+                # logs) the guard thread posts one entry at a time: each
+                # chunk's POST is followed by a busy_loop HIT before the next
+                # POST, so the cache never holds more than 1 entry per edge
+                # even when next_prefill_prior_enable (2P) is on.  Capping at
+                # 1 keeps exactly one recv buffer (~80MB at 8192 tokens)
+                # resident per edge instead of two, reducing
+                # caching-allocator fragmentation in the "64k then 4k"
+                # workload (different-sized buffers in the free list could
+                # not be reused).
                 self._early_recv_max_inflight = 1
             else:
                 self._early_recv_max_inflight = 0
@@ -869,6 +875,23 @@ class NPUWorker(WorkerBase):
     # agnostic: the hidden_channel + num_tokens fully determine the recv, so
     # the same
     # primitives serve CHER (cloud, edge->cloud) and EHER (edge, cloud->edge).
+    @staticmethod
+    def _edge_bucket_of_token(ht: str) -> int | None:
+        """Multi-instance (2E1C): the source edge of a wrapped head_token
+        ("{edge_id}:{token}").  None in legacy/unwrapped mode — all such
+        tokens share a single capacity bucket, preserving 1-1 behavior."""
+        try:
+            from vllm_ascend.edge_cloud.role_registry import (
+                get_role_registry)
+            _registry = get_role_registry()
+            if _registry is not None and len(_registry.edge_ids) > 1:
+                from vllm_ascend.edge_cloud.id_adapter import (
+                    parse_token_edge_id)
+                return parse_token_edge_id(ht)
+        except Exception:
+            pass
+        return None
+
     def _post_early_irecv_locked(
         self, ht: str, channel: "HiddenChannelType", num_tokens: int,
         include_mrope: bool = True,
@@ -885,17 +908,7 @@ class NPUWorker(WorkerBase):
         # Multi-instance (2E1C): the wrapped head_token carries the source
         # edge id ("{edge_id}:{token}") — post the irecv on that pair's
         # group.  Legacy mode: unwrapped token, no scope (default PP group).
-        _pair_edge_id = None
-        try:
-            from vllm_ascend.edge_cloud.role_registry import (
-                get_role_registry)
-            _registry = get_role_registry()
-            if _registry is not None and len(_registry.edge_ids) > 1:
-                from vllm_ascend.edge_cloud.id_adapter import (
-                    parse_token_edge_id)
-                _pair_edge_id = parse_token_edge_id(ht)
-        except Exception:
-            _pair_edge_id = None
+        _pair_edge_id = self._edge_bucket_of_token(ht)
         with self._pair_scope(_pair_edge_id):
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=num_tokens,
@@ -945,16 +958,30 @@ class NPUWorker(WorkerBase):
                 return  # idempotent: another thread already posted
             if ht in self._early_recv_consumed:
                 return  # busy_loop already consumed (posted its own); skip
-            # Cap the cache at prefill_inflight_limit: only that many P-middle
-            # batches are in flight on the cloud at once, so only that many
-            # early-recv entries are ever useful.  Extra hints (e.g. far-ahead
-            # chunks whose P-middle won't run until current ones drain) are
-            # skipped here -- busy_loop posts them via get_or_post_early_recv
-            # when they actually run.  This bounds cache memory (no OOM) and
-            # keeps the guard draining fast (skip costs no NPU alloc), so the
-            # small hint ring never fills and hints are never dropped.
+            # Cap the cache PER EDGE (multi-instance): only
+            # prefill_inflight_limit P-middle batches are in flight per edge
+            # at once, so only that many early-recv entries per edge are ever
+            # useful.  The per-edge cap is what actually breaks the 2E1C
+            # same-channel rendezvous deadlock: the cloud's busy_loop can be
+            # blocked on a c2e result isend to edge X while edge X's next
+            # prefill isend arrives — the early irecv posted by the guard is
+            # the ONLY thing that lets edge X proceed to its PL and recv the
+            # result.  With a single GLOBAL slot, edge Y's cached entry
+            # crowds out edge X's next prefill (its hint is skipped here and
+            # never re-queued; busy_loop cannot post it while blocked), and
+            # the classic 2P cross-direction cycle re-forms under dual-edge
+            # concurrency (single-edge load never trips it).  Per-edge slots
+            # restore the 1-1 cycle-breaking property for every pair; extra
+            # hints within the same edge are still skipped (busy_loop posts
+            # those via get_or_post_early_recv when they run), keeping the
+            # cache bounded and the guard draining fast.
             _max = getattr(self, "_early_recv_max_inflight", 2)
-            if len(self._early_recv_handles) >= _max:
+            _bucket = self._edge_bucket_of_token(ht)
+            _same_bucket = sum(
+                1 for key in self._early_recv_handles
+                if self._edge_bucket_of_token(key) == _bucket
+            )
+            if _same_bucket >= _max:
                 return
             try:
                 entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
