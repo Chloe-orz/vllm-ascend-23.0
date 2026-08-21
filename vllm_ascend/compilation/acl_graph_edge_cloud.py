@@ -138,3 +138,31 @@ class EdgeCloudACLGraphWrapper(ACLGraphWrapper):
         # 不在退出时同步主 stream，避免 replay 后 host-block 破坏 CPU-NPU 掩盖。
         with graph_params_scope_no_sync(self.graph_params, self.draft_graph_params):
             return super().__call__(*args, **kwargs)
+
+    @staticmethod
+    def _params_have_attn_entries(params: GraphParams | None) -> bool:
+        """GraphParams 中是否存在任何 attention 图参数条目。
+
+        graph_params 为 None 时返回 True（信息不足，保守处理）。
+        """
+        if params is None:
+            return True
+        return any(params.attn_params.get(size) for size in params.attn_params)
+
+    def need_pre_replay_sync(self) -> bool:
+        """仅当本 segment 存在 attention 图参数更新时才保留回放前整流同步。
+
+        回放前同步的作用是保证 update_attn_params 的 update_stream op /
+        event record 不与上一次 replay 并发执行。embedding_only 模式下
+        边侧 segment（head_k=tail_k=0）没有任何 attention 层，
+        graph_params.attn_params 恒为空，update 为 no-op，不存在上述并发
+        风险；此时 current_stream().synchronize() 只会把上一步尾段
+        （final norm + lm_head + 采样）尚未跑完的设备耗时吸收进本步
+        _model_forward 的墙钟时间，且阻塞 busy_loop 线程，纯属浪费。
+
+        含 attention 层的 segment（head_k/tail_k > 0、云侧 middle 段）
+        保持原有同步行为不变。
+        """
+        return self._params_have_attn_entries(self.graph_params) or self._params_have_attn_entries(
+            self.draft_graph_params
+        )
