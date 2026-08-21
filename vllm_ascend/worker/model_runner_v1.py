@@ -1272,10 +1272,6 @@ class NPUModelRunner(GPUModelRunner):
         # DSV4 MTP=1 diagnostics are intended to expose.
         self._ec_block_table_generation: int = 0
         self._ec_block_table_last_writer: dict[str, Any] | None = None
-        # DSV4 MTP=1 diagnostic ledger for the worker-side deferred
-        # speculative correction. Entries are CPU scalars only and never
-        # participate in model input preparation.
-        self._ec_worker_rewind_audit: dict[str, dict[str, Any]] = {}
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -1737,20 +1733,6 @@ class NPUModelRunner(GPUModelRunner):
         task_id = scheduler_output.head_token
         assert task_id is not None
         trace = self._ec_hidden_trace_by_task.pop(task_id, None)
-        advance_suspects = (
-            trace.get("worker_advance_suspects", [])
-            if trace is not None
-            else []
-        )
-        if advance_suspects:
-            # Report only after this task has completed sampling. Printing in
-            # _update_states would delay the model input path and could hide
-            # the ordering bug this diagnostic is trying to reproduce.
-            logger.error(
-                "[EC-WORKER-ADVANCE-AUDIT] task=%s suspects=%s",
-                task_id,
-                advance_suspects,
-            )
         if not empty_rows:
             return
         if trace is None:
@@ -1790,39 +1772,6 @@ class NPUModelRunner(GPUModelRunner):
             empty_rows,
             metadata_fields,
         )
-        kernel_audit = trace.get("num_computed_kernel")
-        if kernel_audit is not None:
-            # These tensors were cloned on device around the correction
-            # kernel.  Defer every D2H read until the sampler has already
-            # reported an invalid row, so the probe cannot serialize the
-            # healthy input-preparation path or hide the race under test.
-            kernel_values = {
-                name: value.cpu().tolist()
-                for name, value in kernel_audit.items()
-                if isinstance(value, torch.Tensor)
-            }
-            logger.error(
-                "[EC-NCT-KERNEL] task=%s req_ids=%s so_cpu=%s "
-                "prev_positions=%s prev_drafts=%s participating=%s "
-                "valid_counts=%s prev_computed=%s so_npu=%s "
-                "corrected=%s kernel_output=%s req_indices=%s "
-                "query_pos=%s positions=%s seq_lens=%s",
-                task_id,
-                kernel_audit["req_ids"],
-                kernel_audit["so_cpu"],
-                kernel_values["prev_positions"],
-                kernel_values["prev_drafts"],
-                kernel_values["participating"],
-                kernel_values["valid_counts"],
-                kernel_values["prev_computed"],
-                kernel_values["so_npu"],
-                kernel_values["corrected"],
-                kernel_values["kernel_output"],
-                kernel_values["req_indices"],
-                kernel_values["query_pos"],
-                kernel_values["positions"],
-                kernel_values["seq_lens"],
-            )
         block_table_trace = trace.get("fast_path_block_table")
         if block_table_trace is not None:
             first = block_table_trace.get("first") or {}
@@ -2700,74 +2649,6 @@ class NPUModelRunner(GPUModelRunner):
         # This can be removed after the upstream fix is merged.
         req_data = scheduler_output.scheduled_cached_reqs
 
-        trace_worker_rewind = bool(
-            self._edge_cloud_enabled
-            and self.edge_cloud_cfg.role == "edge"
-            and self._is_deepseek_v4
-            and self.speculative_config is not None
-            and self.speculative_config.method == "mtp"
-            and self.num_spec_tokens == 1
-        )
-        incoming_so_num_computed: dict[str, int] = {}
-        if trace_worker_rewind:
-            incoming_so_num_computed = {
-                req_id: int(num_computed)
-                for req_id, num_computed in zip(
-                    req_data.req_ids, req_data.num_computed_tokens
-                )
-            }
-            for req_id in scheduler_output.finished_req_ids:
-                self._ec_worker_rewind_audit.pop(req_id, None)
-
-            # For MTP=1 a request can advance by at most two valid tokens in
-            # one target VERIFY. An observed +3 means the previous worker
-            # baseline was one token below the scheduler's settled state.
-            advance_suspects: list[dict[str, Any]] = []
-            if scheduler_output.batch_type == BatchType.DECODE_FIRST:
-                for req_id, so_value in incoming_so_num_computed.items():
-                    previous = self._ec_worker_rewind_audit.pop(req_id, None)
-                    if previous is None:
-                        continue
-                    advance = so_value - previous["worker_after"]
-                    if advance > self.num_spec_tokens + 1:
-                        advance_suspects.append({
-                            "req": req_id,
-                            "previous_so": previous["so_value"],
-                            "worker_before_rewind": previous[
-                                "worker_before"
-                            ],
-                            "worker_after_rewind": previous["worker_after"],
-                            "cpu_before_rewind": previous["cpu_before"],
-                            "cpu_after_rewind": previous["cpu_after"],
-                            "rewind": previous["rewind"],
-                            "derived_valid": previous["derived_valid"],
-                            "incoming_so": so_value,
-                            "advance": advance,
-                            "previous_head_token": previous["head_token"],
-                        })
-            if advance_suspects and scheduler_output.head_token is not None:
-                task_id = scheduler_output.head_token
-                if (
-                    task_id not in self._ec_hidden_trace_by_task
-                    and len(self._ec_hidden_trace_by_task)
-                    >= self._ec_hidden_trace_cache_max
-                ):
-                    oldest_task = next(iter(self._ec_hidden_trace_by_task))
-                    self._ec_hidden_trace_by_task.pop(oldest_task, None)
-                trace = self._ec_hidden_trace_by_task.setdefault(
-                    task_id,
-                    {
-                        "req_ids": tuple(
-                            scheduler_output.num_scheduled_tokens.keys()
-                        ),
-                        "num_scheduled_tokens": dict(
-                            scheduler_output.num_scheduled_tokens
-                        ),
-                        "stages": {},
-                    },
-                )
-                trace["worker_advance_suspects"] = advance_suspects
-
         self._cloud_current_cpu_state_authoritative = False
         if self._edge_cloud_enabled and self.edge_cloud_cfg.role == "cloud":
             for req_id in scheduler_output.finished_req_ids:
@@ -2821,61 +2702,6 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         result = super()._update_states(scheduler_output)
-
-        if trace_worker_rewind and result is not None:
-            deferred_correction = result
-            correction_head_token = scheduler_output.head_token
-            correction_so_values = incoming_so_num_computed
-
-            def trace_deferred_correction() -> None:
-                worker_before = {
-                    req_id: int(req_state.num_computed_tokens)
-                    for req_id in correction_so_values
-                    if (req_state := self.requests.get(req_id)) is not None
-                }
-                cpu_before = {
-                    req_id: int(
-                        self.input_batch.num_computed_tokens_cpu[req_index]
-                    )
-                    for req_id in correction_so_values
-                    if (req_index := self.input_batch.req_id_to_index.get(
-                        req_id
-                    )) is not None
-                }
-
-                deferred_correction()
-
-                for req_id, so_value in correction_so_values.items():
-                    req_state = self.requests.get(req_id)
-                    req_index = self.input_batch.req_id_to_index.get(req_id)
-                    if req_state is None or req_index is None:
-                        continue
-                    before = worker_before.get(req_id)
-                    if before is None:
-                        continue
-                    worker_after = int(req_state.num_computed_tokens)
-                    cpu_after = int(
-                        self.input_batch.num_computed_tokens_cpu[req_index]
-                    )
-                    rewind = before - worker_after
-                    if rewind <= 0:
-                        continue
-                    # Upstream correction is:
-                    # rewind = prev_draft + 1 - valid. For MTP=1 this gives
-                    # valid = 2 - rewind without another device/host read.
-                    derived_valid = self.num_spec_tokens + 1 - rewind
-                    self._ec_worker_rewind_audit[req_id] = {
-                        "so_value": so_value,
-                        "worker_before": before,
-                        "worker_after": worker_after,
-                        "cpu_before": cpu_before.get(req_id),
-                        "cpu_after": cpu_after,
-                        "rewind": rewind,
-                        "derived_valid": derived_valid,
-                        "head_token": correction_head_token,
-                    }
-
-            result = trace_deferred_correction
 
         has_previous_cloud_spec = any(
             num_draft > 0 and req_id in self.input_batch.req_id_to_index
@@ -3492,7 +3318,6 @@ class NPUModelRunner(GPUModelRunner):
         # available" instead of raising UnboundLocalError.
         valid_sampled_token_count_gpu = None
         computed_token_tensor_cpu = None
-        dsv4_mtp_kernel_audit: dict[str, Any] | None = None
         if not _skip_tail_sync:
             valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
             if (
@@ -3523,38 +3348,14 @@ class NPUModelRunner(GPUModelRunner):
                 if prev_positions_gpu is None:
                     self.prev_positions.copy_to_gpu(num_reqs)
                 self.prev_num_draft_tokens.copy_to_gpu()
-                capture_dsv4_mtp_kernel = bool(
-                    self._should_trace_dsv4_mtp_block_table()
-                    and scheduler_output.batch_type == BatchType.DECODE_FIRST
-                    and scheduler_output.head_token is not None
+                update_num_computed_tokens_for_batch_change(
+                    self.num_computed_tokens,
+                    self.num_accepted_tokens.gpu[:num_reqs],
+                    self.prev_positions.gpu[:num_reqs],
+                    valid_sampled_token_count_gpu,
+                    self.prev_num_draft_tokens.gpu,
+                    computed_token_tensor_cpu,
                 )
-                audit_operands = (
-                    update_num_computed_tokens_for_batch_change(
-                        self.num_computed_tokens,
-                        self.num_accepted_tokens.gpu[:num_reqs],
-                        self.prev_positions.gpu[:num_reqs],
-                        valid_sampled_token_count_gpu,
-                        self.prev_num_draft_tokens.gpu,
-                        computed_token_tensor_cpu,
-                        capture_intermediates=capture_dsv4_mtp_kernel,
-                    )
-                )
-                if audit_operands is not None:
-                    dsv4_mtp_kernel_audit = {
-                        "req_ids": tuple(self.input_batch.req_ids[:num_reqs]),
-                        "so_cpu": tuple(
-                            int(value)
-                            for value in self.input_batch.num_computed_tokens_cpu[
-                                :num_reqs
-                            ]
-                        ),
-                        **audit_operands,
-                        "kernel_output": (
-                            self.num_computed_tokens[:num_reqs]
-                            .detach()
-                            .clone()
-                        ),
-                    }
                 # Edge-cloud cloud side: rows with no previous-batch mapping
                 # (prev_positions == -1) are skipped by the correction
                 # kernel.  A request that briefly left the cloud batch (e.g.
@@ -3659,40 +3460,6 @@ class NPUModelRunner(GPUModelRunner):
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )
         self.seq_lens[num_reqs:].fill_(0)
-
-        if dsv4_mtp_kernel_audit is not None:
-            dsv4_mtp_kernel_audit.update({
-                "req_indices": req_indices_gpu.detach().clone(),
-                "query_pos": self.query_pos.gpu[
-                    :total_num_scheduled_tokens
-                ].detach().clone(),
-                "positions": self.positions[
-                    :total_num_scheduled_tokens
-                ].detach().clone(),
-                "seq_lens": self.seq_lens[:num_reqs].detach().clone(),
-            })
-            task_id = scheduler_output.head_token
-            assert task_id is not None
-            if (
-                task_id not in self._ec_hidden_trace_by_task
-                and len(self._ec_hidden_trace_by_task)
-                >= self._ec_hidden_trace_cache_max
-            ):
-                oldest_task = next(iter(self._ec_hidden_trace_by_task))
-                self._ec_hidden_trace_by_task.pop(oldest_task, None)
-            trace = self._ec_hidden_trace_by_task.setdefault(
-                task_id,
-                {
-                    "req_ids": tuple(
-                        scheduler_output.num_scheduled_tokens.keys()
-                    ),
-                    "num_scheduled_tokens": dict(
-                        scheduler_output.num_scheduled_tokens
-                    ),
-                    "stages": {},
-                },
-            )
-            trace["num_computed_kernel"] = dsv4_mtp_kernel_audit
 
         # In async spec decode mode, optimistic_seq_lens_cpu assumes all
         # tokens from the previous speculative step were accepted. Correct it
@@ -5662,6 +5429,10 @@ class NPUModelRunner(GPUModelRunner):
             and self._cloud_prepare_cache.get("req_ids_key")
             == tuple(scheduler_output.num_scheduled_tokens)
         )
+        # Diagnostic fence for the DSV4 MTP=1 interleaved VERIFY LAST path.
+        # It is created only when the fast path actually restores persistent
+        # graph-view buffers, then consumed immediately before model forward.
+        dsv4_mtp_restore_event: torch.npu.Event | None = None
         if _fast_path:
             # [ascend fix] The edge tail fast path runs OUTSIDE the
             # synchronize_input_prep/prepare_inputs_event protection that
@@ -5824,6 +5595,15 @@ class NPUModelRunner(GPUModelRunner):
                 self._record_block_table_writer(
                     scheduler_output, "FAST_RESTORE_ENQUEUED"
                 )
+                if self._should_trace_dsv4_mtp_decode_last(scheduler_output):
+                    # All restore copy_ operations above are asynchronous.
+                    # Record after the final restore so the diagnostic wait
+                    # below can prove whether VERIFY LAST was consuming the
+                    # persistent views before their restored contents became
+                    # visible on the device.
+                    dsv4_mtp_restore_event = (
+                        torch.npu.current_stream().record_event()
+                    )
             # Re-sync num_computed_tokens from CPU: segment_a forward or
             # async state update may have modified the GPU buffer.
             # NOTE: In async speculative decoding, segment_a has already
@@ -6352,6 +6132,17 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if self.cache_config.mamba_cache_mode == "align":
                 mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            if dsv4_mtp_restore_event is not None:
+                # Deliberately use a host-visible event wait for this A/B
+                # diagnosis. A same-stream wait_event would be a no-op and
+                # could not distinguish an ACL-graph/internal-stream race.
+                # Scope: edge DSV4 MTP, num_speculative_tokens=1, interleaved
+                # VERIFY LAST fast restore only.
+                dsv4_mtp_restore_event.synchronize()
+                logger.info_once(
+                    "[EC-BT-RESTORE-FENCE] synchronized DSV4 MTP=1 "
+                    "VERIFY LAST fast-path restore before model forward"
+                )
             self._capture_dsv4_mtp_finite_rows(
                 scheduler_output,
                 "decode_last_before_model",
