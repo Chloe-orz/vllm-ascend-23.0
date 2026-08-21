@@ -40,13 +40,16 @@ reservation、超时回收和故障恢复。
 | --- | --- | --- |
 | `8500` | Edge | 对用户提供 OpenAI Chat Completions API |
 | `29871` | Edge/master | 原有边云分布式启动与通信发现 |
+| `29872` | Edge/master | Cloud 向 Edge 上报地址的 TCPStore（`master_port + 1`） |
+| `5558` | Edge | PD PRE_OUT，Cloud 连接 Edge |
+| `5559` | Cloud | PD POST_OUT，Edge 连接 Cloud |
 | `8100` | Cloud | Prefix Cache 协商 HTTP/SSE 控制服务 |
 
 `--master-addr` 通常指向分布式 rank 0 所在的 Edge 地址。Edge 配置中的
 `control_url` 必须指向 Edge 实际可访问的 Cloud 地址，两者不一定相同。
 
-第一阶段需要允许 Edge 访问 `CLOUD_IP:8100`。该端口只应暴露在内部网络，
-不应直接向用户开放。
+第一阶段需要允许 Edge 访问 Cloud 的 `5559` 和 `8100`，并允许 Cloud 访问
+Edge 的 `29872` 和 `5558`。这些端口只应暴露在内部网络，不应直接向用户开放。
 
 ## 3. 启动前检查
 

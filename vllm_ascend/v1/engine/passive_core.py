@@ -1001,6 +1001,12 @@ class PassiveEngineCoreProc:
                 from vllm_ascend.edge_cloud.cloud_kv import CloudKVRequestManager
 
                 physical_configs = None
+                log_event(
+                    logger,
+                    "info",
+                    "cloud_kv_config_waiting",
+                    instance_id=_coordination.instance_id,
+                )
                 while not physical_configs:
                     replies = executor.collective_rpc(
                         "get_initialized_kv_cache_config",
@@ -1009,6 +1015,13 @@ class PassiveEngineCoreProc:
                     physical_configs = [config for config in replies if config]
                     if not physical_configs:
                         time.sleep(0.05)
+                log_event(
+                    logger,
+                    "info",
+                    "cloud_kv_config_ready",
+                    instance_id=_coordination.instance_id,
+                    physical_config_count=len(physical_configs),
+                )
                 scheduler_kv_config = generate_scheduler_kv_cache_config(physical_configs)
                 cloud_kv_manager = CloudKVRequestManager(
                     kv_cache_config=scheduler_kv_config,
@@ -1070,15 +1083,33 @@ class PassiveEngineCoreProc:
 
                 _cloud_ip = get_ip()
                 _dp_rank = getattr(vllm_config.parallel_config, "data_parallel_rank", 0)
+                _store_port = master_port + 1 + _dp_rank
+                log_event(
+                    logger,
+                    "info",
+                    "cloud_addr_discovery_connecting",
+                    host=master_addr,
+                    port=_store_port,
+                    dp_rank=_dp_rank,
+                    timeout_seconds=600,
+                )
                 _addr_store = dist.TCPStore(
                     host_name=master_addr,
-                    port=master_port + 1 + _dp_rank,
+                    port=_store_port,
                     world_size=2,
                     is_master=False,
                     timeout=timedelta(seconds=600),
                 )
                 _addr_store.set("cloud_ip", _cloud_ip)
                 del _addr_store
+                log_event(
+                    logger,
+                    "info",
+                    "cloud_addr_discovery_completed",
+                    cloud_addr=_cloud_ip,
+                    port=_store_port,
+                    dp_rank=_dp_rank,
+                )
 
                 # ZMQ ports are offset per DP rank on the edge side
                 # (dp_rank * 2). The cloud mirrors this offsetting.

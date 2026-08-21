@@ -144,15 +144,33 @@ def _patched_engine_core_init(self, *args, **kwargs):
 
         import torch.distributed as dist
 
+        store_port = parallel_config.master_port + 1 + dp_rank
+        log_event(
+            logger,
+            "info",
+            "edge_addr_discovery_waiting",
+            host=parallel_config.master_addr,
+            port=store_port,
+            dp_rank=dp_rank,
+            timeout_seconds=300,
+        )
         _addr_store = dist.TCPStore(
             host_name=parallel_config.master_addr,
-            port=parallel_config.master_port + 1 + dp_rank,
+            port=store_port,
             world_size=2,
             is_master=True,
             timeout=timedelta(seconds=300),
         )
         cloud_addr = _addr_store.get("cloud_ip").decode()
         del _addr_store
+        log_event(
+            logger,
+            "info",
+            "edge_addr_discovery_completed",
+            cloud_addr=cloud_addr,
+            port=store_port,
+            dp_rank=dp_rank,
+        )
 
         # Each DP rank needs its own ZMQ port pair to avoid bind
         # conflicts within the same edge process. Offset by 2 per
