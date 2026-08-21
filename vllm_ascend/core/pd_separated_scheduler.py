@@ -21,8 +21,6 @@ from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
-from vllm_ascend import envs
-
 
 class PrefillState(enum.Enum):
     """Edge-side prefill in-flight state machine.
@@ -335,22 +333,6 @@ class PDSeparatedScheduler(Scheduler):
         # True 时禁止调度 D首，严格保证 DF -> DL 交替时序。
         self._force_decode_last: bool = False
         self._force_draft_last: bool = False
-
-        # [EC debug switch] VLLM_EC_DISABLE_PD_INTERLEAVE=1: fully disable
-        # prefill/decode interleaving (incl. MTP draft chains).  While any
-        # tail is owed (PL/DL/DRL pending) the opposite kind of head may not
-        # be scheduled, and the DL/DRL delays are skipped, forcing strict
-        # head -> tail adjacency (synchronous round-trip baseline).
-        self._disable_pd_interleave: bool = (
-            envs.VLLM_EC_DISABLE_PD_INTERLEAVE
-        )
-        # Set at every PL/DL pick (a tail just produced sampled tokens),
-        # cleared at the next DF pick (which consumes prev_sampled).  While
-        # set, no PF may be scheduled: a subset sampling (e.g. PL(C)) between
-        # a token's sampling and its DF consumption would wholesale-replace
-        # prev_sampled/prev_map and destroy the pending token (H1).  This is a
-        # correctness invariant even when general PD interleaving is enabled.
-        self._sampled_pending_df: bool = False
 
         self._layer_slice_config_path: str | None = None
         self._layer_slice_config_mtime: float = 0.0
@@ -950,8 +932,6 @@ class PDSeparatedScheduler(Scheduler):
             self.decodes_first_ready
             and self.draft_remote_pending_count == 0
         ):
-            # A (placeholder) DF consumes pending prev_sampled at execution.
-            self._sampled_pending_df = False
             return self.decodes_first_ready.popleft()
 
         first_only = self._pick_decode_or_draft_first_only_or_empty()
@@ -1049,22 +1029,6 @@ class PDSeparatedScheduler(Scheduler):
         # empty batch, causing a tight-loop.  Pre-check capacity to avoid
         # the useless call.
         effective_capacity = self.max_num_running_reqs - len(self.running)
-        # Sampling in a PL/DL tail leaves device-side token rows that the next
-        # DF must consume. Do not admit another PF in this narrow window: its
-        # subset PL can replace the pending map. This is especially harmful
-        # for MTP, whose valid-token-count state is batch-position based.
-        if self._sampled_pending_df and self._has_decode_work():
-            return False
-        if self._must_serialize_prefill_with_decode() and (
-            self._force_decode_last
-            or self._force_draft_last
-            or self.decodes_last_ready
-            or self.drafts_last_ready
-            or self.decodes_first_ready
-        ):
-            # A decode/draft tail is owed: do not let a new prefill mutate
-            # shared batch state before the target/draft chain is complete.
-            return False
         return (
             self._has_prefill_work()
             and self.prefill_inflight_count < self.prefill_inflight_limit
@@ -1072,36 +1036,7 @@ class PDSeparatedScheduler(Scheduler):
             and effective_capacity > 0
         )
 
-    def _has_decode_work(self) -> bool:
-        """True when any running request is fully prefilled (decode-eligible),
-        i.e. a future DF pick can actually happen to consume pending
-        prev_sampled tokens."""
-        return any(
-            req.num_computed_tokens >= req.num_prompt_tokens
-            for req in self.running
-        )
-
-    def _must_serialize_prefill_with_decode(self) -> bool:
-        """Whether prefill may not overlap a decode/draft chain.
-
-        Scheduled edge-cloud MTP keeps request-ordered target, draft and
-        correction state across independently executed batches. A prefill
-        tail mutating the shared input batch while such a chain is active can
-        make those views disagree even if sampled-token preservation itself
-        is correct. Keep this restriction scoped to scheduled edge-cloud
-        drafts; ordinary PD deployments retain full interleaving.
-        """
-        return self._disable_pd_interleave or getattr(
-            self, "_edge_cloud_draft_retention_enabled", False
-        )
-
     def _can_schedule_decode_first(self) -> bool:
-        if self._must_serialize_prefill_with_decode() and (
-            self.prefills_last_ready or self.prefill_inflight_count > 0
-        ):
-            # A prefill tail is owed: do not let target decode observe a
-            # different shared batch state from its following draft chain.
-            return False
         return bool(
             self.running
             and self.decode_or_draft_inflight_count == 0
@@ -1113,12 +1048,6 @@ class PDSeparatedScheduler(Scheduler):
         )
 
     def _can_schedule_draft_first(self) -> bool:
-        if self._must_serialize_prefill_with_decode() and (
-            self.prefills_last_ready or self.prefill_inflight_count > 0
-        ):
-            # A prefill tail is owed: keep the stashed target context and the
-            # independently scheduled draft chain on one batch-state version.
-            return False
         if not self.drafts_first_ready:
             return False
         next_output = self.drafts_first_ready[0]
@@ -1287,10 +1216,6 @@ class PDSeparatedScheduler(Scheduler):
 
     def _can_schedule_decode_last(self) -> bool:
         """Return True if the delay since DECODE_FIRST has elapsed."""
-        if self._disable_pd_interleave:
-            # No interleave to fill the round-trip window with; dispatch the
-            # tail immediately (the worker simply waits on the c2e recv).
-            return True
         if self._decode_last_delay_start_ts is None:
             return True
         elapsed_ms = (time.monotonic() - self._decode_last_delay_start_ts) * 1000
@@ -1312,8 +1237,6 @@ class PDSeparatedScheduler(Scheduler):
 
     def _can_schedule_draft_last(self) -> bool:
         """Return True if the delay since DRAFT_FIRST has elapsed."""
-        if self._disable_pd_interleave:
-            return True
         if self._draft_last_delay_start_ts is None:
             return True
         elapsed_ms = (time.monotonic() - self._draft_last_delay_start_ts) * 1000
@@ -1609,10 +1532,6 @@ class PDSeparatedScheduler(Scheduler):
         assert so.batch_type == BatchType.PREFILL_LAST, (
             f"prefills_last_ready expects PREFILL_LAST, got {so.batch_type}"
         )
-        # This PL just sampled first tokens; they stay pending until the next
-        # DF consumes them. Block PF in that window even when general PD
-        # interleaving is enabled.
-        self._sampled_pending_df = True
         # Mark whether this PL is the request's last prefill chunk.  Mid-chunk
         # PL still has to run the drafter so that the MTP layer populates its
         # KV cache for every prompt chunk; its sampled/draft tokens are only
@@ -2438,10 +2357,6 @@ class PDSeparatedScheduler(Scheduler):
         self._validate_decode_tail_channel(so)
         self._start_decode_or_draft_first_only_window()
         self._force_decode_last = False
-        # This DL just produced sampled tokens; they stay pending until the
-        # next DF consumes them. Block PF in that window even when general PD
-        # interleaving is enabled.
-        self._sampled_pending_df = True
         self._pregenerate_draft_chain(so)
         return so
 
@@ -2510,9 +2425,6 @@ class PDSeparatedScheduler(Scheduler):
                 else:
                     scheduler_output.batch_type = BatchType.DECODE_FIRST
                     scheduler_output.head_token = uuid4().hex
-                    # This DF consumes all pending prev_sampled tokens at
-                    # execution; PF may be scheduled again.
-                    self._sampled_pending_df = False
                     scheduler_output.hidden_channel = (
                         self.hidden_channel_manager.decode_channel()
                     )
