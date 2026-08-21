@@ -226,6 +226,24 @@ class NPUWorker(WorkerBase):
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
         self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
+        # Multi-instance (2E1C) lazy send reaping: in registry mode the
+        # busy_loop must NEVER block on an outstanding send (or its reap) —
+        # a send whose peer is late to recv just stays booked (with its
+        # tensors held) until it completes, and the loop moves on.  This is
+        # what structurally prevents the cross-edge rendezvous deadlock
+        # (cloud blocked reaping a c2e result isend while the owing edge's
+        # PL recv was stuck behind a decode recv that the frozen loop
+        # couldn't serve).  Legacy 1-1 keeps the original blocking wait.
+        self._lazy_send_reap = bool(
+            getattr(self.parallel_config, "role_registry", None))
+        # channel.value -> list of (handles, tensors) pending completion.
+        self._pp_lazy_sends: dict[str, list[tuple[list[Handle], Any]]] = {}
+        # Backpressure ceiling per channel; the scheduling gates
+        # (prefill_inflight=2 etc.) keep this <=2 in practice.  Blocking
+        # only ever happens beyond this bound, and it is per-(channel,
+        # pair)-stream isolated (see parallel_state stream keying), so a
+        # block here can no longer freeze unrelated pairs' traffic.
+        self._pp_lazy_send_hard_cap = 8
 
         # [CHER/EHER] Cloud-side hidden early-receive (and its edge-side
         # mirror) cache.  The guard thread posts irecv ahead of the batch's
@@ -785,10 +803,24 @@ class NPUWorker(WorkerBase):
         return int(self.available_kv_cache_memory_bytes)
 
     def _record_pp_send_work(
-        self, handles: list[Handle], channel: HiddenChannelType | None = None
+        self, handles: list[Handle], channel: HiddenChannelType | None = None,
+        tensors: Any = None,
     ) -> None:
         if channel is None:
             self._pp_send_work = handles
+        elif self._lazy_send_reap:
+            logger.info(
+                "[PD] _record_pp_send_work(lazy): channel=%s handles=%d",
+                channel.value,
+                len(handles),
+            )
+            # Book the send together with its source tensors: without the
+            # prompt blocking reap, the tensor memory must stay referenced
+            # until the send completes (the isend sites also record_stream
+            # on the channel stream; the explicit reference is belt and
+            # suspenders for view/slice edge cases).
+            self._pp_lazy_sends.setdefault(channel.value, []).append(
+                (handles, tensors))
         else:
             logger.info(
                 "[PD] _record_pp_send_work: channel=%s handles=%d",
@@ -846,7 +878,51 @@ class NPUWorker(WorkerBase):
             return contextlib.nullcontext()
         return active_pair(edge_id, cloud_id)
 
+    def _reap_lazy_sends(self, channel_key: str | None) -> None:
+        """Non-blocking reap of booked sends (multi-instance lazy mode).
+
+        Drops entries whose handles have all completed (releasing the
+        tensor references); keeps everything else booked and returns
+        immediately — the busy_loop never waits here.  If a channel
+        exceeds the hard cap, block on the OLDEST entries only, as a
+        backpressure safety net.
+        """
+        if channel_key is None:
+            for key in list(self._pp_lazy_sends):
+                self._reap_lazy_sends(key)
+            return
+        entries = self._pp_lazy_sends.get(channel_key)
+        if not entries:
+            return
+        remaining: list[tuple[list[Handle], Any]] = []
+        n_reaped = 0
+        for handles, tensors in entries:
+            if all(h.is_completed() for h in handles):
+                n_reaped += 1  # drop: send done, release tensor refs
+            else:
+                remaining.append((handles, tensors))
+        while len(remaining) > self._pp_lazy_send_hard_cap:
+            handles, _tensors = remaining.pop(0)
+            for h in handles:
+                h.wait()
+            n_reaped += 1
+        self._pp_lazy_sends[channel_key] = remaining
+        if n_reaped or remaining:
+            logger.info(
+                "[PD] _reap_lazy_sends: channel=%s reaped=%d pending=%d",
+                channel_key, n_reaped, len(remaining),
+            )
+
     def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
+        if self._lazy_send_reap:
+            # Multi-instance (2E1C): never block the busy_loop on
+            # outstanding sends — reap what has completed, keep the rest
+            # booked.  The peer's matching recv is guaranteed to arrive:
+            # with per-(channel, direction, pair) streams and non-blocking
+            # sends on BOTH sides, no cycle can form (the 1-1 protocol
+            # order is preserved per pair).
+            self._reap_lazy_sends(channel.value if channel else None)
+            return
         if channel is None:
             for handle in self._pp_send_work:
                 handle.wait()
@@ -1225,6 +1301,7 @@ class NPUWorker(WorkerBase):
                     edge_cloud_send_tensor_dict(_gathered, channel=channel,
                     num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
                     channel=channel,
+                    tensors=_gathered,
                 )
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
@@ -1435,6 +1512,7 @@ class NPUWorker(WorkerBase):
                                                 num_tokens=scheduler_output.total_num_scheduled_tokens,
                                                 dst=_send_dst),
                     channel=channel,
+                    tensors=_gathered,
                 )
         return output
 
@@ -1525,6 +1603,7 @@ class NPUWorker(WorkerBase):
                     tensor_meta=send_tensor_meta,
                 ),
                 channel=HiddenChannelType.DECODE,
+                tensors=out_tensor_dict,
             )
             logger.info(
                 "Send intermediate tensors to edge, "
@@ -1566,6 +1645,7 @@ class NPUWorker(WorkerBase):
                     tensor_meta=send_tensor_meta,
                 ),
                 channel=HiddenChannelType.DECODE,
+                tensors=tensor_dict,
             )
             logger.info(
                 "Send intermediate tensors to cloud, "
