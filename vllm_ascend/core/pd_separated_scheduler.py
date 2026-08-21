@@ -1092,8 +1092,17 @@ class PDSeparatedScheduler(Scheduler):
                 return self._pick_prefill_last_batch(ready_only=ready_only)
             return self._make_empty_batch()
 
-        # HIGH (prefill_inflight >= limit): PDraft尾 > DDraft尾 > PDraft首
-        # > DDraft首 > D尾 > D首 > P尾 > Empty — no P首 slot left.
+        # HIGH (prefill_inflight >= limit): a data-ready P尾 goes first —
+        # executing it frees a prefill slot (its update_from_output
+        # decrements prefill_inflight_count) and lets the request start its
+        # decode/draft lifecycle; with 2P in flight, deferring a ready PL
+        # behind draft/decode work stalls the whole prefill pipeline.  The
+        # inversion is bounded: at most `prefill_inflight_limit` PLs can be
+        # queued, and PL has no dependency on any draft/decode work.
+        # Then PDraft尾 > DDraft尾 > PDraft首 > DDraft首 > D尾 > D首 > P尾
+        # > Empty — no P首 slot left.
+        if self._has_actionable_prefill_tail():
+            return self._pick_prefill_last_batch(ready_only=ready_only)
         if has_pdrl:
             return self._pick_draft_last_batch(prefill_phase=True)
         if has_ddrl:
@@ -1642,10 +1651,12 @@ class PDSeparatedScheduler(Scheduler):
         # Peek before popping: in the ready pass (ready_only=True) a PL
         # whose tail payload has not finished arriving stays queued and
         # this round yields an EMPTY batch instead of blocking the worker
-        # on recv.  PL is the lowest-priority pick in every state, so
-        # skipping here needs no caller-side handling.  The fallback pass
-        # (ready_only=False) dispatches regardless — the payload wait is
-        # covered device-side by wait_event on the pre-posted recv.
+        # on recv.  In HIGH state a data-ready PL is hoisted to the top of
+        # the branch by the caller; in every other state it is the
+        # lowest-priority pick, so skipping here needs no caller-side
+        # handling.  The fallback pass (ready_only=False) dispatches
+        # regardless — the payload wait is covered device-side by
+        # wait_event on the pre-posted recv.
         if ready_only and not self._prefill_tail_data_ready(
             self.prefills_last_ready[0]
         ):
