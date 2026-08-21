@@ -941,37 +941,40 @@ class PDSeparatedScheduler(Scheduler):
                 self._decode_first_placeholder_parent
             )
         # A placeholder DECODE_FIRST prepared when the final DRAFT_LAST was
-        # dispatched must stay immediately behind that draft tail.  Its real
-        # draft token IDs are filled from the worker-local _draft_token_ids
-        # buffer when it executes, exactly like native async spec decode.
-        # Dispatch is gated on both lanes' remote-pending counts == 0 only:
-        # the channel invariant is that no decode-phase DRAFT_FIRST may still
-        # be at the cloud when a DECODE_FIRST goes out (they use different
-        # recv primitives on the same stream), and the worker-side
-        # _draft_token_ids poisoning risk (see
-        # _prepare_next_decode_first_placeholder) additionally bars popping
-        # while a prefill-phase chain is still in flight.  Ordering against
-        # *queued* draft steps of an interleaved chain is enforced at
-        # creation time instead (see _prepare_next_decode_first_placeholder):
-        # the placeholder is only pre-built once no other draft work remains,
-        # because its creation already claims
-        # decode_or_draft_inflight/decode_head_inflight -- gating the pop on
-        # empty draft queues would deadlock against the draft picks waiting
-        # for those very counters.
+        # dispatched pops immediately: it only needs to stay immediately
+        # behind its own draft chain in dispatch order.  Its real draft
+        # token IDs are scattered from the worker-local
+        # _worker_draft_token_ids_by_req entries at _prepare_inputs time;
+        # those per-request rows are recorded when the chain's final
+        # DRAFT_LAST executes on the worker and are immune to foreign
+        # chains overwriting the global _draft_token_ids buffer.  The
+        # worker busy_loop executes batches in dispatch (FIFO) order, so
+        # popping right behind the chain guarantees the verify's scatter
+        # runs after that final DRAFT_LAST has written the fresh rows --
+        # no scheduler-side drain wait is needed for correctness.
+        #
+        # The earlier drain gate (both lanes' remote-pending == 0) dated
+        # from execution-time recv posting on the shared DECODE channel,
+        # where a DECODE_FIRST in flight with a DRAFT_FIRST could deadlock
+        # the two peers on opposite-direction recvs.  With pre-posted,
+        # seqno-keyed recvs the data plane pairs by (channel, seqno): the
+        # placeholder's seqno is stamped after its chain's reserved range,
+        # so sends and recvs pair off in order even while the chain's last
+        # DRAFT_LASTs are still in flight -- this is what removes the
+        # pre-DF bubble (decode pipeline depth 1 -> 2).
+        #
+        # Ordering against *queued* draft steps of an interleaved chain is
+        # still enforced at creation time (see
+        # _prepare_next_decode_first_placeholder): the placeholder is only
+        # pre-built once no other draft work remains, because its creation
+        # already claims decode_or_draft_inflight/decode_head_inflight.
         # Do NOT gate on decode_or_draft_inflight_count here either: it was
         # incremented by the placeholder's own creation.  A real
         # (non-placeholder) DECODE_FIRST cannot be in flight while a
         # placeholder exists: placeholder creation requires an active
         # pre-generated draft chain, while _can_schedule_decode_first()
-        # requires no decode-lane draft work at all.  Gating costs no extra
-        # round trip (the placeholder is pre-built); it only removes the
-        # unsafe overlap window.  Fall through to the normal priority picks
-        # while gated.
-        if (
-            self.decodes_first_ready
-            and self.decode_draft_remote_pending_count == 0
-            and self.prefill_draft_remote_pending_count == 0
-        ):
+        # requires no decode-lane draft work at all.
+        if self.decodes_first_ready:
             placeholder = self.decodes_first_ready.popleft()
             # The placeholder was pre-built at chain end without a comm
             # seqno (a drop in the window would have left a hole on the
@@ -1167,11 +1170,11 @@ class PDSeparatedScheduler(Scheduler):
         # dedicated PREFILL_DRAFT channel pair and must not hold back DF.
         # `not self.decodes_first_ready` restores a key invariant the shared
         # pending counter used to imply: a queued placeholder verify DF must
-        # never race a real DECODE_FIRST.  The placeholder's pop gate waits
-        # for BOTH lanes to drain, so while a prefill-phase chain holds it
-        # back the decode lane is fully quiet — without this check a real
-        # DF would slip through, double-verify the same drafts, and desync
-        # the cloud's request-keyed correction bookkeeping.
+        # never race a real DECODE_FIRST.  The placeholder now pops on the
+        # very next turn after its creation, so the queued window is a single
+        # scheduling turn at most — but without this check a real DF picked
+        # in that window would double-verify the same drafts and desync the
+        # cloud's request-keyed correction bookkeeping.
         return bool(
             self.running
             and self.decode_or_draft_inflight_count == 0
