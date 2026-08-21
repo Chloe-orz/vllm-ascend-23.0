@@ -285,6 +285,17 @@ class PDSeparatedScheduler(Scheduler):
         # DRF waits until the previous chain's tail updates land).
         self._draft_remote_pending_limit: int = max(2, self.num_spec_tokens)
         self._decode_first_placeholder_parent: SchedulerOutput | None = None
+        # Count of DECODE_LAST tails dispatched but not yet settled through
+        # update_from_output.  A DECODE_FIRST created while this is nonzero
+        # would record PRE-SETTLE (optimistic) num_computed values into its
+        # SchedulerOutput: the queue fill loop schedules several batches per
+        # EngineCore turn but processes only one output per turn, so the
+        # previous chain's DL settle routinely lags the next DF's creation.
+        # On a rejection step the optimistic value is one ahead of the
+        # settled truth and the phantom +1 propagates to every later SO
+        # (observed: worker kernel positions one ahead of the verified
+        # truth -> KV misalignment -> NaN row -> missing-correction crash).
+        self._unsettled_decode_tail_count: int = 0
 
         # ------------------------------------------------------------------ #
         # Edge-cloud deferred-draft KV retention                             #
@@ -1191,6 +1202,10 @@ class PDSeparatedScheduler(Scheduler):
             and not self.decodes_first_ready
             and not self._force_decode_last
             and not self._force_decode_draft_last
+            # A direct (non-placeholder) pick also records num_computed
+            # into the SO; it must likewise wait for the previous chain's
+            # DECODE_LAST settle or it bakes in the same optimistic phantom.
+            and self._unsettled_decode_tail_count == 0
         )
 
     def _can_schedule_prefill_draft_first(self) -> bool:
@@ -2256,6 +2271,15 @@ class PDSeparatedScheduler(Scheduler):
             # the parent above and the normal _can_schedule_decode_first()
             # path schedules the verify instead.
             return
+        if self._unsettled_decode_tail_count > 0:
+            # The parent chain's DECODE_LAST output has not been settled
+            # through update_from_output yet (the fill loop schedules several
+            # batches per EngineCore turn but processes one output per turn).
+            # Building the placeholder now would record pre-settle optimistic
+            # num_computed values; on a rejection step that bakes a phantom
+            # +1 into this and every later SO for the member requests.  Keep
+            # the parent set so a later turn retries after the settle lands.
+            return
 
         next_decode = self._pick_decode_first_batch(defer_seqno=True)
         if (
@@ -2471,6 +2495,10 @@ class PDSeparatedScheduler(Scheduler):
         # The flight was registered for the head at creation; completing it
         # with the self-posted tail copy unprotects the member requests.
         self._complete_pd_flight(tail)
+        # The dropped tail never dispatches, so no settle will ever arrive
+        # for it; release the unsettled-tail credit it held.
+        if self._unsettled_decode_tail_count > 0:
+            self._unsettled_decode_tail_count -= 1
         # The dropped head held the decode-last gate and delay timer; its
         # tail will never be picked to clear them (see the _force_draft_last
         # deadlock note below).  Placeholder creation requires all prior
@@ -2751,6 +2779,7 @@ class PDSeparatedScheduler(Scheduler):
                         batch_type=BatchType.DECODE_LAST,
                     )
                     self.decodes_last_ready.append(decode_last)
+                    self._unsettled_decode_tail_count += 1
                     # ===============================================
                 for req in list(self.waiting):
                     saved_waiting.prepend_request(req)
@@ -3024,6 +3053,8 @@ class PDSeparatedScheduler(Scheduler):
         if scheduler_output.batch_type == BatchType.DECODE_LAST:
             # decode_or_draft_inflight_count 已在 DECODE_FIRST 的 update_from_output
             # 中释放，此处不再重复减 1。
+            if self._unsettled_decode_tail_count > 0:
+                self._unsettled_decode_tail_count -= 1
             logger.info(
                 f"[PD] update_from_output DECODE_LAST done, "
                 f"decode_or_draft_inflight: {self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}",
