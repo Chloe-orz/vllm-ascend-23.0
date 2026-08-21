@@ -910,6 +910,11 @@ class NPUModelRunner(GPUModelRunner):
         # request's value and poison positions/seq_lens (the EC NaN-row
         # crash).  Keyed by request identity, this survives the churn.
         self._prev_num_computed_by_req: dict[str, int] = {}
+        # The snapshot above is rotated from this map at every
+        # _update_states; this map only ever holds SchedulerOutput-recorded
+        # num_computed values (never deferred-correction-rewound req_state
+        # values), which is what makes the correction base exact.
+        self._last_so_num_computed: dict[str, int] = {}
         # Whether the resident batch still matches the executing tail
         # SchedulerOutput BEFORE _update_states runs (see execute_model).
         # Only meaningful for edge tail segments; defaults to intact.
@@ -2408,17 +2413,37 @@ class NPUModelRunner(GPUModelRunner):
                 self.input_batch.prev_req_id_to_index
             )
 
-        # Snapshot request-keyed num_computed BEFORE the base update
-        # overwrites req_state with this SchedulerOutput's values.  For a
-        # request that participated in the previous verify batch, this is
-        # exactly that batch's start-of-step num_computed (the value its
-        # SchedulerOutput carried), which the async spec-decode correction
-        # consumes as the identity-keyed base -- immune to the GPU
-        # positional buffer being recycled by PD-interleaved batches.
-        self._prev_num_computed_by_req = {
-            req_id: req_state.num_computed_tokens
-            for req_id in scheduler_output.num_scheduled_tokens
-            if (req_state := self.requests.get(req_id)) is not None
+        # Request-keyed snapshot of num_computed taken at the top of
+        # every _update_states.  This must come from a map that only ever
+        # holds SchedulerOutput-recorded values (_last_so_num_computed):
+        # req_state.num_computed_tokens is NOT usable here, because the
+        # deferred spec-decode correction rewinds it after the forward
+        # (correct_spec_decode_token_counts), while the PD scheduler has
+        # ALREADY applied the same rejection rewind at settle time before
+        # building the next SO -- reading req_state would see a
+        # double-rewound value on any rejection step (observed: worker
+        # base one behind truth after a valid=1 step, then
+        # token/position mismatch -> NaN row -> missing-correction crash).
+        # The map batch's SO records the start-of-step num_computed, which
+        # is exactly the base the correction needs.
+        self._prev_num_computed_by_req = self._last_so_num_computed
+        _so_nc = dict(self._last_so_num_computed)
+        _req_data = scheduler_output.scheduled_cached_reqs
+        if _req_data is not None and _req_data.req_ids:
+            _so_nc.update(
+                {
+                    req_id: int(nc)
+                    for req_id, nc in zip(
+                        _req_data.req_ids, _req_data.num_computed_tokens
+                    )
+                }
+            )
+        # Drop entries for requests the runner no longer tracks (finished
+        # and popped by the base update in earlier steps).
+        self._last_so_num_computed = {
+            req_id: nc
+            for req_id, nc in _so_nc.items()
+            if req_id in self.requests
         }
 
         result = super()._update_states(scheduler_output)
