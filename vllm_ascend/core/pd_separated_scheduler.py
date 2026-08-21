@@ -1719,35 +1719,6 @@ class PDSeparatedScheduler(Scheduler):
         model_type = str(getattr(hf_config, "model_type", "")).lower()
         return "qwen" in model_type or model_type == "deepseek_v4"
 
-    def _uses_dsv4_async_scheduled_mtp_placeholders(self) -> bool:
-        """Whether the active async placeholder chain is DeepSeek-V4 MTP."""
-        if not self._uses_async_scheduled_mtp_placeholders():
-            return False
-        speculative_config = self.vllm_config.speculative_config
-        if getattr(speculative_config, "method", None) != "mtp":
-            return False
-        hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
-        model_type = str(getattr(hf_config, "model_type", "")).lower()
-        return model_type == "deepseek_v4"
-
-    def _dsv4_parent_target_flight_active(
-        self, draft_last: SchedulerOutput
-    ) -> bool:
-        """Whether the target flight that produced this draft chain is active."""
-        if not self._uses_dsv4_async_scheduled_mtp_placeholders():
-            return False
-        task_id = draft_last.draft_task_id
-        if not task_id:
-            return False
-        flight_id = str(task_id)
-        return any(
-            (first_batch_type, flight_id) in self._pd_active_flight_by_key
-            for first_batch_type in (
-                BatchType.PREFILL_FIRST,
-                BatchType.DECODE_FIRST,
-            )
-        )
-
     def _pregenerate_draft_chain(
         self, target_tail: SchedulerOutput
     ) -> None:
@@ -1912,17 +1883,6 @@ class PDSeparatedScheduler(Scheduler):
         task_id = draft_last.draft_task_id
         if task_id in self._pregenerated_draft_task_ids:
             if next_step_idx >= self.num_spec_tokens:
-                pending_parent = self._decode_first_placeholder_parent
-                if (
-                    self._uses_dsv4_async_scheduled_mtp_placeholders()
-                    and pending_parent is not None
-                    and pending_parent.draft_task_id == task_id
-                ):
-                    # The final DRAFT_LAST has completed, but its next VERIFY
-                    # FIRST placeholder is still waiting for the parent target
-                    # LAST to settle. Keep the task registered so the next
-                    # schedule turn can retry placeholder creation.
-                    return False
                 self._pregenerated_draft_task_ids.discard(task_id)
                 self._pregenerated_draft_req_ids.pop(task_id, None)
             return False
@@ -2033,14 +1993,6 @@ class PDSeparatedScheduler(Scheduler):
             # the parent above and the normal _can_schedule_decode_first()
             # path schedules the verify instead.
             return
-        if self._dsv4_parent_target_flight_active(draft_last):
-            # EngineCore may fill several PD batches before applying any
-            # worker result.  Do not let the final DRAFT step create the next
-            # VERIFY FIRST from scheduler state that still contains the
-            # unsettled result of the preceding VERIFY/PREFILL LAST.  The
-            # pending parent is retried after update_from_output completes the
-            # matching target flight.  Other requests remain free to interleave.
-            return
 
         next_decode = self._pick_decode_first_batch()
         if (
@@ -2050,10 +2002,6 @@ class PDSeparatedScheduler(Scheduler):
         ):
             self.decodes_first_ready.append(next_decode)
             self._decode_first_placeholder_parent = None
-            if self._uses_dsv4_async_scheduled_mtp_placeholders():
-                task_id = draft_last.draft_task_id
-                self._pregenerated_draft_task_ids.discard(task_id)
-                self._pregenerated_draft_req_ids.pop(task_id, None)
 
     @staticmethod
     def _scheduler_output_intersects_req_ids(
