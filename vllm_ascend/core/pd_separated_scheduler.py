@@ -1022,8 +1022,8 @@ class PDSeparatedScheduler(Scheduler):
         )
 
         if state == PrefillState.IDLE:
-            # IDLE: P首/chunk0首 > PDraft尾 > DDraft尾 > PDraft首 > DDraft首
-            #       > Decode尾 > Decode首 > P尾 > Empty
+            # IDLE: P首/chunk0首 > DDraft尾 > PDraft首 > DDraft首
+            #       > Decode尾 > PDraft尾 > Decode首 > P尾 > Empty
             if self._can_schedule_prefill_first():
                 so = self._pick_prefill_first_batch()
                 if so.total_num_scheduled_tokens > 0:
@@ -1034,8 +1034,6 @@ class PDSeparatedScheduler(Scheduler):
                     "requests. Prefill work will be deferred until resources are freed."
                 )
                 self.finished_req_ids.update(so.finished_req_ids)
-            if has_pdrl:
-                return self._pick_draft_last_batch(prefill_phase=True)
             if has_ddrl:
                 return self._pick_draft_last_batch(prefill_phase=False)
             if self._can_schedule_prefill_draft_first():
@@ -1048,6 +1046,11 @@ class PDSeparatedScheduler(Scheduler):
             # find no suspended HeadState for it).
             if has_dl and not self.decodes_first_ready:
                 return self._pick_decode_last_batch()
+            # PDraft尾 sits below Decode尾 in every state: the prefill
+            # warmup chain is throughput work and must not delay the
+            # decode critical path.
+            if has_pdrl:
+                return self._pick_draft_last_batch(prefill_phase=True)
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
             if has_pl:
@@ -1055,16 +1058,14 @@ class PDSeparatedScheduler(Scheduler):
             return self._make_empty_batch()
 
         if state == PrefillState.LOW:
-            # LOW: PDraft尾 > DDraft尾 > PDraft首 > DDraft首 > P首
-            #      > Decode尾 > Decode首 > P尾 > Empty
+            # LOW: DDraft尾 > PDraft首 > DDraft首 > P首
+            #      > Decode尾 > PDraft尾 > Decode首 > P尾 > Empty
             # One prefill is already in flight; the second PF fills the
             # gaps behind draft work (2P pipelining) without delaying
             # decode tails.  Drafts can never starve the PF here: no new
             # prefill chain can form before the PF (PL ranks below it),
             # and the decode lane's next round starts at DL/DF, which
             # also rank below it.
-            if has_pdrl:
-                return self._pick_draft_last_batch(prefill_phase=True)
             if has_ddrl:
                 return self._pick_draft_last_batch(prefill_phase=False)
             if self._can_schedule_prefill_draft_first():
@@ -1086,6 +1087,9 @@ class PDSeparatedScheduler(Scheduler):
             # its head.
             if has_dl and not self.decodes_first_ready:
                 return self._pick_decode_last_batch()
+            # PDraft尾 sits below Decode尾 in every state (see IDLE).
+            if has_pdrl:
+                return self._pick_draft_last_batch(prefill_phase=True)
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
             if has_pl:
@@ -1099,12 +1103,10 @@ class PDSeparatedScheduler(Scheduler):
         # behind draft/decode work stalls the whole prefill pipeline.  The
         # inversion is bounded: at most `prefill_inflight_limit` PLs can be
         # queued, and PL has no dependency on any draft/decode work.
-        # Then PDraft尾 > DDraft尾 > PDraft首 > DDraft首 > D尾 > D首 > P尾
+        # Then DDraft尾 > PDraft首 > DDraft首 > D尾 > PDraft尾 > D首 > P尾
         # > Empty — no P首 slot left.
         if self._has_actionable_prefill_tail():
             return self._pick_prefill_last_batch(ready_only=ready_only)
-        if has_pdrl:
-            return self._pick_draft_last_batch(prefill_phase=True)
         if has_ddrl:
             return self._pick_draft_last_batch(prefill_phase=False)
         if self._can_schedule_prefill_draft_first():
@@ -1115,6 +1117,9 @@ class PDSeparatedScheduler(Scheduler):
         # DECODE_FIRST's self-posted tail must wait for its head.
         if has_dl and not self.decodes_first_ready:
             return self._pick_decode_last_batch()
+        # PDraft尾 sits below Decode尾 in every state (see IDLE).
+        if has_pdrl:
+            return self._pick_draft_last_batch(prefill_phase=True)
         if self._can_schedule_decode_first():
             return self._pick_decode_first_batch()
         if has_pl:
