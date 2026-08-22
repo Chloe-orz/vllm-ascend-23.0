@@ -845,8 +845,10 @@ class PassiveScheduler:
         """Pick among the head decode / decode-draft / prefill-draft by
         arrival order.
 
-        Only data-ready heads participate: with pre-posted irecvs the
-        recv order is fixed at SO arrival time, so dispatch order no
+        Only data-ready heads participate (decode-phase drafts excepted:
+        they dispatch on arrival, their payload wait covered device-side
+        by wait_event on the pre-posted recv).  With pre-posted irecvs
+        the recv order is fixed at SO arrival time, so dispatch order no
         longer affects channel pairing — the old cross-side deadlock
         (cloud posting a recv for one payload while the edge's next
         in-flight message is another) cannot occur once every candidate
@@ -858,9 +860,11 @@ class PassiveScheduler:
         has_decode = bool(self.ready_decodes) and (
             not ready_only or self._decode_head_data_ready()
         )
-        has_decode_draft = bool(self.ready_decode_drafts) and (
-            not ready_only or self._decode_draft_head_data_ready()
-        )
+        # Decode-phase draft heads dispatch on arrival: the payload wait
+        # is covered device-side by wait_event on the pre-posted recv
+        # (the edge sends promptly after its DRF head executes), so the
+        # DECODE_UP watermark is not consulted here.
+        has_decode_draft = bool(self.ready_decode_drafts)
         has_prefill_draft = bool(self.ready_prefill_drafts) and (
             not ready_only or self._prefill_draft_head_data_ready()
         )
@@ -899,7 +903,9 @@ class PassiveScheduler:
         return candidates[0][1]()
 
     def _schedule_by_arrival(self, ready_only: bool = True) -> ScheduledBatch:
-        # Only data-ready heads participate.  With pre-posted irecvs the
+        # Only data-ready heads participate (decode-phase drafts excepted:
+        # they dispatch on arrival, see _pick_decode_or_draft_by_arrival).
+        # With pre-posted irecvs the
         # recv order was fixed at SO arrival time, so dispatching a ready
         # decode/draft ahead of a not-yet-arrived prefill cannot re-order
         # the channel: the inversion hazard the arrival rule guarded
@@ -912,9 +918,11 @@ class PassiveScheduler:
         has_decode = bool(self.ready_decodes) and (
             not ready_only or self._decode_head_data_ready()
         )
-        has_decode_draft = bool(self.ready_decode_drafts) and (
-            not ready_only or self._decode_draft_head_data_ready()
-        )
+        # Decode-phase draft heads dispatch on arrival: the payload wait
+        # is covered device-side by wait_event on the pre-posted recv
+        # (the edge sends promptly after its DRF head executes), so the
+        # DECODE_UP watermark is not consulted here.
+        has_decode_draft = bool(self.ready_decode_drafts)
         has_prefill_draft = bool(self.ready_prefill_drafts) and (
             not ready_only or self._prefill_draft_head_data_ready()
         )
@@ -985,7 +993,9 @@ class PassiveScheduler:
     ) -> ScheduledBatch:
         state = self.cloud_scheduling_state
         # Data-plane readiness: only heads whose pre-posted irecv has
-        # completed participate in this tick's scheduling.  An unready
+        # completed participate in this tick's scheduling (decode-phase
+        # drafts excepted — they dispatch on arrival, see
+        # _pick_decode_or_draft_by_arrival).  An unready
         # head is treated as absent so lower-priority ready work can run
         # — with pre-posted irecvs the recv order was fixed at arrival,
         # so this cannot re-order the channel (see _schedule_by_arrival).
@@ -998,10 +1008,7 @@ class PassiveScheduler:
         has_decode = bool(self.ready_decodes) and (
             not ready_only or self._decode_head_data_ready()
         )
-        has_draft = (
-            bool(self.ready_decode_drafts)
-            and (not ready_only or self._decode_draft_head_data_ready())
-        ) or (
+        has_draft = bool(self.ready_decode_drafts) or (
             bool(self.ready_prefill_drafts)
             and (not ready_only or self._prefill_draft_head_data_ready())
         )
@@ -1140,9 +1147,9 @@ class PassiveScheduler:
                 return self._pick_prefill_draft_batch()
             return ScheduledBatch.empty()
         if queue_name == "ready_decode_drafts":
-            if self.ready_decode_drafts and (
-                not ready_only or self._decode_draft_head_data_ready()
-            ):
+            # Decode-phase drafts dispatch on arrival (see
+            # _pick_decode_or_draft_by_arrival); no watermark check.
+            if self.ready_decode_drafts:
                 return self._pick_decode_draft_batch()
             return ScheduledBatch.empty()
         if queue_name == "ready_pdmixes":
