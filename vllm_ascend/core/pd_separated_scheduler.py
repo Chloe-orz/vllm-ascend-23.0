@@ -261,7 +261,7 @@ class PDSeparatedScheduler(Scheduler):
         # After scheduling a DECODE_LAST or DRAFT_LAST, briefly reserve the
         # next scheduling opportunity for DECODE_FIRST or DRAFT_FIRST only.
         self._decode_or_draft_first_only_start_ts: float | None = None
-        self._decode_or_draft_first_only_window_ms: int = 10
+        self._decode_or_draft_first_only_window_ms: int = 20
         # Rate limiter for the [PD-STALL] empty-schedule probe.
         self._last_stall_log_ts: float = 0.0
 
@@ -911,13 +911,6 @@ class PDSeparatedScheduler(Scheduler):
         self._decode_or_draft_first_only_start_ts = None
 
     def _pick_decode_or_draft_first_only_or_empty(self) -> SchedulerOutput | None:
-        if self._has_draft_work():
-            # A pending draft chain must not be held back by the
-            # decode-first-only window: returning EMPTY here breaks the
-            # batch_queue fill loop right after a DECODE_LAST pick, so the
-            # pre-generated DRF/DRL placeholder chain never reaches the
-            # worker MQ in the same EngineCore turn.
-            return None
         if not self._decode_or_draft_first_only_active():
             return None
         # Window: allow Draft首 (decode lane first — the window exists to
