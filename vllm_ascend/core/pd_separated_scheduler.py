@@ -2139,6 +2139,76 @@ class PDSeparatedScheduler(Scheduler):
             for req_id in batch_req_ids
         )
 
+    def _drop_placeholder_decode_first(
+        self,
+        decode_first: SchedulerOutput,
+        req_ids: set[str],
+    ) -> None:
+        """Discard a queued placeholder DECODE_FIRST and its self-posted tail.
+
+        The tail was appended to decodes_last_ready at creation time while
+        the head was never dispatched, so no worker ever suspended a
+        HeadState for this head_token.  Both halves must vanish together,
+        along with the scheduling credits claimed at creation time; keeping
+        any of them either crashes the worker (orphaned tail) or deadlocks
+        future DECODE_FIRST/DRAFT_FIRST picks (stranded inflight credits or
+        a stranded _force_decode_last gate).
+        """
+        head_token = decode_first.head_token
+        tail: SchedulerOutput | None = None
+        kept_decodes_last: deque[SchedulerOutput] = deque()
+        for output in self.decodes_last_ready:
+            if tail is None and output.head_token == head_token:
+                tail = output
+                continue
+            kept_decodes_last.append(output)
+        gone = {
+            rid for rid in decode_first.num_scheduled_tokens if rid in req_ids
+        }
+        # Roll back the schedule-time mutations made when the placeholder
+        # was created (_pick_decode_first_batch -> super().schedule()):
+        # _update_after_schedule advanced every member request as if this
+        # verify step would really run (num_computed_tokens += num_scheduled,
+        # plus 1 + num_spec async output placeholders).  The batch is never
+        # dispatched, so no update_from_output will ever settle these
+        # counters -- and rejection rewinds are RELATIVE (-= num_rejected),
+        # so the phantom advance survives later settlements and every
+        # subsequent DECODE_FIRST carries num_computed_tokens that run ahead
+        # of the edge worker's verified state (observed on the cloud as
+        # "cpu-state mismatch ... optimistic=actual=N, cpu=N+2" for every
+        # member request, followed by the missing-corrections crash).
+        # KV blocks allocated for the phantom step are intentionally NOT
+        # freed: the same positions are re-scheduled by the next real
+        # DECODE_FIRST, so the already-appended blocks are used, not leaked.
+        scheduled_spec_tokens = (
+            decode_first.scheduled_spec_decode_tokens or {}
+        )
+        for req_id, num_scheduled in decode_first.num_scheduled_tokens.items():
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                continue
+            request.num_computed_tokens -= num_scheduled
+            num_spec = len(scheduled_spec_tokens.get(req_id, ()))
+            request.num_output_placeholders = max(
+                0, request.num_output_placeholders - (1 + num_spec)
+            )
+        if tail is None:
+            return
+        self.decodes_last_ready = kept_decodes_last
+        if self.decode_or_draft_inflight_count > 0:
+            self.decode_or_draft_inflight_count -= 1
+        if self.decode_head_inflight_count > 0:
+            self.decode_head_inflight_count -= 1
+        # The flight was registered for the head at creation; completing it
+        # with the self-posted tail copy unprotects the member requests.
+        self._complete_pd_flight(tail)
+        # The dropped head held the decode-last gate and delay timer; its
+        # tail will never be picked to clear them (see the _force_draft_last
+        # deadlock note below).  Placeholder creation requires all prior
+        # decode work drained, so this head is the sole gate holder.
+        self._force_decode_last = False
+        self._decode_last_delay_start_ts = None
+
     def _drop_stale_drafts_for_req_ids(self, req_ids: set[str]) -> None:
         if not req_ids:
             return
@@ -2167,13 +2237,22 @@ class PDSeparatedScheduler(Scheduler):
                 kept_first.append(output)
         self.drafts_first_ready = kept_first
 
-        self.decodes_first_ready = deque(
-            output
-            for output in self.decodes_first_ready
-            if not self._scheduler_output_intersects_req_ids(
-                output, req_ids
-            )
-        )
+        # A queued placeholder DECODE_FIRST self-posted its DECODE_LAST tail
+        # into decodes_last_ready at creation time
+        # (_prepare_next_decode_first_placeholder -> _pick_decode_first_batch).
+        # Dropping the head without the tail orphans the tail: once
+        # decodes_first_ready is empty, the overtake guard in _pick_by_state
+        # stops applying, the orphaned tail gets picked, and the edge worker
+        # crashes in _resume_and_validate_head_state because no head ever
+        # suspended a HeadState for that head_token.  Drop the pair together
+        # and roll back every side effect claimed at creation time.
+        kept_decodes_first: deque[SchedulerOutput] = deque()
+        for output in self.decodes_first_ready:
+            if self._scheduler_output_intersects_req_ids(output, req_ids):
+                self._drop_placeholder_decode_first(output, req_ids)
+            else:
+                kept_decodes_first.append(output)
+        self.decodes_first_ready = kept_decodes_first
         pending_decode = self._decode_first_placeholder_parent
         if (
             pending_decode is not None
