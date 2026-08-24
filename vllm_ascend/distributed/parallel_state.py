@@ -38,8 +38,7 @@ _FLASHCOMM2_OTP: GroupCoordinator | None = None
 _FLASHCOMM2_ODP: GroupCoordinator | None = None
 
 # ------------------------------------------------------------------ #
-# Per-(channel, direction, pair) dedicated streams for edge-cloud    #
-# P2P (isend/irecv).                                                 #
+# Per-channel dedicated streams for edge-cloud P2P (isend/irecv).     #
 # ------------------------------------------------------------------ #
 # Each hidden channel (PREFILL_1, PREFILL_2) gets its own NPU stream
 # so that isend/irecv on different channels don't serialize on the
@@ -55,40 +54,28 @@ _FLASHCOMM2_ODP: GroupCoordinator | None = None
 # per-channel stream, and handle.wait() syncs back to the default
 # stream before the broadcast.
 #
-# Multi-instance (2E1C) hardening — streams are keyed by
-# (channel, direction, pair), not just channel:
-# * direction: a blocked isend must never starve a later irecv.  With a
-#   single bidirectional stream per channel, an isend whose peer has not
-#   posted the matching recv yet queues every subsequent irecv behind it
-#   in FIFO order, so the recv the peer is waiting for never issues --
-#   the exact 2E1C deadlock where the cloud's c2e result isend (pending)
-#   blocked the next prefill's irecv while both edges waited on decode
-#   results the frozen busy_loop could not send.
-# * pair: streams must not be shared across (edge, cloud) pairs.  One
-#   pair's stalled op would otherwise hold back every other pair's ops
-#   queued behind it on the same stream, turning a single edge's problem
-#   into a cluster-wide stall.  HCCL communicators are already
-#   per-(pair, channel) (each pair group owns its hidden-channel device
-#   groups), so stream granularity is matched to communicator
-#   granularity by keying on the pair group identity.
+# NOTE(2E1C debugging): the (channel, direction, pair) stream split
+# was reverted while isolating a hang — streams are again keyed by
+# channel only.  The direction/pp_group parameters are accepted for
+# call-site compatibility but currently unused.
 _hidden_channel_streams: dict[Any, Any] = {}
 _hidden_channel_stream_lock = threading.Lock()
 
 
-def _get_hidden_channel_stream(key: Any) -> Any:
-    """Return the dedicated NPU stream for *key*, creating it lazily.
+def _get_hidden_channel_stream(channel: Any) -> Any:
+    """Return the dedicated NPU stream for *channel*, creating it lazily.
     Thread-safe (double-checked locking)."""
-    stream = _hidden_channel_streams.get(key)
+    stream = _hidden_channel_streams.get(channel)
     if stream is not None:
         return stream
     with _hidden_channel_stream_lock:
-        stream = _hidden_channel_streams.get(key)
+        stream = _hidden_channel_streams.get(channel)
         if stream is None:
             stream = torch.npu.Stream()
-            _hidden_channel_streams[key] = stream
+            _hidden_channel_streams[channel] = stream
             logger.info(
                 "[edge-cloud] created dedicated stream for hidden "
-                "channel %s", key,
+                "channel %s", channel,
             )
         return stream
 
@@ -101,16 +88,8 @@ def _hidden_channel_stream_ctx(
     pp_group: Any | None = None,
     wait_for_default: bool = True,
 ):
-    """Switch to the (channel, direction, pair) dedicated stream for P2P.
+    """Switch to the channel's dedicated stream for P2P isend/irecv.
 
-    *direction* – "send" for isend paths, "recv" for irecv paths; the two
-    never share a stream, so a blocked send can never starve a pending
-    recv (and vice versa).
-    *pp_group* – the pair group the op runs on; used as the pair
-    dimension of the stream key so different (edge, cloud) pairs never
-    serialize on each other's streams.  None (legacy single-pair) folds
-    all ops of one (channel, direction) onto one stream, matching the
-    pre-multi-instance behavior plus direction isolation.
     *wait_for_default* – True for the **send** path (the tensor being
     sent was produced on the default/compute stream, so the channel
     stream must wait for it). Receive buffers must instead be allocated
@@ -123,7 +102,7 @@ def _hidden_channel_stream_ctx(
     if channel is None:
         yield
         return
-    stream = _get_hidden_channel_stream((channel, direction, pp_group))
+    stream = _get_hidden_channel_stream(channel)
     if wait_for_default:
         stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
