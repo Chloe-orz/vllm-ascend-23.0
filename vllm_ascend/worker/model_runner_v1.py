@@ -4949,19 +4949,21 @@ class NPUModelRunner(GPUModelRunner):
             self._is_deepseek_v4_mtp_edge_cloud_draft()
             and enable_sp()
         ):
-            # Segment E validates the full cloud reply. Sampling rows are
-            # selected globally above; hc_head/logits then operate on the
-            # rank-local request shard, matching ordinary SP draft semantics.
+            # Segment E validates the full cloud reply. Keep the sampled
+            # logits input replicated across TP ranks: the vocab-parallel LM
+            # head computes a different vocab shard on each rank and therefore
+            # requires every rank to process the same request rows before its
+            # logits all-gather. Only the recurrent state and positions for the
+            # next DRAFT_FIRST are sequence-parallel shards.
             position_token_dim = (
                 step_positions.ndim - 1 if self.uses_mrope else 0
             )
             full_step_positions = step_positions
-            logits_hidden_states = (
-                self._localize_deepseek_v4_mtp_draft_tensor(
-                    logits_hidden_states,
-                    num_reqs,
+            if logits_hidden_states.shape[0] != num_reqs:
+                raise RuntimeError(
+                    "DeepSeek-V4 MTP SP logits require full request rows: "
+                    f"rows={logits_hidden_states.shape[0]}, reqs={num_reqs}"
                 )
-            )
             next_hidden_states = (
                 self._localize_deepseek_v4_mtp_draft_tensor(
                     next_hidden_states,
