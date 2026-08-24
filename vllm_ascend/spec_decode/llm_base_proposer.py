@@ -2244,10 +2244,30 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 output["spec_step_idx"] = torch.tensor(
                     0, dtype=torch.int64, device="cpu"
                 )
+            wire_output = output.tensors
+            if self.runner._is_deepseek_v4_mtp_edge_cloud_draft():
+                forward_context = get_forward_context()
+                num_actual_tokens = int(
+                    getattr(
+                        forward_context,
+                        "num_actual_tokens",
+                        model_kwargs["positions"].shape[-1],
+                    )
+                )
+                wire_output = (
+                    self.runner._gather_deepseek_v4_mtp_draft_tensors(
+                        wire_output,
+                        num_actual_tokens,
+                    )
+                )
+                # Segment E consumes the full HC state and therefore also
+                # needs full positions even though the standard proposer had
+                # reduced them to the edge-local SP shard before segment A.
+                model_kwargs["positions"] = wire_output["positions"]
             if get_pp_group().world_size == 2:
                 send_work = get_pp_group().isend_tensor_dict(
                     {k: v.contiguous() if isinstance(v, torch.Tensor) else v
-                     for k, v in output.items()}
+                     for k, v in wire_output.items()}
                 )
                 for handle in send_work:
                     handle.wait()
@@ -2294,12 +2314,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             # Copy received tensors into persistent buffers so that the
             # ACLGraphWrapper-wrapped segment_c sees stable input addresses.
-            positions = tensor_dict.get("positions")
-            num_tokens = positions.shape[-1] if positions is not None else 0
+            full_positions = tensor_dict.get("positions")
+            num_tokens = (
+                full_positions.shape[-1]
+                if full_positions is not None
+                else 0
+            )
             intermediate = (
                 self.runner._sync_edge_cloud_draft_intermediate_tensors(
                     num_tokens, intermediate
                 )
+            )
+            positions = intermediate.tensors.get(
+                "positions", full_positions
             )
 
             model_kwargs["intermediate_tensors"] = intermediate
@@ -2328,8 +2355,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 )
             if positions is not None:
                 model_kwargs["positions"] = positions
-            positions = model_kwargs.get("positions", None)
-            num_tokens = positions.shape[-1] if positions is not None else 0
+            positions = model_kwargs.get("positions")
 
             # Build attention metadata for the draft decoder layers on
             # the cloud side.  Without this, the Ascend attention
@@ -2345,7 +2371,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             ):
                 draft_attn_metadata = (
                     self.runner._build_edge_cloud_draft_attn_metadata(
-                        positions, spec_step_idx
+                        full_positions, spec_step_idx
                     )
                 )
 
@@ -2380,10 +2406,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 output = segments["c"](**model_kwargs)
             assert isinstance(output, IntermediateTensors)
 
+            wire_output = (
+                self.runner._gather_deepseek_v4_mtp_draft_tensors(
+                    output.tensors,
+                    num_tokens,
+                )
+            )
             if get_pp_group().world_size == 2:
                 send_work = get_pp_group().isend_tensor_dict(
                     {k: v.contiguous() if isinstance(v, torch.Tensor) else v
-                     for k, v in output.items()}
+                     for k, v in wire_output.items()}
                 )
                 for handle in send_work:
                     handle.wait()
