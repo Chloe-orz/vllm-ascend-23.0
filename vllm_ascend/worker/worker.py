@@ -661,6 +661,14 @@ class NPUWorker(WorkerBase):
                 and not getattr(_pc, "is_edge_node", True)
                 and _pd.get("enabled", False)
                 and self.local_rank == 0
+                # Debug kill-switch for the multi-instance bring-up: CHER's
+                # early-posted irecv holds NIC/DMA resources until the edge
+                # sends; if that edge is behind, the pending op can starve
+                # the compute/copy engines.  VLLM_ASCEND_EC_CHER=0 turns it
+                # off to isolate that failure mode (correctness is unaffected
+                # — the busy_loop then posts the recv itself when the batch
+                # actually runs).
+                and os.environ.get("VLLM_ASCEND_EC_CHER", "1") != "0"
             )
             # Max in-flight prefill batches on the cloud = prefill_inflight_limit
             # (2 when next_prefill_prior_enable, else 1).  At most that many
@@ -1326,27 +1334,6 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Cloud middle segment: recv -> segment_b/c -> isend -> return."""
-        # [2E1C-FIX-VERIFY] TP alignment barrier at batch entry: force all
-        # cloud TP ranks to enter each batch's collective sequence in
-        # lockstep.  In multi-instance (2E1C) mode the pair-endpoint rank
-        # (TP0) does extra per-pair work (P2P recv, per-pair send reap) that
-        # can let it race AHEAD of the followers into the next batch's
-        # collectives while they are still finishing the previous one —
-        # producing an intra-TP rendezvous deadlock (all 4 ranks stuck on
-        # the compute stream, pendingNum asymmetric).  A barrier here (host
-        # Gloo, no NPU-stream involvement) makes every rank wait for the
-        # others before the first real collective, so a whole-batch
-        # divergence can no longer form; if the bug is a within-batch op
-        # reorder instead, the barrier is a harmless no-op.
-        tp_group = get_tp_group()
-        if tp_group.world_size > 1:
-            torch.distributed.barrier(group=tp_group.cpu_group)
-            logger.info(
-                "[2E1C-TRACE] TP aligned: bt=%s ht=%s",
-                scheduler_output.batch_type,
-                getattr(scheduler_output, "head_token", None),
-            )
-
         #     f"Execute model, batch_type: {scheduler_output.batch_type}, " + (
         #         f"slice: {layer_slice_info.slice_index + 1}/{layer_slice_info.total_slices}, "
         #         f"layers: [{layer_slice_info.start_layer},{layer_slice_info.end_layer})"
