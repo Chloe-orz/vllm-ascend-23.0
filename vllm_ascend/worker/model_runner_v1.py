@@ -197,6 +197,7 @@ from vllm_ascend.utils import (
     get_c_env,
     global_stream,
     is_hidden_state_cache_spec,
+    is_moe_model,
     kv_cache_spec_uses_sparse_c8,
     lmhead_tp_enable,
     oproj_tp_enable,
@@ -290,6 +291,7 @@ class ExecuteModelState(NamedTuple):
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: AscendCommonAttentionMetadata | None
     hidden_states: torch.Tensor
+    mtp_target_hidden_states: torch.Tensor | None
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     attn_metadata: "PerLayerAttnMetadata"
@@ -936,11 +938,22 @@ class NPUModelRunner(GPUModelRunner):
             outer_model_type = getattr(
                 getattr(self.model_config, "hf_config", None), "model_type", ""
             )
-            self._is_deepseek_v4 = (
-                    model_type == "deepseek_v4" or hasattr(hf_config, "hc_mult")
+            self._is_deepseek_v4 = model_type == "deepseek_v4"
+            if self._is_deepseek_v4 and (
+                self.edge_cloud_cfg.mode != "head_tail"
+                or (self.head_k, self.tail_k) != (3, 1)
+            ):
+                raise ValueError(
+                    "DeepSeek-V4 edge-cloud mode only supports the original "
+                    "head-3/tail-1 layout because the first three Hash MoE "
+                    "layers must stay on the edge. Set "
+                    "edge_cloud_config.mode='head_tail' and "
+                    "edge_cloud_config.edge_head_tail_layers=[3, 1]."
                 )
             self._is_qwen3_5 = "qwen3_5" in model_type
-            self._is_deepseek_v2 = "deepseek" in model_type
+            self._is_deepseek_v2 = (
+                "deepseek" in model_type and not self._is_deepseek_v4
+            )
             self._is_kimi_k25 = "kimi_k25" in outer_model_type or "kimi_k25" in model_type
             self._is_glm4_moe = "glm4_moe" in model_type or "glm_moe_dsa" in model_type
             self._is_minimax_m2 = "minimax_m2" in model_type
@@ -1243,6 +1256,9 @@ class NPUModelRunner(GPUModelRunner):
         # Saved in execute_model() for legacy synchronous edge-cloud sampling
         # and auxiliary-hidden-state paths.
         self._last_scheduler_output: "SchedulerOutput | None" = None
+        # True while the parent target graph-capture loop is running. Eager
+        # edge-cloud draft segments must not communicate from inside it.
+        self._edge_cloud_target_capture_in_progress = False
 
         # Latest cloud-side target metadata for draft paths that do not cross
         # an independent scheduling boundary.
@@ -1327,11 +1343,22 @@ class NPUModelRunner(GPUModelRunner):
             outer_model_type = getattr(
                 getattr(self.model_config, "hf_config", None), "model_type", ""
             )
-            self._is_deepseek_v4 = (
-                    model_type == "deepseek_v4" or hasattr(hf_config, "hc_mult")
+            self._is_deepseek_v4 = model_type == "deepseek_v4"
+            if self._is_deepseek_v4 and (
+                self.edge_cloud_cfg.mode != "head_tail"
+                or (self.head_k, self.tail_k) != (3, 1)
+            ):
+                raise ValueError(
+                    "DeepSeek-V4 edge-cloud mode only supports the original "
+                    "head-3/tail-1 layout because the first three Hash MoE "
+                    "layers must stay on the edge. Set "
+                    "edge_cloud_config.mode='head_tail' and "
+                    "edge_cloud_config.edge_head_tail_layers=[3, 1]."
                 )
             self._is_qwen3_5 = "qwen3_5" in model_type
-            self._is_deepseek_v2 = "deepseek" in model_type
+            self._is_deepseek_v2 = (
+                "deepseek" in model_type and not self._is_deepseek_v4
+            )
             self._is_kimi_k25 = "kimi_k25" in outer_model_type or "kimi_k25" in model_type
             self._is_glm4_moe = "glm4_moe" in model_type or "glm_moe_dsa" in model_type
             self._is_minimax_m2 = "minimax_m2" in model_type
@@ -1494,6 +1521,10 @@ class NPUModelRunner(GPUModelRunner):
         start_layer: int,
         end_layer: int,
     ) -> Any:
+        edge_model = getattr(segment, "_edge_model", None)
+        if getattr(edge_model, "edge_cloud_dynamic_step_segments", False):
+            return segment
+
         # 若全局 enable_npugraph_ex 开启且当前处于全图模式，
         # 对 segment 应用 npugraph_ex 编译时优化（第1层）。
         # 第2层（ACLGraphWrapper 运行时捕获）由 _wrap_segment_if_needed 负责。
@@ -1549,6 +1580,12 @@ class NPUModelRunner(GPUModelRunner):
         runtime_mode: CUDAGraphMode = CUDAGraphMode.FULL,
         is_draft: bool = False,
     ) -> Any:
+        edge_model = getattr(segment, "_edge_model", None)
+        if (
+            is_draft
+            and getattr(edge_model, "edge_cloud_dynamic_step_segments", False)
+        ):
+            return segment
         if not self.edge_cloud_cfg.enable_decode_graph:
             return segment
         if not self.compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -1657,11 +1694,18 @@ class NPUModelRunner(GPUModelRunner):
           2. get_model → BaseModelLoader.load_model（标准 NPU 上初始化+加载）
           3. 创建分段 callable 并按需包装 ACLGraphWrapper
         """
-        if not (self._is_qwen3_5 or self._is_deepseek_v2 or self._is_kimi_k25 
-                or self._is_glm4_moe or self._is_minimax_m2):
+        if not (
+            self._is_qwen3_5
+            or self._is_deepseek_v2
+            or self._is_deepseek_v4
+            or self._is_kimi_k25
+            or self._is_glm4_moe
+            or self._is_minimax_m2
+        ):
             raise NotImplementedError(
-                "edge-cloud mode currently supports Qwen3.5, DeepseekV2/V3, "
-                "Kimi-K2.5/K2.6, GLM-4/GLM-5 models, and MiniMax-M2 models."
+                "edge-cloud mode currently supports Qwen3.5, "
+                "DeepSeek-V2/V3/V4, Kimi-K2.5/K2.6, GLM-4/GLM-5 models, "
+                "and MiniMax-M2 models."
             )
 
         logger.info(
@@ -1783,6 +1827,11 @@ class NPUModelRunner(GPUModelRunner):
                 set_edge_cloud_layer_range(0, 0)
                 if self.speculative_config.method == "eagle3":
                     import vllm_ascend.patch.models.eagle3_edge_cloud  # noqa: F401
+                elif (
+                    self.speculative_config.method == "mtp"
+                    and self._is_deepseek_v4
+                ):
+                    import vllm_ascend.patch.models.deepseek_v4_mtp_edge_cloud  # noqa: F401
 
             with get_tp_context(self.drafter):
                 self.drafter.load_model(self.model)
@@ -1923,17 +1972,18 @@ class NPUModelRunner(GPUModelRunner):
             num_spec_tokens = int(self.num_spec_tokens or 0)
             if num_spec_tokens <= 0:
                 raise ValueError(
-                    "Qwen-MTP edge-cloud scheduling requires a positive "
+                    "MTP edge-cloud scheduling requires a positive "
                     "num_speculative_tokens"
                 )
             if num_draft_layers <= 0:
                 raise ValueError(
-                    "Qwen-MTP edge-cloud scheduling requires at least one "
+                    "MTP edge-cloud scheduling requires at least one "
                     "MTP layer"
                 )
             logger.info(
-                "[EdgeCloud] Qwen-MTP scheduling: draft_steps=%d, "
+                "[EdgeCloud] MTP scheduling: draft_kind=%s, draft_steps=%d, "
                 "mtp_layers=%d",
+                getattr(draft_model, "edge_cloud_draft_kind", "qwen_mtp"),
                 num_spec_tokens,
                 num_draft_layers,
             )
@@ -1941,6 +1991,14 @@ class NPUModelRunner(GPUModelRunner):
         # Capture module ids before sharding so we can clean stale
         # static_forward_context entries that point to removed layers.
         draft_module_ids = {id(module) for _, module in draft_model.named_modules()}
+
+        custom_shard = getattr(draft_model, "shard_for_edge_cloud", None)
+        uses_custom_shard = callable(custom_shard)
+        if uses_custom_shard:
+            # Model-specific adapters own only the internal partitioning.
+            # Segment construction, communication, buffering, and scheduling
+            # remain on the shared MTP/Eagle3 edge-cloud draft path.
+            custom_shard(is_edge=is_edge_device())
 
         # Use the same edge-cloud layer range mechanism as the main model.
         # For draft models this was set to head_k=tail_k=0 before the drafter
@@ -1964,14 +2022,16 @@ class NPUModelRunner(GPUModelRunner):
             else list(range(num_draft_layers))
         )
         for idx, key in enumerate(layer_keys):
-            if idx not in local_layers and not isinstance(
-                predictor.layers[key], PPMissingLayer
+            if (
+                not uses_custom_shard
+                and idx not in local_layers
+                and not isinstance(predictor.layers[key], PPMissingLayer)
             ):
                 predictor.layers[key] = PPMissingLayer()
 
         # Cloud side does not need embedding/preprocessing/output modules;
         # edge keeps them.
-        if not is_edge_device():
+        if not uses_custom_shard and not is_edge_device():
             for module_name in edge_only_modules:
                 module = getattr(predictor, module_name, None)
                 if module is not None and not isinstance(module, PPMissingLayer):
@@ -1983,7 +2043,10 @@ class NPUModelRunner(GPUModelRunner):
                 draft_model.lm_head = PPMissingLayer()
 
         # Re-collect MoE parameters now that some layers may be placeholders.
-        if hasattr(draft_model, "set_moe_parameters"):
+        if (
+            not uses_custom_shard
+            and hasattr(draft_model, "set_moe_parameters")
+        ):
             draft_model.set_moe_parameters()
 
         self._clean_mtp_compilation_config(draft_model, draft_module_ids)
@@ -3720,7 +3783,8 @@ class NPUModelRunner(GPUModelRunner):
         if method != "mtp":
             return False
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
-        return "qwen" in str(getattr(hf_config, "model_type", "")).lower()
+        model_type = str(getattr(hf_config, "model_type", "")).lower()
+        return "qwen" in model_type or model_type == "deepseek_v4"
 
     def _should_defer_edge_cloud_draft(
         self, scheduler_output: "SchedulerOutput"
@@ -3734,6 +3798,39 @@ class NPUModelRunner(GPUModelRunner):
                 BatchType.PREFILL_LAST,
                 BatchType.DECODE_LAST,
             )
+        )
+
+    def _snapshot_mtp_target_hidden_states(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> torch.Tensor | None:
+        """Freeze this target batch's pre-HC state before sampling."""
+        if not self._should_defer_edge_cloud_draft(scheduler_output):
+            return None
+        mtp_hidden_states = getattr(
+            self.get_model(),
+            "get_mtp_target_hidden_states",
+            lambda: None,
+        )()
+        if mtp_hidden_states is None:
+            return None
+        scheduled_token_count = sum(
+            int(token_count)
+            for token_count in scheduler_output.num_scheduled_tokens.values()
+        )
+        return mtp_hidden_states[:scheduled_token_count].clone()
+
+    def _edge_cloud_drafter_uses_graph(self) -> bool:
+        """Return whether the loaded edge-cloud draft segments use ACL graphs."""
+        drafter = self.drafter
+        if drafter is None or not drafter.use_cuda_graph:
+            return False
+
+        draft_model = getattr(drafter, "model", None)
+        return not getattr(
+            draft_model,
+            "edge_cloud_dynamic_step_segments",
+            False,
         )
 
     def _snapshot_verified_draft_tokens(
@@ -3875,6 +3972,7 @@ class NPUModelRunner(GPUModelRunner):
         sampled_token_ids: torch.Tensor | list[list[int]],
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        mtp_target_hidden_states: torch.Tensor | None,
     ) -> None:
         if scheduler_output.head_token is None:
             raise RuntimeError(
@@ -3908,9 +4006,12 @@ class NPUModelRunner(GPUModelRunner):
         # a capture boundary (e.g. 16 -> 15 requests).
         scheduled_token_count = sum(num_scheduled)
         draft_positions = positions[:scheduled_token_count].clone()
-        # The draft needs the target hidden states of every scheduled token
-        # (sample_hidden_states only covers the logits rows).
-        draft_hidden_states = hidden_states[:scheduled_token_count].clone()
+        if mtp_target_hidden_states is not None:
+            draft_hidden_states = mtp_target_hidden_states
+        else:
+            # The draft needs the target hidden states of every scheduled token
+            # (sample_hidden_states only covers the logits rows).
+            draft_hidden_states = hidden_states[:scheduled_token_count].clone()
 
         # Snapshot the scheduled token ids so the first draft step can build
         # the shifted input ids (target ids shifted left by one, closed by
@@ -4213,12 +4314,20 @@ class NPUModelRunner(GPUModelRunner):
                     multimodal_embeddings=None,
                     is_multimodal=None,
                 )
-            output = segment(
-                input_ids=input_ids,
-                positions=positions,
-                inputs_embeds=inputs_embeds,
-                hidden_states=hidden_states,
-            )
+            segment_kwargs: dict[str, Any] = {
+                "input_ids": input_ids,
+                "positions": positions,
+                "inputs_embeds": inputs_embeds,
+                "hidden_states": hidden_states,
+            }
+            draft_model = self.drafter.model
+            if getattr(
+                draft_model,
+                "edge_cloud_dynamic_step_segments",
+                False,
+            ):
+                segment_kwargs["spec_step_idx"] = draft_step_idx
+            output = segment(**segment_kwargs)
         if not isinstance(output, IntermediateTensors):
             raise RuntimeError(
                 "Edge-cloud draft first segment returned no intermediates"
@@ -4258,6 +4367,22 @@ class NPUModelRunner(GPUModelRunner):
             logits = mtp_model.logits_processor(
                 mtp_model.lm_head, hidden_states
             )
+        if get_ascend_config().enable_reduce_sample:
+            if lmhead_tp_enable():
+                logits = get_lmhead_tp_group().all_to_all(logits)
+            else:
+                inner_model = getattr(mtp_model, "model", None)
+                logits_processor = getattr(
+                    inner_model,
+                    "logits_processor",
+                    getattr(mtp_model, "logits_processor", None),
+                )
+                if logits_processor is None:
+                    raise RuntimeError(
+                        "MTP edge-cloud reduce-sample path has no logits "
+                        "processor for TP gathering"
+                    )
+                logits = logits_processor._gather_logits(logits)
         if lmhead_tp_enable():
             logits = logits[: hidden_states.shape[0]]
         return logits.argmax(dim=-1)
@@ -5585,6 +5710,7 @@ class NPUModelRunner(GPUModelRunner):
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
                 hidden_states,
+                self._snapshot_mtp_target_hidden_states(scheduler_output),
                 sample_hidden_states,
                 aux_hidden_states,
                 attn_metadata,
@@ -5747,6 +5873,7 @@ class NPUModelRunner(GPUModelRunner):
             spec_decode_metadata,
             spec_decode_common_attn_metadata,
             hidden_states,
+            mtp_target_hidden_states,
             sample_hidden_states,
             aux_hidden_states,
             attn_metadata,
@@ -5914,6 +6041,7 @@ class NPUModelRunner(GPUModelRunner):
                         sampled_token_ids,
                         positions,
                         hidden_states,
+                        mtp_target_hidden_states,
                     )
                 elif use_padded_batch:
                     # EAGLE speculative decoding can use the GPU sampled tokens
@@ -6391,6 +6519,7 @@ class NPUModelRunner(GPUModelRunner):
         # Compute batch_size: each decode request contributes one
         # draft token per step.
         batch_size = num_reqs
+        common_attn_metadata.num_reqs = batch_size
 
         # Use the actual number of tokens carried by positions,
         # which already accounts for rejected tokens on the edge side.
@@ -6400,6 +6529,13 @@ class NPUModelRunner(GPUModelRunner):
         common_attn_metadata.num_input_tokens = num_input_tokens
 
         if spec_step_idx > 0:
+            if num_input_tokens != batch_size:
+                raise RuntimeError(
+                    "Edge-cloud draft follow-up step must carry exactly one "
+                    "token per request: "
+                    f"step={spec_step_idx}, tokens={num_input_tokens}, "
+                    f"requests={batch_size}"
+                )
             # For steps after the first, each request has exactly one
             # query token and the sequence length has grown by
             # spec_step_idx compared to the target model.
@@ -6503,16 +6639,35 @@ class NPUModelRunner(GPUModelRunner):
 
         # Build per-layer attention metadata using draft_attn_groups.
         per_layer_attn_metadata: dict[str, Any] = {}
+        draft_model = getattr(self.drafter, "model", None)
+        uses_dsa_draft_metadata = bool(
+            getattr(
+                draft_model,
+                "edge_cloud_uses_dsa_draft_metadata",
+                False,
+            )
+        )
         for attn_group in self.drafter.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
+            extra_metadata_args: dict[str, Any] = {}
+            if uses_dsa_draft_metadata:
+                extra_metadata_args = {
+                    "prefill_ratio_to_sas_metadata": {},
+                    "decode_ratio_to_sas_metadata": {},
+                    "common_ratio_to_sas_metadata": {},
+                    "block_size": attn_group.kv_cache_spec.block_size,
+                }
             if spec_step_idx == 0:
                 attn_meta = builder.build(
-                    0, common_attn_metadata
+                    0,
+                    common_attn_metadata,
+                    **extra_metadata_args,
                 )
             else:
                 attn_meta = builder.build_for_drafting(
                     common_attn_metadata=common_attn_metadata,
                     draft_index=spec_step_idx,
+                    **extra_metadata_args,
                 )
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_meta
@@ -7893,6 +8048,9 @@ class NPUModelRunner(GPUModelRunner):
                 self._layerwise_spec_decode_metadata,
                 self._layerwise_spec_decode_common_attn_metadata,
                 hidden_states,
+                self._snapshot_mtp_target_hidden_states(
+                    self._layerwise_scheduler_output
+                ),
                 sample_hidden_states,
                 None,   # aux_hidden_states
                 self._layerwise_attn_metadata,
@@ -8832,7 +8990,11 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping)
             if self.speculative_config and spec_decode_common_attn_metadata is None:
                 if isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer | AscendDflashProposer):
-                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
+                    if (
+                        self.drafter.attn_layer_names
+                        and self.drafter.attn_layer_names[0]
+                        in kv_cache_group.layer_names
+                    ):
                         spec_decode_common_attn_metadata = cm
                     elif (
                         self._edge_cloud_enabled
@@ -9236,7 +9398,22 @@ class NPUModelRunner(GPUModelRunner):
                 hidden_states = outputs
             dummy_compute_logits(hidden_states)
 
-            if self.drafter and not profile_cpp:
+            is_scheduled_edge_cloud_draft = (
+                self._edge_cloud_enabled
+                and self.speculative_config is not None
+                and self.speculative_config.method in ("mtp", "eagle3")
+            )
+            skip_eager_edge_cloud_drafter = (
+                self._edge_cloud_target_capture_in_progress
+                and is_scheduled_edge_cloud_draft
+                and self.drafter is not None
+                and not self._edge_cloud_drafter_uses_graph()
+            )
+            if (
+                self.drafter
+                and not profile_cpp
+                and not skip_eager_edge_cloud_drafter
+            ):
                 self.drafter.dummy_run(
                     num_tokens=num_tokens_padded,
                     with_prefill=with_prefill,
@@ -9341,9 +9518,19 @@ class NPUModelRunner(GPUModelRunner):
     def profile_run(self) -> None:
         self.eplb_warmup()
         mc2_tokens_capacity = get_mc2_tokens_capacity()
-        if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
+        uses_local_mc2_warmup = select_moe_comm_method(
             mc2_tokens_capacity, self.vllm_config
-        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
+        ) in {MoECommType.MC2, MoECommType.FUSED_MC2}
+        needs_aligned_edge_cloud_draft_warmup = (
+            self._edge_cloud_enabled
+            and self._uses_scheduled_edge_cloud_draft()
+            and is_moe_model(self.vllm_config)
+            and self.vllm_config.parallel_config.enable_expert_parallel
+        )
+        if self.max_num_tokens > mc2_tokens_capacity and (
+            uses_local_mc2_warmup
+            or needs_aligned_edge_cloud_draft_warmup
+        ):
             self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         origin_max_num_tokens = self.max_num_tokens
         # in the pcp scenario, the split sequence needs to be used for profile run
@@ -11050,8 +11237,14 @@ class NPUModelRunner(GPUModelRunner):
         # 因此这里手动清空，强制重新 capture。
         for wrapper in self._get_aclgraph_wrappers():
             wrapper.concrete_aclgraph_entries.clear()
-        with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
-            cuda_graph_size = GPUModelRunner.capture_model(self)
+        self._edge_cloud_target_capture_in_progress = True
+        try:
+            with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(
+                parent_module_name
+            ):
+                cuda_graph_size = GPUModelRunner.capture_model(self)
+        finally:
+            self._edge_cloud_target_capture_in_progress = False
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and hasattr(self, "update_stream"):

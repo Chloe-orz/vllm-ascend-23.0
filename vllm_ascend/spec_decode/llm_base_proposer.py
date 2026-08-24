@@ -342,10 +342,28 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.attn_layer_names = list(sorted(self._draft_attn_layer_names))
         draft_attn_layers_dict = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
-        # initialized for mamba models
-        self.kernel_block_size = (
-            draft_attn_layers_dict[self.attn_layer_names[0]].get_attn_backend().get_supported_kernel_block_sizes()[0]
+        allows_cloud_only_attention = (
+            not self.attn_layer_names
+            and self.runner is not None
+            and getattr(self.runner, "_edge_cloud_enabled", False)
+            and self.runner.edge_cloud_cfg.role == "edge"
+            and getattr(
+                self.model,
+                "edge_cloud_attention_on_cloud_only",
+                False,
+            )
         )
+        if allows_cloud_only_attention:
+            # The DSV4 MTP decoder block is cloud-owned and is not constructed
+            # on the edge. Metadata preparation still needs a block size.
+            self.kernel_block_size = self.runner.cache_config.block_size
+        else:
+            # initialized for mamba models
+            self.kernel_block_size = (
+                draft_attn_layers_dict[self.attn_layer_names[0]]
+                .get_attn_backend()
+                .get_supported_kernel_block_sizes()[0]
+            )
 
         self.piece_all_attn_layer_name = []
         for _ in range(self.num_speculative_tokens):
@@ -505,7 +523,33 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         " is not trained."
                     )
 
-        if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
+        is_deepseek_v4_edge_cloud_draft = (
+            self.method == "mtp"
+            and self.runner is not None
+            and getattr(self.runner, "_edge_cloud_enabled", False)
+            and getattr(
+                self.model,
+                "edge_cloud_draft_kind",
+                None,
+            )
+            == "deepseek_v4_mtp"
+        )
+        if is_deepseek_v4_edge_cloud_draft:
+            if self.runner.edge_cloud_cfg.role == "edge":
+                target_lm_head = getattr(model, "lm_head", None)
+                if target_lm_head is None or isinstance(
+                    target_lm_head,
+                    PPMissingLayer,
+                ):
+                    raise RuntimeError(
+                        "DeepSeek-V4 MTP edge draft requires the target "
+                        "lm_head on the edge"
+                    )
+                for layer_module in self.model.model.layers.values():
+                    if isinstance(layer_module, PPMissingLayer):
+                        continue
+                    layer_module.shared_head.head = target_lm_head
+        elif self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
@@ -571,6 +615,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Currently, new objects will be assigned to the lists in attn_metadata
         # when update. So we can use the shallow copy.
         return copy.copy(attn_metadata)
+
+    def _compute_logits_for_draft_step(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        model = self.get_model()
+        if getattr(
+            model,
+            "edge_cloud_dynamic_step_segments",
+            False,
+        ):
+            return model.compute_logits(hidden_states, spec_step_idx)
+        return self.model.compute_logits(hidden_states)
 
     def _freeze_draft_index_attn_metadata(self, attn_metadata):
         decode_metadata = getattr(attn_metadata, "decode", None)
@@ -1260,7 +1318,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         is_logits=False,
                     )
             else:
-                logits = self.model.compute_logits(sample_hidden_states)
+                logits = self._compute_logits_for_draft_step(
+                    sample_hidden_states
+                )
                 if lmhead_tp_enable():
                     logits = get_lmhead_tp_group().all_to_all(logits)
                 else:
@@ -1275,7 +1335,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     )
                 draft_token_ids = logits.argmax(dim=-1)
         else:
-            logits = self.model.compute_logits(sample_hidden_states)
+            logits = self._compute_logits_for_draft_step(
+                sample_hidden_states
+            )
             if lmhead_tp_enable():
                 logits, token_indices_to_sample = self._align_tensor_and_indices(
                     logits,
@@ -1434,7 +1496,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         draft_token_ids = draft_token_ids[:num_indices]
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
                 else:
-                    logits = self.model.compute_logits(sample_hidden_states)
+                    logits = self._compute_logits_for_draft_step(
+                        sample_hidden_states,
+                        draft_index + 1,
+                    )
                     if lmhead_tp_enable():
                         logits = get_lmhead_tp_group().all_to_all(logits)
                     else:
@@ -1444,7 +1509,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         token_indices_to_sample = token_indices_to_sample[:num_indices]
                     draft_token_ids = logits.argmax(dim=-1)
             else:
-                logits = self.model.compute_logits(sample_hidden_states)
+                logits = self._compute_logits_for_draft_step(
+                    sample_hidden_states,
+                    draft_index + 1,
+                )
                 if lmhead_tp_enable() and num_indices < logits.shape[0]:
                     logits = logits[:num_indices]
                     token_indices_to_sample = token_indices_to_sample[:num_indices]
