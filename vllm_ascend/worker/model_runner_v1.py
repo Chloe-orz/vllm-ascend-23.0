@@ -5385,6 +5385,15 @@ class NPUModelRunner(GPUModelRunner):
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
+        # Mamba align preprocessing only collects copy metadata on Ascend; the
+        # actual state copy is deferred until the KV connector has loaded its
+        # blocks below. The normal path prepares the metadata in this call,
+        # while the cloud fast path restores metadata prepared by
+        # cloud_prepare_early. An edge tail fast path must leave this as None:
+        # segment_a already consumed its metadata, and the shared buffers may
+        # have been reused by an interleaved batch before segment_e runs.
+        mamba_preprocess_bufs = None
+
         # ---- segment_e fast path: reuse segment_a's cached prepare results ----
         # NOTE: if an intervening EMPTY batch cleared input_batch, we must
         # fall through to the normal path so _update_states can re-add the
@@ -5586,6 +5595,7 @@ class NPUModelRunner(GPUModelRunner):
         elif _cloud_fast_path:
             cache = self._cloud_prepare_cache
             self._cloud_prepare_cache = None  # consumed, clear for next iteration
+            mamba_preprocess_bufs = cache["mamba_preprocess_bufs"]
             total_num_scheduled_tokens = cache["total_num_scheduled_tokens"]
             num_tokens_padded = cache["num_tokens_padded"]
             num_tokens_across_dp = cache["num_tokens_across_dp"]
@@ -5735,7 +5745,12 @@ class NPUModelRunner(GPUModelRunner):
                     # there should be a corresponding 'postprocess_mamba'. However, it is called inside
                     # '_update_states_after_model_execute', which is not overridden in vLLM-Ascend.
                     # We simply utilize the implementation in vLLM.
-                    if self.cache_config.mamba_cache_mode == "align":
+                    # need_accepted_tokens is false when this worker owns no
+                    # local Mamba cache, notably on an embedding-only edge.
+                    if (
+                        self.cache_config.mamba_cache_mode == "align"
+                        and self.need_accepted_tokens
+                    ):
                         # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                         # to decide copy operations, so we must apply deferred
                         # corrections before it runs.
@@ -5743,7 +5758,7 @@ class NPUModelRunner(GPUModelRunner):
                             deferred_state_corrections_fn()
                             deferred_state_corrections_fn = None
                         mamba_bufs = self._get_mamba_bufs()
-                        preprocess_bufs = mamba_bufs.preprocess
+                        mamba_preprocess_bufs = mamba_bufs.preprocess
                         mamba_utils.preprocess_mamba(
                             scheduler_output,
                             self.kv_cache_config,
@@ -5753,7 +5768,7 @@ class NPUModelRunner(GPUModelRunner):
                             self.requests,
                             self.compilation_config.static_forward_context,
                             self.model.get_mamba_state_copy_func(),
-                            preprocess_bufs,
+                            mamba_preprocess_bufs,
                         )
                         # preprocess_mamba resets num_accepted_tokens_cpu to 1
                         # for requests whose state was copied to a new block.
@@ -6057,8 +6072,8 @@ class NPUModelRunner(GPUModelRunner):
                 ),
             ) as kv_connector_output,
         ):
-            if self.cache_config.mamba_cache_mode == "align":
-                mamba_utils.do_mamba_copy_block(preprocess_bufs)
+            if mamba_preprocess_bufs is not None:
+                mamba_utils.do_mamba_copy_block(mamba_preprocess_bufs)
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors,
                 inputs_embeds, layer_slice_info=layer_slice_info,
@@ -8021,6 +8036,11 @@ class NPUModelRunner(GPUModelRunner):
         ):
             scheduler_output = deepcopy(scheduler_output)
 
+        # Passed to execute_model through _cloud_prepare_cache. Ascend's
+        # preprocess_mamba only fills this buffer; execute_model performs the
+        # copy after KV connector loading.
+        mamba_preprocess_bufs = None
+
         # cloud_prepare_early runs BEFORE the forward pass (outside
         # torch.inference_mode), but GDN attention builder does in-place
         # tensor copies that require inference mode.  Wrap the whole
@@ -8068,7 +8088,11 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             # --- mamba align preprocess (same as slow path) ---
-            if self.cache_config.mamba_cache_mode == "align":
+            # Keep the local-cache ownership guard in sync with the slow path.
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and self.need_accepted_tokens
+            ):
                 # preprocess_mamba reads req_state.num_computed_tokens (CPU)
                 # to decide copy operations, so we must apply deferred
                 # corrections before it runs.
@@ -8076,7 +8100,7 @@ class NPUModelRunner(GPUModelRunner):
                     deferred_state_corrections_fn()
                     deferred_state_corrections_fn = None
                 mamba_bufs = self._get_mamba_bufs()
-                preprocess_bufs = mamba_bufs.preprocess
+                mamba_preprocess_bufs = mamba_bufs.preprocess
                 mamba_utils.preprocess_mamba(
                     scheduler_output,
                     self.kv_cache_config,
@@ -8086,7 +8110,7 @@ class NPUModelRunner(GPUModelRunner):
                     self.requests,
                     self.compilation_config.static_forward_context,
                     self.model.get_mamba_state_copy_func(),
-                    preprocess_bufs,
+                    mamba_preprocess_bufs,
                 )
                 # preprocess_mamba resets num_accepted_tokens_cpu to 1
                 # for requests whose state was copied to a new block.
@@ -8148,6 +8172,7 @@ class NPUModelRunner(GPUModelRunner):
         # fast path can apply them at the same post-launch point as the
         # slow path (execute_model applies it after the batch is launched).
         cache["deferred_state_corrections_fn"] = deferred_state_corrections_fn
+        cache["mamba_preprocess_bufs"] = mamba_preprocess_bufs
 
         # An early-returned batch can leave this cache alive until another
         # request reaches execute_model. Tag it with the exact request order
@@ -8247,84 +8272,6 @@ class NPUModelRunner(GPUModelRunner):
                 use_graph, forward_context, layer_slice_info=layer_slice_info,
                 **model_kwargs,
             )
-
-    def _edge_cloud_forward_edge(
-        self,
-        num_tokens_padded: int,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor | None,
-        intermediate_tensors: IntermediateTensors | None,
-        inputs_embeds: torch.Tensor | None,
-        use_graph: bool,
-        forward_context,
-        **model_kwargs: dict[str, Any],
-    ):
-        """Edge 侧分段执行：segment_a（首段）或 segment_e（尾段）。"""
-        seg_a = self.segment_a_wrapper if use_graph else self.segment_a
-        seg_e = self.segment_e_wrapper if use_graph else self.segment_e
-        seg_a_graph = isinstance(seg_a, ACLGraphWrapper)
-        seg_e_graph = isinstance(seg_e, ACLGraphWrapper)
-
-        if intermediate_tensors is None:
-            # Step 1：执行 Segment A（embedding + 首 head_k 层）
-            # 此时 input_ids 有效，输出 IntermediateTensors 供跨节点传输
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-            old_layer_idx = _EXTRA_CTX.layer_idx
-            if _EXTRA_CTX.layer_idx is not None:
-                _EXTRA_CTX.layer_idx = 0
-            try:
-                if seg_a_graph and not forward_context.capturing:
-                    self._update_full_graph_params_if_needed(
-                        forward_context, num_tokens_padded, positions,
-                        layer_indices=list(range(0, self.head_k)),
-                        graph_wrapper=seg_a,
-                    )
-                hidden_states = seg_a(
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
-            finally:
-                if old_layer_idx is not None:
-                    _EXTRA_CTX.layer_idx = old_layer_idx
-
-            assert isinstance(hidden_states, IntermediateTensors)
-            return hidden_states
-
-        # Step 2：执行 Segment E（尾 tail_k 层 + norm）
-        # intermediate_tensors 已由 NPUWorker 从 Cloud 侧接收
-        #
-        # 注意：segment_e 与 segment_a 共用同一个 scheduler_output，num_tokens
-        # 保持不变（scheduler_output 在同一迭代内不变化）。若两者 num_tokens
-        # 出现不一致，会导致 cudagraph shape 不匹配，引发图执行错误。
-        # 关键：重置 layer_idx，使 weight_prefetch / EPLB 定位到尾段起始层，
-        # 执行完毕后恢复原值，避免影响后续非边云路径
-        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-        old_layer_idx = _EXTRA_CTX.layer_idx
-        if _EXTRA_CTX.layer_idx is not None:
-            _EXTRA_CTX.layer_idx = self.num_layers - self.tail_k
-
-        try:
-            tail_layer_indices = list(range(
-                self.num_layers - self.tail_k,
-                self.num_layers,
-            ))
-            if seg_e_graph and not forward_context.capturing:
-                self._update_full_graph_params_if_needed(
-                    forward_context, num_tokens_padded, positions,
-                    layer_indices=tail_layer_indices,
-                    graph_wrapper=seg_e,
-                )
-            hidden_states = seg_e(
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                **model_kwargs,
-            )
-        finally:
-            # segment_e 执行完毕后恢复原始 layer_idx
-            if old_layer_idx is not None:
-                _EXTRA_CTX.layer_idx = old_layer_idx
 
     def _edge_cloud_forward_edge(
         self,

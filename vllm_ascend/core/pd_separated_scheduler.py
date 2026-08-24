@@ -1388,11 +1388,21 @@ class PDSeparatedScheduler(Scheduler):
                                 # Use pre-schedule num_computed_tokens
                                 # to avoid double-counting the current
                                 # chunk's tokens.
-                                num_comp_before = (
-                                    _num_computed_before.get(
-                                        req.request_id, 0
-                                    )
+                                num_comp_before = _num_computed_before.get(
+                                    req.request_id
                                 )
+                                if num_comp_before is None:
+                                    # A newly admitted waiting request was not
+                                    # present when the snapshot was taken.
+                                    # Upstream discovers its prefix-cache hit
+                                    # inside schedule(), then advances
+                                    # num_computed_tokens by this chunk before
+                                    # returning. Subtract the scheduled suffix
+                                    # to recover the true pre-schedule progress.
+                                    num_comp_before = (
+                                        req.num_computed_tokens
+                                        - num_scheduled
+                                    )
                                 remaining = (
                                     req.num_prompt_tokens
                                     - num_comp_before
@@ -2239,6 +2249,13 @@ class PDSeparatedScheduler(Scheduler):
                 0, request.num_output_placeholders - (1 + num_spec)
             )
         if tail is None:
+            logger.warning(
+                "[PD] placeholder DECODE_FIRST head_token=%s dropped but no "
+                "self-posted DECODE_LAST was queued; skipping paired cleanup "
+                "(%d member request(s) gone)",
+                head_token,
+                len(gone),
+            )
             return
         self.decodes_last_ready = kept_decodes_last
         if self.decode_or_draft_inflight_count > 0:
@@ -2258,6 +2275,14 @@ class PDSeparatedScheduler(Scheduler):
         # decode work drained, so this head is the sole gate holder.
         self._force_decode_last = False
         self._decode_last_delay_start_ts = None
+        logger.info(
+            "[PD] drop placeholder DECODE_FIRST head_token=%s together with "
+            "its self-posted DECODE_LAST (%d member request(s) gone; the "
+            "head was never dispatched, so the tail has no suspended "
+            "HeadState to resume)",
+            head_token,
+            len(gone),
+        )
 
     def _drop_stale_drafts_for_req_ids(self, req_ids: set[str]) -> None:
         if not req_ids:
