@@ -1917,9 +1917,8 @@ class PDSeparatedScheduler(Scheduler):
         if method != "mtp":
             return False
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
-        return "qwen" in str(
-            getattr(hf_config, "model_type", "")
-        ).lower()
+        model_type = str(getattr(hf_config, "model_type", "")).lower()
+        return "qwen" in model_type or model_type == "deepseek_v4"
 
     def _pregenerate_draft_chain(
         self, target_tail: SchedulerOutput
@@ -2331,7 +2330,8 @@ class PDSeparatedScheduler(Scheduler):
         if method != "mtp":
             return False
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
-        return "qwen" in str(getattr(hf_config, "model_type", "")).lower()
+        model_type = str(getattr(hf_config, "model_type", "")).lower()
+        return "qwen" in model_type or model_type == "deepseek_v4"
 
     def register_edge_cloud_draft_task(
         self, task_id: str, req_ids: set[str]
