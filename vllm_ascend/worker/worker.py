@@ -236,8 +236,9 @@ class NPUWorker(WorkerBase):
         # couldn't serve).  Legacy 1-1 keeps the original blocking wait.
         self._lazy_send_reap = bool(
             getattr(self.parallel_config, "role_registry", None))
-        # channel.value -> list of (handles, tensors) pending completion.
-        self._pp_lazy_sends: dict[str, list[tuple[list[Handle], Any]]] = {}
+        # channel.value -> list of (handles, tensors, booked_at) pending
+        # completion.
+        self._pp_lazy_sends: dict[str, list[tuple[list[Handle], Any, float]]] = {}
         # Backpressure ceiling per channel; the scheduling gates
         # (prefill_inflight=2 etc.) keep this <=2 in practice.  Blocking
         # only ever happens beyond this bound, and it is per-(channel,
@@ -820,7 +821,7 @@ class NPUWorker(WorkerBase):
             # on the channel stream; the explicit reference is belt and
             # suspenders for view/slice edge cases).
             self._pp_lazy_sends.setdefault(channel.value, []).append(
-                (handles, tensors))
+                (handles, tensors, time.monotonic()))
         else:
             logger.info(
                 "[PD] _record_pp_send_work: channel=%s handles=%d",
@@ -894,15 +895,29 @@ class NPUWorker(WorkerBase):
         entries = self._pp_lazy_sends.get(channel_key)
         if not entries:
             return
-        remaining: list[tuple[list[Handle], Any]] = []
+        remaining: list[tuple[list[Handle], Any, float]] = []
         n_reaped = 0
-        for handles, tensors in entries:
+        now = time.monotonic()
+        for handles, tensors, booked_at in entries:
             if all(h.is_completed() for h in handles):
                 n_reaped += 1  # drop: send done, release tensor refs
             else:
-                remaining.append((handles, tensors))
+                # [2E1C-TRACE] a send stuck pending >30s is a smoking gun:
+                # either the peer never posted the matching recv (wire
+                # ordering bug), or is_completed() is lying about HCCL
+                # completion.  Warn with the age so the log tail identifies
+                # which channel/pair is wedged.
+                age = now - booked_at
+                if age > 30.0:
+                    logger.warning(
+                        "[2E1C-TRACE] send stuck pending %.1fs on channel=%s "
+                        "(handles=%d) — peer never recv'd, or is_completed() "
+                        "misreports HCCL completion",
+                        age, channel_key, len(handles),
+                    )
+                remaining.append((handles, tensors, booked_at))
         while len(remaining) > self._pp_lazy_send_hard_cap:
-            handles, _tensors = remaining.pop(0)
+            handles, _tensors, _ts = remaining.pop(0)
             for h in handles:
                 h.wait()
             n_reaped += 1
@@ -1058,6 +1073,11 @@ class NPUWorker(WorkerBase):
                 if self._edge_bucket_of_token(key) == _bucket
             )
             if _same_bucket >= _max:
+                logger.info(
+                    "[2E1C-TRACE] CHER hint skipped (bucket %s full): "
+                    "head_token=%s channel=%s",
+                    _bucket, ht, channel_str,
+                )
                 return
             try:
                 entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
@@ -1068,9 +1088,10 @@ class NPUWorker(WorkerBase):
                     ht, channel_str,
                 )
                 return
-        logger.debug(
-            "[CHER] early-recv posted head_token=%s channel=%s num_tokens=%d",
-            ht, channel_str, num_tokens,
+        logger.info(
+            "[2E1C-TRACE] CHER early-recv posted head_token=%s channel=%s "
+            "num_tokens=%d bucket=%s",
+            ht, channel_str, num_tokens, _bucket,
         )
 
     def get_or_post_early_recv(

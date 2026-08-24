@@ -1427,6 +1427,14 @@ def edge_cloud_isend_tensor_dict(
                 value.record_stream(torch.npu.current_stream(value.device))
         handles.append(handle)
 
+    # [2E1C-TRACE] The pre-log above fires BEFORE the actual isend posts;
+    # this one confirms they all reached the device queue — the gap between
+    # them is the only place a "sent but never posted" hang can hide.
+    logger.info(
+        "[PD] edge_cloud_isend posted: channel=%s dst=%s num_tokens=%s handles=%d",
+        channel.value if channel else "default",
+        dst, num_tokens, len(handles),
+    )
     return handles
 
 

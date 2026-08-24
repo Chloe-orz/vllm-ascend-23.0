@@ -917,6 +917,15 @@ def _patched_step_with_batch_queue(self):
 
     # Block until the next result is available.
     future, scheduler_output, exec_model_fut = batch_queue.pop()
+    # [2E1C-TRACE] bracket the worker-response wait: if the engine hangs here,
+    # the worker never answered this batch — pair with the worker's
+    # exec START/DONE/resp SENT trace lines to see which hop died.
+    vllm_logger.info(
+        "[2E1C-TRACE] engine wait result: bt=%s ht=%s queue_len=%d",
+        scheduler_output.batch_type.value if scheduler_output.batch_type else None,
+        getattr(scheduler_output, "head_token", None),
+        len(batch_queue),
+    )
     with (
         self.log_error_detail(scheduler_output),
         self.log_iteration_details(scheduler_output),
@@ -925,6 +934,11 @@ def _patched_step_with_batch_queue(self):
         if model_output is None:
             exec_model_fut.result()
             raise RuntimeError("unexpected error")
+    vllm_logger.info(
+        "[2E1C-TRACE] engine got result: bt=%s ht=%s",
+        scheduler_output.batch_type.value if scheduler_output.batch_type else None,
+        getattr(scheduler_output, "head_token", None),
+    )
 
     # Register the deferred draft before abort/model completion can free
     # requests referenced by this parent batch.
