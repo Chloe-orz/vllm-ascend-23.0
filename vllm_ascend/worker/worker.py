@@ -225,7 +225,10 @@ class NPUWorker(WorkerBase):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.23.0; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
-        self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
+        # Keyed by (channel.value, pair_edge_id) — the pair dimension keeps
+        # one edge's unreaped send from gating another edge's channel reuse
+        # in multi-instance (2E1C) mode.
+        self._pp_send_work_by_channel: dict[tuple[str, int | None], list[Handle]] = {}
 
         # [CHER/EHER] Cloud-side hidden early-receive (and its edge-side
         # mirror) cache.  The guard thread posts irecv ahead of the batch's
@@ -785,17 +788,26 @@ class NPUWorker(WorkerBase):
         return int(self.available_kv_cache_memory_bytes)
 
     def _record_pp_send_work(
-        self, handles: list[Handle], channel: HiddenChannelType | None = None
+        self, handles: list[Handle], channel: HiddenChannelType | None = None,
+        pair_edge_id: int | None = None,
     ) -> None:
         if channel is None:
             self._pp_send_work = handles
         else:
+            # Multi-instance (2E1C): key by (channel, source pair).  Each
+            # (edge, cloud) pair owns independent HCCL channel communicators,
+            # so a pending send on one pair must never gate the other pair's
+            # ops — keying by channel alone manufactured exactly such a
+            # cross-pair dependency and deadlocked the cloud (E0's unreaped
+            # prefill_2 send blocking E1's prefill_2 batch).
+            key = (channel.value, pair_edge_id)
             logger.info(
-                "[PD] _record_pp_send_work: channel=%s handles=%d",
+                "[PD] _record_pp_send_work: channel=%s pair=%s handles=%d",
                 channel.value,
+                pair_edge_id,
                 len(handles),
             )
-            self._pp_send_work_by_channel[channel.value] = handles
+            self._pp_send_work_by_channel[key] = handles
 
     # ------------------------------------------------------------------ #
     # Multi-instance (2E1C) pair resolution helpers
@@ -846,7 +858,10 @@ class NPUWorker(WorkerBase):
             return contextlib.nullcontext()
         return active_pair(edge_id, cloud_id)
 
-    def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
+    def _wait_pp_send_work(
+        self, channel: HiddenChannelType | None = None,
+        pair_edge_id: int | None = None,
+    ) -> None:
         if channel is None:
             for handle in self._pp_send_work:
                 handle.wait()
@@ -857,10 +872,14 @@ class NPUWorker(WorkerBase):
             self._pp_send_work_by_channel.clear()
             return
 
-        handles = self._pp_send_work_by_channel.pop(channel.value, [])
+        # Multi-instance (2E1C): wait only on THIS pair's outstanding send —
+        # see _record_pp_send_work for why the key carries the pair.
+        key = (channel.value, pair_edge_id)
+        handles = self._pp_send_work_by_channel.pop(key, [])
         logger.info(
-            "[PD] _wait_pp_send_work: channel=%s handles=%d",
+            "[PD] _wait_pp_send_work: channel=%s pair=%s handles=%d",
             channel.value,
+            pair_edge_id,
             len(handles),
         )
         for handle in handles:
@@ -1092,8 +1111,9 @@ class NPUWorker(WorkerBase):
             dp.step()
 
         # Edge-cloud PD separation can keep one outstanding send per hidden
-        # channel.  Only wait on the channel about to be reused; legacy PP waits
-        # for all outstanding sends to preserve the original behavior.
+        # channel PER PAIR.  Only wait on the (channel, pair) about to be
+        # reused; legacy PP waits for all outstanding sends to preserve the
+        # original behavior.
         if self.model_runner._edge_cloud_enabled:
             bt = scheduler_output.batch_type
             if bt in (
@@ -1104,7 +1124,20 @@ class NPUWorker(WorkerBase):
                 BatchType.DECODE_LAST,
                 BatchType.DRAFT_LAST,
             ):
-                self._wait_pp_send_work(self._hidden_channel_for(scheduler_output))
+                # Multi-instance (2E1C): resolve the pair this batch belongs
+                # to — edge workers use their own instance id; the cloud
+                # worker resolves the segment's source edge.  Waiting per
+                # (channel, pair) keeps one edge's unreaped send from
+                # freezing the other edge's channel reuse (the 2E1C
+                # prefill_2 reap deadlock).
+                _wait_pair = (
+                    self._edge_instance_id()
+                    if is_edge_device()
+                    else self._resolve_segment_edge_id(scheduler_output)
+                )
+                self._wait_pp_send_work(
+                    self._hidden_channel_for(scheduler_output), _wait_pair
+                )
             else:
                 self._wait_pp_send_work()
         else:
@@ -1231,6 +1264,7 @@ class NPUWorker(WorkerBase):
                     edge_cloud_send_tensor_dict(_gathered, channel=channel,
                     num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
                     channel=channel,
+                    pair_edge_id=self._edge_instance_id(),
                 )
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
@@ -1441,6 +1475,7 @@ class NPUWorker(WorkerBase):
                                                 num_tokens=scheduler_output.total_num_scheduled_tokens,
                                                 dst=_send_dst),
                     channel=channel,
+                    pair_edge_id=_pair_edge_id,
                 )
         return output
 
@@ -1531,6 +1566,7 @@ class NPUWorker(WorkerBase):
                     tensor_meta=send_tensor_meta,
                 ),
                 channel=HiddenChannelType.DECODE,
+                pair_edge_id=self._resolve_segment_edge_id(scheduler_output),
             )
             logger.info(
                 "Send intermediate tensors to edge, "
@@ -1572,6 +1608,7 @@ class NPUWorker(WorkerBase):
                     tensor_meta=send_tensor_meta,
                 ),
                 channel=HiddenChannelType.DECODE,
+                pair_edge_id=self._edge_instance_id(),
             )
             logger.info(
                 "Send intermediate tensors to cloud, "

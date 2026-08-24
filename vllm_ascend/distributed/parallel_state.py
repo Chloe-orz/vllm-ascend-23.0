@@ -54,10 +54,13 @@ _FLASHCOMM2_ODP: GroupCoordinator | None = None
 # per-channel stream, and handle.wait() syncs back to the default
 # stream before the broadcast.
 #
-# NOTE(2E1C debugging): the (channel, direction, pair) stream split
-# was reverted while isolating a hang — streams are again keyed by
-# channel only.  The direction/pp_group parameters are accepted for
-# call-site compatibility but currently unused.
+# NOTE(2E1C debugging): streams are keyed by (channel, direction) —
+# sends and recvs of one channel never share a stream, so a blocked isend
+# cannot FIFO-starve a pending irecv (that FIFO coupling re-formed the
+# 2E1C reap deadlock even with per-pair send bookkeeping).  The pp_group
+# parameter is accepted for call-site compatibility but currently unused
+# (pair-level stream isolation is a latency optimization, not a
+# correctness requirement).
 _hidden_channel_streams: dict[Any, Any] = {}
 _hidden_channel_stream_lock = threading.Lock()
 
@@ -102,7 +105,14 @@ def _hidden_channel_stream_ctx(
     if channel is None:
         yield
         return
-    stream = _get_hidden_channel_stream(channel)
+    # Key by (channel, direction): a blocked send must never hold back a
+    # pending recv queued behind it on the same stream — on the cloud, one
+    # pair's pending c2e isend would otherwise FIFO-block the other pair's
+    # e2c irecv, re-forming the reap deadlock through the stream even after
+    # the send-work bookkeeping was split per pair.  (The pair dimension is
+    # deliberately NOT in the key: within one direction, recvs/sends of
+    # different pairs complete independently and the FIFO order is harmless.)
+    stream = _get_hidden_channel_stream((channel, direction))
     if wait_for_default:
         stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
