@@ -712,6 +712,7 @@ class NPUWorker(WorkerBase):
         Then, it calculates the free memory that can be used for KV cache in
         bytes.
         """
+        logger.info("[2E1C-TRACE] worker determine_available_memory start")
         GiB = lambda b: b / GiB_bytes
 
         # Fast path: user has explicitly specified KV cache size via
@@ -793,6 +794,10 @@ class NPUWorker(WorkerBase):
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
 
+        logger.info(
+            "[2E1C-TRACE] worker determine_available_memory done: %.2f GiB",
+            GiB(self.available_kv_cache_memory_bytes),
+        )
         return int(self.available_kv_cache_memory_bytes)
 
     def _record_pp_send_work(
@@ -1760,6 +1765,7 @@ class NPUWorker(WorkerBase):
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
+        logger.info("[2E1C-TRACE] worker compile_or_warm_up_model start")
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
             cg_capture_sizes: list[int] = []
@@ -1781,10 +1787,13 @@ class NPUWorker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
+            logger.info("[2E1C-TRACE] worker warmup dummy_run done size=%d", size)
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
+            logger.info("[2E1C-TRACE] worker capture_model start")
             npugraph_memory_bytes = self.model_runner.capture_model()
+            logger.info("[2E1C-TRACE] worker capture_model done")
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
@@ -1944,7 +1953,12 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+        logger.info("[2E1C-TRACE] worker get_kv_cache_spec start")
+        spec = self.model_runner.get_kv_cache_spec()
+        logger.info(
+            "[2E1C-TRACE] worker get_kv_cache_spec done, entries=%d", len(spec)
+        )
+        return spec
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.
@@ -1961,6 +1975,11 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        logger.info(
+            "[2E1C-TRACE] worker initialize_from_config start, groups=%d blocks=%d",
+            len(kv_cache_config.kv_cache_groups),
+            kv_cache_config.num_blocks,
+        )
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
@@ -1971,6 +1990,8 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
+            logger.info(
+                "[2E1C-TRACE] worker initialize_from_config: kv_cache allocated")
 
             # Restrict to mamba and full attn hybrid models (e.g. Qwen3.x).
             #
