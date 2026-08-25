@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
-
+import os
 from enum import Enum
 from typing import Any
 import copy
