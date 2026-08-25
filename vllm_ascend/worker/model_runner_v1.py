@@ -6892,18 +6892,6 @@ class NPUModelRunner(GPUModelRunner):
                 "DRAFT has no matching target positions: "
                 f"task_id={task_id}"
             )
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-POSITION][STATE] %s is_prefill=%s "
-                "target_shape=%s target_device=%s num_reqs=%d "
-                "scheduled_total=%d",
-                trace_context,
-                state.is_prefill,
-                tuple(state.target_positions.shape),
-                state.target_positions.device,
-                len(state.num_scheduled_tokens),
-                sum(state.num_scheduled_tokens),
-            )
 
         draft_step_idx = int(scheduler_output.draft_step_idx or 0)
         if draft_step_idx == 0:
@@ -6931,14 +6919,6 @@ class NPUModelRunner(GPUModelRunner):
                     f"accepted={len(accepted_counts)}, "
                     f"requests={len(state.num_scheduled_tokens)}, "
                     f"task_id={task_id}"
-                )
-            if trace_mtp1:
-                logger.info(
-                    "[MTP1-POSITION][LAYOUT-VALID] %s tokens=%d "
-                    "accepted_type=%s",
-                    trace_context,
-                    num_tokens,
-                    type(accepted_counts).__name__,
                 )
 
             sample_rows: list[int] = []
@@ -6974,24 +6954,64 @@ class NPUModelRunner(GPUModelRunner):
 
             if trace_mtp1:
                 logger.info(
-                    "[MTP1-POSITION][ROWS-BUILT] %s rows=%d "
-                    "first=%s last=%s scheduled_total=%d",
-                    trace_context,
-                    len(sample_rows),
-                    sample_rows[0] if sample_rows else None,
-                    sample_rows[-1] if sample_rows else None,
-                    start,
-                )
-                logger.info(
                     "[MTP1-POSITION][INDEX-TENSOR-BEGIN] %s",
                     trace_context,
                 )
-            row_indices = torch.tensor(
+                current_stream = torch.npu.current_stream()
+                try:
+                    stream_ready: bool | str = current_stream.query()
+                except Exception as exc:
+                    stream_ready = f"unavailable:{type(exc).__name__}"
+                logger.info(
+                    "[MTP1-POSITION][INDEX-STREAM] %s stream=%s ready=%s",
+                    trace_context,
+                    current_stream,
+                    stream_ready,
+                )
+                logger.info(
+                    "[MTP1-POSITION][INDEX-CPU-BEGIN] %s rows=%d",
+                    trace_context,
+                    len(sample_rows),
+                )
+            row_indices_cpu = torch.tensor(
                 sample_rows,
                 dtype=torch.long,
+                device="cpu",
+            )
+            if trace_mtp1:
+                logger.info(
+                    "[MTP1-POSITION][INDEX-CPU-END] %s shape=%s",
+                    trace_context,
+                    tuple(row_indices_cpu.shape),
+                )
+                logger.info(
+                    "[MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] %s device=%s",
+                    trace_context,
+                    target_positions.device,
+                )
+            row_indices = torch.empty(
+                row_indices_cpu.shape,
+                dtype=row_indices_cpu.dtype,
                 device=target_positions.device,
             )
             if trace_mtp1:
+                logger.info(
+                    "[MTP1-POSITION][INDEX-NPU-ALLOC-END] %s "
+                    "shape=%s device=%s",
+                    trace_context,
+                    tuple(row_indices.shape),
+                    row_indices.device,
+                )
+                logger.info(
+                    "[MTP1-POSITION][INDEX-H2D-BEGIN] %s",
+                    trace_context,
+                )
+            row_indices.copy_(row_indices_cpu)
+            if trace_mtp1:
+                logger.info(
+                    "[MTP1-POSITION][INDEX-H2D-END] %s",
+                    trace_context,
+                )
                 logger.info(
                     "[MTP1-POSITION][INDEX-TENSOR-END] %s shape=%s "
                     "device=%s",
@@ -6999,19 +7019,9 @@ class NPUModelRunner(GPUModelRunner):
                     tuple(row_indices.shape),
                     row_indices.device,
                 )
-                logger.info(
-                    "[MTP1-POSITION][INDEX-SELECT-BEGIN] %s",
-                    trace_context,
-                )
             state.base_positions = target_positions.index_select(
                 -1, row_indices
             )
-            if trace_mtp1:
-                logger.info(
-                    "[MTP1-POSITION][INDEX-SELECT-END] %s shape=%s",
-                    trace_context,
-                    tuple(state.base_positions.shape),
-                )
             return target_positions
 
         base_positions = state.base_positions
@@ -7410,17 +7420,6 @@ class NPUModelRunner(GPUModelRunner):
         The worker records (rather than waits for) the cloud->edge send,
         exactly like ``_execute_model_cloud``.
         """
-        trace_mtp1 = (
-            "mtp" in str(self.speculative_config.method).lower()
-            and self.num_spec_tokens == 1
-        )
-        trace_context = (
-            f"task={scheduler_output.draft_task_id} "
-            f"head={scheduler_output.head_token} "
-            f"step={scheduler_output.draft_step_idx} "
-            f"prefill_phase={scheduler_output.draft_prefill_phase} "
-            f"seqno={scheduler_output.comm_seqno}"
-        )
         # DRAFT batches bypass execute_model/_update_states on the cloud, so
         # the purge hook there never runs for them.  Consume any piggybacked
         # draft-metadata invalidations here instead; the call is a guarded
@@ -7459,22 +7458,10 @@ class NPUModelRunner(GPUModelRunner):
                 f"key={token_tensor_key}"
             )
         num_tokens = token_tensor.shape[0]
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-POSITION][BEGIN] %s tokens=%d",
-                trace_context,
-                num_tokens,
-            )
         positions = self._reconstruct_cloud_draft_positions(
             scheduler_output, num_tokens
         )
         full_positions = positions
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-POSITION][END] %s shape=%s",
-                trace_context,
-                tuple(full_positions.shape),
-            )
         intermediate = self._sync_edge_cloud_draft_intermediate_tensors(
             num_tokens, intermediate_tensors
         )
