@@ -1640,15 +1640,23 @@ class NPUWorker(WorkerBase):
             scheduler_output,
             "e2c",
         )
-        tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv_scheduled_draft(
-                tensor_meta=recv_tensor_meta,
+        # Multi-instance (2E1C): the scheduled-draft comm must run inside the
+        # pair scope of the source edge.  Without it, _effective_pp_group()
+        # falls back to this rank's default PP group — which for the cloud is
+        # the LAST pair containing its rank0 (not necessarily this edge's
+        # pair) and, more importantly, never received hidden-channel groups
+        # in multi-edge mode, so _hidden_channel_groups() raises IndexError.
+        _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
+        with self._pair_scope(_pair_edge_id):
+            tensor_dict, comm_handles, comm_postprocess = (
+                edge_cloud_broadcast_recv_scheduled_draft(
+                    tensor_meta=recv_tensor_meta,
+                )
             )
-        )
-        for handle in comm_handles:
-            handle.wait()
-        for postprocess in comm_postprocess:
-            postprocess()
+            for handle in comm_handles:
+                handle.wait()
+            for postprocess in comm_postprocess:
+                postprocess()
         assert tensor_dict is not None
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
@@ -1665,14 +1673,15 @@ class NPUWorker(WorkerBase):
                 scheduler_output,
                 "c2e",
             )
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict_scheduled_draft(
-                    out_tensor_dict,
-                    tensor_meta=send_tensor_meta,
-                ),
-                channel=HiddenChannelType.DECODE,
-                pair_edge_id=self._resolve_segment_edge_id(scheduler_output),
-            )
+            with self._pair_scope(_pair_edge_id):
+                self._record_pp_send_work(
+                    edge_cloud_send_tensor_dict_scheduled_draft(
+                        out_tensor_dict,
+                        tensor_meta=send_tensor_meta,
+                    ),
+                    channel=HiddenChannelType.DECODE,
+                    pair_edge_id=_pair_edge_id,
+                )
             logger.info(
                 "Send intermediate tensors to edge, "
                 f"hidden_channel: {HiddenChannelType.DECODE.value}"
@@ -1707,14 +1716,17 @@ class NPUWorker(WorkerBase):
                 scheduler_output,
                 "e2c",
             )
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict_scheduled_draft(
-                    tensor_dict,
-                    tensor_meta=send_tensor_meta,
-                ),
-                channel=HiddenChannelType.DECODE,
-                pair_edge_id=self._edge_instance_id(),
-            )
+            # 2E1C: resolve the pair group explicitly — the default PP group
+            # has no hidden channels in multi-edge mode (IndexError).
+            with self._pair_scope(self._edge_instance_id()):
+                self._record_pp_send_work(
+                    edge_cloud_send_tensor_dict_scheduled_draft(
+                        tensor_dict,
+                        tensor_meta=send_tensor_meta,
+                    ),
+                    channel=HiddenChannelType.DECODE,
+                    pair_edge_id=self._edge_instance_id(),
+                )
             logger.info(
                 "Send intermediate tensors to cloud, "
                 f"hidden_channel: {HiddenChannelType.DECODE.value}"
@@ -1734,15 +1746,18 @@ class NPUWorker(WorkerBase):
             scheduler_output,
             "c2e",
         )
-        tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv_scheduled_draft(
-                tensor_meta=recv_tensor_meta,
+        # 2E1C: pair scope is required for hidden-channel resolution — the
+        # default PP group has no channel groups in multi-edge mode.
+        with self._pair_scope(self._edge_instance_id()):
+            tensor_dict, comm_handles, comm_postprocess = (
+                edge_cloud_broadcast_recv_scheduled_draft(
+                    tensor_meta=recv_tensor_meta,
+                )
             )
-        )
-        for handle in comm_handles:
-            handle.wait()
-        for postprocess in comm_postprocess:
-            postprocess()
+            for handle in comm_handles:
+                handle.wait()
+            for postprocess in comm_postprocess:
+                postprocess()
         logger.info(
             "Receive intermediate tensors from cloud after, "
             f"hidden_channel: {HiddenChannelType.DECODE.value}"

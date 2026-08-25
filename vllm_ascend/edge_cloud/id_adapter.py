@@ -110,3 +110,13 @@ def unwrap_scheduler_output_ids(so) -> None:
             unwrap_req_id(rid): v
             for rid, v in so.structured_output_request_ids.items()
         }
+    # draft_task_id lives in the wrapped (cloud) namespace after ingress
+    # wrapping; strip it so the edge keeps seeing its own raw ids.  Guard on
+    # the wrapped form for robustness against ids that never crossed ingress.
+    if getattr(so, "draft_task_id", None) and _TOKEN_RE.match(so.draft_task_id):
+        so.draft_task_id = unwrap_head_token(so.draft_task_id)
+    if getattr(so, "cloud_draft_invalidate_task_ids", None):
+        so.cloud_draft_invalidate_task_ids = [
+            unwrap_head_token(tid) if _TOKEN_RE.match(tid) else tid
+            for tid in so.cloud_draft_invalidate_task_ids
+        ]

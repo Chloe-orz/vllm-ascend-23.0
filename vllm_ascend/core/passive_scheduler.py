@@ -533,6 +533,17 @@ class PassiveScheduler:
             }
         if getattr(so, "head_token", None):
             so.head_token = wrap_head_token(edge_id, so.head_token)
+        # draft_task_id mirrors the target batch's head_token: the cloud
+        # worker caches draft metadata keyed by the WRAPPED head_token, so
+        # the id must enter the cloud namespace too, otherwise DRAFT lookups
+        # miss ("DRAFT has no matching target positions").
+        if getattr(so, "draft_task_id", None):
+            so.draft_task_id = wrap_head_token(edge_id, so.draft_task_id)
+        if getattr(so, "cloud_draft_invalidate_task_ids", None):
+            so.cloud_draft_invalidate_task_ids = [
+                wrap_head_token(edge_id, tid)
+                for tid in so.cloud_draft_invalidate_task_ids
+            ]
 
     def _promote_multi_edge(self) -> None:
         """Move per-edge head segments from the global queue into the legacy

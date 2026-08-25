@@ -4148,6 +4148,28 @@ class NPUModelRunner(GPUModelRunner):
                 f"extra_in_so={sorted(so_req_ids - context_req_ids)}"
             )
         if draft_step_idx > 0:
+            missing = [
+                key
+                for key in (
+                    "last_draft_token_ids",
+                    "last_draft_positions",
+                    "last_draft_hidden_states",
+                )
+                if key not in context
+            ]
+            if missing:
+                # The previous step's DRAFT_LAST never wrote its results —
+                # the chain is broken (peer failure or an aborted tail).
+                # Purge the context so the rest of the chain fails fast with
+                # a clear error instead of a bare KeyError.
+                task_id = scheduler_output.draft_task_id
+                self._pending_edge_cloud_draft_contexts.pop(task_id, None)
+                raise RuntimeError(
+                    f"DRAFT step {draft_step_idx} is missing previous-step "
+                    f"results {missing}: task_id={task_id}. The previous "
+                    "DRAFT_LAST did not complete on this worker; the broken "
+                    "chain context has been purged."
+                )
             return (
                 context["last_draft_token_ids"],
                 context["last_draft_positions"] + 1,
