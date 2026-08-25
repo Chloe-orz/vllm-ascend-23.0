@@ -250,15 +250,6 @@ def _drain_pd_channel_inbox(self) -> None:
             )
 
 
-def _trace_mtp1_flow_enabled(self) -> bool:
-    spec = getattr(self.vllm_config, "speculative_config", None)
-    method = str(getattr(spec, "method", "")).lower()
-    num_spec_tokens = int(
-        getattr(spec, "num_speculative_tokens", 0) or 0
-    )
-    return "mtp" in method and num_spec_tokens == 1
-
-
 def _publish_to_cloud(
     self, scheduler_output: SchedulerOutput
 ) -> None:
@@ -276,20 +267,6 @@ def _publish_to_cloud(
     Only the published copy is filtered -- the edge worker dequeues the
     original SchedulerOutput and cleans up its own batch immediately.
     """
-    if _trace_mtp1_flow_enabled(self):
-        vllm_logger.info(
-            "[MTP1-FLOW][EDGE-PUBLISH] batch=%s head=%s task=%s step=%s "
-            "prefill_phase=%s seqno=%s draft_base=%s parent_req=%s reqs=%d",
-            scheduler_output.batch_type.value,
-            getattr(scheduler_output, "head_token", None),
-            getattr(scheduler_output, "draft_task_id", None),
-            getattr(scheduler_output, "draft_step_idx", None),
-            bool(getattr(scheduler_output, "draft_prefill_phase", False)),
-            getattr(scheduler_output, "comm_seqno", None),
-            getattr(scheduler_output, "draft_seqno_base", None),
-            getattr(scheduler_output, "parent_req_id", None),
-            len(scheduler_output.num_scheduled_tokens),
-        )
     channel = self._pp_pd_channel
     filter_finished = getattr(
         self.scheduler, "filter_cloud_finished_req_ids", None
@@ -437,16 +414,6 @@ def _maybe_publish_pre_out(
                     deferred = {}
                     self._pd_deferred_draft_pre_out = deferred
                 deferred.setdefault(task_id, []).append(scheduler_output)
-                if _trace_mtp1_flow_enabled(self):
-                    vllm_logger.info(
-                        "[MTP1-FLOW][EDGE-DEFER] batch=%s head=%s "
-                        "task=%s step=%s seqno=%s reason=waiting_scalars",
-                        scheduler_output.batch_type.value,
-                        getattr(scheduler_output, "head_token", None),
-                        task_id,
-                        getattr(scheduler_output, "draft_step_idx", None),
-                        getattr(scheduler_output, "comm_seqno", None),
-                    )
                 return
         self._publish_to_cloud(scheduler_output)
     elif bt in (
@@ -486,12 +453,6 @@ def _release_deferred_draft_pre_out(
     channel = getattr(self, "_pp_pd_channel", None)
     if channel is None:
         return
-    if queued and _trace_mtp1_flow_enabled(self):
-        vllm_logger.info(
-            "[MTP1-FLOW][EDGE-RELEASE] task=%s controls=%d",
-            draft_task_id,
-            len(queued),
-        )
     for scheduler_output in queued:
         self._publish_to_cloud(scheduler_output)
     if queued:

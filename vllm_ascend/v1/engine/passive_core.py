@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Optional
 
 import zmq
 from vllm import envs
-from vllm.logger import init_logger, logger as vllm_logger
+from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value,
 )
@@ -551,25 +551,6 @@ class PassiveEngineCoreProc:
         self._prev_dispatch_req_ids: set[str] = set()
         self._pending_post_out_by_head_token: dict[str, SchedulerOutput] = {}
         self._published_post_out_tokens: set[str] = set()
-        spec = getattr(vllm_config, "speculative_config", None)
-        spec_method = str(getattr(spec, "method", "")).lower()
-        self._trace_mtp1_flow = (
-            "mtp" in spec_method
-            and int(getattr(spec, "num_speculative_tokens", 0) or 0) == 1
-        )
-        vllm_logger.info(
-            "[MTP1-FLOW][CLOUD-INIT] enabled=%s method=%s num_spec=%s",
-            self._trace_mtp1_flow,
-            spec_method,
-            getattr(spec, "num_speculative_tokens", None),
-        )
-        self._mtp1_flow_event_seq = 0
-        self._mtp1_pending_draft_tasks: dict[str, int | None] = {}
-        self._mtp1_draft_task_by_head: dict[str, str] = {}
-
-    def _next_mtp1_flow_event(self) -> int:
-        self._mtp1_flow_event_seq += 1
-        return self._mtp1_flow_event_seq
 
     def _drain_worker_completion_acks(self) -> None:
         """Publish POST_OUT only after cloud workers complete the middle segment."""
@@ -589,41 +570,12 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
-                batch_type = result.get("batch_type")
-                head_token = result.get("head_token")
-                if self._trace_mtp1_flow and batch_type in (
-                    BatchType.PREFILL_FIRST,
-                    BatchType.DECODE_FIRST,
-                    BatchType.DRAFT_FIRST,
-                ):
-                    task_id = None
-                    if batch_type == BatchType.DRAFT_FIRST and head_token:
-                        task_id = self._mtp1_draft_task_by_head.pop(
-                            head_token, None
-                        )
-                        if task_id is None:
-                            vllm_logger.error(
-                                "[MTP1-AUDIT][ACK-WITHOUT-DISPATCH] "
-                                "head=%s",
-                                head_token,
-                            )
-                        else:
-                            self._mtp1_pending_draft_tasks.pop(task_id, None)
-                    vllm_logger.info(
-                        "[MTP1-FLOW][CLOUD-ACK] event=%d batch=%s head=%s "
-                        "task=%s pending_tasks=%s",
-                        self._next_mtp1_flow_event(),
-                        batch_type.value,
-                        head_token,
-                        task_id,
-                        sorted(self._mtp1_pending_draft_tasks),
-                    )
-
                 # Decode and draft tails are self-posted on the edge. Their
                 # worker acks are still drained from the response MQ, but do
                 # not drive a cloud -> edge POST_OUT control message.
-                if batch_type != BatchType.PREFILL_FIRST:
+                if result.get("batch_type") != BatchType.PREFILL_FIRST:
                     continue
+                head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
                     continue
                 scheduler_output = self._pending_post_out_by_head_token.pop(
@@ -697,19 +649,6 @@ class PassiveEngineCoreProc:
                 continue
             prefill_phase = bt == BatchType.PREFILL_FIRST
             num_spec = self._num_scheduled_spec_tokens()
-            if self._trace_mtp1_flow:
-                vllm_logger.info(
-                    "[MTP1-FLOW][CLOUD-HINT] arrival_seq=%s batch=%s "
-                    "head=%s target_seqno=%s draft_base=%s num_spec=%d "
-                    "prefill_phase=%s",
-                    _seq,
-                    bt.value,
-                    getattr(so, "head_token", None),
-                    seqno,
-                    base,
-                    num_spec,
-                    prefill_phase,
-                )
             # Draft step shapes (mirrors the worker's meta derivation):
             # step 0 runs over the parent batch's full token count,
             # later steps over one token per request.
@@ -790,76 +729,6 @@ class PassiveEngineCoreProc:
                 )
             return False
 
-        scheduler_output = batch.scheduler_output
-        batch_type = scheduler_output.batch_type
-        if self._trace_mtp1_flow and batch_type in (
-            BatchType.PREFILL_FIRST,
-            BatchType.DECODE_FIRST,
-            BatchType.DRAFT_FIRST,
-        ):
-            head_token = getattr(scheduler_output, "head_token", None)
-            task_id = getattr(scheduler_output, "draft_task_id", None)
-            comm_seqno = getattr(scheduler_output, "comm_seqno", None)
-            arrival_seq = getattr(
-                scheduler_output,
-                "_passive_scheduler_arrival_seq",
-                None,
-            )
-            if (
-                batch_type == BatchType.DECODE_FIRST
-                and self._mtp1_pending_draft_tasks
-            ):
-                vllm_logger.warning(
-                    "[MTP1-AUDIT][VERIFY-BEFORE-DRAFT-ACK] verify_head=%s "
-                    "verify_seqno=%s pending_tasks=%s",
-                    head_token,
-                    comm_seqno,
-                    sorted(self._mtp1_pending_draft_tasks),
-                )
-            if batch_type == BatchType.DRAFT_FIRST:
-                expected_seqno = self._mtp1_pending_draft_tasks.get(task_id)
-                if task_id not in self._mtp1_pending_draft_tasks:
-                    vllm_logger.error(
-                        "[MTP1-AUDIT][DRAFT-WITHOUT-PARENT] head=%s "
-                        "task=%s seqno=%s",
-                        head_token,
-                        task_id,
-                        comm_seqno,
-                    )
-                elif expected_seqno != comm_seqno:
-                    vllm_logger.error(
-                        "[MTP1-AUDIT][DRAFT-SEQNO-MISMATCH] head=%s "
-                        "task=%s actual=%s expected=%s",
-                        head_token,
-                        task_id,
-                        comm_seqno,
-                        expected_seqno,
-                    )
-                if head_token and task_id:
-                    self._mtp1_draft_task_by_head[head_token] = task_id
-            vllm_logger.info(
-                "[MTP1-FLOW][CLOUD-DISPATCH] event=%d arrival_seq=%s "
-                "batch=%s head=%s task=%s step=%s prefill_phase=%s "
-                "seqno=%s draft_base=%s pending_tasks=%s slices=%d",
-                self._next_mtp1_flow_event(),
-                arrival_seq,
-                batch_type.value,
-                head_token,
-                task_id,
-                getattr(scheduler_output, "draft_step_idx", None),
-                bool(
-                    getattr(
-                        scheduler_output,
-                        "draft_prefill_phase",
-                        False,
-                    )
-                ),
-                comm_seqno,
-                getattr(scheduler_output, "draft_seqno_base", None),
-                sorted(self._mtp1_pending_draft_tasks),
-                len(batch.slices),
-            )
-
         _slice_info_str = "["
         for s in batch.slices:
             if s is not None:
@@ -932,28 +801,6 @@ class PassiveEngineCoreProc:
                     self._pending_post_out_by_head_token[head_token] = (
                         batch.scheduler_output
                     )
-        if self._trace_mtp1_flow and batch_type in (
-            BatchType.PREFILL_FIRST,
-            BatchType.DECODE_FIRST,
-        ):
-            dispatched_target_end = any(
-                slice_info is None or slice_info.is_last_slice
-                for slice_info in batch.slices
-            )
-            draft_base = getattr(scheduler_output, "draft_seqno_base", None)
-            task_id = getattr(scheduler_output, "head_token", None)
-            if dispatched_target_end and draft_base is not None and task_id:
-                self._mtp1_pending_draft_tasks[task_id] = draft_base
-                vllm_logger.info(
-                    "[MTP1-FLOW][CLOUD-EXPECT-DRAFT] event=%d "
-                    "parent_batch=%s task=%s expected_seqno=%s "
-                    "pending_tasks=%s",
-                    self._next_mtp1_flow_event(),
-                    batch_type.value,
-                    task_id,
-                    draft_base,
-                    sorted(self._mtp1_pending_draft_tasks),
-                )
         return True
 
     def _maybe_publish_post_out(
