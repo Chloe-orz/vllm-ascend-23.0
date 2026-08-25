@@ -322,15 +322,132 @@ Higress MVP 不需要修改源码。Cloud 配置保持不变，只修改 Edge �
 Higress 需要：
 
 - 配置到 Cloud 控制服务的内部路由和健康检查；
-- 开启 `ai-load-balancer` 的 `prefix_cache` 策略并配置 Redis；
 - 开启 `ai-statistics`；
 - 禁止该内部 POST 的自动重试；
 - 调高或关闭长 SSE 的 stream idle timeout；
 - 允许 `X-Edge-Cloud-*` 响应头透传；
 - 保持 HTTP stream 到最终 usage 和 `[DONE]` 后再结束。
 
+在当前 1:1 或只验证统计信息的场景中，不需要 `ai-load-balancer` 和 Redis，
+普通静态路由即可。只有增加多个 Mock/真实 Cloud backend、验证 Prefix 历史路由
+和 least-request 回退时，才需要开启 `ai-load-balancer` 的 `prefix_cache` 策略并
+配置 Redis。
+
 当前内部 HTTP 场景不使用鉴权或 TLS。如果后续启用 Higress 鉴权、HTTPS 或
 mTLS，需要另外扩展 Edge HTTP Client 的认证配置。
+
+### 6.1 北向非流式请求与内部长 SSE
+
+用户请求中的 `stream` 只控制 Edge 向用户返回结果的方式。Edge 构造内部 Cloud
+control 请求时，会固定覆盖为：
+
+```json
+{
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}
+```
+
+因此，即使用户发送 `stream=false`，Edge 对 Higress/Cloud 的内部统计通道仍是
+长 SSE。Cloud 先通过响应头完成 Prefix 预约，推理完成后再在同一连接中发送
+`choices: []`、标准 OpenAI usage 和 `[DONE]`。Higress 看到的是长 SSE，Edge
+向用户返回的仍可以是普通非流式 JSON，两者没有冲突。
+
+Higress `ai-statistics` 同时兼容普通 `application/json` 非流式响应。该路径适合
+独立验证插件能力或未来的其他 OpenAI 兼容路由，但不是当前边云 control 请求的
+实际传输形态。
+
+### 6.2 ai-statistics 配置与字段语义
+
+在内部路由上开启内置 `ai-statistics`，推荐使用轻量配置：
+
+```yaml
+use_default_response_attributes: true
+```
+
+如果 Console 表单没有展示该字段，切换到 YAML 编辑模式填写。该配置会从
+OpenAI Chat Completions 的流式或非流式 usage 中提取：
+
+- `prompt_tokens` -> Prometheus `input_token` Counter；
+- `completion_tokens` -> Prometheus `output_token` Counter；
+- `total_tokens` -> Prometheus `total_token` Counter；
+- `prompt_tokens_details.cached_tokens` -> `ai_log.cached_tokens`；
+- 完整的 `prompt_tokens_details` -> `ai_log.input_token_details`。
+
+`cached_tokens` 当前不是独立的 Prometheus Counter。需要按 Cloud 实际计算量计费
+时，可以由日志消费或账单系统计算：
+
+```text
+uncached_prompt_tokens = prompt_tokens - cached_tokens
+cloud_compute_tokens = uncached_prompt_tokens + completion_tokens
+```
+
+如需把实例选择结果写入访问日志，可增加自定义响应头属性：
+
+```yaml
+use_default_response_attributes: true
+attributes:
+  - key: edge_cloud_instance
+    value_source: response_header
+    value: x-edge-cloud-instance
+    apply_to_log: true
+  - key: edge_cloud_hit_tokens
+    value_source: response_header
+    value: x-edge-cloud-prefix-hit-tokens
+    apply_to_log: true
+```
+
+这些自定义字段默认也不是 Prometheus 标签，避免把高基数字段直接引入指标系统。
+
+### 6.3 本地隔离验证结果
+
+Higress 统计可以在不启动 vLLM、不使用 NPU 的情况下独立验证。已完成以下本地
+黑盒验证：
+
+- Higress 源码：`v2.2.4`，commit `58666ac9`；
+- 镜像：`higress/all-in-one:latest-o11y`；
+- 内置插件：`ai-statistics 2.0.1`；
+- upstream：返回 OpenAI usage 的 Mock Cloud HTTP Server；
+- 路由：静态 1:1 `/v1/chat/completions` 路由，不启用负载均衡插件。
+
+使用下面的 usage 分别验证长 SSE 和普通 JSON：
+
+```json
+{
+  "prompt_tokens": 6814,
+  "completion_tokens": 32,
+  "total_tokens": 6846,
+  "prompt_tokens_details": {
+    "cached_tokens": 6144
+  }
+}
+```
+
+两种返回方式均满足：
+
+- `X-Edge-Cloud-Instance` 和 Prefix hit 响应头原样透传；
+- 每次成功请求只增加一次 token Counter；
+- input/output/total 指标分别增加 `6814`、`32`、`6846`；
+- SSE 日志为 `response_type=stream`，普通 JSON 为 `response_type=normal`；
+- 两种日志均记录 `cached_tokens=6144`；
+- upstream `503` 不增加 token Counter，但保留状态码、response flag 和空 usage
+  的访问日志，便于异常排查。
+
+可直接从 Gateway 指标端点检查路由维度计数：
+
+```bash
+curl --silent http://127.0.0.1:15020/stats/prometheus \
+  | grep -E 'route_upstream_model_consumer_metric_(input_token|output_token|total_token|llm_duration_count)'
+```
+
+使用 `latest-o11y` 镜像时，还可以从 Prometheus 查询相同指标，并从 Loki 或
+`/var/log/proxy/access.log` 检查 `ai_log`。指标标签至少包含 `ai_route`、
+`ai_cluster`、`ai_model` 和 `ai_consumer`。
+
+该隔离验证只证明路由透传和统计解析正确，不能替代真实 Edge + Cloud 对长连接
+生命周期、idle timeout、active request 和 Prefix 路由选择的联合验收。
 
 ## 7. 协商链路日志与排障
 
