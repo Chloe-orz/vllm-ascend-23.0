@@ -391,7 +391,7 @@ use_default_response_attributes: true
 attributes:
   - key: edge_cloud_instance
     value_source: response_header
-    value: x-edge-cloud-instance
+    value: x-edge-cloud-instance-id
     apply_to_log: true
   - key: edge_cloud_hit_tokens
     value_source: response_header
@@ -427,7 +427,7 @@ Higress 统计可以在不启动 vLLM、不使用 NPU 的情况下独立验证�
 
 两种返回方式均满足：
 
-- `X-Edge-Cloud-Instance` 和 Prefix hit 响应头原样透传；
+- `X-Edge-Cloud-Instance-ID` 和 Prefix hit 响应头原样透传；
 - 每次成功请求只增加一次 token Counter；
 - input/output/total 指标分别增加 `6814`、`32`、`6846`；
 - SSE 日志为 `response_type=stream`，普通 JSON 为 `response_type=normal`；
