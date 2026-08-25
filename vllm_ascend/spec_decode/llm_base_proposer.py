@@ -2171,22 +2171,62 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         addresses matter (ACL graph capture requires the latter).  Routing
         through ``_sync_edge_cloud_draft_intermediate_tensors`` keeps the
         returned views backed by the same persistent buffers used at runtime.
+
+        IMPORTANT: the fabricated key set must mirror the real wire payload
+        (see build_scheduled_draft_tensor_meta) — NOT the full buffer key set.
+        The buffers declare every key the draft model could carry (e.g.
+        "residual" from make_empty_intermediate_tensors), but the MTP wire
+        never carries "residual" (the cloud applies the final norm and ships
+        only normed hidden states).  Capturing the segment graph with a
+        residual key present and then running without it diverges the traced
+        graph from runtime (guard failure at best, baked hard key access /
+        KeyError at worst), and a zeros residual flips the edge tail's
+        "residual is None → already normed, pass through" branch into a
+        second norm application.
         """
+        role = self.runner.edge_cloud_cfg.role
+        if self.method == "eagle3":
+            # c2e carries hidden+residual; e2c carries input_embeds (+ the
+            # previous step's hidden states for steps beyond the first).
+            wire_keys = (
+                ("hidden_states", "residual")
+                if role == "edge"
+                else ("input_embeds", "hidden_states")
+            )
+        else:
+            # MTP: only normed hidden states cross in both directions.
+            wire_keys = ("hidden_states",)
+
         buffers = getattr(self.runner, "_edge_cloud_draft_intermediate_buffers", None)
         if buffers is None:
-            hidden_states = torch.zeros(
-                num_tokens,
-                self.hidden_size,
-                dtype=self.runner.dtype,
-                device=self.device,
+            fabricated = IntermediateTensors(
+                {
+                    key: torch.zeros(
+                        num_tokens,
+                        self.hidden_size,
+                        dtype=self.runner.dtype,
+                        device=self.device,
+                    )
+                    for key in wire_keys
+                }
             )
-            return IntermediateTensors({"hidden_states": hidden_states})
-        fabricated = IntermediateTensors(
-            {
-                key: value[:num_tokens] if isinstance(value, torch.Tensor) else value
-                for key, value in buffers.items()
-            }
-        )
+        else:
+            fabricated = IntermediateTensors(
+                {
+                    key: (
+                        buffers.tensors[key][:num_tokens]
+                        if key in buffers.tensors
+                        and isinstance(buffers.tensors[key], torch.Tensor)
+                        else torch.zeros(
+                            num_tokens,
+                            self.hidden_size,
+                            dtype=self.runner.dtype,
+                            device=self.device,
+                        )
+                    )
+                    for key in wire_keys
+                }
+            )
         return self.runner._sync_edge_cloud_draft_intermediate_tensors(
             num_tokens, fabricated
         )
