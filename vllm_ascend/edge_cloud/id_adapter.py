@@ -127,3 +127,15 @@ def unwrap_scheduler_output_ids(so) -> None:
             unwrap_head_token(tid) if _TOKEN_RE.match(tid) else tid
             for tid in so.cloud_draft_invalidate_task_ids
         ]
+    # Accepted-count dicts keyed by req_id (DRAFT_FIRST step 0): unwrap keys.
+    for field in ("num_accepted_tokens", "valid_sampled_token_count"):
+        value = getattr(so, field, None)
+        if isinstance(value, dict):
+            setattr(
+                so,
+                field,
+                {
+                    unwrap_req_id(rid) if is_wrapped_req_id(rid) else rid: v
+                    for rid, v in value.items()
+                },
+            )

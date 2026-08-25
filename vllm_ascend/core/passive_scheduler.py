@@ -551,6 +551,18 @@ class PassiveScheduler:
                 wrap_head_token(edge_id, tid)
                 for tid in so.cloud_draft_invalidate_task_ids
             ]
+        # DRAFT_FIRST step 0 carries accepted/sampling counts as dicts keyed
+        # by RAW edge req_ids (built in EngineCore from the edge worker's
+        # ModelRunnerOutput).  The cloud pairs them with its cached state by
+        # wrapped req_id, so the dict keys must enter the cloud namespace.
+        for field in ("num_accepted_tokens", "valid_sampled_token_count"):
+            value = getattr(so, field, None)
+            if isinstance(value, dict):
+                setattr(
+                    so,
+                    field,
+                    {wrap_req_id(edge_id, rid): v for rid, v in value.items()},
+                )
 
     def _promote_multi_edge(self) -> None:
         """Move per-edge head segments from the global queue into the legacy
