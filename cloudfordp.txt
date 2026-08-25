@@ -1,0 +1,1090 @@
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:04 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=0 batch=prefill_first head=a773f1daf58e42c6ba58d970413c098a task=None step=None prefill_phase=False seqno=0 draft_base=0 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:04 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=0 (watermark=-1)
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:04 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21125.0268
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:04 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21125.0268
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:04 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21125.0268
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:04 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21125.0268
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:04 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21125.0269
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:04 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:04 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1339 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:04 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_up>
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:04 [service.py:209] [edge-cloud-comm] created channel prefill_draft_up (peer=0 wire=draft)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:04 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_up>
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:04 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21125.0385
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:04 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21125.0448
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:04 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21125.0507
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:04 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1339 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:04 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1339 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:04 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1339 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:04 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1339 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:04 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1339 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:04 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1339 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:04 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1339 src=None pp_world=1 is_pp_npu0=False
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=prefill_up seqno=0
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=0
+[rank9]:[W825 08:09:05.200572200 ProcessGroupHCCL.cpp:5442] Warning: The current allgather operator has a defect in handling different tensor shape,         the work event forces a wait operation, and the allgather wait on the python side would be fake (function operator())
+[rank7]:[W825 08:09:05.200600320 ProcessGroupHCCL.cpp:5442] Warning: The current allgather operator has a defect in handling different tensor shape,         the work event forces a wait operation, and the allgather wait on the python side would be fake (function operator())
+[rank6]:[W825 08:09:05.200655820 ProcessGroupHCCL.cpp:5442] Warning: The current allgather operator has a defect in handling different tensor shape,         the work event forces a wait operation, and the allgather wait on the python side would be fake (function operator())
+[rank4]:[W825 08:09:05.200726420 ProcessGroupHCCL.cpp:5442] Warning: The current allgather operator has a defect in handling different tensor shape,         the work event forces a wait operation, and the allgather wait on the python side would be fake (function operator())
+[rank5]:[W825 08:09:05.200726500 ProcessGroupHCCL.cpp:5442] Warning: The current allgather operator has a defect in handling different tensor shape,         the work event forces a wait operation, and the allgather wait on the python side would be fake (function operator())
+[rank2]:[W825 08:09:05.200741530 ProcessGroupHCCL.cpp:5442] Warning: The current allgather operator has a defect in handling different tensor shape,         the work event forces a wait operation, and the allgather wait on the python side would be fake (function operator())
+[rank8]:[W825 08:09:05.200753500 ProcessGroupHCCL.cpp:5442] Warning: The current allgather operator has a defect in handling different tensor shape,         the work event forces a wait operation, and the allgather wait on the python side would be fake (function operator())
+[rank3]:[W825 08:09:05.200776560 ProcessGroupHCCL.cpp:5442] Warning: The current allgather operator has a defect in handling different tensor shape,         the work event forces a wait operation, and the allgather wait on the python side would be fake (function operator())
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [service.py:209] [edge-cloud-comm] created channel prefill_down (peer=0 wire=hidden)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=1339 tensor_keys=['hidden_states']
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_down>
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=1 batch=draft_first head=10ba29920a5849ee8d4fb3767d624bc7 task=a773f1daf58e42c6ba58d970413c098a step=0 prefill_phase=True seqno=0 draft_base=0 parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=0 (watermark=-1)
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=2 batch=decode_first head=e37de1ac738f4c7a9b7c1b2a0503d9bc task=None step=None prefill_phase=False seqno=0 draft_base=1 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=0 (watermark=-1)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [service.py:209] [edge-cloud-comm] created channel decode_up (peer=0 wire=hidden)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.decode_up>
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=prefill_draft_up seqno=0
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=0
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.6087
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [service.py:209] [edge-cloud-comm] created channel prefill_draft_down (peer=0 wire=draft)
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_down>
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.6091
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.6091
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.6091
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.6093
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.6094
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.6094
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.6098
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.6212
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.6214
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.6224
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.6238
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.6238
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.6239
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.6239
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.6246
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.6248
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.6248
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.6249
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.6249
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.6249
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.6249
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.6250
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.6250
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.6251
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.6251
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.6253
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.6258
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.6259
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.6260
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [acl_graph.py:255] Replaying aclgraph
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.6261
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.6263
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=0
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=0
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.7161
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.7183
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.7188
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.7217
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.7244
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [service.py:209] [edge-cloud-comm] created channel decode_down (peer=0 wire=hidden)
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.7247
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.7248
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.decode_down>
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.7260
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=3 batch=draft_first head=b431ad10ee1345c2ba45141ffdaac1ff task=e37de1ac738f4c7a9b7c1b2a0503d9bc step=0 prefill_phase=False seqno=1 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=4 batch=decode_first head=7adb3f20b001477998ce2e663aa9f17a task=None step=None prefill_phase=False seqno=2 draft_base=3 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 235.32 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=2 (watermark=0)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=1
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.7935
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.7935
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.7937
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.7937
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.7938
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.7938
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.7938
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.7949
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.7994
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.7994
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.7995
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.7996
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.7998
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.7998
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.7998
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.7999
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.7999
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.7999
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.7999
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8000
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8000
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8001
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8004
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8004
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8008
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8008
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8008
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8009
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8010
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8010
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8011
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8012
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8012
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8016
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8016
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8016
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8017
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8018
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8021
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8029
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=2
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=2
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=5 batch=draft_first head=3adccc170e544debaa4c6c19a4c33bed task=7adb3f20b001477998ce2e663aa9f17a step=0 prefill_phase=False seqno=3 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=6 batch=decode_first head=f14bec85ecde46ae9b962744be73bb51 task=None step=None prefill_phase=False seqno=4 draft_base=5 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 74.28 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=4 (watermark=2)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=3
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=3
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.8662
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.8662
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.8664
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.8665
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.8665
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.8666
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.8666
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.8674
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8720
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8721
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8722
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8722
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8724
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8724
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8725
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8725
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8725
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8726
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8726
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8727
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8727
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8728
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8730
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8731
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8733
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8734
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8735
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.8736
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8736
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8736
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.8737
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8738
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8739
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8741
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8742
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8743
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8744
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8744
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.8747
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.8755
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=4
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=4
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=7 batch=draft_first head=5a83954a9b774c70bb59308734965103 task=f14bec85ecde46ae9b962744be73bb51 step=0 prefill_phase=False seqno=5 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=8 batch=decode_first head=c9a1b795bf2649658cce3a3e0e22a86a task=None step=None prefill_phase=False seqno=6 draft_base=7 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 71.10 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=6 (watermark=4)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=5
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=5
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.9374
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.9375
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.9377
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.9377
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.9377
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.9378
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.9378
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21125.9388
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.9432
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.9433
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.9433
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.9434
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.9435
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.9436
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.9436
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.9436
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.9437
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.9437
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.9437
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.9438
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.9439
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.9439
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.9441
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.9442
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.9445
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.9445
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.9446
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.9447
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.9447
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21125.9449
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.9449
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.9450
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21125.9451
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.9453
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.9453
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.9453
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.9455
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.9456
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21125.9460
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21125.9467
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=6
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=6
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=9 batch=draft_first head=d576b4c531a644cf9ff8e56c8eada2bb task=c9a1b795bf2649658cce3a3e0e22a86a step=0 prefill_phase=False seqno=7 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=10 batch=decode_first head=6d2cbd5b054544cba7e53d9aa700a810 task=None step=None prefill_phase=False seqno=8 draft_base=9 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 71.09 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=8 (watermark=6)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=7
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=7
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0087
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0087
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0088
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0089
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0089
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0089
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0089
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0102
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0145
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0145
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0146
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0146
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0146
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0147
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0147
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0148
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0148
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0149
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0149
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0149
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0150
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0150
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0154
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0154
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0155
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0156
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0157
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0158
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0158
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0162
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0162
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0163
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0163
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0164
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0164
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0165
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0166
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0166
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0173
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0181
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=8
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=8
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=11 batch=draft_first head=9bf1165f87b34d1baeaffbd2228d33a9 task=6d2cbd5b054544cba7e53d9aa700a810 step=0 prefill_phase=False seqno=9 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=12 batch=decode_first head=e35298ac973f4341abf1e7f1cddd84c0 task=None step=None prefill_phase=False seqno=10 draft_base=11 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 72.14 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=10 (watermark=8)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=9
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=9
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0800
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0801
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0802
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0802
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0802
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0803
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0804
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.0817
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0858
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0858
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0859
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0859
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0860
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0860
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0861
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0861
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0861
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0862
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0863
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0863
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0864
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0864
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0867
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0867
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0869
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0869
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0870
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0872
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0872
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0875
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0875
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.0877
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0877
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0877
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0878
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.0878
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0880
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0880
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.0888
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.0896
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=13 batch=prefill_first head=21de6926d71c4988bf68f6fda4341a7d task=None step=None prefill_phase=False seqno=1 draft_base=1 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=1 (watermark=0)
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:05 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=11 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=499.7
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21126.1059
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21126.1059
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21126.1059
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21126.1059
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21126.1059
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21126.1059
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21126.1059
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=21126.1059
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1302 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:05 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=10
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=10
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:05 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=11 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=489.3
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:05 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=11 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=479.0
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:05 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=11 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=468.8
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1302 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1302 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1302 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1302 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1302 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1302 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:05 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=1302 src=None pp_world=1 is_pp_npu0=False
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:05 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=14 batch=draft_first head=a3bad4ef0464468fa8aa817184731deb task=e35298ac973f4341abf1e7f1cddd84c0 step=0 prefill_phase=False seqno=11 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:05 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=10 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=494.1
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:05 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=10 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=483.8
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=10 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=473.5
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=10 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=463.1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=15 batch=decode_first head=d1e914a1cef54d3095b9309bee738b04 task=None step=None prefill_phase=False seqno=12 draft_base=13 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 112.40 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=12 (watermark=10)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=497.5
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=11
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=11
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=487.2
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=477.0
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=466.7
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=prefill_up seqno=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=1
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=456.4
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=446.2
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=435.9
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=425.6
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=415.3
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=405.0
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.2912
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.2915
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.2915
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.2915
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.2916
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.2917
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.2917
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.2917
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=394.8
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=12
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=12
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.2976
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.2978
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.2978
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.2978
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.2978
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.2979
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.2979
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.2979
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.2980
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.2981
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.2981
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.2982
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.2982
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.2982
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.2983
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.2984
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.2986
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.2987
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.2987
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.2987
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.2989
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.2990
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.2992
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.2993
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.2994
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.2995
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.2995
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.2995
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.2997
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.2998
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3000
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3002
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=384.3
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=374.1
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=363.9
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=9 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=353.6
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=16 batch=draft_first head=f2716ec84d70497ebb1237c44bd64618 task=d1e914a1cef54d3095b9309bee738b04 step=0 prefill_phase=False seqno=13 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=17 batch=decode_first head=b7769ed8d0b343c08db2398e9da0fcb8 task=None step=None prefill_phase=False seqno=14 draft_base=15 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 153.13 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=14 (watermark=12)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=13
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=13
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=7 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=496.3
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=7 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=486.0
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=7 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=475.7
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=7 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=465.4
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.3813
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.3813
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.3813
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.3813
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.3814
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.3814
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.3815
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.3815
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=7 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=455.2
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.3871
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.3872
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.3872
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.3873
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.3873
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.3873
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.3874
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.3874
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.3874
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.3875
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.3875
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.3876
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.3875
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.3877
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.3877
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.3877
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=14
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.3880
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.3881
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.3882
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=14
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.3883
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.3884
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.3885
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.3885
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.3888
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3889
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3889
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3890
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3891
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3892
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3893
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3894
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.3896
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=7 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=444.8
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=7 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=434.5
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=7 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=424.2
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=18 batch=draft_first head=75fb5b2afeca41cda8716ef5a936f173 task=b7769ed8d0b343c08db2398e9da0fcb8 step=0 prefill_phase=False seqno=15 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=6 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=499.8
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=19 batch=decode_first head=faf7512979084642b608dfc1e8e5c624 task=None step=None prefill_phase=False seqno=16 draft_base=17 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 88.30 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=16 (watermark=14)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=15
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=15
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=5 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=491.7
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=5 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=481.4
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=5 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=471.1
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.4645
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.4645
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.4645
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.4646
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.4646
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.4647
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.4647
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.4647
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=5 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=460.8
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=16
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=16
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.4703
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.4704
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.4705
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.4705
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.4705
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.4706
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.4706
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.4707
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.4707
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.4707
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.4708
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.4708
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.4709
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.4710
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.4710
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.4711
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.4713
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.4713
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.4714
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.4715
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.4716
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.4716
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.4719
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.4720
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.4721
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.4721
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.4722
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.4723
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.4724
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.4724
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.4728
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.4728
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=5 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=450.4
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=5 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=440.2
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=5 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=429.9
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=20 batch=draft_first head=f04bf197ad41456e990914c5eaf0d102 task=faf7512979084642b608dfc1e8e5c624 step=0 prefill_phase=False seqno=17 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=4 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=499.8
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=21 batch=decode_first head=14189f15a21946449d6d8268bad0b358 task=None step=None prefill_phase=False seqno=18 draft_base=19 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 83.67 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=18 (watermark=16)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=17
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=17
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=3 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=491.7
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=3 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=481.4
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=3 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=471.2
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.5472
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.5473
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.5473
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.5473
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.5474
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.5475
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.5475
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.5475
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=3 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=460.9
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=18
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.5530
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.5531
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.5531
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.5532
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.5533
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=18
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.5534
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.5534
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.5534
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.5535
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.5535
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.5535
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.5536
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.5537
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.5537
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.5538
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.5539
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.5539
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.5540
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.5542
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.5543
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.5543
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.5544
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.5547
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.5547
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.5548
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.5548
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.5550
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.5551
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.5551
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.5552
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.5555
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.5556
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=3 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=450.5
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=3 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=440.3
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=3 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=430.0
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=22 batch=draft_first head=ccce0174c14548f79574b88618e1347c task=14189f15a21946449d6d8268bad0b358 step=0 prefill_phase=False seqno=19 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=2 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=499.8
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=23 batch=decode_first head=957e347fe48a437b91143c1a6b00a938 task=None step=None prefill_phase=False seqno=20 draft_base=21 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 83.51 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=20 (watermark=18)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=19
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=19
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=1 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=491.8
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=1 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=481.5
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=1 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=471.2
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.6302
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.6304
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.6304
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.6304
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.6305
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.6305
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.6305
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.6305
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=1 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=460.9
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=20
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=20
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.6360
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.6361
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.6363
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.6363
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.6364
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.6364
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.6364
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.6365
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.6365
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.6366
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.6367
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.6367
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.6367
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.6367
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.6368
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.6369
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.6369
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.6372
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.6372
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.6373
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.6375
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.6375
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.6377
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.6377
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.6378
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.6380
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.6380
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.6381
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.6383
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.6383
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.6385
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.6386
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=1 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=450.6
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=1 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=440.3
+(PassiveEngineCore pid=148262) WARNING 08-25 08:09:06 [passive_scheduler.py:714] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=0 active_slices=1 sliced_pf=True | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=430.1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=24 batch=draft_first head=065dd34408ba4fc094f41624c8979416 task=957e347fe48a437b91143c1a6b00a938 step=0 prefill_phase=False seqno=21 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=25 batch=decode_first head=a2b4c5d53f7242269930ec20b1c88dda task=None step=None prefill_phase=False seqno=22 draft_base=23 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 82.29 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=22 (watermark=20)
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=21
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=21
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7152
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7153
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=1302 tensor_keys=['hidden_states']
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7154
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7154
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7155
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7155
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7156
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7160
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=22
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=22
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7210
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7211
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7212
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7213
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7214
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7214
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7214
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7215
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7215
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7216
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7217
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7218
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7218
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7218
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7219
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7222
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7222
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7223
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7224
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7224
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7224
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7226
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7226
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7227
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7230
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7230
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7231
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7232
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7234
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7234
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7235
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7242
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=26 batch=draft_first head=c339631acde74e4e94979e2eb56f93ae task=a2b4c5d53f7242269930ec20b1c88dda step=0 prefill_phase=False seqno=23 draft_base=None parent_req=chatcmpl-9a151b257d95fdaa-83935a4c reqs=1
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=23
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=23
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=27 batch=decode_first head=4d8515eb71184366984e2f8aaa6c7b76 task=None step=None prefill_phase=False seqno=24 draft_base=25 parent_req=None reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:347] DECODE_FIRST arrival interval: 100.96 ms
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=24 (watermark=23)
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7787
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7787
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7787
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7787
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7788
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7788
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7788
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=21126.7788
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7845
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7846
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7846
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7846
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7846
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7847
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7847
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7847
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7847
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7848
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7848
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7849
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7849
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7850
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7854
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=21126.7854
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7855
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7855
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7855
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=21126.7856
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7856
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7858
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7859
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7861
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7863
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7863
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7863
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7864
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=21126.7865
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7866
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7867
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=21126.7873
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [passive_scheduler.py:314] [MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=28 batch=draft_first head=283099d152df485eb746cba6356be5a1 task=21de6926d71c4988bf68f6fda4341a7d step=0 prefill_phase=True seqno=1 draft_base=1 parent_req=chatcmpl-aa2065a9142fba2e-a07babf7 reqs=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=1 (watermark=0)
+(Worker_TP3_EP3 pid=148399) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=148356) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=148540) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=148308) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=148586) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=148494) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=148448) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=148289) INFO 08-25 08:09:06 [worker.py:983] [early-irecv] completion reported channel=prefill_draft_up seqno=1
+(PassiveEngineCore pid=148262) INFO 08-25 08:09:06 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=1
