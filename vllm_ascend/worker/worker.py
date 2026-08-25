@@ -244,6 +244,11 @@ class NPUWorker(WorkerBase):
         # Prevents the guard thread from posting a duplicate (orphan) irecv
         # when its hint arrives after busy_loop already posted its own.
         self._early_recv_consumed: set[str] = set()
+        # [2E1C-TRACE] CHER debugging state: booking timestamps and a progress
+        # heartbeat so a hang can be localized to a thread/op/lock.
+        self._early_recv_booked_at: dict[str, float] = {}
+        self._cher_last_progress: float = time.monotonic()
+        self._cur_batch_desc: str = "none"
         # Whether cloud-side hidden early-receive (CHER) is active on this
         # worker.  CHER is a built-in part of PD-separation masking, so on a
         # PD-separated cloud worker (local_rank==0) this is always True; False
@@ -924,6 +929,47 @@ class NPUWorker(WorkerBase):
             pass
         return None
 
+    def _dump_cher_state(self, reason: str) -> None:
+        """[2E1C-TRACE] Snapshot CHER + send-work state for hang diagnosis.
+
+        Dumps: pending early-recv handles (with age), consumed count, pending
+        sends per (channel,pair), the batch the busy_loop is currently in, and
+        the calling thread — so at hang time we can see exactly which op each
+        thread is stuck on and who (if anyone) is holding a lock.
+        """
+        try:
+            now = time.monotonic()
+            with self._early_recv_lock:
+                handles = {
+                    ht: f"{now - self._early_recv_booked_at.get(ht, now):.1f}s"
+                    for ht in self._early_recv_handles
+                }
+            pending_sends = {
+                f"{ch}/e{pair}": len(v)
+                for (ch, pair), v in self._pp_send_work_by_channel.items()
+            }
+            logger.warning(
+                "[2E1C-TRACE][CHER-DUMP] reason=%s thread=%s | "
+                "early_recv_handles(ht->age)=%s | consumed=%d | "
+                "pending_sends(chan/pair->n)=%s | cur_batch=%s",
+                reason,
+                threading.current_thread().name,
+                handles,
+                len(self._early_recv_consumed),
+                pending_sends,
+                self._cur_batch_desc,
+            )
+        except Exception:
+            logger.exception("[2E1C-TRACE][CHER-DUMP] failed")
+
+    def _cher_state_watchdog(self) -> None:
+        """[2E1C-TRACE] Daemon: dump CHER state whenever the busy_loop makes
+        no progress for >30s (i.e. a hang is forming)."""
+        while not getattr(self, "_cher_watchdog_shutdown", False):
+            time.sleep(5.0)
+            if time.monotonic() - self._cher_last_progress > 30.0:
+                self._dump_cher_state("no-progress>30s")
+
     def _post_early_irecv_locked(
         self, ht: str, channel: "HiddenChannelType", num_tokens: int,
         include_mrope: bool = True,
@@ -941,6 +987,12 @@ class NPUWorker(WorkerBase):
         # edge id ("{edge_id}:{token}") — post the irecv on that pair's
         # group.  Legacy mode: unwrapped token, no scope (default PP group).
         _pair_edge_id = self._edge_bucket_of_token(ht)
+        logger.info(
+            "[2E1C-TRACE] CHER irecv POST begin: ht=%s channel=%s pair=%s "
+            "ntokens=%d thread=%s",
+            ht, channel.value if channel else None, _pair_edge_id, num_tokens,
+            threading.current_thread().name,
+        )
         with self._pair_scope(_pair_edge_id):
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=num_tokens,
@@ -952,6 +1004,12 @@ class NPUWorker(WorkerBase):
             tensor_dict,
             comm_handles=comm_handles,
             comm_postprocess=comm_postprocess,
+        )
+        logger.info(
+            "[2E1C-TRACE] CHER irecv POST done: ht=%s channel=%s pair=%s "
+            "thread=%s",
+            ht, channel.value if channel else None, _pair_edge_id,
+            threading.current_thread().name,
         )
         return entry
 
@@ -985,7 +1043,16 @@ class NPUWorker(WorkerBase):
                 channel_str,
             )
             return
+        _tname = threading.current_thread().name
+        logger.info(
+            "[2E1C-TRACE] CHER guard: hint ht=%s channel=%s, acquiring "
+            "_early_recv_lock (thread=%s)",
+            ht, channel_str, _tname,
+        )
         with self._early_recv_lock:
+            logger.info(
+                "[2E1C-TRACE] CHER guard: lock acquired ht=%s thread=%s",
+                ht, _tname)
             if ht in self._early_recv_handles:
                 return  # idempotent: another thread already posted
             if ht in self._early_recv_consumed:
@@ -1023,6 +1090,7 @@ class NPUWorker(WorkerBase):
             try:
                 entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
                 self._early_recv_handles[ht] = entry  # cache for busy_loop
+                self._early_recv_booked_at[ht] = time.monotonic()
             except Exception:
                 logger.exception(
                     "[CHER] start_early_irecv failed head_token=%s channel=%s",
@@ -1031,8 +1099,8 @@ class NPUWorker(WorkerBase):
                 return
         logger.info(
             "[2E1C-TRACE] CHER early-recv posted head_token=%s channel=%s "
-            "num_tokens=%d bucket=%s",
-            ht, channel_str, num_tokens, _bucket,
+            "num_tokens=%d bucket=%s thread=%s",
+            ht, channel_str, num_tokens, _bucket, _tname,
         )
 
     def get_or_post_early_recv(
@@ -1054,15 +1122,23 @@ class NPUWorker(WorkerBase):
         """
         if not head_token:
             return None
+        _tname = threading.current_thread().name
         with self._early_recv_lock:
             entry = self._early_recv_handles.pop(head_token, None)
             self._early_recv_consumed.add(head_token)
             if entry is not None:
+                logger.info(
+                    "[2E1C-TRACE] CHER consume(guard-entry) ht=%s thread=%s",
+                    head_token, _tname)
+                self._cher_last_progress = time.monotonic()
                 return entry  # guard thread posted it, consumed
             # Not posted by guard: post our own.  Do NOT cache in
             # _early_recv_handles -- we consume it immediately.  Marking
             # _early_recv_consumed above prevents the guard from posting a
             # duplicate (orphan irecv) when its hint arrives later.
+            logger.info(
+                "[2E1C-TRACE] CHER consume(self-post) ht=%s thread=%s",
+                head_token, _tname)
             try:
                 return self._post_early_irecv_locked(
                     head_token, channel, num_tokens, include_mrope=include_mrope)
@@ -1339,6 +1415,20 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Cloud middle segment: recv -> segment_b/c -> isend -> return."""
+        # [2E1C-TRACE] record the current batch for the CHER state dump, and
+        # lazily start the hang watchdog (once).
+        self._cur_batch_desc = (
+            f"bt={scheduler_output.batch_type} "
+            f"ht={getattr(scheduler_output, 'head_token', None)}"
+        )
+        if not getattr(self, "_cher_watchdog_started", False):
+            self._cher_watchdog_started = True
+            threading.Thread(
+                target=self._cher_state_watchdog,
+                name="cher-state-watchdog",
+                daemon=True,
+            ).start()
+            logger.info("[2E1C-TRACE] CHER state watchdog started")
         #     f"Execute model, batch_type: {scheduler_output.batch_type}, " + (
         #         f"slice: {layer_slice_info.slice_index + 1}/{layer_slice_info.total_slices}, "
         #         f"layers: [{layer_slice_info.start_layer},{layer_slice_info.end_layer})"
@@ -1489,6 +1579,9 @@ class NPUWorker(WorkerBase):
                     channel=channel,
                     pair_edge_id=_pair_edge_id,
                 )
+        # [2E1C-TRACE] batch completed — feed the hang watchdog.
+        self._cher_last_progress = time.monotonic()
+        self._cur_batch_desc = "idle"
         return output
 
     def _scheduled_draft_tensor_meta(
