@@ -157,6 +157,12 @@ class PassiveScheduler:
         self._prefill_middle_throttle_seconds = 0.010
         # Rate limiter for the [PD-STALL-CLOUD] empty-dispatch probe.
         self._last_stall_log_ts: float = 0.0
+        spec = getattr(vllm_config, "speculative_config", None)
+        spec_method = str(getattr(spec, "method", "")).lower()
+        self._trace_mtp1_flow = (
+            "mtp" in spec_method
+            and int(getattr(spec, "num_speculative_tokens", 0) or 0) == 1
+        )
 
         # Bridge queue between the (optional) subscriber thread and the
         # main loop. When the thread is enabled, it drains
@@ -300,6 +306,32 @@ class PassiveScheduler:
             # )
             if bt == BatchType.EMPTY:
                 continue
+            if self._trace_mtp1_flow and bt in (
+                BatchType.PREFILL_FIRST,
+                BatchType.DECODE_FIRST,
+                BatchType.DRAFT_FIRST,
+            ):
+                logger.info(
+                    "[MTP1-FLOW][CLOUD-ARRIVE] arrival_seq=%d batch=%s "
+                    "head=%s task=%s step=%s prefill_phase=%s seqno=%s "
+                    "draft_base=%s parent_req=%s reqs=%d",
+                    seq,
+                    bt.value,
+                    getattr(scheduler_output, "head_token", None),
+                    getattr(scheduler_output, "draft_task_id", None),
+                    getattr(scheduler_output, "draft_step_idx", None),
+                    bool(
+                        getattr(
+                            scheduler_output,
+                            "draft_prefill_phase",
+                            False,
+                        )
+                    ),
+                    getattr(scheduler_output, "comm_seqno", None),
+                    getattr(scheduler_output, "draft_seqno_base", None),
+                    getattr(scheduler_output, "parent_req_id", None),
+                    len(scheduler_output.num_scheduled_tokens),
+                )
             arrivals.append((seq, scheduler_output))
             if bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
                 # PREFILL_FIRST = edge-cloud "P first" head segment; from the
