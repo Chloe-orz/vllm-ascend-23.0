@@ -1,236 +1,176 @@
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=38
-(PassiveEngineCore pid=297626) INFO 08-25 11:10:14 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=38
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31994.9453
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31994.9455
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31994.9456
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31994.9457
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31994.9457
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31994.9457
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31994.9458
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31994.9458
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31994.9458
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31994.9458
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31994.9459
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31994.9460
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31994.9461
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31994.9461
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31994.9463
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31994.9466
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31994.9466
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31994.9466
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31994.9467
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31994.9467
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31994.9469
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31994.9470
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31994.9470
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31994.9471
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31994.9474
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31994.9475
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31994.9475
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31994.9475
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31994.9478
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31994.9478
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31994.9479
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31994.9488
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=4 tensor_keys=['hidden_states']
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 is_prefill=False target_shape=(4,) target_device=npu:4 num_reqs=2 scheduled_total=4
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 is_prefill=False target_shape=(4,) target_device=npu:5 num_reqs=2 scheduled_total=4
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 is_prefill=False target_shape=(4,) target_device=npu:1 num_reqs=2 scheduled_total=4
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4 accepted_type=dict
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4 accepted_type=dict
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 is_prefill=False target_shape=(4,) target_device=npu:3 num_reqs=2 scheduled_total=4
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 is_prefill=False target_shape=(4,) target_device=npu:2 num_reqs=2 scheduled_total=4
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 is_prefill=False target_shape=(4,) target_device=npu:7 num_reqs=2 scheduled_total=4
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 rows=2 first=1 last=3 scheduled_total=4
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 rows=2 first=1 last=3 scheduled_total=4
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4 accepted_type=dict
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 is_prefill=False target_shape=(4,) target_device=npu:6 num_reqs=2 scheduled_total=4
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4 accepted_type=dict
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4 accepted_type=dict
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 is_prefill=False target_shape=(4,) target_device=npu:0 num_reqs=2 scheduled_total=4
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4 accepted_type=dict
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 rows=2 first=1 last=3 scheduled_total=4
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 rows=2 first=1 last=3 scheduled_total=4
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4 accepted_type=dict
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 rows=2 first=1 last=3 scheduled_total=4
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 tokens=4 accepted_type=dict
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 rows=2 first=1 last=3 scheduled_total=4
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 rows=2 first=1 last=3 scheduled_total=4
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 rows=2 first=1 last=3 scheduled_total=4
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6995] [MTP1-POSITION][INDEX-TENSOR-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,) device=npu:1
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6995] [MTP1-POSITION][INDEX-TENSOR-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,) device=npu:4
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6995] [MTP1-POSITION][INDEX-TENSOR-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,) device=npu:0
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6995] [MTP1-POSITION][INDEX-TENSOR-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,) device=npu:5
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6995] [MTP1-POSITION][INDEX-TENSOR-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,) device=npu:3
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6995] [MTP1-POSITION][INDEX-TENSOR-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,) device=npu:2
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6995] [MTP1-POSITION][INDEX-TENSOR-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,) device=npu:6
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6995] [MTP1-POSITION][INDEX-TENSOR-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,) device=npu:7
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:7002] [MTP1-POSITION][INDEX-SELECT-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:7002] [MTP1-POSITION][INDEX-SELECT-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:7002] [MTP1-POSITION][INDEX-SELECT-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:7002] [MTP1-POSITION][INDEX-SELECT-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:7002] [MTP1-POSITION][INDEX-SELECT-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:7002] [MTP1-POSITION][INDEX-SELECT-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:7002] [MTP1-POSITION][INDEX-SELECT-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:7002] [MTP1-POSITION][INDEX-SELECT-BEGIN] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:7010] [MTP1-POSITION][INDEX-SELECT-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,)
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:7010] [MTP1-POSITION][INDEX-SELECT-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,)
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:7010] [MTP1-POSITION][INDEX-SELECT-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,)
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:7010] [MTP1-POSITION][INDEX-SELECT-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,)
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:7010] [MTP1-POSITION][INDEX-SELECT-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,)
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:7010] [MTP1-POSITION][INDEX-SELECT-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,)
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:7473] [MTP1-POSITION][END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(4,)
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:7010] [MTP1-POSITION][INDEX-SELECT-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,)
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:7010] [MTP1-POSITION][INDEX-SELECT-END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(2,)
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:7473] [MTP1-POSITION][END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(4,)
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:7473] [MTP1-POSITION][END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(4,)
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:7473] [MTP1-POSITION][END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(4,)
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:7473] [MTP1-POSITION][END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(4,)
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:7473] [MTP1-POSITION][END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(4,)
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:7473] [MTP1-POSITION][END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(4,)
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:7473] [MTP1-POSITION][END] task=be3d2b283c9645e69b14886756003fa9 head=3758cc228faa433e8955d5e68c6f7dc9 step=0 prefill_phase=False seqno=39 shape=(4,)
-
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=39
-(PassiveEngineCore pid=297626) INFO 08-25 11:10:14 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=39
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
-(PassiveEngineCore pid=297626) INFO 08-25 11:10:14 [passive_scheduler.py:315] DECODE_FIRST arrival interval: 105.36 ms
-(PassiveEngineCore pid=297626) INFO 08-25 11:10:14 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=40 (watermark=39)
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=31995.0043
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=31995.0043
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=31995.0043
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=31995.0043
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=31995.0043
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=31995.0044
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=31995.0044
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=31995.0044
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=2 is_pp_npu0=True
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31995.0103
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31995.0104
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31995.0104
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31995.0104
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31995.0105
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31995.0105
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31995.0105
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31995.0106
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31995.0106
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31995.0106
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31995.0107
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31995.0108
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31995.0109
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31995.0109
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=31995.0111
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31995.0112
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=31995.0113
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31995.0114
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31995.0114
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31995.0114
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31995.0114
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31995.0117
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31995.0118
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31995.0120
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31995.0122
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=31995.0122
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31995.0122
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31995.0122
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31995.0122
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31995.0126
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31995.0126
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=31995.0130
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=4 tensor_keys=['hidden_states']
-(PassiveEngineCore pid=297626) INFO 08-25 11:10:14 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=2 (watermark=1)
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 is_prefill=True target_shape=(1325,) target_device=npu:3 num_reqs=1 scheduled_total=1325
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 is_prefill=True target_shape=(1325,) target_device=npu:5 num_reqs=1 scheduled_total=1325
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:7463] [MTP1-POSITION][BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 is_prefill=True target_shape=(1325,) target_device=npu:2 num_reqs=1 scheduled_total=1325
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 is_prefill=True target_shape=(1325,) target_device=npu:4 num_reqs=1 scheduled_total=1325
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 is_prefill=True target_shape=(1325,) target_device=npu:1 num_reqs=1 scheduled_total=1325
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325 accepted_type=dict
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325 accepted_type=dict
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 is_prefill=True target_shape=(1325,) target_device=npu:0 num_reqs=1 scheduled_total=1325
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 is_prefill=True target_shape=(1325,) target_device=npu:7 num_reqs=1 scheduled_total=1325
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325 accepted_type=dict
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325 accepted_type=dict
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6896] [MTP1-POSITION][STATE] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 is_prefill=True target_shape=(1325,) target_device=npu:6 num_reqs=1 scheduled_total=1325
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 rows=1 first=1324 last=1324 scheduled_total=1325
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325 accepted_type=dict
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 rows=1 first=1324 last=1324 scheduled_total=1325
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325 accepted_type=dict
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325 accepted_type=dict
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 rows=1 first=1324 last=1324 scheduled_total=1325
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 rows=1 first=1324 last=1324 scheduled_total=1325
-(Worker_TP3_EP3 pid=297763) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6936] [MTP1-POSITION][LAYOUT-VALID] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 tokens=1325 accepted_type=dict
-(Worker_TP5_EP5 pid=297858) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 rows=1 first=1324 last=1324 scheduled_total=1325
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 rows=1 first=1324 last=1324 scheduled_total=1325
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 rows=1 first=1324 last=1324 scheduled_total=1325
-(Worker_TP2_EP2 pid=297720) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2
-(Worker_TP4_EP4 pid=297812) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6976] [MTP1-POSITION][ROWS-BUILT] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2 rows=1 first=1324 last=1324 scheduled_total=1325
-(Worker_TP1_EP1 pid=297672) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2
-(Worker_TP7_EP7 pid=297950) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2
-(Worker_TP6_EP6 pid=297904) INFO 08-25 11:10:14 [model_runner_v1.py:6985] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=521e1fd24dcc41de9a6a2ed137e66f51 head=198e87a33e6246d9993740c61f6b3f90 step=0 prefill_phase=True seqno=2
-(Worker_PP1_TP0_EP0 pid=297653) INFO 08-25 11:10:14 [worker.py:983] [early-irecv] completion reported channel=prefill_draft_up seqno=2
-(PassiveEngineCore pid=297626) INFO 08-25 11:10:14 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=2
+(PassiveEngineCore pid=494279) INFO 08-25 14:10:00 [passive_scheduler.py:320] DECODE_FIRST arrival interval: 78.04 ms
+(PassiveEngineCore pid=494279) INFO 08-25 14:10:00 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=4770 (watermark=4768)
+(PassiveEngineCore pid=494279) INFO 08-25 14:10:00 [passive_scheduler.py:686] [AB-GATE-HOLD] batch_type=BatchType.DECODE_FIRST channel=decode_up seqno=4770 task=None head=f9c20eb94cdd409eb7c357ff47dd7097
+(PassiveEngineCore pid=494279) WARNING 08-25 14:10:00 [passive_scheduler.py:727] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_PREFILL | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=1 active_slices=0 sliced_pf=False | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=inactive
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=2 is_pp_npu0=True
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769 shape=(1,) device=npu:2
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769 shape=(1,) device=npu:3
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769 shape=(1,) device=npu:6
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769 shape=(1,) device=npu:7
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769 shape=(1,) device=npu:1
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769 shape=(1,) device=npu:5
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769 shape=(1,) device=npu:4
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=4769
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=2b098985289246f09c292e1e14e97f38 head=3e0cdd0220fb4023966b894ca0fa83be step=0 prefill_phase=False seqno=4769 shape=(1,) device=npu:0
+(PassiveEngineCore pid=494279) INFO 08-25 14:10:00 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=4769
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(PassiveEngineCore pid=494279) WARNING 08-25 14:10:00 [passive_scheduler.py:727] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_PREFILL | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=1 active_slices=0 sliced_pf=False | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=inactive
+(PassiveEngineCore pid=494279) WARNING 08-25 14:10:00 [passive_scheduler.py:727] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_PREFILL | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=1 active_slices=0 sliced_pf=False | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=inactive
+(PassiveEngineCore pid=494279) WARNING 08-25 14:10:00 [passive_scheduler.py:727] [PD-STALL-CLOUD] empty dispatch with queued work: policy=expect_alternation state=CloudSchedulingState.EXPECT_EXECUTE_PREFILL | queues: prefills=0 pdmixes=0 p_drafts=0 d_drafts=0 decodes=1 active_slices=0 sliced_pf=False | head_ready: pf=False dd=False p_drf=False d_drf=False | throttle_remaining_ms=inactive
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=4770
+(PassiveEngineCore pid=494279) INFO 08-25 14:10:00 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=4770
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=42780.5575
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=42780.5575
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=42780.5575
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=42780.5575
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=42780.5575
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=42780.5575
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=42780.5575
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:1405] [PD-TIMING] cloud middle enter batch_type=BatchType.DECODE_FIRST ts=42780.5575
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=42780.5635
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=42780.5635
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=42780.5636
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=42780.5636
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=42780.5637
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=2 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=42780.5637
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=42780.5637
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=42780.5638
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=42780.5638
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=42780.5639
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=42780.5639
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=42780.5639
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=42780.5639
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:5629] [PD-TIMING] runner prep enter batch_type=BatchType.DECODE_FIRST ts=42780.5640
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=42780.5641
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:5637] [PD-TIMING] runner input-prep sync acquired batch_type=BatchType.DECODE_FIRST ts=42780.5641
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=42780.5645
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=42780.5646
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=42780.5646
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=42780.5648
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=42780.5648
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=42780.5649
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=42780.5651
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:6112] [PD-TIMING] runner prep done batch_type=BatchType.DECODE_FIRST ts=42780.5651
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=42780.5652
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=42780.5654
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=42780.5654
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=42780.5656
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=42780.5656
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=42780.5657
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=42780.5659
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:6123] [PD-TIMING] runner forward done batch_type=BatchType.DECODE_FIRST ts=42780.5659
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=decode_down dst=0 num_tokens=2 tensor_keys=['hidden_states']
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:1617] Execute model, batch_type: BatchType.DRAFT_FIRST
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:6956] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:6956] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:6956] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:6956] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:6956] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:6956] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:6956] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:6956] [MTP1-POSITION][INDEX-TENSOR-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:6965] [MTP1-POSITION][INDEX-STREAM] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 stream=<torch_npu.npu.Stream device=npu:2 npu_stream=0xfffef6795400> ready=False
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:6965] [MTP1-POSITION][INDEX-STREAM] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 stream=<torch_npu.npu.Stream device=npu:3 npu_stream=0xfffedfe95400> ready=False
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:6965] [MTP1-POSITION][INDEX-STREAM] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 stream=<torch_npu.npu.Stream device=npu:1 npu_stream=0xfffed3d75400> ready=False
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:6965] [MTP1-POSITION][INDEX-STREAM] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 stream=<torch_npu.npu.Stream device=npu:7 npu_stream=0xfffec5745400> ready=False
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:6965] [MTP1-POSITION][INDEX-STREAM] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 stream=<torch_npu.npu.Stream device=npu:6 npu_stream=0xfffefd895400> ready=False
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:6965] [MTP1-POSITION][INDEX-STREAM] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 stream=<torch_npu.npu.Stream device=npu:4 npu_stream=0xfffef2d45400> ready=False
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:6971] [MTP1-POSITION][INDEX-CPU-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 rows=1
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:6965] [MTP1-POSITION][INDEX-STREAM] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 stream=<torch_npu.npu.Stream device=npu:5 npu_stream=0xfffef5d75400> ready=False
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:6971] [MTP1-POSITION][INDEX-CPU-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 rows=1
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:6971] [MTP1-POSITION][INDEX-CPU-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 rows=1
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:6965] [MTP1-POSITION][INDEX-STREAM] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 stream=<torch_npu.npu.Stream device=npu:0 npu_stream=0xfffee3ad6800> ready=False
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:6971] [MTP1-POSITION][INDEX-CPU-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 rows=1
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:6971] [MTP1-POSITION][INDEX-CPU-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 rows=1
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:6971] [MTP1-POSITION][INDEX-CPU-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 rows=1
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:6971] [MTP1-POSITION][INDEX-CPU-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 rows=1
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:6982] [MTP1-POSITION][INDEX-CPU-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,)
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:6971] [MTP1-POSITION][INDEX-CPU-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 rows=1
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:6982] [MTP1-POSITION][INDEX-CPU-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,)
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:6982] [MTP1-POSITION][INDEX-CPU-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,)
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:6982] [MTP1-POSITION][INDEX-CPU-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,)
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:6982] [MTP1-POSITION][INDEX-CPU-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,)
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:6987] [MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 device=npu:2
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:6982] [MTP1-POSITION][INDEX-CPU-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,)
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:6987] [MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 device=npu:3
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:6982] [MTP1-POSITION][INDEX-CPU-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,)
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:6987] [MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 device=npu:1
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:6982] [MTP1-POSITION][INDEX-CPU-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,)
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:6987] [MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 device=npu:7
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:6987] [MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 device=npu:6
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:6987] [MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 device=npu:4
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:6998] [MTP1-POSITION][INDEX-NPU-ALLOC-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:2
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:6987] [MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 device=npu:5
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:6987] [MTP1-POSITION][INDEX-NPU-ALLOC-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 device=npu:0
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:6998] [MTP1-POSITION][INDEX-NPU-ALLOC-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:3
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:6998] [MTP1-POSITION][INDEX-NPU-ALLOC-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:1
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:6998] [MTP1-POSITION][INDEX-NPU-ALLOC-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:7
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:6998] [MTP1-POSITION][INDEX-NPU-ALLOC-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:6
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:7005] [MTP1-POSITION][INDEX-H2D-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:6998] [MTP1-POSITION][INDEX-NPU-ALLOC-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:4
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:7005] [MTP1-POSITION][INDEX-H2D-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:7005] [MTP1-POSITION][INDEX-H2D-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:6998] [MTP1-POSITION][INDEX-NPU-ALLOC-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:5
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:7005] [MTP1-POSITION][INDEX-H2D-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:7005] [MTP1-POSITION][INDEX-H2D-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:6998] [MTP1-POSITION][INDEX-NPU-ALLOC-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:0
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:7005] [MTP1-POSITION][INDEX-H2D-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:7005] [MTP1-POSITION][INDEX-H2D-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:7005] [MTP1-POSITION][INDEX-H2D-BEGIN] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:7011] [MTP1-POSITION][INDEX-H2D-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:1
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:6
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:3
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:2
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:7
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:5
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:4
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [model_runner_v1.py:7015] [MTP1-POSITION][INDEX-TENSOR-END] task=f9c20eb94cdd409eb7c357ff47dd7097 head=4673277290fa4f01b36acff501f16f78 step=0 prefill_phase=False seqno=4771 shape=(1,) device=npu:0
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:983] [early-irecv] completion reported channel=decode_up seqno=4771
+(PassiveEngineCore pid=494279) INFO 08-25 14:10:00 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=decode_up seqno=4771
+(Worker_TP1_EP1 pid=494325) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=494416) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=494557) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=494373) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=494603) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=494465) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=494511) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:1674] Send intermediate tensors to edge, hidden_channel: decode_down
+(Worker_PP1_TP0_EP0 pid=494306) INFO 08-25 14:10:00 [worker.py:1678] Execute model, batch_type: BatchType.DRAFT_FIRST, after.
