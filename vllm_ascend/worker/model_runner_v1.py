@@ -6308,8 +6308,17 @@ class NPUModelRunner(GPUModelRunner):
                     and "mrope_positions" in recv_intermediate_tensors.tensors):
                 recv_intermediate_tensors.wait_for_comm()
                 recv_mrope = recv_intermediate_tensors.tensors["mrope_positions"]
-                self.mrope_positions.gpu[:, :num_tokens_padded].copy_(
-                    recv_mrope[:num_tokens_padded].t().contiguous()
+                # The edge strips cudagraph/SP padding before transmission,
+                # so the wire tensor may be shorter than num_tokens_padded
+                # (e.g. an MTP uniform-decode batch padded up to a FULL
+                # cudagraph capture size). Copy only the rows actually
+                # received -- mirrors the min() guard for hidden_states in
+                # sync_and_slice_intermediate_tensors. The padding tail's
+                # positions are never consumed (padding tokens are outside
+                # the attention region and logits_indices).
+                recv_len = min(recv_mrope.shape[0], num_tokens_padded)
+                self.mrope_positions.gpu[:, :recv_len].copy_(
+                    recv_mrope[:recv_len].t().contiguous()
                 )
 
             (
