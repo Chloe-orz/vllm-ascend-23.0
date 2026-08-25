@@ -1975,6 +1975,21 @@ class PDSeparatedScheduler(Scheduler):
                 "draft_output_req_ids",
                 tuple(target_tail.num_scheduled_tokens),
             )
+            # The wire copy of every chain step would carry the parent's
+            # full token history: replace() shares the parent's
+            # CachedRequestData, so each pickled DRAFT_FIRST re-sends the
+            # whole all_token_ids dict (MBs for long contexts) -- 3-4x the
+            # same history per decode round over the edge->cloud ZMQ. No
+            # draft-step consumer reads it: the cloud draft path never
+            # calls _update_states, and the recovery path that does read
+            # all_token_ids only fires for requests re-joining a
+            # persistent batch, which never happens inside a chain. Ship
+            # an empty copy instead of mutating the shared original.
+            _cached = draft_first.scheduled_cached_reqs
+            if _cached is not None and _cached.all_token_ids:
+                draft_first.scheduled_cached_reqs = replace(
+                    _cached, all_token_ids={}
+                )
             first_ready.append(draft_first)
             if step_idx == 0 and not chain_dead:
                 self._draft_publish_pending[task_id] = draft_first
@@ -2081,6 +2096,14 @@ class PDSeparatedScheduler(Scheduler):
             "draft_output_req_ids",
             tuple(source.num_scheduled_tokens),
         )
+        # Same wire-size trim as the pre-generated chain: drop the shared
+        # parent token history before this DRAFT_FIRST crosses the
+        # edge->cloud ZMQ (no draft-step consumer reads all_token_ids).
+        _cached = draft_first.scheduled_cached_reqs
+        if _cached is not None and _cached.all_token_ids:
+            draft_first.scheduled_cached_reqs = replace(
+                _cached, all_token_ids={}
+            )
         if draft_first.draft_prefill_phase:
             self.prefill_drafts_first_ready.append(draft_first)
         else:
