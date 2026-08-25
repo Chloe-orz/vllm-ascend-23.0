@@ -521,6 +521,13 @@ class PassiveScheduler:
         # spec decode: per-req draft token map is keyed by req_id — must be
         # wrapped too, otherwise the cloud's draft/verify lookup by wrapped
         # req_id would KeyError.
+        # NOTE: the live SchedulerOutput field is ``scheduled_spec_decode_tokens``;
+        # ``scheduled_spec_token_ids`` is a stale name kept for backward compat.
+        if getattr(so, "scheduled_spec_decode_tokens", None):
+            so.scheduled_spec_decode_tokens = {
+                wrap_req_id(edge_id, rid): ids
+                for rid, ids in so.scheduled_spec_decode_tokens.items()
+            }
         if getattr(so, "scheduled_spec_token_ids", None):
             so.scheduled_spec_token_ids = {
                 wrap_req_id(edge_id, rid): ids

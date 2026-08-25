@@ -100,6 +100,13 @@ def unwrap_scheduler_output_ids(so) -> None:
         so.finished_req_ids = {
             unwrap_req_id(rid) for rid in so.finished_req_ids
         }
+    # Live SchedulerOutput field name is scheduled_spec_decode_tokens;
+    # scheduled_spec_token_ids is the stale alias kept for compat.
+    if getattr(so, "scheduled_spec_decode_tokens", None):
+        so.scheduled_spec_decode_tokens = {
+            unwrap_req_id(rid): ids
+            for rid, ids in so.scheduled_spec_decode_tokens.items()
+        }
     if getattr(so, "scheduled_spec_token_ids", None):
         so.scheduled_spec_token_ids = {
             unwrap_req_id(rid): ids
