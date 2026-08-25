@@ -44,7 +44,7 @@ from typing import TYPE_CHECKING, Optional
 
 import zmq
 from vllm import envs
-from vllm.logger import init_logger
+from vllm.logger import init_logger, logger as vllm_logger
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value,
 )
@@ -557,6 +557,12 @@ class PassiveEngineCoreProc:
             "mtp" in spec_method
             and int(getattr(spec, "num_speculative_tokens", 0) or 0) == 1
         )
+        vllm_logger.info(
+            "[MTP1-FLOW][CLOUD-INIT] enabled=%s method=%s num_spec=%s",
+            self._trace_mtp1_flow,
+            spec_method,
+            getattr(spec, "num_speculative_tokens", None),
+        )
         self._mtp1_flow_event_seq = 0
         self._mtp1_pending_draft_tasks: dict[str, int | None] = {}
         self._mtp1_draft_task_by_head: dict[str, str] = {}
@@ -596,14 +602,14 @@ class PassiveEngineCoreProc:
                             head_token, None
                         )
                         if task_id is None:
-                            logger.error(
+                            vllm_logger.error(
                                 "[MTP1-AUDIT][ACK-WITHOUT-DISPATCH] "
                                 "head=%s",
                                 head_token,
                             )
                         else:
                             self._mtp1_pending_draft_tasks.pop(task_id, None)
-                    logger.info(
+                    vllm_logger.info(
                         "[MTP1-FLOW][CLOUD-ACK] event=%d batch=%s head=%s "
                         "task=%s pending_tasks=%s",
                         self._next_mtp1_flow_event(),
@@ -692,7 +698,7 @@ class PassiveEngineCoreProc:
             prefill_phase = bt == BatchType.PREFILL_FIRST
             num_spec = self._num_scheduled_spec_tokens()
             if self._trace_mtp1_flow:
-                logger.info(
+                vllm_logger.info(
                     "[MTP1-FLOW][CLOUD-HINT] arrival_seq=%s batch=%s "
                     "head=%s target_seqno=%s draft_base=%s num_spec=%d "
                     "prefill_phase=%s",
@@ -803,7 +809,7 @@ class PassiveEngineCoreProc:
                 batch_type == BatchType.DECODE_FIRST
                 and self._mtp1_pending_draft_tasks
             ):
-                logger.warning(
+                vllm_logger.warning(
                     "[MTP1-AUDIT][VERIFY-BEFORE-DRAFT-ACK] verify_head=%s "
                     "verify_seqno=%s pending_tasks=%s",
                     head_token,
@@ -813,7 +819,7 @@ class PassiveEngineCoreProc:
             if batch_type == BatchType.DRAFT_FIRST:
                 expected_seqno = self._mtp1_pending_draft_tasks.get(task_id)
                 if task_id not in self._mtp1_pending_draft_tasks:
-                    logger.error(
+                    vllm_logger.error(
                         "[MTP1-AUDIT][DRAFT-WITHOUT-PARENT] head=%s "
                         "task=%s seqno=%s",
                         head_token,
@@ -821,7 +827,7 @@ class PassiveEngineCoreProc:
                         comm_seqno,
                     )
                 elif expected_seqno != comm_seqno:
-                    logger.error(
+                    vllm_logger.error(
                         "[MTP1-AUDIT][DRAFT-SEQNO-MISMATCH] head=%s "
                         "task=%s actual=%s expected=%s",
                         head_token,
@@ -831,7 +837,7 @@ class PassiveEngineCoreProc:
                     )
                 if head_token and task_id:
                     self._mtp1_draft_task_by_head[head_token] = task_id
-            logger.info(
+            vllm_logger.info(
                 "[MTP1-FLOW][CLOUD-DISPATCH] event=%d arrival_seq=%s "
                 "batch=%s head=%s task=%s step=%s prefill_phase=%s "
                 "seqno=%s draft_base=%s pending_tasks=%s slices=%d",
@@ -938,7 +944,7 @@ class PassiveEngineCoreProc:
             task_id = getattr(scheduler_output, "head_token", None)
             if dispatched_target_end and draft_base is not None and task_id:
                 self._mtp1_pending_draft_tasks[task_id] = draft_base
-                logger.info(
+                vllm_logger.info(
                     "[MTP1-FLOW][CLOUD-EXPECT-DRAFT] event=%d "
                     "parent_batch=%s task=%s expected_seqno=%s "
                     "pending_tasks=%s",

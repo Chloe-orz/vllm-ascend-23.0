@@ -277,7 +277,7 @@ def _publish_to_cloud(
     original SchedulerOutput and cleans up its own batch immediately.
     """
     if _trace_mtp1_flow_enabled(self):
-        logger.info(
+        vllm_logger.info(
             "[MTP1-FLOW][EDGE-PUBLISH] batch=%s head=%s task=%s step=%s "
             "prefill_phase=%s seqno=%s draft_base=%s parent_req=%s reqs=%d",
             scheduler_output.batch_type.value,
@@ -438,7 +438,7 @@ def _maybe_publish_pre_out(
                     self._pd_deferred_draft_pre_out = deferred
                 deferred.setdefault(task_id, []).append(scheduler_output)
                 if _trace_mtp1_flow_enabled(self):
-                    logger.info(
+                    vllm_logger.info(
                         "[MTP1-FLOW][EDGE-DEFER] batch=%s head=%s "
                         "task=%s step=%s seqno=%s reason=waiting_scalars",
                         scheduler_output.batch_type.value,
@@ -487,7 +487,7 @@ def _release_deferred_draft_pre_out(
     if channel is None:
         return
     if queued and _trace_mtp1_flow_enabled(self):
-        logger.info(
+        vllm_logger.info(
             "[MTP1-FLOW][EDGE-RELEASE] task=%s controls=%d",
             draft_task_id,
             len(queued),
