@@ -1622,18 +1622,6 @@ class NPUWorker(WorkerBase):
             prefill_phase_draft=scheduler_output.draft_prefill_phase,
         )
         _seqno = self._require_comm_seqno(scheduler_output)
-        trace_mtp1 = (
-            "mtp" in str(self.model_runner.speculative_config.method).lower()
-            and self.model_runner.num_spec_tokens == 1
-        )
-        trace_context = (
-            f"task={scheduler_output.draft_task_id} "
-            f"head={scheduler_output.head_token} "
-            f"step={scheduler_output.draft_step_idx} "
-            f"prefill_phase={scheduler_output.draft_prefill_phase} "
-            f"seqno={_seqno} "
-            f"tokens={scheduler_output.total_num_scheduled_tokens}"
-        )
         recv_tensor_meta = self._scheduled_draft_tensor_meta(
             scheduler_output,
             "e2c",
@@ -1649,80 +1637,30 @@ class NPUWorker(WorkerBase):
                 seqno=_seqno,
                 draft_meta=recv_tensor_meta,
             ))
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][RECV-ATTACHED] %s",
-                trace_context,
-            )
         # Lazy consumption: wait_event ordering + TP-broadcast postprocess
         # run on first .tensors access inside the middle segment.
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][MIDDLE-BEGIN] %s",
-                trace_context,
-            )
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
             scheduler_output, recv_future.as_intermediate_tensors()
         )
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][MIDDLE-END] %s output_shapes=%s",
-                trace_context,
-                {
-                    key: tuple(value.shape)
-                    for key, value in output.items()
-                    if isinstance(value, torch.Tensor)
-                },
-            )
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][GATHER-BEGIN] %s",
-                trace_context,
-            )
         out_tensor_dict = (
             self.model_runner._gather_deepseek_v4_mtp_draft_tensors(
                 output.tensors,
                 self._scheduled_draft_num_tokens(scheduler_output),
             )
         )
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][GATHER-END] %s output_shapes=%s",
-                trace_context,
-                {
-                    key: tuple(value.shape)
-                    for key, value in out_tensor_dict.items()
-                    if isinstance(value, torch.Tensor)
-                },
-            )
         if get_pp_group().world_size == 2:
-            if trace_mtp1:
-                logger.info(
-                    "[MTP1-CLOUD-DRAFT][OUTPUT-PACK-BEGIN] %s",
-                    trace_context,
-                )
             out_tensor_dict = {
                 key: value.contiguous()
                 if isinstance(value, torch.Tensor)
                 else value
                 for key, value in out_tensor_dict.items()
             }
-            if trace_mtp1:
-                logger.info(
-                    "[MTP1-CLOUD-DRAFT][OUTPUT-PACK-END] %s",
-                    trace_context,
-                )
             # Submit only -- the service owns completion; do NOT wait.  See
             # method docstring.
             send_tensor_meta = self._scheduled_draft_tensor_meta(
                 scheduler_output,
                 "c2e",
             )
-            if trace_mtp1:
-                logger.info(
-                    "[MTP1-CLOUD-DRAFT][SEND-BEGIN] %s channel=%s",
-                    trace_context,
-                    channel_for_direction(_kind, up=False).value,
-                )
             get_comm_service().submit_send(
                 CommRequest(
                     channel=channel_for_direction(_kind, up=False),
@@ -1733,12 +1671,6 @@ class NPUWorker(WorkerBase):
                     tensor_dict=out_tensor_dict,
                     draft_meta=send_tensor_meta,
                 ))
-            if trace_mtp1:
-                logger.info(
-                    "[MTP1-CLOUD-DRAFT][SEND-SUBMITTED] %s channel=%s",
-                    trace_context,
-                    channel_for_direction(_kind, up=False).value,
-                )
             logger.info(
                 "Send intermediate tensors to edge, "
                 f"hidden_channel: {channel_for_direction(_kind, up=False).value}"

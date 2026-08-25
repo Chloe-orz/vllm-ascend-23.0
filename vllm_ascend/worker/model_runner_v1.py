@@ -6872,14 +6872,37 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens: int,
     ) -> torch.Tensor:
         """Reconstruct draft positions from the cached cloud target step."""
+        trace_mtp1 = (
+            "mtp" in str(self.speculative_config.method).lower()
+            and self.num_spec_tokens == 1
+        )
         task_id = scheduler_output.draft_task_id
         if task_id is None:
             raise RuntimeError("DRAFT batch missing draft_task_id")
+        trace_context = (
+            f"task={task_id} "
+            f"head={scheduler_output.head_token} "
+            f"step={scheduler_output.draft_step_idx} "
+            f"prefill_phase={scheduler_output.draft_prefill_phase} "
+            f"seqno={scheduler_output.comm_seqno}"
+        )
         state = self._cloud_draft_position_state_by_task.get(task_id)
         if state is None:
             raise RuntimeError(
                 "DRAFT has no matching target positions: "
                 f"task_id={task_id}"
+            )
+        if trace_mtp1:
+            logger.info(
+                "[MTP1-POSITION][STATE] %s is_prefill=%s "
+                "target_shape=%s target_device=%s num_reqs=%d "
+                "scheduled_total=%d",
+                trace_context,
+                state.is_prefill,
+                tuple(state.target_positions.shape),
+                state.target_positions.device,
+                len(state.num_scheduled_tokens),
+                sum(state.num_scheduled_tokens),
             )
 
         draft_step_idx = int(scheduler_output.draft_step_idx or 0)
@@ -6908,6 +6931,14 @@ class NPUModelRunner(GPUModelRunner):
                     f"accepted={len(accepted_counts)}, "
                     f"requests={len(state.num_scheduled_tokens)}, "
                     f"task_id={task_id}"
+                )
+            if trace_mtp1:
+                logger.info(
+                    "[MTP1-POSITION][LAYOUT-VALID] %s tokens=%d "
+                    "accepted_type=%s",
+                    trace_context,
+                    num_tokens,
+                    type(accepted_counts).__name__,
                 )
 
             sample_rows: list[int] = []
@@ -6941,14 +6972,46 @@ class NPUModelRunner(GPUModelRunner):
                 sample_rows.append(start + accepted - 1)
                 start += scheduled
 
+            if trace_mtp1:
+                logger.info(
+                    "[MTP1-POSITION][ROWS-BUILT] %s rows=%d "
+                    "first=%s last=%s scheduled_total=%d",
+                    trace_context,
+                    len(sample_rows),
+                    sample_rows[0] if sample_rows else None,
+                    sample_rows[-1] if sample_rows else None,
+                    start,
+                )
+                logger.info(
+                    "[MTP1-POSITION][INDEX-TENSOR-BEGIN] %s",
+                    trace_context,
+                )
             row_indices = torch.tensor(
                 sample_rows,
                 dtype=torch.long,
                 device=target_positions.device,
             )
+            if trace_mtp1:
+                logger.info(
+                    "[MTP1-POSITION][INDEX-TENSOR-END] %s shape=%s "
+                    "device=%s",
+                    trace_context,
+                    tuple(row_indices.shape),
+                    row_indices.device,
+                )
+                logger.info(
+                    "[MTP1-POSITION][INDEX-SELECT-BEGIN] %s",
+                    trace_context,
+                )
             state.base_positions = target_positions.index_select(
                 -1, row_indices
             )
+            if trace_mtp1:
+                logger.info(
+                    "[MTP1-POSITION][INDEX-SELECT-END] %s shape=%s",
+                    trace_context,
+                    tuple(state.base_positions.shape),
+                )
             return target_positions
 
         base_positions = state.base_positions
@@ -7389,12 +7452,6 @@ class NPUModelRunner(GPUModelRunner):
             if self.speculative_config.method == "eagle3"
             else "hidden_states"
         )
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][RECV-MATERIALIZE-BEGIN] %s key=%s",
-                trace_context,
-                token_tensor_key,
-            )
         token_tensor = intermediate_tensors.tensors.get(token_tensor_key)
         if token_tensor is None:
             raise RuntimeError(
@@ -7404,14 +7461,7 @@ class NPUModelRunner(GPUModelRunner):
         num_tokens = token_tensor.shape[0]
         if trace_mtp1:
             logger.info(
-                "[MTP1-CLOUD-DRAFT][RECV-MATERIALIZE-END] %s "
-                "key=%s shape=%s",
-                trace_context,
-                token_tensor_key,
-                tuple(token_tensor.shape),
-            )
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][POSITIONS-BEGIN] %s tokens=%d",
+                "[MTP1-POSITION][BEGIN] %s tokens=%d",
                 trace_context,
                 num_tokens,
             )
@@ -7421,27 +7471,13 @@ class NPUModelRunner(GPUModelRunner):
         full_positions = positions
         if trace_mtp1:
             logger.info(
-                "[MTP1-CLOUD-DRAFT][POSITIONS-END] %s shape=%s",
+                "[MTP1-POSITION][END] %s shape=%s",
                 trace_context,
                 tuple(full_positions.shape),
-            )
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][BUFFER-SYNC-BEGIN] %s",
-                trace_context,
             )
         intermediate = self._sync_edge_cloud_draft_intermediate_tensors(
             num_tokens, intermediate_tensors
         )
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][BUFFER-SYNC-END] %s shapes=%s",
-                trace_context,
-                {
-                    key: tuple(value.shape)
-                    for key, value in intermediate.items()
-                    if isinstance(value, torch.Tensor)
-                },
-            )
         positions = self._chunk_deepseek_v4_mtp_draft_positions(
             full_positions
         )
@@ -7464,22 +7500,9 @@ class NPUModelRunner(GPUModelRunner):
                 num_tokens,
                 is_first_step=spec_step_idx == 0,
             )
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][ATTN-METADATA-BEGIN] %s "
-                "positions_shape=%s",
-                trace_context,
-                tuple(positions.shape),
-            )
         draft_attn_metadata = self._build_edge_cloud_draft_attn_metadata(
             full_positions, spec_step_idx, scheduler_output
         )
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][ATTN-METADATA-END] %s layers=%d",
-                trace_context,
-                len(draft_attn_metadata),
-            )
 
         if is_forward_context_available():
             forward_context = get_forward_context()
@@ -7495,14 +7518,6 @@ class NPUModelRunner(GPUModelRunner):
             batch_descriptor = BatchDescriptor(num_tokens)
             num_actual_tokens = num_tokens
 
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][SEGMENT-C-BEGIN] %s tokens=%d "
-                "actual_tokens=%d",
-                trace_context,
-                num_tokens,
-                num_actual_tokens,
-            )
         with set_ascend_forward_context(
             attn_metadata=draft_attn_metadata,
             vllm_config=self.vllm_config,
@@ -7513,11 +7528,6 @@ class NPUModelRunner(GPUModelRunner):
             is_draft_model=True,
         ):
             output = self._edge_cloud_draft_segments["c"](**model_kwargs)
-        if trace_mtp1:
-            logger.info(
-                "[MTP1-CLOUD-DRAFT][SEGMENT-C-END] %s",
-                trace_context,
-            )
         if not isinstance(output, IntermediateTensors):
             raise RuntimeError(
                 "Edge-cloud draft middle segment returned no intermediates"
