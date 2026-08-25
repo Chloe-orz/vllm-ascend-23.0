@@ -157,6 +157,11 @@ class PassiveScheduler:
         self._prefill_middle_throttle_seconds = 0.010
         # Rate limiter for the [PD-STALL-CLOUD] empty-dispatch probe.
         self._last_stall_log_ts: float = 0.0
+        # Diagnostic MTP=1 ordering gate. PassiveEngineCore updates this
+        # count from cloud-worker DRAFT_FIRST completion ACKs. While it is
+        # non-zero, VERIFY stays queued but other cloud work remains
+        # dispatchable, and all cross-node receives continue progressing.
+        self._verify_wait_draft_acks: int = 0
 
         # Bridge queue between the (optional) subscriber thread and the
         # main loop. When the thread is enabled, it drains
@@ -685,7 +690,7 @@ class PassiveScheduler:
             "queues: prefills=%d pdmixes=%d p_drafts=%d d_drafts=%d "
             "decodes=%d active_slices=%d sliced_pf=%s | "
             "head_ready: pf=%s dd=%s p_drf=%s d_drf=%s | "
-            "throttle_remaining_ms=%s",
+            "verify_wait_draft_acks=%d throttle_remaining_ms=%s",
             self.dispatch_policy.value,
             self.cloud_scheduling_state,
             len(self.ready_prefills),
@@ -699,6 +704,7 @@ class PassiveScheduler:
             self._decode_head_data_ready(),
             self._prefill_draft_head_data_ready(),
             self._decode_draft_head_data_ready(),
+            self._verify_wait_draft_acks,
             (
                 f"{throttle_remaining_ms:.1f}"
                 if throttle_remaining_ms is not None
@@ -766,6 +772,16 @@ class PassiveScheduler:
         return self._seqno_ready(
             CommChannelType.DECODE_UP, self.ready_decodes[0]
         )
+
+    def set_verify_wait_draft_acks(self, count: int) -> None:
+        """Hold cloud VERIFY dispatch until prior DRAFT workers finish."""
+        self._verify_wait_draft_acks = max(0, count)
+
+    def _decode_head_dispatchable(self, ready_only: bool) -> bool:
+        """Whether the queued VERIFY may enter the cloud worker."""
+        if not self.ready_decodes or self._verify_wait_draft_acks > 0:
+            return False
+        return not ready_only or self._decode_head_data_ready()
 
     def _prefill_draft_head_data_ready(self) -> bool:
         """True once the head prefill-phase draft's payload has arrived.
@@ -857,9 +873,7 @@ class PassiveScheduler:
 
         Caller must ensure at least one of the three queues is non-empty.
         """
-        has_decode = bool(self.ready_decodes) and (
-            not ready_only or self._decode_head_data_ready()
-        )
+        has_decode = self._decode_head_dispatchable(ready_only)
         # Decode-phase draft heads dispatch on arrival: the payload wait
         # is covered device-side by wait_event on the pre-posted recv
         # (the edge sends promptly after its DRF head executes), so the
@@ -915,9 +929,7 @@ class PassiveScheduler:
         has_prefill = bool(self.ready_prefills) and (
             not ready_only or self._prefill_head_data_ready()
         )
-        has_decode = bool(self.ready_decodes) and (
-            not ready_only or self._decode_head_data_ready()
-        )
+        has_decode = self._decode_head_dispatchable(ready_only)
         # Decode-phase draft heads dispatch on arrival: the payload wait
         # is covered device-side by wait_event on the pre-posted recv
         # (the edge sends promptly after its DRF head executes), so the
@@ -1005,9 +1017,7 @@ class PassiveScheduler:
         has_prefill = bool(self.ready_prefills) and (
             not ready_only or self._prefill_head_data_ready()
         )
-        has_decode = bool(self.ready_decodes) and (
-            not ready_only or self._decode_head_data_ready()
-        )
+        has_decode = self._decode_head_dispatchable(ready_only)
         has_draft = bool(self.ready_decode_drafts) or (
             bool(self.ready_prefill_drafts)
             and (not ready_only or self._prefill_draft_head_data_ready())
@@ -1120,8 +1130,9 @@ class PassiveScheduler:
         self, queue_name: str, ready_only: bool = True
     ) -> ScheduledBatch:
         if self._active_prefill_slices:
-            if queue_name == "ready_decodes" and self.ready_decodes and (
-                not ready_only or self._decode_head_data_ready()
+            if (
+                queue_name == "ready_decodes"
+                and self._decode_head_dispatchable(ready_only)
             ):
                 return self._pick_decode_batch()
             if queue_name in ("ready_prefills", "ready_pdmixes"):
@@ -1135,9 +1146,7 @@ class PassiveScheduler:
                 return self._build_batch(self.ready_prefills.popleft())
             return ScheduledBatch.empty()
         if queue_name == "ready_decodes":
-            if self.ready_decodes and (
-                not ready_only or self._decode_head_data_ready()
-            ):
+            if self._decode_head_dispatchable(ready_only):
                 return self._pick_decode_batch()
             return ScheduledBatch.empty()
         if queue_name == "ready_prefill_drafts":
