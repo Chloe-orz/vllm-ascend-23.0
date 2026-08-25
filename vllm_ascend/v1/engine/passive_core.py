@@ -551,24 +551,6 @@ class PassiveEngineCoreProc:
         self._prev_dispatch_req_ids: set[str] = set()
         self._pending_post_out_by_head_token: dict[str, SchedulerOutput] = {}
         self._published_post_out_tokens: set[str] = set()
-        spec = getattr(vllm_config, "speculative_config", None)
-        spec_method = str(getattr(spec, "method", "")).lower()
-        num_spec_tokens = int(
-            getattr(spec, "num_speculative_tokens", 0) or 0
-        )
-        # Diagnostic experiment for the MTP=1 failure: preserve all
-        # communication overlap, but do not let a VERIFY enter the cloud
-        # worker until the preceding DRAFT_FIRST has completed there.
-        self._wait_mtp1_verify_for_draft_ack = (
-            "mtp" in spec_method and num_spec_tokens == 1
-        )
-        self._pending_mtp1_draft_tasks: set[str] = set()
-        self._mtp1_draft_task_by_head_token: dict[str, str] = {}
-
-    def _update_mtp1_verify_wait_gate(self) -> None:
-        self.passive_scheduler.set_verify_wait_draft_acks(
-            len(self._pending_mtp1_draft_tasks)
-        )
 
     def _drain_worker_completion_acks(self) -> None:
         """Publish POST_OUT only after cloud workers complete the middle segment."""
@@ -588,32 +570,12 @@ class PassiveEngineCoreProc:
                 ):
                     continue
 
-                batch_type = result.get("batch_type")
-                head_token = result.get("head_token")
-                if (
-                    self._wait_mtp1_verify_for_draft_ack
-                    and batch_type == BatchType.DRAFT_FIRST
-                    and head_token
-                ):
-                    task_id = self._mtp1_draft_task_by_head_token.pop(
-                        head_token, None
-                    )
-                    if task_id is not None:
-                        self._pending_mtp1_draft_tasks.discard(task_id)
-                        self._update_mtp1_verify_wait_gate()
-                        logger.info(
-                            "[MTP1-VERIFY-WAIT] DRAFT worker completed: "
-                            "task_id=%s head_token=%s remaining=%d",
-                            task_id,
-                            head_token,
-                            len(self._pending_mtp1_draft_tasks),
-                        )
-
                 # Decode and draft tails are self-posted on the edge. Their
                 # worker acks are still drained from the response MQ, but do
                 # not drive a cloud -> edge POST_OUT control message.
-                if batch_type != BatchType.PREFILL_FIRST:
+                if result.get("batch_type") != BatchType.PREFILL_FIRST:
                     continue
+                head_token = result.get("head_token")
                 if not head_token or head_token in self._published_post_out_tokens:
                     continue
                 scheduler_output = self._pending_post_out_by_head_token.pop(
@@ -805,59 +767,6 @@ class PassiveEngineCoreProc:
             self.executor.rpc_broadcast_mq.enqueue(
                 (b"pp_scheduler_output", payload, {}, None)
             )
-            if self._wait_mtp1_verify_for_draft_ack:
-                is_target_end = (
-                    batch.scheduler_output.batch_type
-                    in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST)
-                    and (slice_info is None or slice_info.is_last_slice)
-                )
-                if is_target_end and getattr(
-                    batch.scheduler_output, "draft_seqno_base", None
-                ) is not None:
-                    # Arm at the parent target, not at DRAFT arrival: a
-                    # pre-generated DRAFT control may be held until the edge
-                    # has finalized its accepted-token scalars, while the
-                    # following VERIFY control can already reach the cloud.
-                    task_id = getattr(
-                        batch.scheduler_output, "head_token", None
-                    )
-                    if task_id:
-                        self._pending_mtp1_draft_tasks.add(task_id)
-                        self._update_mtp1_verify_wait_gate()
-                        logger.info(
-                            "[MTP1-VERIFY-WAIT] target armed DRAFT wait: "
-                            "task_id=%s pending=%d",
-                            task_id,
-                            len(self._pending_mtp1_draft_tasks),
-                        )
-                elif (
-                    batch.scheduler_output.batch_type
-                    == BatchType.DRAFT_FIRST
-                ):
-                    head_token = getattr(
-                        batch.scheduler_output, "head_token", None
-                    )
-                    task_id = getattr(
-                        batch.scheduler_output, "draft_task_id", None
-                    )
-                    if head_token and task_id:
-                        self._pending_mtp1_draft_tasks.add(task_id)
-                        self._mtp1_draft_task_by_head_token[head_token] = (
-                            task_id
-                        )
-                        self._update_mtp1_verify_wait_gate()
-                        logger.info(
-                            "[MTP1-VERIFY-WAIT] DRAFT worker dispatched: "
-                            "task_id=%s head_token=%s pending=%d",
-                            task_id,
-                            head_token,
-                            len(self._pending_mtp1_draft_tasks),
-                        )
-                    else:
-                        logger.warning(
-                            "MTP=1 DRAFT_FIRST has no task/head token; "
-                            "VERIFY ACK wait is skipped to avoid deadlock."
-                        )
             if _updates_worker_persistent_batch(
                 batch.scheduler_output, slice_info
             ):
