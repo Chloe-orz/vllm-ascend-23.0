@@ -77,6 +77,22 @@ from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 
 from vllm_ascend.v1.engine.passive_core import PPSchedulerZmqChannel
 
+# Decoupled data-plane irecv coordination.  The scheduler-process glue
+# (scheduler_link) forwards recv hints to the local worker's comm thread
+# and answers per-channel watermark queries fed by the worker's
+# completion reports.  Hint schema (see scheduler_link docstring):
+#   batch_type: BatchType     -- FIRST = UP head payload, LAST = DOWN tail
+#   draft_prefill_phase: bool -- draft channel-pair selection
+#   seqno: int                -- per-channel sequence number (edge-stamped)
+#   num_tokens: int           -- dim-0 of the payload
+#   has_mrope: bool
+from vllm_ascend.distributed.edge_cloud_comm.scheduler_link import (
+    post_irecv_hint,
+    record_irecv_completions,
+    register_hint_sender,
+    set_readiness_gating_enabled,
+)
+
 logger = init_logger(__name__)
 
 
@@ -170,6 +186,26 @@ def _patched_engine_core_init(self, *args, **kwargs):
             pre_out, post_out, cloud_addr,
         )
 
+    # Wire the decoupled data-plane recv scheduling: hints travel on the
+    # executor's dedicated hint MQ (consumed by the edge worker's comm
+    # thread); completion reports come back on the done MQ and are
+    # drained per step in _drain_irecv_completions.
+    executor = getattr(self, "model_executor", None)
+    hint_mq = getattr(executor, "edge_recv_hint_mq", None)
+    if pd_enabled and hint_mq is not None:
+
+        def _send_hint(hint: dict, mq=hint_mq) -> None:
+            # Blocking enqueue: with readiness gating active a lost hint
+            # deadlocks the pipeline (no pre-post -> watermark never
+            # advances -> the gated tail is never dispatched).
+            mq.enqueue((b"irecv_hint", (hint,), {}, None))
+
+        register_hint_sender(_send_hint)
+    if pd_enabled and getattr(parallel_config, "is_shared_model_edge", False):
+        # The shared-model single-NPU edge topology has no hint/feedback
+        # infrastructure this period; keep the scheduler ungated there.
+        set_readiness_gating_enabled(False)
+
 
 # =======================================================================#
 # Three helper methods bound on EngineCore. Mirror the dest fork.         #
@@ -183,7 +219,8 @@ def _drain_pd_channel_inbox(self) -> None:
     if not (
         hasattr(self.scheduler, "prefills_last_ready")
         and hasattr(self.scheduler, "decodes_last_ready")
-        and hasattr(self.scheduler, "drafts_last_ready")
+        and hasattr(self.scheduler, "prefill_drafts_last_ready")
+        and hasattr(self.scheduler, "decode_drafts_last_ready")
     ):
         return
     new_outputs = self._pp_pd_channel.consume_new_outputs()
@@ -198,7 +235,7 @@ def _drain_pd_channel_inbox(self) -> None:
             # DRAFT_LAST is self-posted by _pick_draft_first_batch (like
             # DECODE_LAST). If it arrives via POST_OUT (e.g. from an older
             # cloud that still publishes it), drop it -- the edge already has
-            # its own copy in drafts_last_ready.
+            # its own copy in the per-lane drafts_last_ready queue.
             logger.debug(
                 "Dropping POST_OUT DRAFT_LAST head_token=%s "
                 "(edge self-posts DRAFT_LAST)",
@@ -250,13 +287,93 @@ def _publish_to_cloud(
         return
     # copy.copy (NOT dataclasses.replace): the SO carries dynamically
     # attached attributes that replace() would silently drop -- has_mrope
-    # (stamped per-SO in _schedule_pd_separated; the cloud's CHER
-    # early-recv hint relies on it), is_last_prefill_chunk,
+    # (stamped per-SO in _schedule_pd_separated; the cloud's early-recv
+    # hint relies on it), is_last_prefill_chunk,
     # draft_output_req_ids, etc.  A shallow copy preserves __dict__;
     # only finished_req_ids is overridden with a fresh set.
     cloud_so = _copy.copy(scheduler_output)
     cloud_so.finished_req_ids = cloud_finished
     channel.publish(cloud_so)
+
+
+def _post_irecv_hints_for_first_batch(
+    self, scheduler_output: SchedulerOutput
+) -> None:
+    """Pre-post edge-side irecvs for a just-published PF/DF head batch.
+
+    For every PREFILL_FIRST / DECODE_FIRST published to the cloud, the
+    edge will later receive (cloud -> edge):
+      1. this batch's tail-segment payload (same comm_seqno on the DOWN
+         channel of the same pair), and
+      2. one DRAFT_LAST payload per speculative step of the draft chain
+         that follows the batch — the chain's seqno range was reserved
+         at pick time and rides on the SO as ``draft_seqno_base``.
+
+    Posting the irecvs at dispatch-decision time decouples the data
+    plane from worker execution: tail segments attach an
+    already-received buffer instead of blocking on recv.
+    """
+    bt = scheduler_output.batch_type
+    if bt not in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST):
+        return
+    seqno = scheduler_output.comm_seqno
+    if seqno is None:
+        return
+    total_tokens = scheduler_output.total_num_scheduled_tokens
+    # Tail payloads never carry mrope (mirrors _execute_model_edge_tail).
+    post_irecv_hint({
+        "batch_type": (
+            BatchType.PREFILL_LAST
+            if bt == BatchType.PREFILL_FIRST
+            else BatchType.DECODE_LAST
+        ),
+        "draft_prefill_phase": False,
+        "seqno": seqno,
+        "num_tokens": total_tokens,
+        "has_mrope": False,
+        "draft_step_idx": None,
+    })
+    base = scheduler_output.draft_seqno_base
+    if base is None:
+        return
+    prefill_phase = bt == BatchType.PREFILL_FIRST
+    num_spec = int(getattr(self.scheduler, "num_spec_tokens", 0) or 0)
+    # Draft step shapes (mirrors the worker's meta derivation): step 0
+    # runs over the parent batch's full token count, later steps over
+    # one token per request.
+    num_reqs = len(scheduler_output.num_scheduled_tokens)
+    for step_idx in range(num_spec):
+        post_irecv_hint({
+            "batch_type": BatchType.DRAFT_LAST,
+            "draft_prefill_phase": prefill_phase,
+            "seqno": base + step_idx,
+            "num_tokens": total_tokens if step_idx == 0 else num_reqs,
+            "has_mrope": False,
+            "draft_step_idx": step_idx,
+        })
+
+
+def _drain_irecv_completions(self) -> None:
+    """Drain worker completion reports into the per-channel watermarks.
+
+    The edge worker's comm thread reports every completed pre-posted
+    recv as ``(CommChannelType, seqno)`` on the done MQ; per-channel
+    completion is FIFO in-order, so the watermarks (max seqno seen) are
+    an exact readiness predicate for the scheduler's tail gating.
+    """
+    executor = getattr(self, "model_executor", None)
+    done_mq = getattr(executor, "irecv_done_mq", None)
+    if done_mq is None:
+        return
+    items = []
+    while True:
+        try:
+            items.append(done_mq.dequeue(timeout=0))
+        except Exception:
+            # TimeoutError (empty queue) or transient failure: stop.
+            break
+    if items:
+        record_irecv_completions(items)
 
 
 def _maybe_publish_pre_out(
@@ -267,6 +384,12 @@ def _maybe_publish_pre_out(
         return
     bt = scheduler_output.batch_type
     if bt == BatchType.DRAFT_FIRST:
+        if scheduler_output.draft_chain_dead:
+            # Dead chains never wait for scalar patching (their parent
+            # produces none): publish immediately so the cloud runs the
+            # middle and the channel seqno sequence stays intact.
+            self._publish_to_cloud(scheduler_output)
+            return
         is_pregenerated = getattr(
             self.scheduler, "is_pre_generated_draft", lambda _so: False
         )(scheduler_output)
@@ -298,6 +421,9 @@ def _maybe_publish_pre_out(
         BatchType.DECODE_FIRST,
     ):
         self._publish_to_cloud(scheduler_output)
+        # Right after the SO goes out: pre-post the local irecvs for
+        # this batch's tail payload and its n draft tail payloads.
+        self._post_irecv_hints_for_first_batch(scheduler_output)
     elif bt in (
         BatchType.EMPTY,
         BatchType.PREFILL_LAST,
@@ -574,6 +700,25 @@ def _advance_edge_cloud_draft(
         self.scheduler.update_draft_token_ids(draft_token_ids)
 
 
+def _release_dead_chain_pre_out(self, draft_task_id: str) -> None:
+    """Release a dead chain's deferred cloud controls with neutral scalars.
+
+    The deferral exists to patch step-0's accepted-token scalars before
+    the cloud sees them; a dead parent never produces them, so patch
+    zeros (no acceptance) before publishing — the cloud's draft state
+    upkeep requires the fields to be non-None.
+    """
+    deferred = getattr(self, "_pd_deferred_draft_pre_out", None)
+    queued = deferred.get(draft_task_id, []) if deferred else []
+    for so in queued:
+        n = len(so.num_scheduled_tokens)
+        if getattr(so, "num_accepted_tokens", None) is None:
+            so.num_accepted_tokens = [0] * n
+        if getattr(so, "valid_sampled_token_count", None) is None:
+            so.valid_sampled_token_count = [0] * n
+    self._release_deferred_draft_pre_out(draft_task_id)
+
+
 def _clear_pending_edge_cloud_draft_for_finished_requests(self) -> None:
     """Push draft lifecycle events across the executor boundary.
 
@@ -599,6 +744,19 @@ def _clear_pending_edge_cloud_draft_for_finished_requests(self) -> None:
     sched_dropped = (
         take_sched_dropped() if take_sched_dropped is not None else []
     )
+    # Release deferred cloud controls of chains that were just marked
+    # dead: a dead parent never produces the scalars their step-0
+    # publication was waiting for, so without this the SOs would sit in
+    # the deferred queue forever and the cloud would never run the
+    # middle (channel seqno stall).
+    take_dead_releases = getattr(
+        self.scheduler, "take_dead_chain_publish_releases", None
+    )
+    dead_releases = (
+        take_dead_releases() if take_dead_releases is not None else []
+    )
+    for task_id in dead_releases:
+        self._release_dead_chain_pre_out(task_id)
     release = getattr(
         self.scheduler, "release_draft_retained_blocks", None
     )
@@ -720,9 +878,17 @@ def _patched_step(self):
     # [ascend insert] Drain POST_OUT (cloud → edge) into the
     # PDSeparatedScheduler's tail-segment ready queues before scheduling.
     self._drain_pd_channel_inbox()
+    # [ascend insert] Drain worker recv-completion reports into the
+    # per-channel watermarks the scheduler's tail gating queries.
+    self._drain_irecv_completions()
 
     scheduler_output = self.scheduler.schedule()
     self._ensure_pd_head_token(scheduler_output)
+    if scheduler_output.batch_type == BatchType.DECODE_FIRST:
+        logger.info(
+            "[PD-TIMING] DF scheduled ts=%.4f",
+            _time.monotonic(),
+        )
 
     # [ascend insert] Merge worker cleanup stashed from EMPTY batches
     # BEFORE publishing to the cloud, so the published SO also carries
@@ -747,6 +913,11 @@ def _patched_step(self):
         self.log_iteration_details(scheduler_output),
     ):
         model_output = future.result()
+        if scheduler_output.batch_type == BatchType.DECODE_FIRST:
+            logger.info(
+                "[PD-TIMING] DF head result collected ts=%.4f",
+                _time.monotonic(),
+            )
         if model_output is None:
             model_output = self.model_executor.sample_tokens(grammar_output)
 
@@ -800,8 +971,17 @@ def _patched_step_with_batch_queue(self):
         and not self._has_unresolved_edge_cloud_draft_parent()
     ):
         self._drain_pd_channel_inbox()
+        self._drain_irecv_completions()
         scheduler_output = self.scheduler.schedule()
         self._ensure_pd_head_token(scheduler_output)
+        if scheduler_output.batch_type in (
+            BatchType.DECODE_FIRST, BatchType.DECODE_LAST
+        ):
+            vllm_logger.info(
+                "[PD-TIMING] engine scheduled %s ts=%.4f",
+                scheduler_output.batch_type.value,
+                _time.monotonic(),
+            )
 
         # [ascend insert] Merge worker cleanup stashed from EMPTY batches
         # BEFORE publishing to the cloud, so the published SO also carries
@@ -890,6 +1070,14 @@ def _patched_step_with_batch_queue(self):
         self.log_iteration_details(scheduler_output),
     ):
         model_output = future.result()
+        if scheduler_output.batch_type in (
+            BatchType.DECODE_FIRST, BatchType.DECODE_LAST
+        ):
+            vllm_logger.info(
+                "[PD-TIMING] engine collected %s ts=%.4f",
+                scheduler_output.batch_type.value,
+                _time.monotonic(),
+            )
         if model_output is None:
             exec_model_fut.result()
             raise RuntimeError("unexpected error")
@@ -1072,11 +1260,16 @@ def install() -> None:
 
     EngineCore.__init__ = _patched_engine_core_init
     EngineCore._drain_pd_channel_inbox = _drain_pd_channel_inbox
+    EngineCore._drain_irecv_completions = _drain_irecv_completions
     EngineCore._publish_to_cloud = _publish_to_cloud
     EngineCore._maybe_publish_pre_out = _maybe_publish_pre_out
+    EngineCore._post_irecv_hints_for_first_batch = (
+        _post_irecv_hints_for_first_batch
+    )
     EngineCore._release_deferred_draft_pre_out = (
         _release_deferred_draft_pre_out
     )
+    EngineCore._release_dead_chain_pre_out = _release_dead_chain_pre_out
     EngineCore._close_draft_pre_out = _close_draft_pre_out
     EngineCore._ensure_pd_head_token = _ensure_pd_head_token
     EngineCore._needs_sample_tokens = _needs_sample_tokens

@@ -5127,8 +5127,27 @@ class NPUModelRunner(GPUModelRunner):
                     spec_decode_common_attn_metadata
                 )
                 self._cloud_spec_decode_num_reqs = num_reqs
+        _pd_timing = (
+            self._edge_cloud_enabled
+            and scheduler_output.batch_type in (
+                BatchType.DECODE_FIRST, BatchType.DECODE_LAST
+            )
+        )
+        if _pd_timing:
+            logger.info(
+                "[PD-TIMING] runner prep enter batch_type=%s ts=%.4f",
+                scheduler_output.batch_type,
+                time.monotonic(),
+            )
         with record_function_or_nullcontext("prepare input"):
             with self.synchronize_input_prep():
+                if _pd_timing:
+                    logger.info(
+                        "[PD-TIMING] runner input-prep sync acquired "
+                        "batch_type=%s ts=%.4f",
+                        scheduler_output.batch_type,
+                        time.monotonic(),
+                    )
                 if not _fast_path and not _cloud_fast_path:
                     # [EDGE-SEGMENT-E LEAK FIX] If we popped a segment_a entry
                     # but cannot take the fast path (req_ids mismatch from
@@ -5195,6 +5214,13 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn = self._update_states(
                             scheduler_output
                         )
+                    if _pd_timing:
+                        logger.info(
+                            "[PD-TIMING] runner update_states done "
+                            "batch_type=%s ts=%.4f",
+                            scheduler_output.batch_type,
+                            time.monotonic(),
+                        )
 
                     if has_ec_transfer() and get_ec_transfer().is_producer:
                         with self.maybe_get_ec_connector_output(
@@ -5225,6 +5251,13 @@ class NPUModelRunner(GPUModelRunner):
                         scheduler_output,
                         num_scheduled_tokens_np,
                     )
+                    if _pd_timing:
+                        logger.info(
+                            "[PD-TIMING] runner update_states+prepare_inputs "
+                            "done batch_type=%s ts=%.4f",
+                            scheduler_output.batch_type,
+                            time.monotonic(),
+                        )
 
                     if not num_scheduled_tokens:
                         if (
@@ -5356,7 +5389,8 @@ class NPUModelRunner(GPUModelRunner):
             # `intermediate_tensors` to a local-buffer copy that omits
             # mrope_positions (the sync loop skips it). Gate on the tensor's
             # presence so this never KeyErrors regardless of whether the
-            # edge/cloud include_mrope decision (CHER hint vs sync) agreed.
+            # edge/cloud include_mrope decision (early-recv hint vs sync)
+            # agreed.
             recv_intermediate_tensors = intermediate_tensors
             if (self._edge_cloud_enabled
                     and self.edge_cloud_cfg.role == "cloud"
@@ -5582,11 +5616,23 @@ class NPUModelRunner(GPUModelRunner):
         ):
             if mamba_preprocess_bufs is not None:
                 mamba_utils.do_mamba_copy_block(mamba_preprocess_bufs)
+            if _pd_timing:
+                logger.info(
+                    "[PD-TIMING] runner prep done batch_type=%s ts=%.4f",
+                    scheduler_output.batch_type,
+                    time.monotonic(),
+                )
             hidden_states = self._model_forward(
                 num_tokens_padded, input_ids, positions, intermediate_tensors,
                 inputs_embeds, layer_slice_info=layer_slice_info,
                 **model_kwargs
             )
+            if _pd_timing:
+                logger.info(
+                    "[PD-TIMING] runner forward done batch_type=%s ts=%.4f",
+                    scheduler_output.batch_type,
+                    time.monotonic(),
+                )
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
