@@ -137,6 +137,16 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    def need_pre_replay_sync(self) -> bool:
+        """FULL 图回放前是否需要整流 host 同步（current_stream.synchronize）。
+
+        标准路径必须保留：防止异步调度下 update_attn_params 的 update_stream
+        op / event record 与上一次 replay 并发执行（见 __call__ 内注释）。
+        子类（如边云分段 wrapper）可在确认本图没有任何 attention 参数
+        更新时覆写为 False，避免回放前 host-block 吸收上一步设备耗时。
+        """
+        return True
+
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
@@ -253,7 +263,11 @@ class ACLGraphWrapper:
         # When enable_enpu is on, model_runner orders update vs replay; skip here.
         # When FULL + EAGLE draft (merge path), replay does not need this barrier.
         is_draft_eagle = _EXTRA_CTX.is_draft_model and self.use_eagle
-        need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
+        need_sync = (
+            self.runtime_mode == CUDAGraphMode.FULL
+            and not is_draft_eagle
+            and self.need_pre_replay_sync()
+        )
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
         entry.aclgraph.replay()

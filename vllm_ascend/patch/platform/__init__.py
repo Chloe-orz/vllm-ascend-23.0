@@ -57,7 +57,8 @@ import vllm_ascend.patch.platform.patch_mamba_manager  # noqa
 # PassiveEngineCore process: it imports vllm_ascend (triggering this patch)
 # during spawn bootstrap BEFORE run_passive_engine_core sets that env var, so
 # the cloud executor stayed the upstream MultiprocExecutor and never built
-# cloud_recv_hint_mq (CHER silently disabled, no [CHER] logs).  The patched
+# the sideband hint/done MQs (early-irecv silently disabled, no
+# [early-irecv] logs).  The patched
 # classes are no-op when edge-cloud / EPLB are off (they delegate to the
 # upstream path), so unconditional import is safe -- same rationale as
 # patch_engine_core below being unconditional.

@@ -20,11 +20,16 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 from vllm import envs
 from vllm.logger import logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
+
+from vllm_ascend.distributed.edge_cloud_comm.scheduler_link import (
+    is_irecv_complete,
+)
+from vllm_ascend.distributed.edge_cloud_comm.types import CommChannelType
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -128,7 +133,13 @@ class PassiveScheduler:
 
         self.ready_prefills: deque[SchedulerOutput] = deque()
         self.ready_pdmixes: deque[SchedulerOutput] = deque()
-        self.ready_drafts: deque[SchedulerOutput] = deque()
+        # Draft batches are split into two lanes by draft_prefill_phase:
+        # prefill-phase chains arrive on the dedicated PREFILL_DRAFT channel
+        # pair, decode-phase chains share the DECODE pair.  Splitting the
+        # queues lets each lane's data-readiness gate peek at its own head
+        # without cross-channel head-of-line blocking.
+        self.ready_prefill_drafts: deque[SchedulerOutput] = deque()
+        self.ready_decode_drafts: deque[SchedulerOutput] = deque()
         self.ready_decodes: deque[SchedulerOutput] = deque()
 
         # Active sliced prefill / PD-mix continuation.  Only one sliced
@@ -144,6 +155,8 @@ class PassiveScheduler:
         # batch before falling back to another prefill-middle slice.
         self._prefill_middle_throttle_started_at: float | None = None
         self._prefill_middle_throttle_seconds = 0.010
+        # Rate limiter for the [PD-STALL-CLOUD] empty-dispatch probe.
+        self._last_stall_log_ts: float = 0.0
 
         # Bridge queue between the (optional) subscriber thread and the
         # main loop. When the thread is enabled, it drains
@@ -258,11 +271,17 @@ class PassiveScheduler:
     # ------------------------------------------------------------------ #
     # Inbox draining + classification                                    #
     # ------------------------------------------------------------------ #
-    def poll_and_classify(self) -> None:
+    def poll_and_classify(self) -> list[tuple[int, "SchedulerOutput"]]:
         """Drain SchedulerOutputs from the inbox (fed by the subscriber
         thread, or directly by `_drain_subscriber_inline` when the thread
         is disabled) and route each into its phase-specific ready queue.
+
+        Returns the newly classified ``(seq, SchedulerOutput)`` pairs
+        (EMPTY batches excluded) so the engine core can run arrival-time
+        data-plane actions — pre-posting irecvs for the head payload and
+        its following draft chain — before any dispatch decision.
         """
+        arrivals: list[tuple[int, SchedulerOutput]] = []
         if self._subscriber_thread is None:
             # Inline mode: pull from the subscriber directly into _inbox.
             self._drain_subscriber_inline()
@@ -281,7 +300,8 @@ class PassiveScheduler:
             # )
             if bt == BatchType.EMPTY:
                 continue
-            elif bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
+            arrivals.append((seq, scheduler_output))
+            if bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
                 # PREFILL_FIRST = edge-cloud "P first" head segment; from the
                 # cloud's perspective it is exactly the same workload as a
                 # legacy PURE_PREFILL batch (run middle layers, send hidden
@@ -299,7 +319,10 @@ class PassiveScheduler:
                 self._last_decode_first_arrival_ts = now
                 self.ready_decodes.append(scheduler_output)
             elif bt == BatchType.DRAFT_FIRST:
-                self.ready_drafts.append(scheduler_output)
+                if getattr(scheduler_output, "draft_prefill_phase", False):
+                    self.ready_prefill_drafts.append(scheduler_output)
+                else:
+                    self.ready_decode_drafts.append(scheduler_output)
             elif bt in (
                 BatchType.PREFILL_LAST,
                 BatchType.DECODE_LAST,
@@ -318,14 +341,17 @@ class PassiveScheduler:
                 self.ready_pdmixes.append(scheduler_output)
             logger.debug(
                 "PassiveScheduler classified seq=%s batch_type=%s "
-                "(prefills=%d, pdmixes=%d, drafts=%d, decodes=%d)",
+                "(prefills=%d, pdmixes=%d, prefill_drafts=%d, "
+                "decode_drafts=%d, decodes=%d)",
                 self._arrival_seq(scheduler_output),
                 bt.value if bt is not None else "<none>",
                 len(self.ready_prefills),
                 len(self.ready_pdmixes),
-                len(self.ready_drafts),
+                len(self.ready_prefill_drafts),
+                len(self.ready_decode_drafts),
                 len(self.ready_decodes),
             )
+        return arrivals
 
     def _remember_arrival_seq(
         self, scheduler_output: SchedulerOutput, seq: int
@@ -591,14 +617,94 @@ class PassiveScheduler:
         an early out-of-band check.
         """
         if self.dispatch_policy == DispatchPolicy.EXPECT_ALTERNATION:
-            return self._schedule_expect_alternation()
+            batch = self._schedule_expect_alternation(ready_only=True)
+            if batch.is_empty() and (
+                self.ready_prefills or self.ready_decodes
+                or self.ready_prefill_drafts or self.ready_decode_drafts
+            ):
+                # Nothing is data-ready but work is queued: fall back to
+                # the original priority order and dispatch anyway — the
+                # payload wait happens device-side (wait_event on the
+                # pre-posted recv), never a host block.
+                batch = self._schedule_expect_alternation(ready_only=False)
+            self._log_stall_if_blocked(batch)
+            return batch
 
         for queue_name in self._POLICY_ORDER[self.dispatch_policy]:
-            batch = self._schedule_from_queue(queue_name)
+            batch = self._schedule_from_queue(queue_name, ready_only=True)
             if not batch.is_empty():
                 return batch
+        if (
+            self.ready_prefills or self.ready_decodes
+            or self.ready_prefill_drafts or self.ready_decode_drafts
+        ):
+            for queue_name in self._POLICY_ORDER[self.dispatch_policy]:
+                batch = self._schedule_from_queue(
+                    queue_name, ready_only=False
+                )
+                if not batch.is_empty():
+                    return batch
+        batch = ScheduledBatch.empty()
+        self._log_stall_if_blocked(batch)
+        return batch
 
-        return ScheduledBatch.empty()
+    def _log_stall_if_blocked(self, batch: ScheduledBatch) -> None:
+        """Rate-limited probe for empty dispatches with queued work.
+
+        Fires at most once per 10ms.  Pure supply gaps (all queues empty)
+        are intentionally NOT logged here — those belong to the edge's own
+        [PD-STALL] probe.  This probe distinguishes the cloud-local causes:
+        watermark-not-ready heads, EED throttle waits, and the single
+        sliced-prefill constraint.
+        """
+        if not batch.is_empty():
+            return
+        if not (
+            self.ready_prefills
+            or self.ready_pdmixes
+            or self.ready_prefill_drafts
+            or self.ready_decode_drafts
+            or self.ready_decodes
+            or self._active_prefill_slices
+        ):
+            return
+        now = time.monotonic()
+        if now - self._last_stall_log_ts < 0.010:
+            return
+        self._last_stall_log_ts = now
+        throttle_remaining_ms: float | None = None
+        if self._prefill_middle_throttle_started_at is not None:
+            elapsed = now - self._prefill_middle_throttle_started_at
+            throttle_remaining_ms = max(
+                0.0,
+                (self._prefill_middle_throttle_seconds - elapsed) * 1000,
+            )
+        logger.warning(
+            "[PD-STALL-CLOUD] empty dispatch with queued work: "
+            "policy=%s state=%s | "
+            "queues: prefills=%d pdmixes=%d p_drafts=%d d_drafts=%d "
+            "decodes=%d active_slices=%d sliced_pf=%s | "
+            "head_ready: pf=%s dd=%s p_drf=%s d_drf=%s | "
+            "throttle_remaining_ms=%s",
+            self.dispatch_policy.value,
+            self.cloud_scheduling_state,
+            len(self.ready_prefills),
+            len(self.ready_pdmixes),
+            len(self.ready_prefill_drafts),
+            len(self.ready_decode_drafts),
+            len(self.ready_decodes),
+            len(self._active_prefill_slices),
+            self._active_sliced_prefill is not None,
+            self._prefill_head_data_ready(),
+            self._decode_head_data_ready(),
+            self._prefill_draft_head_data_ready(),
+            self._decode_draft_head_data_ready(),
+            (
+                f"{throttle_remaining_ms:.1f}"
+                if throttle_remaining_ms is not None
+                else "inactive"
+            ),
+        )
 
     @staticmethod
     def _compute_slice_boundaries(
@@ -628,7 +734,64 @@ class PassiveScheduler:
     # ------------------------------------------------------------------ #
     # Pick methods (analogous to edge-side PDSeparatedScheduler)         #
     # ------------------------------------------------------------------ #
-    def _pick_prefill_batch(self) -> ScheduledBatch:
+    @staticmethod
+    def _seqno_ready(channel: CommChannelType, so: SchedulerOutput) -> bool:
+        """True once the pre-posted irecv for this batch's head payload
+        has completed — i.e. the channel's completion watermark covers
+        the batch's ``comm_seqno`` (stamped by the edge scheduler and
+        carried on the SO).  Batches without a comm_seqno (legacy
+        PURE_* path) carry no sequenced traffic and are always ready."""
+        seqno = getattr(so, "comm_seqno", None)
+        if seqno is None:
+            return True
+        return is_irecv_complete(channel, seqno)
+
+    def _prefill_head_data_ready(self) -> bool:
+        """True once the head-of-queue prefill's payload has arrived.
+
+        Only the fresh-prefill queue is gated: active slice continuations
+        reuse an already-received payload, and PD-mix batches do not
+        participate in pre-posted irecv.
+        """
+        if not self.ready_prefills:
+            return False
+        return self._seqno_ready(
+            CommChannelType.PREFILL_UP, self.ready_prefills[0]
+        )
+
+    def _decode_head_data_ready(self) -> bool:
+        """True once the head-of-queue decode's payload has arrived."""
+        if not self.ready_decodes:
+            return False
+        return self._seqno_ready(
+            CommChannelType.DECODE_UP, self.ready_decodes[0]
+        )
+
+    def _prefill_draft_head_data_ready(self) -> bool:
+        """True once the head prefill-phase draft's payload has arrived.
+
+        Prefill-phase chains travel on the dedicated PREFILL_DRAFT pair.
+        """
+        if not self.ready_prefill_drafts:
+            return False
+        return self._seqno_ready(
+            CommChannelType.PREFILL_DRAFT_UP, self.ready_prefill_drafts[0]
+        )
+
+    def _decode_draft_head_data_ready(self) -> bool:
+        """True once the head decode-phase draft's payload has arrived.
+
+        Decode-phase chains share the DECODE pair with plain decode.
+        """
+        if not self.ready_decode_drafts:
+            return False
+        return self._seqno_ready(
+            CommChannelType.DECODE_UP, self.ready_decode_drafts[0]
+        )
+
+    def _pick_prefill_batch(
+        self, ready_only: bool = True
+    ) -> ScheduledBatch:
         """Pick a prefill or prefill-like batch from the ready queues.
 
         Checks in priority order: active prefill slices (continuation of
@@ -640,6 +803,13 @@ class PassiveScheduler:
         if self._active_prefill_slices:
             return self._build_active_prefill_slice_batch()
         if self.ready_prefills:
+            # Data-plane gate: in the ready pass, keep the batch queued
+            # (and yield an empty tick) until its pre-posted irecv has
+            # completed, so the worker never blocks on recv inside
+            # execute_model.  The fallback pass dispatches regardless
+            # (device-side wait_event covers the in-flight payload).
+            if ready_only and not self._prefill_head_data_ready():
+                return ScheduledBatch.empty()
             return self._build_batch(self.ready_prefills.popleft())
         assert self.ready_pdmixes, (
             "_pick_prefill_batch called with no prefill work available"
@@ -653,89 +823,164 @@ class PassiveScheduler:
         """
         return self._build_batch(self.ready_decodes.popleft())
 
-    def _pick_draft_batch(self) -> ScheduledBatch:
-        """Pick a draft batch from ``ready_drafts``.
+    def _pick_prefill_draft_batch(self) -> ScheduledBatch:
+        """Pick a draft batch from ``ready_prefill_drafts``.
 
-        Caller must ensure ``ready_drafts`` is non-empty before calling.
+        Caller must ensure ``ready_prefill_drafts`` is non-empty before
+        calling.
         """
-        return self._build_batch(self.ready_drafts.popleft())
+        return self._build_batch(self.ready_prefill_drafts.popleft())
 
-    def _pick_decode_or_draft_by_arrival(self) -> ScheduledBatch:
-        """Pick between the head decode and head draft by arrival order.
+    def _pick_decode_draft_batch(self) -> ScheduledBatch:
+        """Pick a draft batch from ``ready_decode_drafts``.
 
-        DECODE_FIRST and DRAFT_FIRST payloads share the DECODE hidden
-        channel, and the edge publishes control messages in exactly the
-        order its data plane requires.  Letting a later-arrived draft
-        overtake an earlier decode (unconditional draft priority) makes
-        the cloud post a recv for the draft payload while the edge's
-        next in-flight message is a decode payload of a different size;
-        the cloud then never produces the decode response the edge is
-        blocked on, and the edge never sends the draft payload the cloud
-        is blocked on -- a cross-side deadlock.  Fall back to draft
-        priority only when an arrival seq is unavailable.
-
-        Caller must ensure at least one of the two queues is non-empty.
+        Caller must ensure ``ready_decode_drafts`` is non-empty before
+        calling.
         """
+        return self._build_batch(self.ready_decode_drafts.popleft())
+
+    def _pick_decode_or_draft_by_arrival(
+        self, ready_only: bool = True
+    ) -> ScheduledBatch:
+        """Pick among the head decode / decode-draft / prefill-draft by
+        arrival order.
+
+        Only data-ready heads participate (decode-phase drafts excepted:
+        they dispatch on arrival, their payload wait covered device-side
+        by wait_event on the pre-posted recv).  With pre-posted irecvs
+        the recv order is fixed at SO arrival time, so dispatch order no
+        longer affects channel pairing — the old cross-side deadlock
+        (cloud posting a recv for one payload while the edge's next
+        in-flight message is another) cannot occur once every candidate
+        is gated on irecv completion.  Arrival order remains as the
+        priority tie-breaker among ready heads.
+
+        Caller must ensure at least one of the three queues is non-empty.
+        """
+        has_decode = bool(self.ready_decodes) and (
+            not ready_only or self._decode_head_data_ready()
+        )
+        # Decode-phase draft heads dispatch on arrival: the payload wait
+        # is covered device-side by wait_event on the pre-posted recv
+        # (the edge sends promptly after its DRF head executes), so the
+        # DECODE_UP watermark is not consulted here.
+        has_decode_draft = bool(self.ready_decode_drafts)
+        has_prefill_draft = bool(self.ready_prefill_drafts) and (
+            not ready_only or self._prefill_draft_head_data_ready()
+        )
+        # (arrival_seq, pick) candidates; the lowest seq wins.  The lambda
+        # order breaks the (impossible-in-practice) seq tie deterministically.
+        # A missing seq (annotation failed) sorts last, mirroring the old
+        # pair-wise comparison which never let a None seq win.
+        candidates: list[tuple[float, Callable[[], ScheduledBatch]]] = []
+
+        def _seq_of(so: SchedulerOutput) -> float:
+            seq = self._arrival_seq(so)
+            return float(seq) if seq is not None else math.inf
+
+        if has_decode:
+            candidates.append(
+                (_seq_of(self.ready_decodes[0]), self._pick_decode_batch)
+            )
+        if has_decode_draft:
+            candidates.append(
+                (
+                    _seq_of(self.ready_decode_drafts[0]),
+                    self._pick_decode_draft_batch,
+                )
+            )
+        if has_prefill_draft:
+            candidates.append(
+                (
+                    _seq_of(self.ready_prefill_drafts[0]),
+                    self._pick_prefill_draft_batch,
+                )
+            )
+        if not candidates:
+            # No head is data-ready yet — idle this tick.
+            return ScheduledBatch.empty()
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]()
+
+    def _schedule_by_arrival(self, ready_only: bool = True) -> ScheduledBatch:
+        # Only data-ready heads participate (decode-phase drafts excepted:
+        # they dispatch on arrival, see _pick_decode_or_draft_by_arrival).
+        # With pre-posted irecvs the
+        # recv order was fixed at SO arrival time, so dispatching a ready
+        # decode/draft ahead of a not-yet-arrived prefill cannot re-order
+        # the channel: the inversion hazard the arrival rule guarded
+        # against required the worker to block on recv at execution time,
+        # which the readiness gate eliminates.  Arrival order remains the
+        # priority tie-breaker among ready heads.
+        has_prefill = bool(self.ready_prefills) and (
+            not ready_only or self._prefill_head_data_ready()
+        )
+        has_decode = bool(self.ready_decodes) and (
+            not ready_only or self._decode_head_data_ready()
+        )
+        # Decode-phase draft heads dispatch on arrival: the payload wait
+        # is covered device-side by wait_event on the pre-posted recv
+        # (the edge sends promptly after its DRF head executes), so the
+        # DECODE_UP watermark is not consulted here.
+        has_decode_draft = bool(self.ready_decode_drafts)
+        has_prefill_draft = bool(self.ready_prefill_drafts) and (
+            not ready_only or self._prefill_draft_head_data_ready()
+        )
+        has_draft = has_decode_draft or has_prefill_draft
+        prefill_seq = (
+            self._arrival_seq(self.ready_prefills[0])
+            if has_prefill
+            else None
+        )
         decode_seq = (
             self._arrival_seq(self.ready_decodes[0])
-            if self.ready_decodes
+            if has_decode
             else None
         )
-        draft_seq = (
-            self._arrival_seq(self.ready_drafts[0])
-            if self.ready_drafts
-            else None
-        )
-        if (
-            decode_seq is not None
-            and draft_seq is not None
-            and decode_seq < draft_seq
-        ):
-            return self._pick_decode_batch()
-        if self.ready_drafts:
-            return self._pick_draft_batch()
-        return self._pick_decode_batch()
-
-    def _schedule_by_arrival(self) -> ScheduledBatch:
-        prefill_seq = self._arrival_seq(self.ready_prefills[0])
-        # ready_decodes may be empty when only drafts are pending -- guard
-        # the indexing or this raises IndexError.
-        decode_seq = (
-            self._arrival_seq(self.ready_decodes[0])
-            if self.ready_decodes
-            else None
-        )
-        draft_seq = (
-            self._arrival_seq(self.ready_drafts[0])
-            if self.ready_drafts
-            else None
-        )
-        # Decodes and drafts share the DECODE hidden channel, so the
-        # "channel work" competing with the prefill is whichever of the
-        # two arrived first -- an earlier draft must not be overtaken by
-        # a later decode either (same deadlock hazard as the reverse,
-        # see _pick_decode_or_draft_by_arrival).
+        draft_seqs = [
+            seq
+            for seq in (
+                (
+                    self._arrival_seq(self.ready_decode_drafts[0])
+                    if has_decode_draft
+                    else None
+                ),
+                (
+                    self._arrival_seq(self.ready_prefill_drafts[0])
+                    if has_prefill_draft
+                    else None
+                ),
+            )
+            if seq is not None
+        ]
+        draft_seq = min(draft_seqs) if draft_seqs else None
         channel_seq = decode_seq
         if draft_seq is not None and (
             channel_seq is None or draft_seq < channel_seq
         ):
             channel_seq = draft_seq
-        if prefill_seq is None or channel_seq is None:
-            self.cloud_scheduling_state = CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT
-            self._start_prefill_middle_throttle()
-            return self._build_batch(self.ready_prefills.popleft())
-        if channel_seq < prefill_seq:
+        if prefill_seq is None:
+            # No ready prefill: run whatever channel work is ready.
+            if channel_seq is None:
+                return ScheduledBatch.empty()
+            self._clear_prefill_middle_throttle()
+            return self._pick_decode_or_draft_by_arrival(
+                ready_only=ready_only
+            )
+        if channel_seq is not None and channel_seq < prefill_seq:
             logger.info(
-                "[PD-PASSIVE] Decode/draft arrived before prefill: "
-                "channel_seq=%d, prefill_seq=%d",
+                "[PD-PASSIVE] Decode/draft ready and arrived before "
+                "prefill: channel_seq=%d, prefill_seq=%d",
                 channel_seq,
                 prefill_seq,
             )
             self._clear_prefill_middle_throttle()
-            return self._pick_decode_or_draft_by_arrival()
+            return self._pick_decode_or_draft_by_arrival(
+                ready_only=ready_only
+            )
         logger.info(
-            "[PD-PASSIVE] Prefill arrived before decode/draft: "
-            "prefill_seq=%d, channel_seq=%d",
+            "[PD-PASSIVE] Prefill ready and arrived before decode/draft: "
+            "prefill_seq=%d, channel_seq=%s",
             prefill_seq,
             channel_seq,
         )
@@ -743,29 +988,43 @@ class PassiveScheduler:
         self._start_prefill_middle_throttle()
         return self._build_batch(self.ready_prefills.popleft())
 
-    def _schedule_expect_alternation(self) -> ScheduledBatch:
+    def _schedule_expect_alternation(
+        self, ready_only: bool = True
+    ) -> ScheduledBatch:
         state = self.cloud_scheduling_state
+        # Data-plane readiness: only heads whose pre-posted irecv has
+        # completed participate in this tick's scheduling (decode-phase
+        # drafts excepted — they dispatch on arrival, see
+        # _pick_decode_or_draft_by_arrival).  An unready
+        # head is treated as absent so lower-priority ready work can run
+        # — with pre-posted irecvs the recv order was fixed at arrival,
+        # so this cannot re-order the channel (see _schedule_by_arrival).
+        # The fallback pass (ready_only=False, taken only when nothing
+        # was ready) treats queue non-empty as sufficient: the payload
+        # wait is covered device-side by wait_event, never a host block.
+        has_prefill = bool(self.ready_prefills) and (
+            not ready_only or self._prefill_head_data_ready()
+        )
+        has_decode = bool(self.ready_decodes) and (
+            not ready_only or self._decode_head_data_ready()
+        )
+        has_draft = bool(self.ready_decode_drafts) or (
+            bool(self.ready_prefill_drafts)
+            and (not ready_only or self._prefill_draft_head_data_ready())
+        )
         if state == CloudSchedulingState.EXPECT_EXECUTE_PREFILL:
             if self._active_prefill_slices:
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT
                 )
                 self._start_prefill_middle_throttle()
-                return self._pick_prefill_batch()
-            if self.ready_prefills:
-                # Arrival-order protection applies to EVERY prefill, not
-                # just sliced ones: the deadlock is a worker-FIFO blocking
-                # problem, independent of slicing.  The edge enqueues the
-                # matching PL tail immediately after the PF head (and DL
-                # right after DF), so if the cloud executes a prefill that
-                # arrived LATER than a pending decode/draft, the cloud
-                # blocks on the prefill's e2c payload while the edge's PF
-                # head is stuck behind a tail that waits for that very
-                # decode/draft reply -> cross-side circular wait.  Dispatch
-                # strictly by arrival seq whenever both kinds of work are
-                # pending.
-                if self.ready_decodes or self.ready_drafts:
-                    return self._schedule_by_arrival()
+                return self._pick_prefill_batch(ready_only=ready_only)
+            if has_prefill:
+                # Arrival-order protection applies to every READY prefill:
+                # when both kinds of work are ready, dispatch strictly by
+                # arrival seq (see _schedule_by_arrival).
+                if has_decode or has_draft:
+                    return self._schedule_by_arrival(ready_only=ready_only)
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT
                 )
@@ -773,65 +1032,76 @@ class PassiveScheduler:
                     self.ready_prefills[0], "cloud_suggest_slicing", False
                 ):
                     self._start_prefill_middle_throttle()
-                return self._pick_prefill_batch()
-            # No Prefill: callback to Decode/Draft.  Arrival order is
-            # mandatory here (shared DECODE channel), not a preference.
-            if self.ready_drafts or self.ready_decodes:
+                return self._pick_prefill_batch(ready_only=ready_only)
+            # No ready prefill: callback to ready decode/draft.
+            if has_draft or has_decode:
                 self._clear_prefill_middle_throttle()
-                return self._pick_decode_or_draft_by_arrival()
+                return self._pick_decode_or_draft_by_arrival(
+                    ready_only=ready_only
+                )
         else:  # EXPECT_EXECUTE_DECODE_OR_DRAFT
-            # Decode/Draft in arrival order (shared DECODE channel --
-            # see _pick_decode_or_draft_by_arrival).
-            if self.ready_drafts or self.ready_decodes:
-                # [INVERSION-HAZARD] 镜像插队告警(本次不改行为,只观测):
-                # 若 ready_prefills 队头的 prefill 比 decode/draft 更早到达,
-                # 此处派发 decode/draft 即构成插队——边侧 PL 随 PF 即刻投递,
-                # 被阻塞的 PL 会卡住 DF head,payload 发不出,cloud 的 decode
-                # recv 永远等不到 → 与 PREFILL 态死锁互为镜像。尚未在现网
-                # 观测到,触发本日志即说明该场景真实存在,届时再修。
-                if self.ready_prefills:
+            # Decode/Draft in arrival order (see
+            # _pick_decode_or_draft_by_arrival).
+            if has_draft or has_decode:
+                # [INVERSION-HAZARD] 观测（历史遗留）：就绪门控 + 预挂
+                # irecv 已从机制上消除该镜像死锁（recv 顺序在 SO 到达时
+                # 即固定，不再取决于派发顺序），此处仅在“被超越的 prefill
+                # 本身已就绪”时记录，作为状态机优先级的纯观测日志。
+                if self.ready_prefills and self._prefill_head_data_ready():
                     _pf_seq = self._arrival_seq(self.ready_prefills[0])
                     _dc_seq = (
                         self._arrival_seq(self.ready_decodes[0])
                         if self.ready_decodes else None
                     )
-                    _dr_seq = (
-                        self._arrival_seq(self.ready_drafts[0])
-                        if self.ready_drafts else None
-                    )
+                    _dr_seqs = [
+                        seq
+                        for seq in (
+                            (
+                                self._arrival_seq(self.ready_decode_drafts[0])
+                                if self.ready_decode_drafts else None
+                            ),
+                            (
+                                self._arrival_seq(self.ready_prefill_drafts[0])
+                                if self.ready_prefill_drafts else None
+                            ),
+                        )
+                        if seq is not None
+                    ]
+                    _dr_seq = min(_dr_seqs) if _dr_seqs else None
                     _ch_seq = _dc_seq
                     if _dr_seq is not None and (
                             _ch_seq is None or _dr_seq < _ch_seq):
                         _ch_seq = _dr_seq
                     if (_pf_seq is not None and _ch_seq is not None
                             and _pf_seq < _ch_seq):
-                        logger.error(
-                            "[PD-PASSIVE][INVERSION-HAZARD] DECODE-state "
-                            "dispatch overtakes an earlier-arrived prefill: "
-                            "prefill_seq=%d, channel_seq=%d -- potential "
-                            "cross-side FIFO deadlock (mirror of the "
-                            "PREFILL-state inversion).",
+                        logger.info(
+                            "[PD-PASSIVE] DECODE-state dispatch overtakes "
+                            "an earlier-arrived ready prefill: "
+                            "prefill_seq=%d, channel_seq=%d (state-machine "
+                            "priority; channel order fixed at arrival).",
                             _pf_seq, _ch_seq,
                         )
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_PREFILL
                 )
                 self._clear_prefill_middle_throttle()
-                return self._pick_decode_or_draft_by_arrival()
-            # No Draft/Decode: callback to Prefill.  Stay in the current
-            # state — the next schedule() call will check for drafts
-            # again at its earliest opportunity.
+                return self._pick_decode_or_draft_by_arrival(
+                    ready_only=ready_only
+                )
+            # No ready Draft/Decode: callback to Prefill.  Stay in the
+            # current state — the next schedule() call will check for
+            # drafts again at its earliest opportunity.
             if self._can_fallback_to_prefill_in_decode_state():
                 if self._active_prefill_slices:
                     self._start_prefill_middle_throttle()
-                    return self._pick_prefill_batch()
-                if self.ready_prefills:
+                    return self._pick_prefill_batch(ready_only=ready_only)
+                if has_prefill:
                     if getattr(
                         self.ready_prefills[0],
                         "cloud_suggest_slicing", False
                     ):
                         self._start_prefill_middle_throttle()
-                    return self._pick_prefill_batch()
+                    return self._pick_prefill_batch(ready_only=ready_only)
             else:
                 return ScheduledBatch.empty()
 
@@ -843,32 +1113,48 @@ class PassiveScheduler:
                 return ScheduledBatch.empty()
             if state == CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT:
                 self._start_prefill_middle_throttle()
-            return self._pick_prefill_batch()
+            return self._pick_prefill_batch(ready_only=ready_only)
         return ScheduledBatch.empty()
 
-    def _schedule_from_queue(self, queue_name: str) -> ScheduledBatch:
+    def _schedule_from_queue(
+        self, queue_name: str, ready_only: bool = True
+    ) -> ScheduledBatch:
         if self._active_prefill_slices:
-            if queue_name == "ready_decodes" and self.ready_decodes:
+            if queue_name == "ready_decodes" and self.ready_decodes and (
+                not ready_only or self._decode_head_data_ready()
+            ):
                 return self._pick_decode_batch()
             if queue_name in ("ready_prefills", "ready_pdmixes"):
-                return self._pick_prefill_batch()
+                return self._pick_prefill_batch(ready_only=ready_only)
             return ScheduledBatch.empty()
 
         if queue_name == "ready_prefills":
-            if self.ready_prefills:
+            if self.ready_prefills and (
+                not ready_only or self._prefill_head_data_ready()
+            ):
                 return self._build_batch(self.ready_prefills.popleft())
             return ScheduledBatch.empty()
         if queue_name == "ready_decodes":
-            if self.ready_decodes:
+            if self.ready_decodes and (
+                not ready_only or self._decode_head_data_ready()
+            ):
                 return self._pick_decode_batch()
             return ScheduledBatch.empty()
-        if queue_name == "ready_drafts":
-            if self.ready_drafts:
-                return self._pick_draft_batch()
+        if queue_name == "ready_prefill_drafts":
+            if self.ready_prefill_drafts and (
+                not ready_only or self._prefill_draft_head_data_ready()
+            ):
+                return self._pick_prefill_draft_batch()
+            return ScheduledBatch.empty()
+        if queue_name == "ready_decode_drafts":
+            # Decode-phase drafts dispatch on arrival (see
+            # _pick_decode_or_draft_by_arrival); no watermark check.
+            if self.ready_decode_drafts:
+                return self._pick_decode_draft_batch()
             return ScheduledBatch.empty()
         if queue_name == "ready_pdmixes":
             if self.ready_pdmixes:
-                return self._pick_prefill_batch()
+                return self._pick_prefill_batch(ready_only=ready_only)
             return ScheduledBatch.empty()
 
         q: deque[SchedulerOutput] = getattr(self, queue_name)
@@ -910,14 +1196,16 @@ class PassiveScheduler:
         logger.debug(
             "PassiveScheduler.schedule[%s] picked batch_type=%s slices=%d; "
             "pending=(prefills=%d, active_prefill_slices=%d, "
-            "pdmixes=%d, drafts=%d, decodes=%d) seq=%s",
+            "pdmixes=%d, prefill_drafts=%d, decode_drafts=%d, decodes=%d) "
+            "seq=%s",
             self.dispatch_policy.value,
             so.batch_type.value if so.batch_type is not None else "<none>",
             len(batch.slices),
             len(self.ready_prefills),
             len(self._active_prefill_slices),
             len(self.ready_pdmixes),
-            len(self.ready_drafts),
+            len(self.ready_prefill_drafts),
+            len(self.ready_decode_drafts),
             len(self.ready_decodes),
             self._arrival_seq(so),
         )
@@ -930,7 +1218,8 @@ class PassiveScheduler:
             self.ready_prefills
             or self._active_prefill_slices
             or self.ready_pdmixes
-            or self.ready_drafts
+            or self.ready_prefill_drafts
+            or self.ready_decode_drafts
             or self.ready_decodes
         )
 
@@ -940,6 +1229,7 @@ class PassiveScheduler:
             len(self.ready_prefills)
             + len(self._active_prefill_slices)
             + len(self.ready_pdmixes)
-            + len(self.ready_drafts)
+            + len(self.ready_prefill_drafts)
+            + len(self.ready_decode_drafts)
             + len(self.ready_decodes)
         )

@@ -23,41 +23,48 @@ from vllm.v1.executor.multiproc_executor import (
     WorkerProc,
     set_multiprocessing_worker_envs,
 )
-# [CHER] Environment variable carrying the pickled+base64'd Handle of the
-# cloud_recv_hint_mq, so the cloud worker process (spawned by
-# make_worker_process) can rebuild the sideband MQ without changing
+# [early-irecv] Environment variables carrying the pickled+base64'd Handle
+# of each sideband hint MQ, so the worker process (spawned by
+# make_worker_process) can rebuild the MQs without changing
 # make_worker_process/WorkerProc.__init__ signatures.  Fork inherits env
-# directly; spawn gets it via the env copied at process start.
+# directly; spawn gets it via the env copied at process start.  The reverse
+# completion-report MQ (irecv_done_mq) needs no env var: it is created as
+# a writer inside NPUWorker and its handle rides the READY handshake.
 _CLOUD_RECV_HINT_MQ_ENV = "VLLM_ASCEND_CLOUD_RECV_HINT_MQ_HANDLE"
+_EDGE_RECV_HINT_MQ_ENV = "VLLM_ASCEND_EDGE_RECV_HINT_MQ_HANDLE"
 
 
-def _cloud_pd_enabled(vllm_config: VllmConfig) -> bool:
-    """True iff this is a PD-separated cloud node.
+def _pd_separation_enabled(vllm_config: VllmConfig) -> bool:
+    """True iff edge-cloud PD separation is enabled (role-agnostic).
 
-    Cloud-side hidden early-receive (CHER) is a built-in part of PD-separation
-    masking -- it is always on whenever PD-separation is enabled on the cloud,
-    so this gate is simply "cloud role + PD enabled" (no separate flag).
+    Arrival-time irecv pre-posting (hint MQ -> worker comm thread) and its
+    completion feedback (done MQ -> scheduler watermarks) are built-in parts
+    of PD-separation masking -- always on whenever PD-separation is enabled,
+    so this gate is simply "edge-cloud + PD enabled" (no separate flag).
 
-    Reads ``enable_edge_cloud``/``is_edge_node`` from parallel_config (config-
-    level fields set from --headless, available in every process) and PD-enabled
-    from ``additional_config`` (a dict field that survives cross-process
+    Reads ``enable_edge_cloud`` from parallel_config (a config-level field
+    set from --headless, available in every process) and PD-enabled from
+    ``additional_config`` (a dict field that survives cross-process
     pickling).  It deliberately does NOT read ``scheduler_config
     .pd_separation_enabled``: that is a dynamic attribute platform threads at
-    runtime, and the cloud executor runs ``_init_executor`` in the
-    PassiveEngineCore process before that attribute is reliably present there.
+    runtime, and the executor runs ``_init_executor`` in the engine-core
+    process before that attribute is reliably present there.
     """
     pc = getattr(vllm_config, "parallel_config", None)
     if pc is None:
         return False
     if not getattr(pc, "enable_edge_cloud", False):
         return False
-    # cloud role == not edge node (mirrors model_runner_v1 role inference).
-    if getattr(pc, "is_edge_node", True):
-        return False
     ac = getattr(vllm_config, "additional_config", None) or {}
     ec = ac.get("edge_cloud_config", {}) if isinstance(ac, dict) else {}
     pd = ec.get("pd_separation", {}) if isinstance(ec, dict) else {}
     return bool(pd.get("enabled", False))
+
+
+def _export_mq_handle_env(mq: MessageQueue, env_var: str) -> None:
+    os.environ[env_var] = base64.b64encode(
+        pickle.dumps(mq.export_handle())
+    ).decode()
 
 
 class AscendMultiprocExecutor(MultiprocExecutor):
@@ -113,44 +120,67 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
-        # [CHER] Cloud-side hidden early-receive: build a sideband MQ that
-        # PassiveEC writes recv-hints to and a guard thread on the cloud
-        # worker (the one issuing the cross-node irecv, i.e. PP NPU0 /
-        # local_rank==0) drains.  Using a dedicated MQ (not the
-        # rpc_broadcast_mq that busy_loop consumes) is essential: busy_loop is
-        # single-threaded and blocks inside execute_model for a long P-middle
-        # batch, so a hint queued there would not be dequeued until that batch
-        # finishes -- defeating the overlap.  Always created on a PD-separated
-        # cloud node (CHER is a built-in part of PD masking); left None and
-        # hints are never sent otherwise.
+        # [early-irecv] Arrival-time irecv pre-posting: sideband hint MQs
+        # the engine core writes recv-hints to (drained by the PP-first
+        # worker's comm thread, local_rank==0), plus the reverse
+        # completion-report MQ the worker reports finished irecvs on (drained
+        # by the engine core once per step).  Dedicated MQs (not the
+        # rpc_broadcast_mq that busy_loop consumes) are essential: busy_loop
+        # is single-threaded and blocks inside execute_model for a long
+        # P-middle batch, so a hint queued there would not be dequeued until
+        # that batch finishes -- defeating the overlap.  Created on every
+        # PD-separated edge/cloud node; left None and hints are never sent
+        # otherwise.
         self.cloud_recv_hint_mq: MessageQueue | None = None
+        self.edge_recv_hint_mq: MessageQueue | None = None
+        self.irecv_done_mq: MessageQueue | None = None
+        _pd_on = _pd_separation_enabled(self.vllm_config)
+        # 64 slots x 1KB absorb the per-batch hint burst (1 head hint +
+        # num_spec_tokens draft hints) even when the comm thread briefly
+        # stalls on a post or on _early_recv_lock.  Hints are a correctness
+        # dependency under readiness gating (a lost hint means the recv is
+        # never posted, the watermark never advances, and the gated tail is
+        # never dispatched), so the ring must never fill in practice.
         if (
             self.parallel_config.enable_edge_cloud
             and not self.parallel_config.is_edge_node
-            and _cloud_pd_enabled(self.vllm_config)
+            and _pd_on
         ):
-            # Small ring buffer: at most prefill_inflight_limit (<=2) P-middle
-            # batches are in flight on the cloud at once, so at most that many
-            # early-recv entries are ever useful -- the guard thread skips
-            # posting once the cache holds that many (see start_early_irecv),
-            # so it drains hints fast and the ring never fills.  8 slots x
-            # 1KB absorb the burst when the guard briefly stalls on a post or
-            # on _early_recv_lock; a larger ring would only mask a slow guard
-            # and let the cache grow unbounded (the earlier OOM).
             self.cloud_recv_hint_mq = MessageQueue(
-                1, 1, max_chunk_bytes=1024, max_chunks=8,
+                1, 1, max_chunk_bytes=1024, max_chunks=64,
             )
-            _hint_handle = self.cloud_recv_hint_mq.export_handle()
-            os.environ[_CLOUD_RECV_HINT_MQ_ENV] = base64.b64encode(
-                pickle.dumps(_hint_handle)
-            ).decode()
+            _export_mq_handle_env(self.cloud_recv_hint_mq, _CLOUD_RECV_HINT_MQ_ENV)
             logger.info(
-                "[CHER] cloud_recv_hint_mq created on cloud executor "
+                "[early-irecv] cloud_recv_hint_mq created on cloud executor "
                 "(local_world_size=%d)", self.local_world_size,
             )
         else:
             # Clean any stale handle so a non-cloud worker does not pick it up.
             os.environ.pop(_CLOUD_RECV_HINT_MQ_ENV, None)
+        if (
+            self.parallel_config.enable_edge_cloud
+            and self.parallel_config.is_edge_node
+            and _pd_on
+            # The shared-model single-NPU edge topology has no hint/feedback
+            # infrastructure this period (its scheduler runs ungated), so no
+            # reader would ever drain this MQ.
+            and not getattr(self.parallel_config, "is_shared_model_edge", False)
+        ):
+            self.edge_recv_hint_mq = MessageQueue(
+                1, 1, max_chunk_bytes=1024, max_chunks=64,
+            )
+            _export_mq_handle_env(self.edge_recv_hint_mq, _EDGE_RECV_HINT_MQ_ENV)
+            logger.info(
+                "[early-irecv] edge_recv_hint_mq created on edge executor "
+                "(local_world_size=%d)", self.local_world_size,
+            )
+        else:
+            os.environ.pop(_EDGE_RECV_HINT_MQ_ENV, None)
+        # Completion-report MQ (worker comm thread -> engine core): created
+        # as a WRITER inside the PP-first worker (MessageQueue creators are
+        # always writers, create_from_handle always yields a reader), so it
+        # cannot be created here.  The reader is attached from the READY
+        # handshake handle below, once workers are up.
         # Create workers
         context = get_mp_context()
         shared_worker_lock = context.Lock()
@@ -229,22 +259,50 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # Wait for all input mqs to be ready.
             if self.rpc_broadcast_mq is not None:
                 self.rpc_broadcast_mq.wait_until_ready()
-            # [CHER] cloud_recv_hint_mq is a fire-and-forget hint channel
-            # (PassiveEC -> guard thread).  Do NOT wait_until_ready() here:
-            # the reader (cloud worker local_rank==0) rebuilds it inside
-            # _init_message_queues, which runs after distributed init; the
-            # cloud worker's distributed init waits for the edge's NCCL
-            # rendezvous, which only starts after the edge's PD TCPStore
-            # (patch_engine_core.py line ~138) completes; and that TCPStore
-            # waits for the cloud to write cloud_ip (passive_core.py line
-            # ~863), which runs AFTER this executor init.  Waiting here would
-            # deadlock the whole startup.  If the reader is not connected yet
-            # when PassiveEC enqueues a hint, the hint is simply dropped
-            # (ZMQ pub-sub) and execute_model falls back to sync recv; CHER
-            # activates once the reader connects.
+            # [early-irecv] The hint/done MQs are fire-and-forget sideband
+            # channels (engine core <-> worker comm thread).  Do NOT
+            # wait_until_ready() here: the worker-side endpoint is rebuilt
+            # inside _init_message_queues, which runs after distributed
+            # init; the cloud worker's distributed init waits for the
+            # edge's NCCL rendezvous, which only starts after the edge's PD
+            # TCPStore (patch_engine_core.py line ~138) completes; and that
+            # TCPStore waits for the cloud to write cloud_ip
+            # (passive_core.py line ~863), which runs AFTER this executor
+            # init.  Waiting here would deadlock the whole startup.  Hints
+            # enqueued before the reader connects are dropped (ZMQ
+            # pub-sub); the consume point's fallback submit_recv keeps
+            # correctness until the comm thread attaches.
             # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
+            # [early-irecv] Attach the reverse completion-report MQ reader
+            # (worker comm thread -> engine core).  Only the PP-first
+            # worker (local_rank 0) creates/reports.  NOTE: self.workers is
+            # indexed by global_rank % local_world_size, so workers[0] is
+            # NOT necessarily local_rank 0 when edge_npu_count is not a
+            # multiple of the cloud world size — pick the holder instead.
+            # No wait_until_ready here: same startup-ordering constraint
+            # as the hint MQs above, and the writer only starts reporting
+            # after init_device, long after this point.
+            if (
+                self.parallel_config.enable_edge_cloud
+                and _pd_on
+                and self.workers
+            ):
+                self.irecv_done_mq = next(
+                    (
+                        w.irecv_done_mq
+                        for w in self.workers
+                        if w.irecv_done_mq is not None
+                    ),
+                    None,
+                )
+                logger.info(
+                    "[early-irecv] irecv_done_mq reader attach on executor "
+                    "(is_edge_node=%s): %s",
+                    self.parallel_config.is_edge_node,
+                    "OK" if self.irecv_done_mq is not None else "NONE",
+                )
             self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
             self._post_init_executor()
 
@@ -354,11 +412,14 @@ class AscendWorkerProc(WorkerProc):
         else:
             # Delegate to parent class for the inner_dp_world_group path
             super()._init_message_queues(input_shm_handle, vllm_config)
-        # cloud_recv_hint_mq is rebuilt by the base-class wrapper
-        # (_cher_init_message_queues applied below) which runs for plain
-        # WorkerProc instances that worker_main actually creates.  Initialize
-        # the attribute here for the AscendWorkerProc path (if ever taken).
+        # The sideband MQs are rebuilt by the base-class wrapper
+        # (_edge_cloud_comm_init_message_queues applied below) which runs for
+        # plain WorkerProc instances that worker_main actually creates.
+        # Initialize the attributes here for the AscendWorkerProc path (if
+        # ever taken).
         self.cloud_recv_hint_mq: MessageQueue | None = None
+        self.edge_recv_hint_mq: MessageQueue | None = None
+        self.irecv_done_mq: MessageQueue | None = None
 
     @staticmethod
     def make_worker_process(
@@ -411,8 +472,9 @@ class AscendWorkerProc(WorkerProc):
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
 
-# [CHER] Wrap the ORIGINAL WorkerProc._init_message_queues to rebuild
-# cloud_recv_hint_mq on the cloud worker.  We must wrap the base class
+# [early-irecv] Wrap the ORIGINAL WorkerProc._init_message_queues to rebuild
+# the sideband hint MQs (cloud_recv_hint_mq / edge_recv_hint_mq) on the
+# PP-first worker of either role.  We must wrap the base class
 # directly (AscendWorkerProc.__bases__[0]) and capture the original method
 # BEFORE any replacement, because:
 #  - worker_main (spawned) resolves `WorkerProc` to the original base class,
@@ -422,44 +484,59 @@ vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
 #    subclass's own _init_message_queues, causing infinite recursion when the
 #    subclass calls super().
 # AscendWorkerProc._init_message_queues is kept for the executor-side path
-# (it also rebuilds); the wrapper early-returns if cloud_recv_hint_mq is
-# already set, so there is no double-rebuild / clobber.
+# (it also initializes the attributes); the wrapper early-returns via the
+# _early_irecv_mqs_rebuilt flag, so there is no double-rebuild / clobber.
 _OrigWorkerProc = AscendWorkerProc.__bases__[0]
 _orig_init_message_queues = _OrigWorkerProc._init_message_queues
 
 
-def _cher_init_message_queues(self, input_shm_handle, vllm_config):
+def _edge_cloud_comm_init_message_queues(self, input_shm_handle, vllm_config):
     _orig_init_message_queues(self, input_shm_handle, vllm_config)
-    # Only rebuild if not already done by AscendWorkerProc._init_message_queues.
-    if getattr(self, "cloud_recv_hint_mq", None) is not None:
+    # Only rebuild if not already done (guard against double invocation).
+    if getattr(self, "_early_irecv_mqs_rebuilt", False):
         return
+    self._early_irecv_mqs_rebuilt = True
     self.cloud_recv_hint_mq = None
+    self.edge_recv_hint_mq = None
+    # Only the PP-first worker (local_rank==0, the rank issuing the
+    # cross-node irecv) needs the hint MQs; other ranks receive hidden
+    # via TP-broadcast from rank0.  Both roles rebuild (the edge worker
+    # pre-posts tail recvs, the cloud worker pre-posts head recvs).
+    # The reverse irecv_done_mq is NOT rebuilt here: it is created as a
+    # writer inside NPUWorker and its handle rides the READY handshake.
     if not (
-        envs.VLLM_PP_NON_LEADER_ENGINE_CORE
-        and self.local_rank == 0
-        and not vllm_config.parallel_config.is_edge_node
-        and _cloud_pd_enabled(vllm_config)
+        self.local_rank == 0
+        and _pd_separation_enabled(vllm_config)
     ):
         return
-    _raw = os.environ.get(_CLOUD_RECV_HINT_MQ_ENV)
-    if _raw is None:
-        return
-    try:
-        _handle = pickle.loads(base64.b64decode(_raw))
-        self.cloud_recv_hint_mq = MessageQueue.create_from_handle(
-            _handle, self.local_rank
-        )
-        logger.info(
-            "[CHER] cloud_recv_hint_mq rebuilt on worker local_rank=%d",
-            self.local_rank,
-        )
-    except Exception:
-        logger.exception(
-            "[CHER] failed to rebuild cloud_recv_hint_mq on worker "
-            "local_rank=%d; CHER will fall back to sync recv",
-            self.local_rank,
-        )
-        self.cloud_recv_hint_mq = None
+    for _env_var, _attr in (
+        (_CLOUD_RECV_HINT_MQ_ENV, "cloud_recv_hint_mq"),
+        (_EDGE_RECV_HINT_MQ_ENV, "edge_recv_hint_mq"),
+    ):
+        _raw = os.environ.get(_env_var)
+        if _raw is None:
+            # Not this role's MQ (or PD hint infra off): leave None.
+            continue
+        try:
+            _handle = pickle.loads(base64.b64decode(_raw))
+            setattr(
+                self,
+                _attr,
+                MessageQueue.create_from_handle(_handle, self.local_rank),
+            )
+            logger.info(
+                "[early-irecv] %s rebuilt on worker local_rank=%d",
+                _attr,
+                self.local_rank,
+            )
+        except Exception:
+            logger.exception(
+                "[early-irecv] failed to rebuild %s on worker "
+                "local_rank=%d; early-irecv falls back to sync recv",
+                _attr,
+                self.local_rank,
+            )
+            setattr(self, _attr, None)
 
 
-_OrigWorkerProc._init_message_queues = _cher_init_message_queues
+_OrigWorkerProc._init_message_queues = _edge_cloud_comm_init_message_queues
