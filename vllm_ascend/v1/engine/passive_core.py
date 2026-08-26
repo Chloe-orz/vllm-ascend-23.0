@@ -42,6 +42,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Optional
 
+import numpy as np
 import zmq
 from vllm import envs
 from vllm.logger import init_logger
@@ -148,6 +149,67 @@ class PPSchedulerZmqPublisher:
                 "PP Scheduler ZMQ publish queue full, dropping message"
             )
 
+    # Only the PD-separation decode/draft batch types are value-free on
+    # the wire. Legacy mixed types (PURE_DECODE, PD_MIX) are excluded on
+    # purpose - their consumers are not guaranteed to be non-last PP
+    # ranks. DECODE_LAST/DRAFT_LAST never traverse ZMQ (the edge
+    # self-posts them), but listing them keeps the intent explicit.
+    _VALUE_FREE_BATCH_TYPES = frozenset(
+        {
+            BatchType.DECODE_FIRST,
+            BatchType.DECODE_LAST,
+            BatchType.DRAFT_FIRST,
+            BatchType.DRAFT_LAST,
+        }
+    )
+
+    def _compress_token_history(
+        self, scheduler_output: SchedulerOutput
+    ) -> SchedulerOutput:
+        """[PD-WIRE-SLIM] strip token VALUES from decode-family
+        SchedulerOutputs, keeping only the history lengths.
+
+        The edge re-sends `all_token_ids[req_id]` (the whole prompt +
+        generated history, ~2 MB) with every decode SchedulerOutput.
+        The cloud only ever consumes it as a contiguous array whose
+        LENGTH matters: the worker's recovery path slices
+        `[-num_output_tokens:]` to rebuild request state, and a non-last
+        PP rank never embeds or samples the values. DECODE/DRAFT-family
+        SOs also never flow back to the edge (the cloud returns only
+        PREFILL_LAST), so no consumer anywhere needs the real values.
+
+        The wire therefore carries `all_token_ids[req_id] =
+        len(history)` and the subscriber re-inflates `np.zeros(len)`.
+        This shrinks the wire to near-zero AND keeps token ids off it
+        (security). No cross-message state, no receive-path
+        concatenate - unlike a delta scheme this costs nothing on
+        either CPU.
+
+        PREFILL-family SOs pass through untouched: their histories
+        travel back inside PREFILL_LAST and the edge consumes the values
+        (draft prefill warm-up, sampling penalties).
+        """
+        bt = getattr(scheduler_output, "batch_type", None)
+        if bt not in self._VALUE_FREE_BATCH_TYPES:
+            return scheduler_output
+        cached = scheduler_output.scheduled_cached_reqs
+        all_token_ids = getattr(cached, "all_token_ids", None)
+        if not all_token_ids:
+            return scheduler_output
+
+        slimmed = {
+            req_id: len(tokens) for req_id, tokens in all_token_ids.items()
+        }
+
+        # The original SO is shared with local dispatch (the edge worker
+        # embeds the real tokens), so never mutate it: ship a shallow
+        # copy with a copied CachedRequestData carrying only lengths.
+        so_copy = copy.copy(scheduler_output)
+        cached_copy = copy.copy(cached)
+        cached_copy.all_token_ids = slimmed
+        so_copy.scheduled_cached_reqs = cached_copy
+        return so_copy
+
     def _publisher_thread(self) -> None:
         while self._running or self._queue.qsize() > 0:
             try:
@@ -155,6 +217,12 @@ class PPSchedulerZmqPublisher:
                 if item is None:
                     break
                 seq, scheduler_output = item
+                # [PD-WIRE-SLIM] strip token values from decode-family
+                # SOs before pickling, so the size probe below measures
+                # the bytes actually put on the wire.
+                scheduler_output = self._compress_token_history(
+                    scheduler_output
+                )
                 try:
                     data = pickle.dumps(
                         scheduler_output, protocol=pickle.HIGHEST_PROTOCOL
@@ -219,6 +287,41 @@ class PPSchedulerZmqSubscriber:
         )
         self._thread.start()
 
+    def _expand_token_history(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        """[PD-WIRE-SLIM] restore the length-only token histories sent
+        by the publisher (see PPSchedulerZmqPublisher
+        ._compress_token_history).
+
+        Each decode-family entry arrives as a bare length; materialize
+        a zero-filled int32 array of that length. Values are unused on
+        this side (non-last PP rank: no embedding, no sampling), only
+        the length feeds the recovery-path slice. np.zeros is calloc
+        backed, so this stays far cheaper than the transfer it replaces.
+        Entries that are already arrays (prefill-family SOs, or an
+        older publisher) pass through untouched.
+
+        Mutates the deserialized SO in place - this thread is the sole
+        owner of the object until it is published via
+        `_received_outputs`.
+        """
+        cached = scheduler_output.scheduled_cached_reqs
+        all_token_ids = getattr(cached, "all_token_ids", None)
+        if not all_token_ids:
+            return
+
+        rebuilt: dict[str, object] = {}
+        changed = False
+        for req_id, payload in all_token_ids.items():
+            if isinstance(payload, int):
+                rebuilt[req_id] = np.zeros(payload, dtype=np.int32)
+                changed = True
+            else:
+                rebuilt[req_id] = payload
+        if changed:
+            cached.all_token_ids = rebuilt
+
     def _subscriber_thread(self) -> None:
         while self._running:
             try:
@@ -229,6 +332,12 @@ class PPSchedulerZmqSubscriber:
                 scheduler_output = pickle.loads(data)
                 if scheduler_output.batch_type is BatchType.EMPTY:
                     continue
+                # [PD-WIRE-SLIM] restore zero-filled token histories
+                # before the SO is handed downstream (dispatch loop,
+                # trim, worker) - they all keep seeing arrays of the
+                # original lengths.
+                self._expand_token_history(scheduler_output)
+
                 with self._lock:
                     self._received_outputs.append((seq, scheduler_output))
                 # logger.info(
