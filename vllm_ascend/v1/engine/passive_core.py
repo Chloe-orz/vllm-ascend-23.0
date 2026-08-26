@@ -597,25 +597,14 @@ class PassiveEngineCoreProc:
         """num_spec_tokens when scheduled edge-cloud draft is active.
 
         Mirrors the edge-side ``_uses_scheduled_edge_cloud_draft`` method
-        gating: only the scheduled-draft methods (eagle3 / mtp-family on
-        qwen) produce a draft chain after every PF/DF batch, hence only
-        they need the n pre-posted draft irecvs.
+        gating: Eagle3 and all MTP methods produce a draft chain after every
+        PF/DF batch, hence only they need the n pre-posted draft irecvs.
         """
         spec = getattr(self.vllm_config, "speculative_config", None)
         if spec is None:
             return 0
         method = getattr(spec, "method", None)
-        if method == "eagle3" or method in ("qwen3_5_mtp", "qwen_mtp"):
-            pass
-        elif method == "mtp":
-            hf_config = getattr(
-                self.vllm_config.model_config, "hf_config", None
-            )
-            if "qwen" not in str(
-                getattr(hf_config, "model_type", "")
-            ).lower():
-                return 0
-        else:
+        if method != "eagle3" and "mtp" not in str(method).lower():
             return 0
         return int(getattr(spec, "num_speculative_tokens", 0) or 0)
 
