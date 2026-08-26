@@ -78,10 +78,28 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # the larger-TP side.
     orig_tp = None
     if parallel_config.enable_edge_cloud:
-        canonical_tp = min(
-            parallel_config.edge_npu_count,
-            parallel_config.cloud_npu_count,
-        )
+        # In embedding_only mode the edge reports an empty KV cache spec (no
+        # local attention/mamba layers), so there is no cross-side spec
+        # merging to protect. Deriving with the smaller (edge) TP inflates
+        # the cloud's attention block_size (e.g. 768 -> 1536), which doubles
+        # the per-request cost of every block-granularity charge (mamba
+        # state/speculative blocks) and shrinks the reported/scheduled KV
+        # capacity. Derive with the cloud's TP instead: on the cloud this is
+        # a no-op (identical to the centralized layout); on the edge it only
+        # keeps cache_config numbers consistent (the edge stores no KV).
+        # Read the mode from the raw additional_config dict because
+        # get_ascend_config() may not be initialized this early.
+        additional_config = vllm_config.additional_config or {}
+        edge_cloud_mode = (
+            additional_config.get("edge_cloud_config", {}) or {}
+        ).get("mode", "head_tail")
+        if edge_cloud_mode == "embedding_only":
+            canonical_tp = parallel_config.cloud_npu_count
+        else:
+            canonical_tp = min(
+                parallel_config.edge_npu_count,
+                parallel_config.cloud_npu_count,
+            )
         if canonical_tp != parallel_config.tensor_parallel_size:
             orig_tp = parallel_config.tensor_parallel_size
             parallel_config.tensor_parallel_size = canonical_tp
