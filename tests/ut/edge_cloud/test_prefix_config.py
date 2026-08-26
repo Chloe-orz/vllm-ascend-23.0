@@ -103,13 +103,30 @@ def test_accepts_qwen35_conditional_generation_checkpoint(language_model_only):
     [
         ({"model_type": "qwen3_5_moe_text"}, "Qwen3.5-Dense"),
         ({"lora_config": object()}, "LoRA"),
-        ({"speculative_config": object()}, "speculative decoding"),
+        (
+            {"speculative_config": SimpleNamespace(method="eagle3")},
+            "only MTP speculative decoding",
+        ),
         ({"enable_prefix_caching": False}, "enable_prefix_caching"),
     ],
 )
 def test_rejects_unsupported_phase_one_features(vllm_overrides, message):
     with pytest.raises(ValueError, match=message):
         EdgeCloudConfig(_config(), _vllm_config(**vllm_overrides))
+
+
+def test_accepts_mtp_with_prefix_cache_coordination():
+    parsed = EdgeCloudConfig(
+        _config(),
+        _vllm_config(
+            speculative_config=SimpleNamespace(
+                method="mtp",
+                num_speculative_tokens=3,
+            )
+        ),
+    )
+
+    assert parsed.prefix_cache_coordination.enabled
 
 
 def test_coordination_requires_pd_separation():

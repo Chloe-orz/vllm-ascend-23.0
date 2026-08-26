@@ -1012,8 +1012,9 @@ class EdgeCloudConfig:
             )
         if self._vllm_config.lora_config is not None:
             raise ValueError("prefix cache coordination does not currently support LoRA")
-        if self._vllm_config.speculative_config is not None:
-            raise ValueError("prefix cache coordination does not currently support speculative decoding")
+        speculative_config = self._vllm_config.speculative_config
+        if speculative_config is not None and getattr(speculative_config, "method", None) != "mtp":
+            raise ValueError("prefix cache coordination currently supports only MTP speculative decoding")
         cache_config = self._vllm_config.cache_config
         if not getattr(cache_config, "enable_prefix_caching", False):
             raise ValueError("prefix cache coordination requires enable_prefix_caching=True")

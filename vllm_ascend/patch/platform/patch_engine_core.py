@@ -374,6 +374,10 @@ def _make_cloud_safe_scheduler_output(
         for request_id, token_ids in (scheduler_output.scheduled_cached_reqs.all_token_ids.items())
     }
     cloud_so.scheduled_cached_reqs = cached
+    cloud_so.scheduled_spec_decode_tokens = {
+        request_id: [0] * len(token_ids)
+        for request_id, token_ids in (scheduler_output.scheduled_spec_decode_tokens.items())
+    }
     log_event(
         logger,
         "debug",

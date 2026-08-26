@@ -15,8 +15,10 @@ Cloud HTTP 控制服务；第二阶段只将该连接切换到 Higress。
 - `embedding_only` 和 `head_tail` 边云切分配置。其中本文以
   `embedding_only` 为例。
 - PD Separation、Chunked Prefill 和 Prefix Caching。
+- Qwen3.5-Dense MTP speculative decoding。当前只支持 `method=mtp`，Edge 和
+  Cloud 必须配置相同的 `num_speculative_tokens`，并同时启用异步调度。
 - Edge 使用 HMAC block Hash 隐藏真实 Prompt；Cloud-facing SchedulerOutput
-  中的真实 token ID 也会被替换。
+  中的 Prompt、生成 token 和 speculative token ID 也会被替换。
 - Cloud 使用独立物理 KV block table，不复用 Edge block ID。
 
 当前不支持：
@@ -24,7 +26,7 @@ Cloud HTTP 控制服务；第二阶段只将该连接切换到 Higress。
 - Qwen3.5 MoE、其他模型系列或未经校验的 `model_type`。
 - Multimodal 请求、LoRA、prompt embeds。允许使用多模态模型制品，但不能传入
   图片、音频、视频或预计算 embedding。
-- speculative decoding，包括 MTP、EAGLE/EAGLE3 和独立 Draft Model。
+- EAGLE/EAGLE3、独立 Draft Model 及 MTP 之外的 speculative decoding。
 - `n > 1`、beam search 和 prompt logprobs。
 - PCP/DCP 上下文并行。
 - `/v1/completions` 和离线 LLM API 的 Prefix 协商。
@@ -241,6 +243,25 @@ vllm serve /weight/Qwen3.5-27B \
       "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32]
     }'
 ```
+
+### 4.3 可选：启用 MTP
+
+Prefix Cache 协商支持 Qwen3.5-Dense 自带的 MTP drafter。需要在上述 Edge 和
+Cloud 两条命令中同时增加完全相同的配置，例如：
+
+```bash
+--speculative-config '{"num_speculative_tokens":3,"method":"mtp","enforce_eager":true}'
+```
+
+MTP 模式下 Cloud KV 管理器会使用与主 Scheduler 相同的 EAGLE/MTP KV group
+语义，并为目标模型批次预留 speculative lookahead blocks。独立调度的
+`DRAFT_FIRST` 只复用该目标批次已经分配的 Cloud block table，不会重复分配或
+重复推进 `num_computed_tokens`。只有匹配的 MTP draft chain 完成，Prompt block
+才会对后续 Prefix probe 可见；若 draft token 被拒绝，Cloud 影子请求会在 chain
+结束时回退到 Edge 给出的实际 accepted token 数。
+
+当前该组合仅适配 `method=mtp`。配置 EAGLE/EAGLE3 或独立 Draft Model 会在启动
+阶段被拒绝。
 
 ## 5. 第一阶段验证
 
@@ -514,6 +535,15 @@ Edge 的 `edge_client_initialized` 和 `edge_negotiate_start` 还会记录非敏
 | 数据面接入 | `edge_scheduler_request_published` | `cloud_kv_admission_start`、`cloud_kv_admission_complete` |
 | Prefill 完成 | `edge_prefill_ack_received` | `cloud_prefill_ack_published` |
 | 请求结束 | `edge_finish_manifest_created`、`edge_usage_received` | `cloud_kv_request_finished`、`cloud_sse_usage_ready` |
+
+启用 MTP 后，还可以搜索以下 Cloud 事件：
+
+```text
+cloud_kv_mtp_draft_rewritten
+cloud_kv_mtp_acceptance_recorded
+cloud_kv_mtp_draft_chain_completed
+cloud_kv_computed_tokens_reconciled
+```
 
 查看两侧全部关键日志：
 
