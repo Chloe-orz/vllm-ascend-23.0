@@ -252,6 +252,12 @@ class NPUWorker(WorkerBase):
         # Prevents the guard thread from posting a duplicate (orphan) irecv
         # when its hint arrives after busy_loop already posted its own.
         self._early_recv_consumed: set[str] = set()
+        # busy_loop self-posts currently in flight per edge bucket (None =
+        # legacy single-edge bucket).  The guard thread must yield to these
+        # before enqueueing its own irecv on the same bucket: a busy_loop
+        # self-post is always for an EARLIER ht (busy_loop executes in
+        # schedule order), so its irecv must reach the channel FIFO first.
+        self._early_recv_selfpost_inflight: dict[int | None, int] = {}
         # [2E1C-TRACE] CHER debugging state: booking timestamps and a progress
         # heartbeat so a hang can be localized to a thread/op/lock.
         self._early_recv_booked_at: dict[str, float] = {}
@@ -1064,23 +1070,16 @@ class NPUWorker(WorkerBase):
                 return  # idempotent: another thread already posted/reserved
             if ht in self._early_recv_consumed:
                 return  # busy_loop already consumed (posted its own); skip
-            # Cap the cache PER EDGE (multi-instance): only
-            # prefill_inflight_limit P-middle batches are in flight per edge
-            # at once, so only that many early-recv entries per edge are ever
-            # useful.  The per-edge cap is what actually breaks the 2E1C
-            # same-channel rendezvous deadlock: the cloud's busy_loop can be
-            # blocked on a c2e result isend to edge X while edge X's next
-            # prefill isend arrives — the early irecv posted by the guard is
-            # the ONLY thing that lets edge X proceed to its PL and recv the
-            # result.  With a single GLOBAL slot, edge Y's cached entry
-            # crowds out edge X's next prefill (its hint is skipped here and
-            # never re-queued; busy_loop cannot post it while blocked), and
-            # the classic 2P cross-direction cycle re-forms under dual-edge
-            # concurrency (single-edge load never trips it).  Per-edge slots
-            # restore the 1-1 cycle-breaking property for every pair; extra
-            # hints within the same edge are still skipped (busy_loop posts
-            # those via get_or_post_early_recv when they run), keeping the
-            # cache bounded and the guard draining fast.
+            # NOTE: the per-edge cache is intentionally NOT capped here.
+            # Skipping a hint when the bucket was "full" proved FATAL (2E1C
+            # hang): busy_loop can be blocked in a DRAFT/DECODE recv before
+            # it ever reaches this batch, so it cannot self-post the irecv,
+            # and the missing early irecv re-forms the cross-direction
+            # rendezvous deadlock (edge's prefill isend never completes, the
+            # edge never sends the draft the cloud is blocked on).  The
+            # outstanding-hint count is bounded by the scheduler's per-edge
+            # prefill inflight limit anyway; exceeding the old cap is now
+            # only logged.
             _max = getattr(self, "_early_recv_max_inflight", 2)
             _bucket = self._edge_bucket_of_token(ht)
             _same_bucket = sum(
@@ -1088,15 +1087,23 @@ class NPUWorker(WorkerBase):
                 if self._edge_bucket_of_token(key) == _bucket
             )
             if _same_bucket >= _max:
-                logger.info(
-                    "[2E1C-TRACE] CHER hint skipped (bucket %s full): "
-                    "head_token=%s channel=%s",
-                    _bucket, ht, channel_str,
+                logger.warning(
+                    "[2E1C-TRACE] CHER hint over soft cap (bucket %s has %d "
+                    ">= %d outstanding): head_token=%s channel=%s -- posting "
+                    "anyway (skip would starve the rendezvous cycle-breaker)",
+                    _bucket, _same_bucket, _max, ht, channel_str,
                 )
-                return
             self._early_recv_handles[ht] = _RECV_POSTING  # atomic reserve
-        # ---- OUTSIDE the lock: the potentially-blocking post ----
+        # ---- OUTSIDE the lock ----
         try:
+            # Yield to any in-progress busy_loop self-post on this bucket:
+            # that self-post is always for an EARLIER ht (busy_loop executes
+            # in schedule order), so its irecv must reach the channel FIFO
+            # before this one, or the sender's isends pair with the wrong
+            # recv buffers.  Lock-free and bounded; a self-post stuck >30s
+            # means the worker is wedged, so this raises after a CHER dump.
+            self._wait_selfpost_quiet(_bucket, ht)
+            # The potentially-blocking buffer alloc + HCCL post.
             entry = self._post_early_irecv(ht, channel, num_tokens, include_mrope=has_mrope)
         except Exception:
             logger.exception(
@@ -1109,13 +1116,44 @@ class NPUWorker(WorkerBase):
             return
         # ---- back under the lock: fill the reserved entry ----
         with self._early_recv_lock:
-            self._early_recv_handles[ht] = entry  # cache for busy_loop
-            self._early_recv_booked_at[ht] = time.monotonic()
+            if self._early_recv_handles.get(ht) is _RECV_POSTING:
+                self._early_recv_handles[ht] = entry  # cache for busy_loop
+                self._early_recv_booked_at[ht] = time.monotonic()
+            else:
+                # cleanup_early_recv popped the reservation while we were
+                # posting (request aborted mid-post).  Do NOT resurrect the
+                # entry -- a resurrected entry is never consumed and leaks a
+                # bucket slot forever (starving later hints).  The posted
+                # irecv itself is stranded on the channel, same as the
+                # pre-existing cleanup-of-ready-entry case.
+                logger.warning(
+                    "[CHER] start_early_irecv: reservation for ht=%s was "
+                    "cleaned up mid-post; dropping the posted entry", ht)
+                return
         logger.info(
             "[2E1C-TRACE] CHER early-recv posted head_token=%s channel=%s "
             "num_tokens=%d bucket=%s thread=%s",
             ht, channel_str, num_tokens, _bucket, _tname,
         )
+
+    def _wait_selfpost_quiet(self, bucket: int | None, ht: str) -> None:
+        """Wait (lock-free) until no busy_loop self-post is in flight on this
+        edge bucket, so the guard's irecv cannot overtake an earlier ht's
+        self-posted irecv on the same channel FIFO.  Bounded to 30s; on
+        timeout dumps CHER state and raises (a self-post stuck that long
+        means the worker is wedged -- failing fast preserves the scene)."""
+        deadline = time.monotonic() + 30.0
+        while True:
+            with self._early_recv_lock:
+                n = self._early_recv_selfpost_inflight.get(bucket, 0)
+            if n <= 0:
+                return
+            if time.monotonic() >= deadline:
+                self._dump_cher_state(f"selfpost-inflight-stuck ht={ht}")
+                raise RuntimeError(
+                    f"[CHER] guard post for ht={ht} blocked >30s by a "
+                    f"busy_loop self-post on bucket {bucket}")
+            time.sleep(0.001)
 
     def get_or_post_early_recv(
         self, head_token: str | None, channel: "HiddenChannelType",
@@ -1155,21 +1193,39 @@ class NPUWorker(WorkerBase):
         if entry is _RECV_POSTING:
             # guard is mid-posting this ht OUTSIDE the lock: wait (lock-free)
             # for it to fill, then consume it — do NOT self-post.
+            # Raises (after a CHER dump) if the reservation is stuck >30s:
+            # silently falling through to the sync recv would post a SECOND
+            # irecv for this ht, and the guard's late completion would leave
+            # an orphan irecv that pairs with the NEXT sender's isend on this
+            # channel, permanently corrupting the channel FIFO (and on TP>1
+            # the peer ranks are already parked in the deferred TP broadcast,
+            # so a fallback recv here hangs the whole TP group).
             entry = self._wait_reserved_entry(head_token)
-            with self._early_recv_lock:
-                if self._early_recv_handles.get(head_token) is entry:
-                    self._early_recv_handles.pop(head_token, None)
-                self._early_recv_consumed.add(head_token)
-            logger.info(
-                "[2E1C-TRACE] CHER consume(waited guard-entry) ht=%s thread=%s",
-                head_token, _tname)
-            self._cher_last_progress = time.monotonic()
-            return entry
+            if entry is not None:
+                with self._early_recv_lock:
+                    if self._early_recv_handles.get(head_token) is entry:
+                        self._early_recv_handles.pop(head_token, None)
+                    self._early_recv_consumed.add(head_token)
+                logger.info(
+                    "[2E1C-TRACE] CHER consume(waited guard-entry) ht=%s thread=%s",
+                    head_token, _tname)
+                self._cher_last_progress = time.monotonic()
+                return entry
+            # The guard's post failed and its reservation was dropped before
+            # any irecv was enqueued: fall through to the self-post below.
 
         # self-post (guard never posted this ht) — OUTSIDE the lock.
         logger.info(
             "[2E1C-TRACE] CHER consume(self-post) ht=%s thread=%s",
             head_token, _tname)
+        _bucket = self._edge_bucket_of_token(head_token)
+        with self._early_recv_lock:
+            self._early_recv_consumed.add(head_token)
+            # Register the in-flight self-post so the guard yields to it on
+            # this bucket (see _wait_selfpost_quiet): this ht is earlier than
+            # anything the guard is about to post, so it must enqueue first.
+            self._early_recv_selfpost_inflight[_bucket] = (
+                self._early_recv_selfpost_inflight.get(_bucket, 0) + 1)
         try:
             return self._post_early_irecv(
                 head_token, channel, num_tokens, include_mrope=include_mrope)
@@ -1179,13 +1235,24 @@ class NPUWorker(WorkerBase):
                 head_token,
             )
             return None
+        finally:
+            with self._early_recv_lock:
+                _n = self._early_recv_selfpost_inflight.get(_bucket, 1) - 1
+                if _n > 0:
+                    self._early_recv_selfpost_inflight[_bucket] = _n
+                else:
+                    self._early_recv_selfpost_inflight.pop(_bucket, None)
 
     def _wait_reserved_entry(self, head_token: str):
         """Poll (lock-free) until a RESERVED (mid-post) early-recv entry is
-        filled by the guard, then return it.  Bounded to 30s; returns the
-        filled entry, or None if the post failed/was abandoned.  Never holds
-        ``_early_recv_lock`` while waiting, so the guard's post is never
-        blocked by this waiter."""
+        filled by the guard, then return it.  Returns the filled entry, or
+        None if the guard's post failed / the reservation was dropped (no
+        irecv was enqueued in that case, so the caller may self-post).
+
+        Never holds ``_early_recv_lock`` while waiting, so the guard's post
+        is never blocked by this waiter.  A reservation stuck >30s means the
+        guard is wedged inside its post — NOT recoverable locally (see the
+        caller's comment), so dump CHER state and raise."""
         deadline = time.monotonic() + 30.0
         while time.monotonic() < deadline:
             with self._early_recv_lock:
@@ -1193,10 +1260,10 @@ class NPUWorker(WorkerBase):
                 if entry is not _RECV_POSTING:
                     return entry
             time.sleep(0.001)
-        logger.warning(
-            "[2E1C-TRACE] CHER _wait_reserved_entry timeout ht=%s "
-            "(guard post stuck >30s)", head_token)
-        return None
+        self._dump_cher_state(f"reserved-entry-stuck ht={head_token}")
+        raise RuntimeError(
+            f"[CHER] reserved early-recv entry for ht={head_token} was not "
+            "filled within 30s (guard thread stuck in post)")
 
 
     def cleanup_early_recv(self, head_token: str) -> None:
