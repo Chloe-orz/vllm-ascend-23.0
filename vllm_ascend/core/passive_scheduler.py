@@ -482,12 +482,36 @@ class PassiveScheduler:
         }
         partition = self._me_get_partition() if self._me_registry else None
         for req_data in so.scheduled_new_reqs or []:
+            raw_req_id = req_data.req_id
             req_data.req_id = wrap_req_id(edge_id, req_data.req_id)
             if partition is not None and req_data.block_ids:
-                req_data.block_ids = tuple(
-                    partition.to_physical(edge_id, list(ids))
-                    for ids in req_data.block_ids
-                )
+                try:
+                    req_data.block_ids = tuple(
+                        partition.to_physical(edge_id, list(ids))
+                        for ids in req_data.block_ids
+                    )
+                except ValueError:
+                    # Diagnostic for block-id namespace mismatches (MTP draft
+                    # chains, spec-state blocks): dump the full context so we
+                    # can tell edge-local ids apart from already-physical or
+                    # out-of-pool ids.
+                    logger.exception(
+                        "[ME] block-id translation failed: edge=%d "
+                        "batch_type=%s req_id=%s draft_task_id=%s "
+                        "draft_step_idx=%s block_ids_per_group=%s "
+                        "partition=%s",
+                        edge_id,
+                        so.batch_type,
+                        raw_req_id,
+                        getattr(so, "draft_task_id", None),
+                        getattr(so, "draft_step_idx", None),
+                        [
+                            [b for b in ids if b >= partition.num_blocks_of(edge_id)][:4]
+                            for ids in req_data.block_ids
+                        ],
+                        partition.split if partition else None,
+                    )
+                    raise
         cached = so.scheduled_cached_reqs
         if cached is not None:
             if getattr(cached, "req_ids", None):

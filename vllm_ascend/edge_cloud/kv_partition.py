@@ -105,3 +105,20 @@ class KvPartition:
                     f"for edge {edge_id}"
                 )
         return [offset + b for b in local_block_ids]
+
+    def to_local(self, edge_id: int, physical_block_ids: list[int]) -> list[int]:
+        """Inverse of to_physical: cloud-physical -> edge-local block ids.
+
+        Used on the cloud -> edge echo path (POST_OUT): the edge must get
+        its own local numbering back, otherwise re-publishing an echoed
+        batch (MTP draft chains copy the tail's fields) would double-offset
+        the ids / trip the range check for non-zero-offset edges.
+        """
+        offset, num_blocks = self.range_of(edge_id)
+        for b in physical_block_ids:
+            if b < offset or b >= offset + num_blocks:
+                raise ValueError(
+                    f"physical block id {b} out of range "
+                    f"[{offset}, {offset + num_blocks}) for edge {edge_id}"
+                )
+        return [b - offset for b in physical_block_ids]
