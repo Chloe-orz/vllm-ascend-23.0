@@ -157,11 +157,6 @@ class PassiveScheduler:
         self._prefill_middle_throttle_seconds = 0.010
         # Rate limiter for the [PD-STALL-CLOUD] empty-dispatch probe.
         self._last_stall_log_ts: float = 0.0
-        # Fifth-round A/B diagnostic: report each recv-gated cloud head once
-        # without flooding the scheduling loop or perturbing the timing race.
-        self._ab_gate_hold_logged: set[
-            tuple[BatchType, CommChannelType, int]
-        ] = set()
 
         # Bridge queue between the (optional) subscriber thread and the
         # main loop. When the thread is enabled, it drains
@@ -627,12 +622,11 @@ class PassiveScheduler:
                 self.ready_prefills or self.ready_decodes
                 or self.ready_prefill_drafts or self.ready_decode_drafts
             ):
-                # A/B experiment: keep recv-unready heads queued instead of
-                # placing their wait_event on the shared model stream. This
-                # lets an independently arriving ready head run on a later
-                # tick and tests whether the old ready_only=False fallback
-                # creates a cross-lane dependency cycle.
-                self._log_ab_gate_hold()
+                # Nothing is data-ready but work is queued: fall back to
+                # the original priority order and dispatch anyway — the
+                # payload wait happens device-side (wait_event on the
+                # pre-posted recv), never a host block.
+                batch = self._schedule_expect_alternation(ready_only=False)
             self._log_stall_if_blocked(batch)
             return batch
 
@@ -653,45 +647,6 @@ class PassiveScheduler:
         batch = ScheduledBatch.empty()
         self._log_stall_if_blocked(batch)
         return batch
-
-    def _log_ab_gate_hold(self) -> None:
-        """Log each recv-unready queue head once for the strict-gate A/B.
-
-        Decode-phase draft heads are intentionally excluded: the active
-        scheduler policy already lets that path bypass its watermark. This
-        experiment changes only the ready_only=False fallback observed for
-        ordinary decode and prefill-phase draft heads.
-        """
-        gated_heads = (
-            (self.ready_prefills, CommChannelType.PREFILL_UP),
-            (self.ready_decodes, CommChannelType.DECODE_UP),
-            (
-                self.ready_prefill_drafts,
-                CommChannelType.PREFILL_DRAFT_UP,
-            ),
-        )
-        for ready_queue, channel in gated_heads:
-            if not ready_queue:
-                continue
-            scheduler_output = ready_queue[0]
-            seqno = getattr(scheduler_output, "comm_seqno", None)
-            if seqno is None or self._seqno_ready(
-                channel, scheduler_output
-            ):
-                continue
-            key = (scheduler_output.batch_type, channel, int(seqno))
-            if key in self._ab_gate_hold_logged:
-                continue
-            self._ab_gate_hold_logged.add(key)
-            logger.info(
-                "[AB-GATE-HOLD] batch_type=%s channel=%s seqno=%d "
-                "task=%s head=%s",
-                scheduler_output.batch_type,
-                channel.value,
-                seqno,
-                getattr(scheduler_output, "draft_task_id", None),
-                getattr(scheduler_output, "head_token", None),
-            )
 
     def _log_stall_if_blocked(self, batch: ScheduledBatch) -> None:
         """Rate-limited probe for empty dispatches with queued work.
