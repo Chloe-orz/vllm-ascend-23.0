@@ -172,6 +172,7 @@ vllm serve /home/extra/Qwen3.5-27B \
           "enabled": true,
           "control_url": "http://CLOUD_IP:8100/v1/chat/completions",
           "tenant_key_file": "/run/secrets/edge-cloud-tenant-key",
+          "consumer_id": "enterprise-a",
           "connect_timeout": 5.0
         }
       }
@@ -182,10 +183,16 @@ vllm serve /home/extra/Qwen3.5-27B \
     }'
 ```
 
+`consumer_id` 是 Edge 必填的计费租户标识，必须是 1 到 128 个不含空白的可见
+ASCII 字符。Edge 会把它写入内部请求的 `X-Mse-Consumer` Header；同一企业的
+多个 Edge 实例使用相同值时，Higress 会把它们聚合到同一个 Consumer。若需要
+按 Edge 实例区分，则为每个实例配置不同值。不要使用 tenant key 或其他密钥作为
+`consumer_id`。
+
 ### 4.2 Cloud 启动命令
 
 Cloud 的 `instance_id` 必须在所有 Cloud 实例中唯一。Cloud 不配置
-`tenant_key_file`。
+`tenant_key_file` 或 `consumer_id`。
 
 ```bash
 vllm serve /weight/Qwen3.5-27B \
@@ -306,7 +313,7 @@ Prefix Cache 只能复用完整 KV block。短于一个 block 或只在尾部不
 ## 6. 第二阶段：接入 Higress
 
 Higress MVP 不需要修改源码。Cloud 配置保持不变，只修改 Edge 的
-`control_url`：
+`control_url`；`consumer_id` 继续作为计费租户标识发送：
 
 ```json
 {
@@ -314,6 +321,7 @@ Higress MVP 不需要修改源码。Cloud 配置保持不变，只修改 Edge �
     "enabled": true,
     "control_url": "http://HIGRESS_HOST/INTERNAL_ROUTE/v1/chat/completions",
     "tenant_key_file": "/run/secrets/edge-cloud-tenant-key",
+    "consumer_id": "enterprise-a",
     "connect_timeout": 5.0
   }
 }
@@ -325,6 +333,7 @@ Higress 需要：
 - 开启 `ai-statistics`；
 - 禁止该内部 POST 的自动重试；
 - 调高或关闭长 SSE 的 stream idle timeout；
+- 不移除或覆盖 Edge 发送的 `X-Mse-Consumer` 请求头；
 - 允许 `X-Edge-Cloud-*` 响应头透传；
 - 保持 HTTP stream 到最终 usage 和 `[DONE]` 后再结束。
 
@@ -335,6 +344,10 @@ Higress 需要：
 
 当前内部 HTTP 场景不使用鉴权或 TLS。如果后续启用 Higress 鉴权、HTTPS 或
 mTLS，需要另外扩展 Edge HTTP Client 的认证配置。
+
+无鉴权时，`X-Mse-Consumer` 是 Edge 声明的可信内部身份，不具备防伪能力。
+因此 Higress 的该内部路由不能直接暴露给不可信客户端。后续启用认证时，应由
+认证插件根据凭据生成或覆盖此 Header，不能信任外部用户自行传入的值。
 
 ### 6.1 北向非流式请求与内部长 SSE
 
@@ -384,11 +397,25 @@ uncached_prompt_tokens = prompt_tokens - cached_tokens
 cloud_compute_tokens = uncached_prompt_tokens + completion_tokens
 ```
 
-如需把实例选择结果写入访问日志，可增加自定义响应头属性：
+`ai-statistics` 独立于 `attributes` 配置读取请求头 `X-Mse-Consumer`，并把它写入
+Prometheus 标签 `ai_consumer`。Header 缺失时标签回退为 `none`。因此 Consumer
+Usage 的来源区分依赖 Edge 的 `consumer_id`，不需要额外添加
+`attributes.consumer`。
+
+在 `ai-statistics 2.0.1` 中，`use_default_response_attributes: true` 会优先使用
+内置轻量属性列表，同时忽略显式的 `attributes` 列表。如需在保留 token 明细的
+同时记录 Cloud 实例和 Prefix 命中响应头，应改为下面的完整显式配置：
 
 ```yaml
-use_default_response_attributes: true
 attributes:
+  - key: reasoning_tokens
+    apply_to_log: true
+  - key: cached_tokens
+    apply_to_log: true
+  - key: input_token_details
+    apply_to_log: true
+  - key: output_token_details
+    apply_to_log: true
   - key: edge_cloud_instance
     value_source: response_header
     value: x-edge-cloud-instance-id
@@ -432,6 +459,8 @@ Higress 统计可以在不启动 vLLM、不使用 NPU 的情况下独立验证�
 - input/output/total 指标分别增加 `6814`、`32`、`6846`；
 - SSE 日志为 `response_type=stream`，普通 JSON 为 `response_type=normal`；
 - 两种日志均记录 `cached_tokens=6144`；
+- 请求携带 `X-Mse-Consumer: enterprise-a` 时，指标生成
+  `ai_consumer="enterprise-a"`；不携带时回退为 `ai_consumer="none"`；
 - upstream `503` 不增加 token Counter，但保留状态码、response flag 和空 usage
   的访问日志，便于异常排查。
 
@@ -445,6 +474,20 @@ curl --silent http://127.0.0.1:15020/stats/prometheus \
 使用 `latest-o11y` 镜像时，还可以从 Prometheus 查询相同指标，并从 Loki 或
 `/var/log/proxy/access.log` 检查 `ai_log`。指标标签至少包含 `ai_route`、
 `ai_cluster`、`ai_model` 和 `ai_consumer`。
+
+例如，只检查某个计费租户的精确累计 Counter：
+
+```bash
+curl --silent http://127.0.0.1:15020/stats/prometheus \
+  | grep 'ai_consumer="enterprise-a"'
+```
+
+Higress 内置 Dashboard 的 Consumer Usage 使用 Prometheus `increase()` 计算所选
+时间窗口的增量。新 consumer 的第一条请求会在 Counter 已非零后才创建序列，且
+`increase()` 会对采样窗口做边界外推，因此短时间测试可能看不到第一条请求，或
+显示非整数。隔离验证时应以 Gateway 原始 Counter 和逐请求 `ai_log` 为准；若要
+观察 Dashboard，至少为同一个 consumer 连续发送两次请求并等待 Prometheus 抓取。
+历史 `ai_consumer="none"` 不会被重命名，会在所选时间窗口过去后消失。
 
 该隔离验证只证明路由透传和统计解析正确，不能替代真实 Edge + Cloud 对长连接
 生命周期、idle timeout、active request 和 Prefix 路由选择的联合验收。
@@ -460,6 +503,8 @@ curl --silent http://127.0.0.1:15020/stats/prometheus \
 每条日志还包含稳定的 `event=<事件名>`，并尽量携带 `request_id`、
 `control_request_id`、`engine_request_id`、`head_token`、命中 token 数或请求数。
 日志不会记录原始 Prompt、token ID 列表、Hash 值、tenant key 或完整 HTTP body。
+Edge 的 `edge_client_initialized` 和 `edge_negotiate_start` 还会记录非敏感的
+`consumer_id`，用于确认计费租户 Header 的来源。
 
 默认 INFO 日志可以观察一次请求的关键状态转换：
 

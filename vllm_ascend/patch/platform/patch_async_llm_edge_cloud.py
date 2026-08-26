@@ -32,9 +32,11 @@ async def _negotiate_edge_cloud_prefix(
     if client is None:
         assert coordination.control_url is not None
         assert coordination.tenant_key_file is not None
+        assert coordination.consumer_id is not None
         client = EdgePrefixClient(
             control_url=coordination.control_url,
             tenant_key_file=coordination.tenant_key_file,
+            consumer_id=coordination.consumer_id,
             block_size=self.vllm_config.cache_config.block_size,
             connect_timeout=coordination.connect_timeout,
         )

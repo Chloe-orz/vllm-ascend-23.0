@@ -44,6 +44,8 @@ _UNSUPPORTED_CONTENT_FIELDS = frozenset(
     }
 )
 
+HIGRESS_CONSUMER_HEADER = "X-Mse-Consumer"
+
 
 class EdgePrefixClient:
     """Open and drain one internal OpenAI stream per external request."""
@@ -53,18 +55,21 @@ class EdgePrefixClient:
         *,
         control_url: str,
         tenant_key_file: str,
+        consumer_id: str,
         block_size: int,
         connect_timeout: float,
     ) -> None:
         tenant_key = Path(tenant_key_file).read_bytes().strip()
         self._hasher = PrefixHasher(tenant_key, block_size)
         self._control_url = control_url
+        self._consumer_id = consumer_id
         self._connect_timeout = connect_timeout
         self._streams: dict[str, asyncio.Task[None]] = {}
         log_event(
             logger,
             "info",
             "edge_client_initialized",
+            consumer_id=consumer_id,
             block_size=block_size,
             connect_timeout=connect_timeout,
         )
@@ -98,7 +103,9 @@ class EdgePrefixClient:
         body["stream"] = True
         body["stream_options"] = {"include_usage": True}
         body["edge_cloud_prompt_tokens"] = manifest.prompt_tokens
-        return manifest.to_headers(), body
+        headers = manifest.to_headers()
+        headers[HIGRESS_CONSUMER_HEADER] = self._consumer_id
+        return headers, body
 
     async def negotiate(
         self,
@@ -121,6 +128,7 @@ class EdgePrefixClient:
             "info",
             "edge_negotiate_start",
             request_id=request_id,
+            consumer_id=self._consumer_id,
             prompt_tokens=len(prompt_token_ids),
             full_blocks=len(prompt_token_ids) // self.block_size,
             tail_tokens=len(prompt_token_ids) % self.block_size,

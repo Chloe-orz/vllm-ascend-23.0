@@ -16,6 +16,7 @@ def client(tmp_path: Path):
     return EdgePrefixClient(
         control_url="http://cloud.example/v1/chat/completions",
         tenant_key_file=str(key_file),
+        consumer_id="enterprise-a",
         block_size=4,
         connect_timeout=1.0,
     )
@@ -44,6 +45,7 @@ def test_build_control_request_removes_original_prompt(client):
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
     assert headers["X-Edge-Cloud-Request-ID"] == "req-1"
+    assert headers["X-Mse-Consumer"] == "enterprise-a"
 
 
 def test_build_control_request_accepts_structured_text_content(client):
