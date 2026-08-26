@@ -333,6 +333,9 @@ Prefix Cache 只能复用完整 KV block。短于一个 block 或只在尾部不
 
 ## 6. 第二阶段：接入 Higress
 
+从服务来源、透明路由、超时/重试、`ai-statistics`、联合验证到回退的完整操作，见
+[边云 Prefix Cache 协商接入 Higress 验证指南](EDGE_CLOUD_HIGRESS_VALIDATION.md)。
+
 Higress MVP 不需要修改源码。Cloud 配置保持不变，只修改 Edge 的
 `control_url`；`consumer_id` 继续作为计费租户标识发送：
 
