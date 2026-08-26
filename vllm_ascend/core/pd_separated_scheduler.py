@@ -465,10 +465,13 @@ class PDSeparatedScheduler(Scheduler):
                 continue
             cloud_finished.discard(req_id)
             self._cloud_withheld_finished_req_ids.add(req_id)
-            logger.info(
-                "[PD] withholding cloud finish for req=%s until draft tasks %s release it",
-                req_id,
-                self._edge_cloud_draft_req_tasks.get(req_id),
+            draft_tasks = self._edge_cloud_draft_req_tasks.get(req_id) or set()
+            log_event(
+                logger,
+                "info",
+                "edge_finish_withheld_for_mtp",
+                engine_request_id=req_id,
+                draft_task_count=len(draft_tasks),
             )
         if self._cloud_released_finished_req_ids:
             still_valid: set[str] = set()
@@ -489,6 +492,31 @@ class PDSeparatedScheduler(Scheduler):
             cloud_finished |= still_valid
             self._cloud_released_finished_req_ids = set()
         return cloud_finished
+
+    def get_cloud_finished_request_data(
+        self,
+        finished_req_ids: set[str],
+    ) -> dict[str, EdgeCloudFinishedRequest]:
+        """Return accounting records without consuming withheld finishes.
+
+        MTP may remove a finished request from one cloud-bound output and
+        re-emit it after the in-flight draft chain releases the request. The
+        accounting record must remain available until that later publish
+        succeeds.
+        """
+        return {
+            request_id: self._edge_cloud_finished_request_data[request_id]
+            for request_id in finished_req_ids
+            if request_id in self._edge_cloud_finished_request_data
+        }
+
+    def acknowledge_cloud_finished_request_data(
+        self,
+        finished_req_ids: set[str],
+    ) -> None:
+        """Consume accounting records after their cloud publish succeeds."""
+        for request_id in finished_req_ids:
+            self._edge_cloud_finished_request_data.pop(request_id, None)
 
     def schedule(self) -> SchedulerOutput:
         scheduler_output = self._schedule_pd_separated()
@@ -511,7 +539,7 @@ class PDSeparatedScheduler(Scheduler):
             scheduler_output.cloud_draft_invalidate_task_ids = self._pending_cloud_draft_invalidations
             self._pending_cloud_draft_invalidations = []
         finished_data = {
-            request_id: self._edge_cloud_finished_request_data.pop(request_id)
+            request_id: self._edge_cloud_finished_request_data[request_id]
             for request_id in scheduler_output.finished_req_ids
             if request_id in self._edge_cloud_finished_request_data
         }
@@ -1987,6 +2015,13 @@ class PDSeparatedScheduler(Scheduler):
             if req_id in self._cloud_withheld_finished_req_ids:
                 self._cloud_withheld_finished_req_ids.discard(req_id)
                 self._cloud_released_finished_req_ids.add(req_id)
+                log_event(
+                    logger,
+                    "info",
+                    "edge_finish_released_after_mtp",
+                    engine_request_id=req_id,
+                    accounting_record_present=(req_id in self._edge_cloud_finished_request_data),
+                )
             request = retained.get(req_id)
             if request is None:
                 continue

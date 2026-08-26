@@ -4,6 +4,7 @@
 import copy
 from types import SimpleNamespace
 
+import pytest
 import torch
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_utils import init_none_hash
@@ -208,6 +209,54 @@ def test_cloud_owns_blocks_and_reuses_only_acknowledged_prefix():
     replay = hasher.build_manifest("control-2", list(range(8)))
     hit = manager.probe(replay)
     assert hit.hit_tokens == block_size
+
+
+def test_missing_finish_accounting_preserves_cloud_request_state():
+    block_size = 4
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_kv_cache_config(block_size),
+        vllm_config=_vllm_config(block_size),
+        instance_id="cloud-a",
+    )
+    hasher = PrefixHasher(b"tenant-a-secret-key-material", block_size)
+    manifest = hasher.build_manifest("control-1", list(range(8)))
+    manager.probe(manifest)
+    new_request = NewRequestData(
+        req_id="internal-1",
+        prompt_token_ids=[0] * 8,
+        mm_features=[],
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        block_ids=([99, 100],),
+        num_computed_tokens=0,
+        lora_request=None,
+        edge_cloud_request_id="control-1",
+    )
+    cloud_output, _ = manager.rewrite_scheduler_output(_scheduler_output(new_request))
+    manager.complete_scheduler_output(cloud_output)
+
+    with pytest.raises(RuntimeError, match="has no accounting data"):
+        manager.rewrite_scheduler_output(_scheduler_output(finished={"internal-1"}))
+
+    assert "internal-1" in manager._requests
+
+    final_manifest = hasher.build_manifest("control-1", list(range(8)) + [9])
+    finish = EdgeCloudFinishedRequest(
+        control_request_id="control-1",
+        prompt_tokens=8,
+        completion_tokens=1,
+        full_block_hashes=final_manifest.full_block_hashes,
+    )
+    _, usage = manager.rewrite_scheduler_output(
+        _scheduler_output(
+            finished={"internal-1"},
+            finish_data={"internal-1": finish},
+        )
+    )
+
+    assert usage[0][0] == "control-1"
+    assert "internal-1" not in manager._requests
 
 
 def test_cloud_mamba_prefix_replay_starts_new_kv_cache_step():

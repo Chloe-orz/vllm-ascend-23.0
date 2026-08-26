@@ -618,7 +618,7 @@ class CloudKVRequestManager:
     ) -> list[tuple[str, UsageInfo]]:
         finished: list[tuple[str, UsageInfo]] = []
         for request_id in finished_request_ids:
-            state = self._requests.pop(request_id, None)
+            state = self._requests.get(request_id)
             if state is None:
                 log_event(
                     logger,
@@ -630,6 +630,13 @@ class CloudKVRequestManager:
             request = state.request
             final = finish_data.get(request_id)
             if final is None:
+                log_event(
+                    logger,
+                    "error",
+                    "cloud_kv_finish_accounting_missing",
+                    engine_request_id=request_id,
+                    finish_record_count=len(finish_data),
+                )
                 raise RuntimeError(f"cloud finish for {request_id!r} has no accounting data")
             if final.control_request_id != state.manifest.request_id:
                 raise RuntimeError("cloud finish has a different control request ID")
@@ -659,6 +666,7 @@ class CloudKVRequestManager:
             completed_blocks = request.num_computed_tokens // self.block_size
             self._completed_hashes.update(final.full_block_hashes[:completed_blocks])
             self._kv.free(request)
+            self._requests.pop(request_id, None)
             for task_id, corrections in list(self._mtp_actual_computed_by_task.items()):
                 corrections.pop(request_id, None)
                 if not corrections:

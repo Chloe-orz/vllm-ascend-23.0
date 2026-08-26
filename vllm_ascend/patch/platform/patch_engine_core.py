@@ -274,9 +274,10 @@ def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
     """
     channel = self._pp_pd_channel
     cloud_so = scheduler_output
+    finished = set(getattr(scheduler_output, "finished_req_ids", None) or ())
+    cloud_finished = finished
     filter_finished = getattr(self.scheduler, "filter_cloud_finished_req_ids", None)
     if filter_finished is not None:
-        finished = set(getattr(scheduler_output, "finished_req_ids", None) or ())
         released = getattr(self.scheduler, "_cloud_released_finished_req_ids", None)
         if finished or released:
             cloud_finished = filter_finished(finished)
@@ -285,15 +286,33 @@ def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
                 # dynamically attached attributes used by the cloud.
                 cloud_so = _copy.copy(scheduler_output)
                 cloud_so.finished_req_ids = cloud_finished
-                finished_data = getattr(scheduler_output, "edge_cloud_finished_requests", None)
-                if finished_data is not None:
-                    cloud_so.edge_cloud_finished_requests = {
-                        request_id: data for request_id, data in finished_data.items() if request_id in cloud_finished
-                    }
 
     edge_cloud = (getattr(self.vllm_config, "additional_config", {}) or {}).get("edge_cloud_config", {})
     coordination = edge_cloud.get("prefix_cache_coordination", {})
     coordination_enabled = coordination.get("enabled", False)
+    attached_finish_data = getattr(
+        scheduler_output,
+        "edge_cloud_finished_requests",
+        None,
+    )
+    published_finish_data = {}
+    if coordination_enabled and cloud_finished:
+        get_finish_data = getattr(
+            self.scheduler,
+            "get_cloud_finished_request_data",
+            None,
+        )
+        if get_finish_data is not None:
+            published_finish_data = get_finish_data(cloud_finished)
+        elif attached_finish_data:
+            published_finish_data = {
+                request_id: data for request_id, data in attached_finish_data.items() if request_id in cloud_finished
+            }
+    if coordination_enabled and (attached_finish_data is not None or published_finish_data):
+        if cloud_so is scheduler_output:
+            cloud_so = _copy.copy(scheduler_output)
+        cloud_so.edge_cloud_finished_requests = published_finish_data or None
+
     if coordination_enabled:
         if cloud_so.batch_type == BatchType.PREFILL_FIRST:
             head_token = getattr(cloud_so, "head_token", None)
@@ -320,6 +339,22 @@ def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
                 ),
             )
         raise
+
+    if published_finish_data:
+        acknowledge_finish_data = getattr(
+            self.scheduler,
+            "acknowledge_cloud_finished_request_data",
+            None,
+        )
+        if acknowledge_finish_data is not None:
+            acknowledge_finish_data(set(published_finish_data))
+        log_event(
+            logger,
+            "debug",
+            "edge_finish_records_published",
+            batch_type=cloud_so.batch_type,
+            finished_requests=len(published_finish_data),
+        )
 
     if coordination_enabled:
         for request_data in cloud_so.scheduled_new_reqs:
