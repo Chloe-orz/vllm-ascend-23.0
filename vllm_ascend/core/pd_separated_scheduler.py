@@ -105,6 +105,18 @@ _DRAFT_LAST_TYPES = (
 # no longer derived from the channel pool size.
 _DEFAULT_PREFILL_INFLIGHT_LIMIT = 2
 
+# Prefill batches smaller than this run unsliced on the cloud (the
+# layer_slice_config.yaml thresholds start at 1k tokens -> 12 slices,
+# anything below falls through to ``0: 1`` = single full pass) and their
+# PF→PL round trip is therefore much shorter than the time the
+# single-slot prefill-draft lane needs to drain the batch's draft chain.
+# For those batches the prefill in-flight slot must be held until the
+# chain's last DRAFT_FIRST is dispatched; otherwise fast prefills flood
+# the lane (observed as unbounded prefill_drafts_first_ready growth).
+# Keep in sync with the lowest threshold in
+# vllm_ascend/core/layer_slice_config.yaml.
+_PREFILL_SLICE_MIN_TOKENS = 1000
+
 
 class PDSeparatedScheduler(Scheduler):
     """Scheduler that separates prefill and decode into distinct steps.
@@ -1924,6 +1936,23 @@ class PDSeparatedScheduler(Scheduler):
             # and never touch the decode-lane in-flight counter.
             self.prefill_draft_remote_pending_count += 1
             self._force_prefill_draft_last = True
+            if (
+                step_idx >= self.num_spec_tokens - 1
+                and scheduler_output.total_num_scheduled_tokens
+                < _PREFILL_SLICE_MIN_TOKENS
+            ):
+                # Last step of an unsliced (fast) prefill's draft chain:
+                # release the prefill in-flight slot held back at the
+                # parent's PREFILL_LAST output (see update_from_output).
+                if self.prefill_inflight_count > 0:
+                    self.prefill_inflight_count -= 1
+                else:
+                    logger.warning(
+                        "[PD] draft chain last step releasing an already-"
+                        "zero prefill_inflight_count (task_id=%s); possible "
+                        "double release",
+                        scheduler_output.draft_task_id,
+                    )
         else:
             self.decode_or_draft_inflight_count += 1
             self.decode_draft_remote_pending_count += 1
@@ -3108,7 +3137,19 @@ class PDSeparatedScheduler(Scheduler):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, Any]:
         if scheduler_output.batch_type == BatchType.PREFILL_LAST:
-            if self.prefill_inflight_count > 0:
+            # Release on PL output only for sliced (>= _PREFILL_SLICE_MIN_TOKENS)
+            # or chain-less prefills.  Unsliced (fast) prefills hold their
+            # in-flight slot until their draft chain's last DRAFT_FIRST is
+            # dispatched (see _pick_draft_first_batch): their PL returns
+            # long before the single-slot draft lane can drain the chain,
+            # and releasing here would let new prefills flood the lane.
+            release_on_pl = (
+                scheduler_output.total_num_scheduled_tokens
+                >= _PREFILL_SLICE_MIN_TOKENS
+                or getattr(scheduler_output, "draft_seqno_base", None)
+                is None
+            )
+            if release_on_pl and self.prefill_inflight_count > 0:
                 self.prefill_inflight_count -= 1
 
             # logger.info(
