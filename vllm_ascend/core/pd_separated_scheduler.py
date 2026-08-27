@@ -866,44 +866,9 @@ class PDSeparatedScheduler(Scheduler):
         if now - self._last_stall_log_ts < 0.010:
             return
         self._last_stall_log_ts = now
-        logger.warning(
-            "[PD-STALL] empty schedule with outstanding work: "
-            "state=%s waiting=%d chunk_pf=%d pl_pending=%d running=%d | "
-            "counters: pf_inflight=%d/%d decode_inflight=%d "
-            "decode_head=%d p_pending=%d d_pending=%d | "
-            "force: dl=%s pdl=%s ddl=%s | "
-            "queues: pl_last=%d df_ph=%d dl_last=%d p_drf=%d p_drl=%d "
-            "d_drf=%d d_drl=%d | "
-            "tail_ready: pl=%s dl=%s p_drl=%s d_drl=%s | "
-            "placeholder_parent=%s publish_pending=%d",
-            self._prefill_state(),
-            len(self.waiting),
-            len(self.chunk_prefill_first),
-            len(self.prefill_last_pending),
-            len(self.running),
-            self.prefill_inflight_count,
-            self.prefill_inflight_limit,
-            self.decode_or_draft_inflight_count,
-            self.decode_head_inflight_count,
-            self.prefill_draft_remote_pending_count,
-            self.decode_draft_remote_pending_count,
-            self._force_decode_last,
-            self._force_prefill_draft_last,
-            self._force_decode_draft_last,
-            len(self.prefills_last_ready),
-            len(self.decodes_first_ready),
-            len(self.decodes_last_ready),
-            len(self.prefill_drafts_first_ready),
-            len(self.prefill_drafts_last_ready),
-            len(self.decode_drafts_first_ready),
-            len(self.decode_drafts_last_ready),
-            self._has_actionable_prefill_tail(),
-            self._has_actionable_decode_tail(),
-            self._has_actionable_prefill_draft_tail(),
-            self._has_actionable_decode_draft_tail(),
-            self._decode_first_placeholder_parent is not None,
-            len(self._draft_publish_pending),
-        )
+        # Temporarily suppress the high-frequency [PD-STALL] snapshot while
+        # diagnosing the Eagle3 execution path. The probe is observational
+        # only; disabling its warning does not change scheduling behaviour.
 
     def _decode_or_draft_first_only_active(self) -> bool:
         started_at = self._decode_or_draft_first_only_start_ts
