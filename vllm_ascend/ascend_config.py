@@ -1188,11 +1188,17 @@ class PrefixCacheCoordinationConfig:
         self.tenant_key_file: str | None = user_config.get("tenant_key_file")
         self.consumer_id: str | None = user_config.get("consumer_id")
         self.connect_timeout: float = float(user_config.get("connect_timeout", 5.0))
+        self.enforce_mm_abi_match: bool = user_config.get(
+            "enforce_mm_abi_match",
+            False,
+        )
 
         if self.enabled:
             self._validate(role)
 
     def _validate(self, role: str) -> None:
+        if not isinstance(self.enforce_mm_abi_match, bool):
+            raise ValueError("enforce_mm_abi_match must be a bool")
         if role == "edge":
             if not self.control_url:
                 raise ValueError("edge prefix cache coordination requires control_url")
@@ -1224,7 +1230,8 @@ class PrefixCacheCoordinationConfig:
             f"enabled={self.enabled}, control_url={self.control_url!r}, "
             f"consumer_id={self.consumer_id!r}, "
             f"listen_host={self.listen_host!r}, listen_port={self.listen_port}, "
-            f"instance_id={self.instance_id!r})"
+            f"instance_id={self.instance_id!r}, "
+            f"enforce_mm_abi_match={self.enforce_mm_abi_match})"
         )
 
 
