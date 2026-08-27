@@ -1228,10 +1228,49 @@ class PDSeparatedScheduler(Scheduler):
             )
         )
 
+    def _draft_seqno_key(self, so: SchedulerOutput) -> tuple[int, int]:
+        """Effective channel seqno a queued DRAFT_FIRST will be stamped with.
+
+        The comm channel posts ops strictly in reserved-seqno order
+        (``draft_seqno_base + draft_step_idx``), but DRFs are enqueued in
+        output-completion order: once chains go dynamic, a later chain's
+        step-0 can be enqueued ahead of an earlier chain's continuation
+        step even though its reserved seqno is higher.  Submitting in
+        queue (FIFO) order then holds the higher-seqno send behind the
+        never-submitted lower one and deadlocks the channel (the held
+        send also occupies the lane's only in-flight slot, so the missing
+        seqno can never be picked either).  Picks must therefore follow
+        the seqno, not the queue position.  DRFs without a reservation
+        are stamped from the counter at pick time -- that value is >=
+        every outstanding reservation, so they sort last.
+        """
+        task_id = so.draft_task_id
+        base = (
+            self._reserved_draft_seqno_base.get(task_id) if task_id else None
+        )
+        if base is not None:
+            return (0, base + int(so.draft_step_idx or 0))
+        seqno = getattr(so, "comm_seqno", None)
+        if seqno is not None:
+            return (0, seqno)
+        return (1, 0)
+
+    def _earliest_draft_first_idx(
+        self, first_ready: deque[SchedulerOutput]
+    ) -> int:
+        """Index of the queued DRAFT_FIRST with the smallest effective
+        seqno (stable FIFO tie-break; see _draft_seqno_key)."""
+        return min(
+            range(len(first_ready)),
+            key=lambda i: (self._draft_seqno_key(first_ready[i]), i),
+        )
+
     def _can_schedule_prefill_draft_first(self) -> bool:
         if not self.prefill_drafts_first_ready:
             return False
-        next_output = self.prefill_drafts_first_ready[0]
+        next_output = self.prefill_drafts_first_ready[
+            self._earliest_draft_first_idx(self.prefill_drafts_first_ready)
+        ]
         is_pregenerated = (
             next_output.draft_task_id in self._pregenerated_draft_task_ids
         )
@@ -1263,7 +1302,9 @@ class PDSeparatedScheduler(Scheduler):
     def _can_schedule_decode_draft_first(self) -> bool:
         if not self.decode_drafts_first_ready:
             return False
-        next_output = self.decode_drafts_first_ready[0]
+        next_output = self.decode_drafts_first_ready[
+            self._earliest_draft_first_idx(self.decode_drafts_first_ready)
+        ]
         is_pregenerated = (
             next_output.draft_task_id in self._pregenerated_draft_task_ids
         )
@@ -1757,7 +1798,13 @@ class PDSeparatedScheduler(Scheduler):
             first_ready = self.decode_drafts_first_ready
             last_ready = self.decode_drafts_last_ready
         while first_ready:
-            scheduler_output = first_ready.popleft()
+            # Pop the smallest effective seqno, not the FIFO head: the
+            # channel requires submissions in reserved-seqno order, and a
+            # held (out-of-order) send would deadlock the lane against the
+            # in-flight slot it occupies (see _draft_seqno_key).
+            idx = self._earliest_draft_first_idx(first_ready)
+            scheduler_output = first_ready[idx]
+            del first_ready[idx]
             if self._is_stale_draft_output(scheduler_output):
                 # Never drop a stale DRAFT_FIRST: its comm seqno was
                 # reserved and its recvs were pre-posted when the parent
