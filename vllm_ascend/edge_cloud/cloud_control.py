@@ -53,32 +53,36 @@ def _validate_mm_abi_header(value: str | None) -> str:
 def _negotiate_protocol_headers(
     headers: Mapping[str, str],
     expected_mm_abi: str | None = None,
+    *,
+    enforce_mm_abi_match: bool = False,
 ) -> str | None:
     """Return the validated MM-ABI header value for v2 requests, else None.
 
     v1 requests keep their exact legacy behavior; a v1 request carrying the
     MM-ABI header and a v2 request with a missing or malformed one are both
     rejected so the two protocol stacks never relax into each other. When
-    ``expected_mm_abi`` is given, a v2 request must carry exactly this
-    locally computed fingerprint so an edge with a diverging processor
-    configuration never probes (and pins) cloud KV blocks.
+    When ``enforce_mm_abi_match`` is enabled, a v2 request must carry exactly
+    the locally computed ``expected_mm_abi`` fingerprint. The check is off by
+    default because heterogeneous Edge/Cloud hardware commonly uses different
+    software images even though media preprocessing happens on the Edge.
     """
     normalized = {key.lower(): value for key, value in headers.items()}
     protocol = normalized.get(HEADER_PROTOCOL.lower())
     mm_abi = normalized.get(HEADER_MM_ABI.lower())
     if protocol == PROTOCOL_VERSION_MM:
         value = _validate_mm_abi_header(mm_abi)
-        if expected_mm_abi is None:
-            log_event(
-                logger,
-                "warning",
-                "cloud_protocol_rejected",
-                reason="mm_abi_unavailable",
-            )
-            raise ValueError(f"{PROTOCOL_VERSION_MM} requires a locally computed {HEADER_MM_ABI} fingerprint")
-        if value != expected_mm_abi:
-            log_event(logger, "warning", "cloud_protocol_rejected", reason="mm_abi_mismatch")
-            raise ValueError(f"{HEADER_MM_ABI} fingerprint does not match this cloud instance")
+        if enforce_mm_abi_match:
+            if expected_mm_abi is None:
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_protocol_rejected",
+                    reason="mm_abi_unavailable",
+                )
+                raise ValueError(f"{PROTOCOL_VERSION_MM} requires a locally computed {HEADER_MM_ABI} fingerprint")
+            if value != expected_mm_abi:
+                log_event(logger, "warning", "cloud_protocol_rejected", reason="mm_abi_mismatch")
+                raise ValueError(f"{HEADER_MM_ABI} fingerprint does not match this cloud instance")
         return value
     if mm_abi is not None:
         raise ValueError(f"{HEADER_MM_ABI} requires protocol {PROTOCOL_VERSION_MM}")
@@ -332,6 +336,8 @@ class CloudControlProcessor:
 def create_cloud_control_app(
     bridge: CloudControlBridge,
     processor_fingerprint: bytes | None = None,
+    *,
+    enforce_mm_abi_match: bool = False,
 ) -> FastAPI:
     """Create the minimal OpenAI-compatible cloud control endpoint."""
     app = FastAPI(title="vLLM Ascend edge-cloud control plane")
@@ -354,7 +360,11 @@ def create_cloud_control_app(
         request_id = request.headers.get(HEADER_REQUEST_ID)
         try:
             body = await request.json()
-            mm_abi_header = _negotiate_protocol_headers(request.headers, expected_mm_abi)
+            mm_abi_header = _negotiate_protocol_headers(
+                request.headers,
+                expected_mm_abi,
+                enforce_mm_abi_match=enforce_mm_abi_match,
+            )
             parse_headers: Mapping[str, str] = request.headers
             if mm_abi_header is not None:
                 # The v2 manifest wire format is isomorphic to v1: after the
@@ -467,6 +477,8 @@ def run_cloud_control_server(
     port: int,
     process: Any,
     processor_fingerprint: bytes | None = None,
+    *,
+    enforce_mm_abi_match: bool = False,
 ) -> None:
     """Run Uvicorn until the PassiveEngineCore child exits."""
     import uvicorn
@@ -477,11 +489,16 @@ def run_cloud_control_server(
         "cloud_http_server_starting",
         host=host,
         port=port,
+        enforce_mm_abi_match=enforce_mm_abi_match,
     )
 
     server = uvicorn.Server(
         uvicorn.Config(
-            create_cloud_control_app(bridge, processor_fingerprint),
+            create_cloud_control_app(
+                bridge,
+                processor_fingerprint,
+                enforce_mm_abi_match=enforce_mm_abi_match,
+            ),
             host=host,
             port=port,
             log_level="info",

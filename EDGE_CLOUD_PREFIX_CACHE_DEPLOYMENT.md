@@ -113,8 +113,10 @@ Edge 和 Cloud 必须使用完全相同的：
 
 Edge 与 Cloud 可以把同一制品挂载到不同本地目录（本指南示例分别为
 `/home/extra/...` 与 `/weight/...`）；MM-ABI 指纹不会把本地挂载路径当作执行
-语义。revision、resolved commit、模型/MM graph hash、processor 配置和主要软件
-版本仍必须一致。
+语义。Edge 与 Cloud 可使用适配 910B/910C 等不同硬件的软件镜像，但两个仓库的
+协议实现必须兼容，模型、Tokenizer、层切分和数据面配置仍须一致。希望互相共享
+媒体 KV 的多个 Edge 还应保持 processor 配置和预处理软件版本一致；否则其
+fingerprint 不同，只会产生安全的假 miss。
 
 ### 3.4 创建 Edge 租户密钥
 
@@ -240,7 +242,8 @@ vllm serve /weight/Qwen3.5-27B \
           "enabled": true,
           "listen_host": "0.0.0.0",
           "listen_port": 8100,
-          "instance_id": "cloud-0"
+          "instance_id": "cloud-0",
+          "enforce_mm_abi_match": false
         }
       }
     }' \
@@ -249,6 +252,11 @@ vllm serve /weight/Qwen3.5-27B \
       "cudagraph_capture_sizes": [1, 2, 4, 8, 16, 32]
     }'
 ```
+
+`enforce_mm_abi_match` 默认 `false`。默认模式只校验并回显 Edge 发送的 MM-ABI
+header，不要求异构 Edge/Cloud 镜像计算出相同指纹。若部署使用同构镜像并希望在
+Probe 前强制发现模型、processor 或软件版本漂移，可在 Cloud 设为 `true`；该模式
+下不一致请求会以 `mm_abi_mismatch` 返回 400。
 
 ### 4.3 可选：启用 MTP
 
@@ -659,7 +667,15 @@ prompt embeds, or media embeds
 - Cloud KV Cache 没有因容量压力淘汰对应 blocks；
 - 日志中的 request ID、Cloud instance ID 和 hit tokens 对应同一次请求。
 
-### 8.6 Mamba KeyError、未绑定变量或 Prefix suffix 请求悬挂
+### 8.6 多模态请求返回 `mm_abi_mismatch`
+
+该错误只会在 Cloud 显式设置 `enforce_mm_abi_match=true` 时出现，表示 Edge 与
+Cloud 的模型/processor 指纹不同。910B Edge + 910C Cloud 等异构镜像建议保持
+默认值 `false`；若必须使用严格模式，则检查两侧模型配置、processor 配置、
+vLLM/vLLM-Ascend/transformers/Pillow 版本和摘要算法。模型挂载目录不同本身不会
+造成指纹不一致。
+
+### 8.7 Mamba KeyError、未绑定变量或 Prefix suffix 请求悬挂
 
 确认当前 vLLM-Ascend 分支包含以下修复：
 

@@ -87,6 +87,29 @@ def test_accepts_qwen35_dense_cloud_configuration_without_tenant_key():
     parsed = EdgeCloudConfig(config, _vllm_config())
 
     assert parsed.prefix_cache_coordination.instance_id == "cloud-a"
+    assert parsed.prefix_cache_coordination.enforce_mm_abi_match is False
+
+
+def test_cloud_coordination_can_enforce_mm_abi_match():
+    config = _config(role="cloud", enforce_mm_abi_match=True)
+    del config["prefix_cache_coordination"]["tenant_key_file"]
+    del config["prefix_cache_coordination"]["control_url"]
+    del config["prefix_cache_coordination"]["consumer_id"]
+
+    parsed = EdgeCloudConfig(config, _vllm_config())
+
+    assert parsed.prefix_cache_coordination.enforce_mm_abi_match is True
+
+
+@pytest.mark.parametrize("value", [1, "true", None])
+def test_cloud_coordination_rejects_non_boolean_mm_abi_match(value):
+    config = _config(role="cloud", enforce_mm_abi_match=value)
+    del config["prefix_cache_coordination"]["tenant_key_file"]
+    del config["prefix_cache_coordination"]["control_url"]
+    del config["prefix_cache_coordination"]["consumer_id"]
+
+    with pytest.raises(ValueError, match="enforce_mm_abi_match must be a bool"):
+        EdgeCloudConfig(config, _vllm_config())
 
 
 @pytest.mark.parametrize("language_model_only", [False, True])

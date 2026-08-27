@@ -64,7 +64,11 @@ def control_client():
     commands = queue.Queue()
     events = queue.Queue()
     bridge = CloudControlBridge(commands, events)
-    app = create_cloud_control_app(bridge, processor_fingerprint=PROCESSOR_FINGERPRINT)
+    app = create_cloud_control_app(
+        bridge,
+        processor_fingerprint=PROCESSOR_FINGERPRINT,
+        enforce_mm_abi_match=True,
+    )
     with TestClient(app) as client:
         yield client, commands, events
 
@@ -191,11 +195,30 @@ def test_v2_request_with_mismatched_fingerprint_is_rejected(control_client):
     assert commands.empty()
 
 
+def test_v2_request_with_mismatched_fingerprint_is_accepted_by_default():
+    commands = queue.Queue()
+    events = queue.Queue()
+    bridge = CloudControlBridge(commands, events)
+    app = create_cloud_control_app(
+        bridge,
+        processor_fingerprint=PROCESSOR_FINGERPRINT,
+    )
+    other_abi = mm_abi_header_value(hashlib.sha256(b"other-processor-config").digest())
+    headers, body = _control_payload(protocol=PROTOCOL_VERSION_MM, mm_abi=other_abi)
+    _start_responder(commands, events)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", headers=headers, json=body)
+
+    assert response.status_code == 200
+    assert response.headers[HEADER_MM_ABI] == other_abi
+
+
 def test_v2_request_is_rejected_when_cloud_has_no_local_fingerprint():
     commands = queue.Queue()
     events = queue.Queue()
     bridge = CloudControlBridge(commands, events)
-    app = create_cloud_control_app(bridge)
+    app = create_cloud_control_app(bridge, enforce_mm_abi_match=True)
     headers, body = _control_payload(protocol=PROTOCOL_VERSION_MM, mm_abi=MM_ABI)
 
     with TestClient(app) as client:
