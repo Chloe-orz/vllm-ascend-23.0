@@ -564,14 +564,44 @@ class PassiveEngineCoreProc:
             # Track which head_tokens we have already sent a hint for, so
             # layer-slicing's multiple first-slice steps fire it only once.
             self._cher_hint_sent: set[str] = set()
+            # Recv-hints whose enqueue failed (ring full), retried each step.
+            self._cher_hint_pending: list[dict] = []
         else:
             self._cher_enabled = False
             self._cher_hint_sent = set()
+            self._cher_hint_pending = []
         self._idle_sleep_seconds = 0.001
 
         self._prev_dispatch_req_ids: set[str] = set()
         self._pending_post_out_by_head_token: dict[str, SchedulerOutput] = {}
         self._published_post_out_tokens: set[str] = set()
+
+    def _flush_cher_hints(self) -> None:
+        """Retry recv-hints whose enqueue previously failed (ring full),
+        FIFO, non-blocking: a persistently full ring just keeps them queued."""
+        if not self._cher_enabled or not self._cher_hint_pending:
+            return
+        _hint_mq = getattr(self.executor, "cloud_recv_hint_mq", None)
+        if _hint_mq is None:
+            return
+        _pending = self._cher_hint_pending
+        self._cher_hint_pending = []
+        while _pending:
+            _hint = _pending[0]
+            try:
+                _hint_mq.enqueue(
+                    (b"pp_recv_hint", (_hint,), {}, None),
+                    timeout=0,
+                )
+            except Exception:
+                break  # ring still full or torn down: retry next step
+            self._cher_hint_sent.add(_hint["head_token"])
+            logger.info(
+                "[CHER] pending recv-hint delivered head_token=%s",
+                _hint["head_token"],
+            )
+            _pending.pop(0)
+        self._cher_hint_pending = _pending
 
     def _drain_worker_completion_acks(self) -> None:
         """Publish POST_OUT only after cloud workers complete the middle segment."""
@@ -627,6 +657,9 @@ class PassiveEngineCoreProc:
         _t0 = time.monotonic()
         self._drain_worker_completion_acks()
         _dt_drain = (time.monotonic() - _t0) * 1000
+
+        # [CHER] Retry recv-hints whose enqueue previously failed (ring full).
+        self._flush_cher_hints()
 
         _t0 = time.monotonic()
         self.passive_scheduler.poll_and_classify()
@@ -711,17 +744,14 @@ class PassiveEngineCoreProc:
                 _hint_mq = getattr(self.executor, "cloud_recv_hint_mq", None)
                 if _hint_mq is not None:
                     try:
-                        # Non-blocking (timeout=0): the hint is fire-and-forget.
-                        # If the guard thread hasn't drained the sideband MQ
-                        # (slow / contended on _early_recv_lock), we DROP the
-                        # hint rather than block PassiveEC.step() here -- a
-                        # blocked step can't drain acks, which fills
-                        # response_mq, which blocks the worker's ack enqueue,
-                        # which stops it from dequeuing rpc_broadcast_mq, which
-                        # blocks PassiveEC's dispatch -> circular deadlock.
-                        # When a hint is dropped, busy_loop's get_or_post_early
-                        # _recv posts the irecv itself (synchronous), so only
-                        # the early-post overlap is lost, never correctness.
+                        # Non-blocking (timeout=0): never block
+                        # PassiveEC.step() here -- a blocked step can't drain
+                        # acks, which fills response_mq, which blocks the
+                        # worker's ack enqueue, which stops it from dequeuing
+                        # rpc_broadcast_mq, which blocks PassiveEC's dispatch
+                        # -> circular deadlock.  On ring-full the hint goes to
+                        # _cher_hint_pending and is retried every step
+                        # (dropping it can deadlock: see _flush_cher_hints).
                         _hint_mq.enqueue(
                             (b"pp_recv_hint", (_hint,), {}, None),
                             timeout=0,
@@ -732,9 +762,14 @@ class PassiveEngineCoreProc:
                             _ht, _hint["hidden_channel"],
                         )
                     except TimeoutError:
+                        # Ring full: retry next step instead of dropping -- a
+                        # dropped hint means no early irecv, and busy_loop may
+                        # be blocked before reaching this batch and thus
+                        # unable to post it itself (rendezvous deadlock).
+                        self._cher_hint_pending.append(_hint)
                         logger.warning(
-                            "[CHER] recv-hint dropped (ring full) "
-                            "head_token=%s; busy_loop will post irecv itself",
+                            "[CHER] recv-hint queued for retry (ring full) "
+                            "head_token=%s",
                             _ht,
                         )
                     except Exception as _e:

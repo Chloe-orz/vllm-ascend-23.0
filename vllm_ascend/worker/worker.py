@@ -149,6 +149,13 @@ def _use_materialized_residual_boundary(model_config) -> bool:
     return supports_materialized_boundary_for_config(model_config)
 
 
+# Slot reservation marker for the early-recv cache: the guard thread marks a
+# head_token with this sentinel before posting its irecv OUTSIDE
+# ``_early_recv_lock`` (the buffer alloc + HCCL post may block and must never
+# run under the lock), so that exactly one irecv is ever posted per token.
+_RECV_POSTING = object()
+
+
 class NPUWorker(WorkerBase):
     def __init__(
         self,
@@ -1003,15 +1010,13 @@ class NPUWorker(WorkerBase):
             if time.monotonic() - self._cher_last_progress > 30.0:
                 self._dump_cher_state("no-progress>30s")
 
-    def _post_early_irecv_locked(
+    def _post_early_irecv(
         self, ht: str, channel: "HiddenChannelType", num_tokens: int,
         include_mrope: bool = True,
     ) -> AsyncIntermediateTensors:
-        """Post an irecv and return the entry.  Caller MUST hold
-        ``_early_recv_lock``.  Does NOT cache in ``_early_recv_handles`` --
-        the caller decides whether to cache (guard thread) or consume
-        immediately (busy_loop).  This prevents the memory leak where
-        busy_loop's self-posted entries were left in the dict forever.
+        """Post an irecv and return the entry.  Called OUTSIDE
+        ``_early_recv_lock`` (the lock only guards dedup/reservation; the
+        potentially-blocking buffer alloc + HCCL post must not run under it).
         """
         do_sp_chunk = enable_sp() and (
             self.model_runner.edge_cloud_cfg.mode != "embedding_only"
@@ -1077,59 +1082,34 @@ class NPUWorker(WorkerBase):
             )
             return
         _tname = threading.current_thread().name
-        logger.info(
-            "[2E1C-TRACE] CHER guard: hint ht=%s channel=%s, acquiring "
-            "_early_recv_lock (thread=%s)",
-            ht, channel_str, _tname,
-        )
+        _bucket = self._edge_bucket_of_token(ht)
+        # Lock guards dedup + reservation only; the blocking buffer alloc +
+        # HCCL post runs outside the lock.  The _RECV_POSTING sentinel
+        # reserves the slot atomically so exactly one irecv is ever posted
+        # per head_token.  Hints are never skipped: a skipped hint means no
+        # early irecv, and busy_loop may be blocked before reaching this
+        # batch and thus unable to post it itself (rendezvous deadlock).
         with self._early_recv_lock:
-            logger.info(
-                "[2E1C-TRACE] CHER guard: lock acquired ht=%s thread=%s",
-                ht, _tname)
             if ht in self._early_recv_handles:
-                return  # idempotent: another thread already posted
+                return  # idempotent: another thread already posted/reserved
             if ht in self._early_recv_consumed:
                 return  # busy_loop already consumed (posted its own); skip
-            # Cap the cache PER EDGE (multi-instance): only
-            # prefill_inflight_limit P-middle batches are in flight per edge
-            # at once, so only that many early-recv entries per edge are ever
-            # useful.  The per-edge cap is what actually breaks the 2E1C
-            # same-channel rendezvous deadlock: the cloud's busy_loop can be
-            # blocked on a c2e result isend to edge X while edge X's next
-            # prefill isend arrives — the early irecv posted by the guard is
-            # the ONLY thing that lets edge X proceed to its PL and recv the
-            # result.  With a single GLOBAL slot, edge Y's cached entry
-            # crowds out edge X's next prefill (its hint is skipped here and
-            # never re-queued; busy_loop cannot post it while blocked), and
-            # the classic 2P cross-direction cycle re-forms under dual-edge
-            # concurrency (single-edge load never trips it).  Per-edge slots
-            # restore the 1-1 cycle-breaking property for every pair; extra
-            # hints within the same edge are still skipped (busy_loop posts
-            # those via get_or_post_early_recv when they run), keeping the
-            # cache bounded and the guard draining fast.
-            _max = getattr(self, "_early_recv_max_inflight", 2)
-            _bucket = self._edge_bucket_of_token(ht)
-            _same_bucket = sum(
-                1 for key in self._early_recv_handles
-                if self._edge_bucket_of_token(key) == _bucket
+            self._early_recv_handles[ht] = _RECV_POSTING  # atomic reserve
+        try:
+            entry = self._post_early_irecv(ht, channel, num_tokens, include_mrope=has_mrope)
+        except Exception:
+            logger.exception(
+                "[CHER] start_early_irecv failed head_token=%s channel=%s",
+                ht, channel_str,
             )
-            if _same_bucket >= _max:
-                logger.info(
-                    "[2E1C-TRACE] CHER hint skipped (bucket %s full): "
-                    "head_token=%s channel=%s",
-                    _bucket, ht, channel_str,
-                )
-                return
-            try:
-                entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
+            with self._early_recv_lock:
+                if self._early_recv_handles.get(ht) is _RECV_POSTING:
+                    self._early_recv_handles.pop(ht, None)
+            return
+        with self._early_recv_lock:
+            if self._early_recv_handles.get(ht) is _RECV_POSTING:
                 self._early_recv_handles[ht] = entry  # cache for busy_loop
                 self._early_recv_booked_at[ht] = time.monotonic()
-            except Exception:
-                logger.exception(
-                    "[CHER] start_early_irecv failed head_token=%s channel=%s",
-                    ht, channel_str,
-                )
-                return
         logger.info(
             "[2E1C-TRACE] CHER early-recv posted head_token=%s channel=%s "
             "num_tokens=%d bucket=%s thread=%s",
@@ -1142,45 +1122,74 @@ class NPUWorker(WorkerBase):
     ) -> AsyncIntermediateTensors | None:
         """Atomically reuse the guard-thread's early-recv entry, or post one.
 
-        execute_model calls this instead of pop-then-fallback: under
-        ``_early_recv_lock`` it pops a cached entry if the guard thread
-        already posted one, otherwise it posts the irecv itself and returns
-        it.  This guarantees at most one irecv per head_token even when the
-        guard thread's hint dequeue races ahead of (or lags behind)
-        execute_model's pp_scheduler_output dequeue -- the original
-        pop-then-fallback path posted a second irecv when the guard had not
-        posted yet, and both irecvs then raced for the sender's single isend,
-        deadlocking (the losing irecv waits forever -> no ack -> no POST_OUT
-        -> edge has no P-tail -> full stall).
+        Three-way handling: a ready guard entry is popped and consumed; a
+        ``_RECV_POSTING`` reservation means the guard is mid-posting outside
+        the lock, so wait (lock-free) for it rather than double-posting;
+        otherwise mark consumed and self-post outside the lock.
         """
         if not head_token:
             return None
         _tname = threading.current_thread().name
         with self._early_recv_lock:
-            entry = self._early_recv_handles.pop(head_token, None)
-            self._early_recv_consumed.add(head_token)
-            if entry is not None:
+            entry = self._early_recv_handles.get(head_token)
+            if entry is not None and entry is not _RECV_POSTING:
+                self._early_recv_handles.pop(head_token, None)
+                self._early_recv_consumed.add(head_token)
                 logger.info(
                     "[2E1C-TRACE] CHER consume(guard-entry) ht=%s thread=%s",
                     head_token, _tname)
                 self._cher_last_progress = time.monotonic()
                 return entry  # guard thread posted it, consumed
-            # Not posted by guard: post our own.  Do NOT cache in
-            # _early_recv_handles -- we consume it immediately.  Marking
-            # _early_recv_consumed above prevents the guard from posting a
-            # duplicate (orphan irecv) when its hint arrives later.
-            logger.info(
-                "[2E1C-TRACE] CHER consume(self-post) ht=%s thread=%s",
-                head_token, _tname)
-            try:
-                return self._post_early_irecv_locked(
-                    head_token, channel, num_tokens, include_mrope=include_mrope)
-            except Exception:
-                logger.exception(
-                    "[CHER] get_or_post_early_recv failed head_token=%s",
-                    head_token,
-                )
-                return None
+            if entry is None:
+                self._early_recv_consumed.add(head_token)
+
+        if entry is _RECV_POSTING:
+            # guard is mid-posting this ht outside the lock: wait for the
+            # real entry, do NOT self-post (would double-post the same ht).
+            entry = self._wait_reserved_entry(head_token)
+            if entry is not None:
+                with self._early_recv_lock:
+                    if self._early_recv_handles.get(head_token) is entry:
+                        self._early_recv_handles.pop(head_token, None)
+                    self._early_recv_consumed.add(head_token)
+                logger.info(
+                    "[2E1C-TRACE] CHER consume(waited guard-entry) ht=%s "
+                    "thread=%s", head_token, _tname)
+                self._cher_last_progress = time.monotonic()
+                return entry
+            # guard's post failed (reservation dropped before any irecv was
+            # enqueued): fall through to the self-post below.
+
+        # Not posted by guard: post our own (outside the lock).  Do NOT
+        # cache in _early_recv_handles -- we consume it immediately.  The
+        # _early_recv_consumed mark prevents the guard from posting a
+        # duplicate (orphan irecv) when its hint arrives later.
+        logger.info(
+            "[2E1C-TRACE] CHER consume(self-post) ht=%s thread=%s",
+            head_token, _tname)
+        with self._early_recv_lock:
+            self._early_recv_consumed.add(head_token)
+        try:
+            return self._post_early_irecv(
+                head_token, channel, num_tokens, include_mrope=include_mrope)
+        except Exception:
+            logger.exception(
+                "[CHER] get_or_post_early_recv failed head_token=%s",
+                head_token,
+            )
+            return None
+
+    def _wait_reserved_entry(self, head_token: str):
+        """Poll (lock-free) until the guard fills the reserved early-recv
+        entry, then return it.  Returns None if the reservation was dropped
+        (the guard's post failed before enqueueing, so self-posting is
+        safe).  Never holds ``_early_recv_lock`` while waiting."""
+        while True:
+            with self._early_recv_lock:
+                entry = self._early_recv_handles.get(head_token)
+                if entry is not _RECV_POSTING:
+                    return entry
+            time.sleep(0.001)
 
 
     def cleanup_early_recv(self, head_token: str) -> None:
