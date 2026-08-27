@@ -948,7 +948,14 @@ class PassiveEngineCoreProc:
             # re-publish them, so leaving physical ids here would make the
             # ingress translator double-offset them (fatal for edges with a
             # non-zero partition offset; silently identity for edge 0).
-            _partition = self.passive_scheduler._me_get_partition()
+            # With prefix-cache coordination the cloud KV manager owns the
+            # whole pool (no static partition, no ingress translation) and
+            # coordination tails are ack-only, so there is nothing to
+            # restore — and treating cloud-owned ids as partition-physical
+            # would be wrong.
+            _partition = (
+                self.passive_scheduler._me_get_partition()
+                if self._cloud_kv_manager is None else None)
             if _partition is not None:
                 for req_data in tail.scheduled_new_reqs or []:
                     if req_data.block_ids:

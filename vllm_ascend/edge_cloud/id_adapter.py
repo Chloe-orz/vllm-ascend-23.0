@@ -100,6 +100,11 @@ def unwrap_scheduler_output_ids(so) -> None:
         so.finished_req_ids = {
             unwrap_req_id(rid) for rid in so.finished_req_ids
         }
+    if getattr(so, "edge_cloud_finished_requests", None):
+        so.edge_cloud_finished_requests = {
+            unwrap_req_id(rid): data
+            for rid, data in so.edge_cloud_finished_requests.items()
+        }
     # Live SchedulerOutput field name is scheduled_spec_decode_tokens;
     # scheduled_spec_token_ids is the stale alias kept for compat.
     if getattr(so, "scheduled_spec_decode_tokens", None):

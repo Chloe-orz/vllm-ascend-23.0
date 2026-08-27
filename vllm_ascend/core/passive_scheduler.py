@@ -420,6 +420,12 @@ class PassiveScheduler:
             self._me_seq += 1
             self._remember_arrival_seq(so, self._me_seq)
             self._wrap_segment(edge_id, so)
+            # Apply the cloud KV rewrite (prefix-cache coordination) on the
+            # multi-edge path too — ids are already wrapped, so the cloud KV
+            # manager keys its state in the same wrapped namespace the rest
+            # of the pipeline (queues, worker acks, POST_OUT) uses.
+            if self.scheduler_output_handler is not None:
+                so = self.scheduler_output_handler(so)
             self._me_queue.append((edge_id, self._me_seq, so))
             self._me_edge_head.setdefault(edge_id, self._me_seq)
             logger.debug(
@@ -484,7 +490,16 @@ class PassiveScheduler:
             wrap_req_id(edge_id, rid): n
             for rid, n in so.num_scheduled_tokens.items()
         }
-        partition = self._me_get_partition() if self._me_registry else None
+        # When prefix-cache coordination is active the scheduler_output_handler
+        # (CloudKVRequestManager.rewrite_scheduler_output) replaces every
+        # incoming block table with cloud-owned allocations from the shared
+        # pool — edge-sent block ids are discarded, so the static per-edge
+        # partition translation is both redundant and wrong (its range check
+        # constrains edges to a fixed share of the pool).  Only the legacy
+        # multi-edge path (coordination off) still needs it.
+        partition = (
+            None if self.scheduler_output_handler is not None else
+            (self._me_get_partition() if self._me_registry else None))
         for req_data in so.scheduled_new_reqs or []:
             raw_req_id = req_data.req_id
             req_data.req_id = wrap_req_id(edge_id, req_data.req_id)
@@ -545,6 +560,13 @@ class PassiveScheduler:
         if so.finished_req_ids:
             so.finished_req_ids = {
                 wrap_req_id(edge_id, rid) for rid in so.finished_req_ids
+            }
+        # Finish accounting payloads are keyed by req_id as well; the cloud
+        # KV manager looks them up with the wrapped id.
+        if getattr(so, "edge_cloud_finished_requests", None):
+            so.edge_cloud_finished_requests = {
+                wrap_req_id(edge_id, rid): data
+                for rid, data in so.edge_cloud_finished_requests.items()
             }
         # spec decode: per-req draft token map is keyed by req_id — must be
         # wrapped too, otherwise the cloud's draft/verify lookup by wrapped
