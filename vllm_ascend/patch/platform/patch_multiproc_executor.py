@@ -88,15 +88,53 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        if self.parallel_config.node_rank_within_dp == 0:
+        _is_registry_edge = bool(
+            getattr(self.parallel_config, "role_registry", None)
+            and self.parallel_config.is_edge_node)
+        if self.parallel_config.node_rank_within_dp == 0 or _is_registry_edge:
             # For leader node within each dp rank,
             # each dp will have its own leader multiproc executor.
+            # Multi-instance (2E1C): EVERY edge is the leader of its own
+            # pipeline (its own engine core + broadcast MQ), even when its
+            # node_rank_within_dp != 0 — otherwise a second edge can never
+            # issue collective_rpc (its EngineCore dies on the follower
+            # assert at get_kv_cache_specs).
             max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+            # Bind on THIS instance's own address — master_addr is the world
+            # rendezvous anchor (rank 0 host = E0), and binding to it from E1
+            # fails with "Cannot assign requested address" (E0's IP is not
+            # local to E1).
+            _connect_ip = self.parallel_config.master_addr
+            _mq_readers = self.world_size
+            if _is_registry_edge:
+                from vllm_ascend.edge_cloud.role_registry import (
+                    get_role_registry, init_role_registry)
+                _reg = get_role_registry()
+                if _reg is None:
+                    # Engine-core process may not have loaded it yet.
+                    _reg = init_role_registry(
+                        self.parallel_config.role_registry)
+                if _reg is not None:
+                    _connect_ip = _reg.edge(
+                        self.parallel_config.edge_id).addr
+                    if 0 not in _reg.edge(self.parallel_config.edge_id).ranks:
+                        # Non-rank0 edges (E1): a fully independent
+                        # engine↔worker pipeline — the MQ only serves this
+                        # instance's local workers, and nothing cross-node
+                        # ever reads it.
+                        _mq_readers = self.local_world_size
+                    # else: the rank0 edge (E0) feeds the world-group control
+                    # MQ — its worker (leader branch of _init_message_queues)
+                    # re-exports THIS handle to all remote readers, so the MQ
+                    # must stay remote-capable (world-sized reader set) or
+                    # every remote reader crashes on connect(None).  Cloud
+                    # workers' control RPCs (initialize_from_config etc.)
+                    # still arrive via this channel, exactly like 1-1.
             self.rpc_broadcast_mq = MessageQueue(
-                self.world_size,
+                _mq_readers,
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
-                connect_ip=self.parallel_config.master_addr,
+                connect_ip=_connect_ip,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         elif envs.VLLM_PP_NON_LEADER_ENGINE_CORE:
@@ -158,11 +196,30 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         success = False
         try:
             if self.parallel_config.enable_edge_cloud:
-                global_start_rank = (
-                    0
-                    if self.parallel_config.is_edge_node
-                    else self.parallel_config.edge_npu_count
-                )
+                if getattr(self.parallel_config, "role_registry", None):
+                    # Multi-instance (2E1C): this instance's global ranks come
+                    # from the registry — E0 starts at 0, E1 at 1, cloud at 2,
+                    # instead of "edge always starts at 0" which collided the
+                    # second edge with the first.
+                    import yaml as _yaml
+                    with open(self.parallel_config.role_registry,
+                              encoding="utf-8") as _f:
+                        _reg = _yaml.safe_load(_f)
+                    if self.parallel_config.is_edge_node:
+                        _eid = self.parallel_config.edge_id
+                        _entry = next(e for e in _reg["edges"]
+                                      if int(e["id"]) == _eid)
+                    else:
+                        _cid = self.parallel_config.cloud_id
+                        _entry = next(c for c in _reg["clouds"]
+                                      if int(c["id"]) == _cid)
+                    global_start_rank = int(_entry["ranks"][0])
+                else:
+                    global_start_rank = (
+                        0
+                        if self.parallel_config.is_edge_node
+                        else self.parallel_config.edge_npu_count
+                    )
             else:
                 global_start_rank = self.local_world_size * self.parallel_config.node_rank_within_dp
 
@@ -201,7 +258,49 @@ class AscendMultiprocExecutor(MultiprocExecutor):
 
             self.response_mqs = []
             # Only leader node have remote response mqs
-            if self.parallel_config.node_rank_within_dp == 0 and (
+            if getattr(self.parallel_config, "role_registry", None) and (
+                self.parallel_config.is_edge_node
+            ):
+                # Multi-instance (2E1C): every edge is the leader of its own
+                # pipeline.  The rank0 edge (E0) additionally runs the
+                # 1-1-style world control plane: its collective_rpcs (KV
+                # sizing, initialize_from_config, warmup) execute on its own
+                # workers AND all cloud workers, so it collects replies from
+                # exactly that pipeline — own ranks + all cloud ranks.
+                # Other edges' workers are EXCLUDED: they shelve the
+                # world-group MQ reader (they serve their own engine), so
+                # they never execute E0's RPCs and never reply — including
+                # their queues here would deadlock get_response.
+                from vllm_ascend.edge_cloud.role_registry import (
+                    get_role_registry, init_role_registry)
+                _reg = get_role_registry()
+                if _reg is None:
+                    _reg = init_role_registry(
+                        self.parallel_config.role_registry)
+                _my_ranks = list(
+                    _reg.edge(self.parallel_config.edge_id).ranks)
+                if 0 in _my_ranks:
+                    _pipeline_ranks = sorted(
+                        set(_my_ranks)
+                        | {r for c_id in _reg.cloud_ids
+                           for r in _reg.cloud(c_id).ranks})
+                else:
+                    # Non-rank0 edge (E1): instance-local engine — collect
+                    # only its own workers' response queues.
+                    _pipeline_ranks = sorted(_my_ranks)
+                for rank in _pipeline_ranks:
+                    local_idx = rank - global_start_rank
+                    if 0 <= local_idx < self.local_world_size:
+                        local_message_queue = (
+                            self.workers[local_idx].worker_response_mq)
+                        assert local_message_queue is not None
+                        self.response_mqs.append(local_message_queue)
+                    else:
+                        remote_message_queue = (
+                            self.workers[0].peer_worker_response_mqs[rank])
+                        assert remote_message_queue is not None
+                        self.response_mqs.append(remote_message_queue)
+            elif self.parallel_config.node_rank_within_dp == 0 and (
                 not self.parallel_config.enable_edge_cloud
                 or self.parallel_config.is_edge_node
             ):

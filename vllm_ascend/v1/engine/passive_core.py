@@ -348,6 +348,40 @@ class PPSchedulerZmqChannel:
         self._subscriber.shutdown()
 
 
+class MultiEdgeChannelMux:
+    """Fan-in mux over one PPSchedulerZmqChannel per edge (2E1C cloud side).
+
+    The cloud keeps one bidirectional channel per edge; this mux drains all
+    of them and tags each message with the source channel's ``edge_id``, so
+    the scheduler's ingress adapter can wrap ids per edge without inspecting
+    payloads.  Satisfies the ``pp_subscriber`` contract used by
+    ``PassiveScheduler`` (``consume_new_outputs``), but yields
+    ``(edge_id, seq, SchedulerOutput)`` triples.
+    """
+
+    def __init__(self, channels: dict[int, PPSchedulerZmqChannel]) -> None:
+        self._channels = channels  # edge_id -> channel
+
+    @property
+    def channels(self) -> dict[int, PPSchedulerZmqChannel]:
+        return self._channels
+
+    def consume_new_outputs(self) -> list[tuple[int, int, SchedulerOutput]]:
+        """Drain all edge channels; return (edge_id, seq, output) triples."""
+        out: list[tuple[int, int, SchedulerOutput]] = []
+        for edge_id, channel in self._channels.items():
+            for seq, so in channel.consume_new_outputs():
+                out.append((edge_id, seq, so))
+        return out
+
+    def publish_to_edge(self, edge_id: int, so: SchedulerOutput) -> None:
+        self._channels[edge_id].publish(so)
+
+    def shutdown(self) -> None:
+        for channel in self._channels.values():
+            channel.shutdown()
+
+
 
 
 def _trim_scheduler_output_for_worker_enqueue(
@@ -829,7 +863,50 @@ class PassiveEngineCoreProc:
             self._published_post_out_tokens.add(head_token)
         # Echo the head_token back so the edge can correlate the tail
         # segment with its suspended head state.
-        self._pp_pd_channel.publish(tail)
+        if isinstance(self._pp_pd_channel, MultiEdgeChannelMux):
+            # Multi-instance: route the tail back to the source edge (the
+            # wrapped head_token carries the edge id prefix, F6).
+            from vllm_ascend.edge_cloud.id_adapter import (
+                parse_token_edge_id, unwrap_scheduler_output_ids)
+            _edge_id = (
+                parse_token_edge_id(head_token)
+                if head_token else None)
+            if _edge_id is None:
+                logger.error(
+                    "[CLOUD-POST-OUT] missing head_token; cannot route "
+                    "tail back to its source edge — dropping")
+                return
+            # Strip the cloud-internal wrapped namespace before returning:
+            # the edge must see its own original ids (F6 egress discipline).
+            unwrap_scheduler_output_ids(tail)
+            # Block ids were translated to cloud-physical at ingress (F2);
+            # restore the edge-local numbering too.  The edge reuses echoed
+            # tail batches beyond the tail itself — MTP draft chains copy
+            # the tail's scheduled_new_reqs into DRAFT_FIRST batches and
+            # re-publish them, so leaving physical ids here would make the
+            # ingress translator double-offset them (fatal for edges with a
+            # non-zero partition offset; silently identity for edge 0).
+            _partition = self.passive_scheduler._me_get_partition()
+            if _partition is not None:
+                for req_data in tail.scheduled_new_reqs or []:
+                    if req_data.block_ids:
+                        req_data.block_ids = tuple(
+                            _partition.to_local(_edge_id, list(ids))
+                            for ids in req_data.block_ids
+                        )
+                _cached = tail.scheduled_cached_reqs
+                if _cached is not None and getattr(
+                        _cached, "new_block_ids", None):
+                    _cached.new_block_ids = [
+                        (tuple(
+                            _partition.to_local(_edge_id, list(g))
+                            for g in ids)
+                         if ids is not None else None)
+                        for ids in _cached.new_block_ids
+                    ]
+            self._pp_pd_channel.publish_to_edge(_edge_id, tail)
+        else:
+            self._pp_pd_channel.publish(tail)
 
     def run_busy_loop(self) -> None:
         """Drive `step()` until the executor reports failure or shutdown."""
@@ -930,55 +1007,94 @@ class PassiveEngineCoreProc:
                 and _edge_cloud.pd_separation.enabled
             )
             if _pd_enabled:
-                master_addr = vllm_config.parallel_config.master_addr
-                master_port = vllm_config.parallel_config.master_port
+                # Multi-instance (2E1C): when a role registry is configured,
+                # channels are created per edge from the registry (no
+                # TCPStore discovery); otherwise the legacy single-channel
+                # path runs unchanged.
+                from vllm_ascend.edge_cloud.role_registry import (
+                    get_role_registry, init_role_registry)
+                _registry = get_role_registry()
+                if _registry is None and getattr(
+                        vllm_config.parallel_config, "role_registry", None):
+                    # Freshly-spawned subprocess may not have loaded it yet.
+                    _registry = init_role_registry(
+                        vllm_config.parallel_config.role_registry)
+                if _registry is not None:
+                    _cloud_id = vllm_config.parallel_config.cloud_id
+                    _channels: dict[int, PPSchedulerZmqChannel] = {}
+                    for _edge_id in _registry.edge_ids:
+                        # Cloud binds POST_OUT (per edge offset); connects to
+                        # the edge's PRE_OUT bind endpoint from the registry.
+                        _post_port = (
+                            _registry.cloud(_cloud_id).zmq_base_port
+                            + _edge_id * 2)
+                        _pre_ep = _registry.endpoint(
+                            _edge_id, _cloud_id, "pre_out")
+                        _channels[_edge_id] = PPSchedulerZmqChannel(
+                            send_endpoint=f"tcp://*:{_post_port}",
+                            recv_endpoint=_pre_ep,
+                            name=f"pd-cloud-c{_cloud_id}-e{_edge_id}",
+                        )
+                    pp_pd_channel = MultiEdgeChannelMux(_channels)
+                    scheduler_input = pp_pd_channel
+                    logger.info(
+                        "PD-separation cloud multi-edge channels: %d edges "
+                        "(cloud_id=%s, digest=%s)",
+                        len(_channels), _cloud_id, _registry.config_digest,
+                    )
+                else:
+                    master_addr = vllm_config.parallel_config.master_addr
+                    master_port = vllm_config.parallel_config.master_port
 
-                # Report this node's reachable IP to the edge so the
-                # edge can construct POST_OUT's connect endpoint
-                # without a CLI flag. Uses a one-shot TCPStore (edge
-                # = master, cloud = client) on ``master_port + 1 +
-                # dp_rank`` to avoid colliding with the NCCL
-                # rendezvous store on ``master_port``. The cloud
-                # connects only to the edge DP rank it is paired
-                # with.
-                import torch.distributed as dist
-                from datetime import timedelta
-                from vllm.utils.network_utils import get_ip
-                _cloud_ip = get_ip()
-                _dp_rank = getattr(
-                    vllm_config.parallel_config, "data_parallel_rank", 0
-                )
-                _addr_store = dist.TCPStore(
-                    host_name=master_addr,
-                    port=master_port + 1 + _dp_rank,
-                    world_size=2,
-                    is_master=False,
-                    timeout=timedelta(seconds=600),
-                )
-                _addr_store.set("cloud_ip", _cloud_ip)
-                del _addr_store
+                if _registry is not None:
+                    pass  # multi-instance: channels built from registry above
+                else:
+                    # Report this node's reachable IP to the edge so the
+                    # edge can construct POST_OUT's connect endpoint
+                    # without a CLI flag. Uses a one-shot TCPStore (edge
+                    # = master, cloud = client) on ``master_port + 1 +
+                    # dp_rank`` to avoid colliding with the NCCL
+                    # rendezvous store on ``master_port``. The cloud
+                    # connects only to the edge DP rank it is paired
+                    # with.
+                    import torch.distributed as dist
+                    from datetime import timedelta
+                    from vllm.utils.network_utils import get_ip
+                    _cloud_ip = get_ip()
+                    _dp_rank = getattr(
+                        vllm_config.parallel_config, "data_parallel_rank", 0
+                    )
+                    _addr_store = dist.TCPStore(
+                        host_name=master_addr,
+                        port=master_port + 1 + _dp_rank,
+                        world_size=2,
+                        is_master=False,
+                        timeout=timedelta(seconds=600),
+                    )
+                    _addr_store.set("cloud_ip", _cloud_ip)
+                    del _addr_store
 
-                # ZMQ ports are offset per DP rank on the edge side
-                # (dp_rank * 2). The cloud mirrors this offsetting.
-                # NOTE: the cloud currently creates a single
-                # PPSchedulerZmqChannel (per dp_rank=0). True
-                # multi-DP cloud support requires N channels inside
-                # PassiveEngineCoreProc.
-                _pre_out_port = pd_config.pre_out_port + _dp_rank * 2
-                _post_out_port = pd_config.post_out_port + _dp_rank * 2
-                post_out_bind = f"tcp://*:{_post_out_port}"
-                pre_out_connect = f"tcp://{master_addr}:{_pre_out_port}"
-                pp_pd_channel = PPSchedulerZmqChannel(
-                    send_endpoint=post_out_bind,
-                    recv_endpoint=pre_out_connect,
-                    name=f"pd-cloud-dp{_dp_rank}",
-                )
-                scheduler_input = pp_pd_channel
-                logger.info(
-                    "PD-separation cloud channel: POST_OUT=%s, "
-                    "PRE_OUT=%s (dp_rank=%d)",
-                    post_out_bind, pre_out_connect, _dp_rank,
-                )
+                    # ZMQ ports are offset per DP rank on the edge side
+                    # (dp_rank * 2). The cloud mirrors this offsetting.
+                    # NOTE: the cloud currently creates a single
+                    # PPSchedulerZmqChannel (per dp_rank=0). True
+                    # multi-DP cloud support requires N channels inside
+                    # PassiveEngineCoreProc.
+                    _pre_out_port = pd_config.pre_out_port + _dp_rank * 2
+                    _post_out_port = pd_config.post_out_port + _dp_rank * 2
+                    post_out_bind = f"tcp://*:{_post_out_port}"
+                    pre_out_connect = f"tcp://{master_addr}:{_pre_out_port}"
+                    pp_pd_channel = PPSchedulerZmqChannel(
+                        send_endpoint=post_out_bind,
+                        recv_endpoint=pre_out_connect,
+                        name=f"pd-cloud-dp{_dp_rank}",
+                    )
+                    scheduler_input = pp_pd_channel
+                    logger.info(
+                        "PD-separation cloud channel: POST_OUT=%s, "
+                        "PRE_OUT=%s (dp_rank=%d)",
+                        post_out_bind, pre_out_connect, _dp_rank,
+                    )
 
             if scheduler_input is not None:
                 executor.start_worker_monitor(inline=False)

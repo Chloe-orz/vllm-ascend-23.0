@@ -53,6 +53,18 @@ _FLASHCOMM2_ODP: GroupCoordinator | None = None
 # synchronized; only the cross-node P2P (isend/irecv) uses the
 # per-channel stream, and handle.wait() syncs back to the default
 # stream before the broadcast.
+#
+# NOTE(2E1C): streams are keyed by (channel, direction, PAIR).  Two edges
+# are independent comms but were sharing one stream per (channel,
+# direction) -- and a stream executes its ops in strict FIFO.  A blocked
+# isend to edge X (peer hasn't posted the matching recv) then starves
+# every later op to edge Y on the same stream, even though Y's recv is
+# already posted: one edge's rendezvous stall becomes BOTH edges' stall
+# (the 2E1C dual-edge pending_sends pileup).  Pair-level isolation is a
+# correctness requirement in multi-edge mode, not a latency optimization:
+# the earlier reasoning ("within one direction, ops of different pairs
+# complete independently") is false -- completion depends on the PEER's
+# recv being posted, which is exactly what a stalled edge stops doing.
 _hidden_channel_streams: dict[Any, Any] = {}
 _hidden_channel_stream_lock = threading.Lock()
 
@@ -77,7 +89,11 @@ def _get_hidden_channel_stream(channel: Any) -> Any:
 
 @contextlib.contextmanager
 def _hidden_channel_stream_ctx(
-    channel: Any | None, *, wait_for_default: bool = True,
+    channel: Any | None,
+    *,
+    direction: str = "send",
+    pp_group: Any | None = None,
+    wait_for_default: bool = True,
 ):
     """Switch to the channel's dedicated stream for P2P isend/irecv.
 
@@ -93,7 +109,17 @@ def _hidden_channel_stream_ctx(
     if channel is None:
         yield
         return
-    stream = _get_hidden_channel_stream(channel)
+    # Key by (channel, direction, pair): a blocked send must never hold
+    # back a pending recv queued behind it on the same stream (direction
+    # split), AND one pair's blocked op must never FIFO-starve another
+    # pair's op (pair split -- the peer of a stalled pair stops posting
+    # recvs, so its stream head may never complete; without pair isolation
+    # that single stall cascades to every edge).  ``_current_active_pair``
+    # is thread-local and set by the worker's ``_pair_scope`` around every
+    # send/recv; it is None on legacy/scope-less paths, which then share
+    # one stream as before.
+    stream = _get_hidden_channel_stream(
+        (channel, direction, _current_active_pair()))
     if wait_for_default:
         stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
@@ -545,7 +571,24 @@ def init_ascend_model_parallel(
         backend = torch.distributed.get_backend(get_world_group().device_group)
         edge_npu_count = parallel_config.edge_npu_count
         cloud_npu_count = parallel_config.cloud_npu_count
-        if parallel_config.is_shared_model_edge:
+
+        # Multi-instance (2E1C): EP/MC2 membership comes from the registry
+        # (all edge ranks in one group, all cloud ranks in another), NOT from
+        # the legacy contiguous [edge..., cloud...] arithmetic — that formula
+        # silently mis-assigns ranks once a second edge exists (cloud rank 5
+        # fell outside every group and crashed GroupCoordinator init).
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry, init_role_registry)
+        _registry = get_role_registry()
+        if _registry is None and getattr(
+                parallel_config, "role_registry", None):
+            _registry = init_role_registry(parallel_config.role_registry)
+        if _registry is not None:
+            ep_edge_ranks = [r for e in _registry.edge_ids
+                             for r in _registry.edge(e).ranks]
+            ep_cloud_ranks = [r for c in _registry.cloud_ids
+                              for r in _registry.cloud(c).ranks]
+        elif parallel_config.is_shared_model_edge:
             # Shared-model edge-cloud topology: the edge has a
             # single distributed rank (rank 0) and the cloud
             # occupies ranks 1..1 + N*C.
@@ -574,7 +617,17 @@ def init_ascend_model_parallel(
         # DECODE_1, and extra hidden-channel groups are created for
         # PREFILL_2..N and DECODE_2..M when dp_size > 1.
         pp_group = get_pp_group()
-        if pp_group.world_size > 1:
+        # Multi-instance (2E1C): skip legacy default-PP channel setup and
+        # warmup entirely — channels live on per-pair groups (created below).
+        # Running the legacy warmup here would rendezvous the two edges on
+        # DIFFERENT default groups (GroupCoordinator picks the LAST group
+        # containing a rank, so the cloud's default PP is the last pair),
+        # deadlocking the first edge.
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry as _get_reg)
+        _reg = _get_reg()
+        _multi_edge = _reg is not None and len(_reg.edge_ids) > 1
+        if pp_group.world_size > 1 and not _multi_edge:
             pp_group.create_alternate_groups(backend)
             if hasattr(pp_group, "create_hidden_channel_groups"):
                 dp_size = parallel_config.data_parallel_size
@@ -607,6 +660,20 @@ def init_ascend_model_parallel(
             # channels and deadlock.
             if envs.VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP:
                 warmup_edge_cloud_hidden_channels(parallel_config)
+
+        # Multi-instance (2E1C): per-(edge, cloud) pair groups with their own
+        # hidden channels.  Legacy single-pair mode is untouched when no role
+        # registry is configured.
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry, init_role_registry)
+        _registry = get_role_registry()
+        if _registry is None and getattr(
+                parallel_config, "role_registry", None):
+            _registry = init_role_registry(parallel_config.role_registry)
+        if _registry is not None and len(_registry.edge_ids) > 1:
+            create_edge_cloud_pair_groups(parallel_config)
+            if envs.VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP:
+                warmup_edge_cloud_pair_channels()
 
         # Ascend-specific groups that are currently disabled by default
         # in edge-cloud mode. If enabled in the future, they must follow
@@ -1024,7 +1091,7 @@ def warmup_edge_cloud_hidden_channels(
     global order -- moves that first-use rendezvous to init time, where
     both sides are guaranteed to arrive in the same order.
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     if pp_group.world_size <= 1:
         return
     if not hasattr(pp_group, "isend_tensor_dict_on_hidden_channel"):
@@ -1194,7 +1261,7 @@ def edge_cloud_isend_tensor_dict(
             sides must pass the same value (derived from
             step_has_multimodal_req) so sender/receiver agree on the key set.
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     if pp_group.world_size <= 1:
         return []
 
@@ -1309,7 +1376,9 @@ def edge_cloud_isend_tensor_dict(
             "was initialized with inconsistent per-tensor shapes; re-init "
             "it or unset VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD."
         )
-        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+        with _hidden_channel_stream_ctx(
+            channel, direction="send", pp_group=pp_group, wait_for_default=True
+        ):
             handle = torch.distributed.isend(
                 merged, dst=pp_group.ranks[dst], group=group
             )
@@ -1342,7 +1411,9 @@ def edge_cloud_isend_tensor_dict(
             # only happens when upstream code returned a non-standard
             # layout, in which case we materialize once.
             value = value.contiguous()
-        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+        with _hidden_channel_stream_ctx(
+            channel, direction="send", pp_group=pp_group, wait_for_default=True
+        ):
             handle = torch.distributed.isend(
                 value, dst=pp_group.ranks[dst], group=group
             )
@@ -1459,7 +1530,7 @@ def edge_cloud_irecv_tensor_dict(
             argument (both derived from step_has_multimodal_req). When False,
             mrope_positions is neither received nor broadcast (text-only batch).
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     if not torch.distributed.is_initialized() or pp_group.world_size == 1:
         return {}, [], []
 
@@ -1489,7 +1560,7 @@ def edge_cloud_irecv_tensor_dict(
         # comm_postprocess list so it runs *after* the irecv handle is
         # waited on by AsyncIntermediateTensors.wait_for_comm().
         with _hidden_channel_stream_ctx(
-            channel, wait_for_default=False
+            channel, direction="recv", pp_group=pp_group, wait_for_default=False
         ):
             # Allocation and first use must share the channel stream. If
             # torch.empty runs on the default stream, a recycled block can
@@ -1544,7 +1615,7 @@ def edge_cloud_irecv_tensor_dict(
         full_size = (recv_num_tokens,) + value.size[1:]
         if key in send_keys:
             with _hidden_channel_stream_ctx(
-                channel, wait_for_default=False
+                channel, direction="recv", pp_group=pp_group, wait_for_default=False
             ):
                 full_tensor = torch.empty(
                     full_size, dtype=value.dtype, device=value.device
@@ -1630,7 +1701,7 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
     tensor_meta: ScheduledDraftTensorMeta | None = None,
 ) -> list[Handle]:
     """Send a scheduled draft payload, avoiding metadata sync when possible."""
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     if tensor_meta is not None:
         if pp_group.world_size <= 1:
             return []
@@ -1673,7 +1744,9 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
             )
             if not tensor.is_contiguous():
                 tensor = tensor.contiguous()
-            with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+            with _hidden_channel_stream_ctx(
+                channel, direction="send", pp_group=pp_group, wait_for_default=True
+            ):
                 handle = torch.distributed.isend(
                     tensor,
                     dst=pp_group.ranks[dst],
@@ -1786,7 +1859,7 @@ def edge_cloud_broadcast_recv(
             argument (both derived from step_has_multimodal_req). When False,
             mrope_positions is neither received nor broadcast (text-only batch).
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size > 1
     ec_meta = _select_edge_cloud_meta_for_recv()
@@ -2011,7 +2084,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
     implementation around — renamed — for the draft callers while the
     non-draft edge-cloud worker path keeps the optimized one.
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
 
@@ -2086,7 +2159,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
     exchange and the local TP object broadcast. ``None`` retains the dynamic
     compatibility path.
     """
-    pp_group = get_pp_group()
+    pp_group = _effective_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
 
@@ -2108,7 +2181,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
 
             if is_pp_npu0 and key in send_keys:
                 with _hidden_channel_stream_ctx(
-                    channel, wait_for_default=False
+                    channel, direction="recv", pp_group=pp_group, wait_for_default=False
                 ):
                     # Scheduled-draft buffers follow the same allocation-
                     # stream rule as the generic receive path.
@@ -2242,3 +2315,163 @@ def edge_cloud_broadcast_recv_scheduled_draft(
             handle.wait()
 
     return recv_tensor_dict, [], [broadcast_postprocess]
+
+
+# ---------------------------------------------------------------------------
+# Multi-edge pair groups (2E1C scenario)
+#
+# Legacy edge-cloud mode has exactly one (edge, cloud) pair, so the default PP
+# group doubles as the pair group.  In multi-instance mode each edge-cloud
+# pair gets its own 2-rank group (edge NPU0 + cloud NPU0 of that instance)
+# with its own hidden-channel groups; the worker send/recv path picks the
+# pair group from the segment's source edge id instead of using the global
+# PP group.  The legacy single-pair path is completely unchanged when no
+# role registry is configured.
+# ---------------------------------------------------------------------------
+
+# (edge_id, cloud_id) -> pair PP group (2-rank: edge NPU0, cloud NPU0)
+_PAIR_PP_GROUPS: dict[tuple[int, int], GroupCoordinator] = {}
+# (edge_id, cloud_id) -> {channel -> device_group}
+_PAIR_CHANNEL_GROUPS: dict[tuple[int, int], Any] = {}
+# The pair this THREAD is currently executing against.  Workers set it
+# around each segment execution via ``active_pair``.  Thread-local, NOT
+# process-global: the CHER guard thread and the busy_loop thread enter
+# pair scopes concurrently, and a shared global let one thread's scope
+# change the OTHER thread's group resolution mid-flight -- the busy_loop
+# could then post a send/recv on the wrong pair's comm (cross-pair
+# rendezvous mismatch -> hang or silent corruption).
+_ACTIVE_PAIR_TLS = threading.local()
+
+
+def _current_active_pair() -> tuple[int, int] | None:
+    """The active pair of the CALLING thread (None when outside a scope)."""
+    return getattr(_ACTIVE_PAIR_TLS, "value", None)
+
+
+@contextlib.contextmanager
+def active_pair(edge_id: int, cloud_id: int):
+    """Scope the current thread's edge-cloud pair for send/recv resolution."""
+    prev = _current_active_pair()
+    _ACTIVE_PAIR_TLS.value = (edge_id, cloud_id)
+    try:
+        yield
+    finally:
+        _ACTIVE_PAIR_TLS.value = prev
+
+
+def get_pair_pp_group(edge_id: int, cloud_id: int) -> GroupCoordinator:
+    """Return the 2-rank pair group for (edge_id, cloud_id)."""
+    return _PAIR_PP_GROUPS[(edge_id, cloud_id)]
+
+
+def pair_group_count() -> int:
+    return len(_PAIR_PP_GROUPS)
+
+
+def create_edge_cloud_pair_groups(parallel_config) -> None:
+    """Create per-(edge, cloud) pair PP groups + hidden channel groups.
+
+    Called once from ``init_ascend_model_parallel`` when a role registry is
+    configured (multi-instance mode).  All ranks must call ``new_group`` in
+    the same global order, so we iterate pairs in sorted order and every
+    rank (member or not) participates in every creation call.
+
+    Pair layout per (edge, cloud) pair: ``[edge_npu0_global_rank,
+    cloud_npu0_global_rank]`` — mirroring the legacy PP pair where NPU0 of
+    each side forms the PP pair and other TP ranks receive via intra-TP
+    broadcast.  Channel groups per pair follow the legacy convention:
+    PREFILL_1 (default device group), PREFILL_2 (first extra hidden channel),
+    DECODE (alternate group).
+    """
+    from vllm_ascend.edge_cloud.role_registry import (
+        get_role_registry, init_role_registry)
+    registry = get_role_registry()
+    if registry is None and getattr(
+            parallel_config, "role_registry", None):
+        registry = init_role_registry(parallel_config.role_registry)
+    if registry is None:
+        return
+    backend = torch.distributed.get_backend(get_world_group().device_group)
+    # HiddenChannelType enum init (legacy does it on the default-PP path
+    # which multi-edge mode skips).
+    HiddenChannelType.init(dp_size=1)
+
+    for edge_id in registry.edge_ids:
+        for cloud_id in registry.cloud_ids:
+            edge_rank0 = registry.edge(edge_id).ranks[0]
+            cloud_rank0 = registry.cloud(cloud_id).ranks[0]
+            # init_model_parallel_group requires every rank covered exactly
+            # once per call: pair + singletons for all other ranks.
+            world_size = torch.distributed.get_world_size()
+            group_ranks: list[list[int]] = [[edge_rank0, cloud_rank0]]
+            for r in range(world_size):
+                if r != edge_rank0 and r != cloud_rank0:
+                    group_ranks.append([r])
+            pair = init_model_parallel_group(
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                group_name=f"ec_pair_e{edge_id}_c{cloud_id}",
+            )
+            # create_alternate_groups / create_hidden_channel_groups call
+            # torch.distributed.new_group internally, which is a collective
+            # on the DEFAULT (world) group — EVERY rank must participate,
+            # even non-members of this pair (non-members run it on their
+            # singleton group, harmless).  Calling them member-only desyncs
+            # the world-wide new_group counter and deadlocks all later
+            # rendezvous.  Only the *registration* is member-scoped.
+            if hasattr(pair, "create_alternate_groups"):
+                pair.create_alternate_groups(backend)
+            if hasattr(pair, "create_hidden_channel_groups"):
+                pair.create_hidden_channel_groups(
+                    backend, num_prefill=2, num_decode=1)
+            # Store ONLY on the two member ranks: init_model_parallel_group
+            # returns a real (singleton) group to non-member ranks because we
+            # cover every rank in each call — storing those would make
+            # non-members believe they are pair members.
+            if torch.distributed.get_rank() in (edge_rank0, cloud_rank0):
+                _PAIR_PP_GROUPS[(edge_id, cloud_id)] = pair
+
+    logger.info(
+        "[edge-cloud] multi-instance pair groups created: %d pairs (%s)",
+        len(_PAIR_PP_GROUPS),
+        sorted(_PAIR_PP_GROUPS.keys()),
+    )
+
+
+def _effective_pp_group() -> GroupCoordinator:
+    """Resolve the PP group for the current send/recv.
+
+    Multi-instance mode: the active pair group (set by the worker around
+    each segment execution) — but only when this rank is actually a member
+    (non-members, e.g. cloud TP non-first ranks, keep their default
+    singleton PP group so TP-internal broadcast logic is unchanged).
+    Legacy mode: the global PP group.
+    """
+    if _current_active_pair() is not None:
+        pair = _PAIR_PP_GROUPS.get(_current_active_pair())
+        if pair is not None:
+            return pair
+    return get_pp_group()
+
+
+def warmup_edge_cloud_pair_channels() -> None:
+    """Warm up every hidden channel of every pair group (multi-instance).
+
+    Same motivation as ``warmup_edge_cloud_hidden_channels``: the first
+    isend/irecv on a channel rendezvous the two peers and blocks the host;
+    doing it at init in a fixed global order avoids mid-pipeline deadlock.
+    Here we iterate pairs in sorted order and warm each pair's channels
+    through its own pair group.
+    """
+    for pair_key in sorted(_PAIR_PP_GROUPS):
+        pair = _PAIR_PP_GROUPS[pair_key]
+        # Reuse the legacy warmup body against the pair group by temporarily
+        # scoping the active pair, so the legacy warmup resolves groups via
+        # _effective_pp_group().
+        with active_pair(*pair_key):
+            warmup_edge_cloud_hidden_channels(get_current_vllm_config().parallel_config)
+    logger.info(
+        "[edge-cloud] pair channel warmup done for %d pairs",
+        len(_PAIR_PP_GROUPS),
+    )

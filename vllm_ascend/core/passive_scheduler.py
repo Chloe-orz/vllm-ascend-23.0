@@ -131,6 +131,41 @@ class PassiveScheduler:
         self.ready_drafts: deque[SchedulerOutput] = deque()
         self.ready_decodes: deque[SchedulerOutput] = deque()
 
+        # ---- Multi-edge (2E1C) global queue state ----
+        # When a role registry with >1 edge is configured, inbound segments
+        # are wrapped (id prefix) + block-id translated at ingress and land
+        # in a single global arrival-ordered queue; a promotion step then
+        # moves per-edge head segments into the legacy ready queues, so the
+        # whole legacy dispatch machinery (alternation, slicing, throttle)
+        # runs unchanged downstream.
+        self._me_enabled = False
+        self._me_queue: deque[tuple[int, int, SchedulerOutput]] = deque()
+        self._me_inbox: queue.Queue[tuple[int, int, SchedulerOutput]] = (
+            queue.Queue())
+        self._me_edge_head: dict[int, int] = {}
+        self._me_seq = 0
+        self._me_registry = None
+        self._me_partition = None
+        self._me_vllm_config = vllm_config
+        try:
+            from vllm_ascend.edge_cloud.role_registry import (
+                get_role_registry)
+            _registry = get_role_registry()
+            if _registry is not None and len(_registry.edge_ids) > 1:
+                self._me_enabled = True
+                # NOTE: do NOT touch _registry.kv_partition here — ratio-based
+                # partitions only resolve once the real block count is known
+                # (after KV sizing).  Resolved lazily on first ingress.
+                self._me_registry = _registry
+                self._me_vllm_config = vllm_config
+                logger.info(
+                    "PassiveScheduler multi-edge mode enabled: %d edges "
+                    "(registry digest=%s)",
+                    len(_registry.edge_ids), _registry.config_digest,
+                )
+        except Exception:
+            logger.exception("multi-edge init probe failed; legacy mode")
+
         # Active sliced prefill / PD-mix continuation.  Only one sliced
         # prefill-like batch is allowed to be active at a time because the
         # Ascend model runner keeps layerwise continuation state in single
@@ -244,8 +279,13 @@ class PassiveScheduler:
                 # Avoid a tight spin when the subscriber returns nothing.
                 self._shutdown_event.wait(0.001)
                 continue
-            for seq, scheduler_output in new_outputs:
-                self._inbox.put((seq, scheduler_output))
+            for item in new_outputs:
+                if len(item) == 3:
+                    # Multi-edge mux triple: (edge_id, seq, output)
+                    self._me_inbox.put(item)
+                else:
+                    seq, scheduler_output = item
+                    self._inbox.put((seq, scheduler_output))
 
     def shutdown(self) -> None:
         """Signal the subscriber thread to stop and join it."""
@@ -263,6 +303,9 @@ class PassiveScheduler:
         thread, or directly by `_drain_subscriber_inline` when the thread
         is disabled) and route each into its phase-specific ready queue.
         """
+        if self._me_enabled:
+            self._poll_and_classify_multi_edge()
+            return
         if self._subscriber_thread is None:
             # Inline mode: pull from the subscriber directly into _inbox.
             self._drain_subscriber_inline()
@@ -346,8 +389,236 @@ class PassiveScheduler:
     def _drain_subscriber_inline(self) -> None:
         """Used only when the subscriber thread is disabled (e.g. tests)."""
         new_outputs = self.pp_subscriber.consume_new_outputs()
-        for seq, scheduler_output in new_outputs:
-            self._inbox.put((seq, scheduler_output))
+        for item in new_outputs:
+            if len(item) == 3:
+                self._me_inbox.put(item)
+            else:
+                seq, scheduler_output = item
+                self._inbox.put((seq, scheduler_output))
+
+    # ------------------------------------------------------------------ #
+    # Multi-edge (2E1C) ingress + promotion
+    # ------------------------------------------------------------------ #
+    def _poll_and_classify_multi_edge(self) -> None:
+        """Multi-edge ingress: drain the per-edge channel mux, wrap ids,
+        translate block ids, and land segments on the global arrival queue.
+
+        The mux yields ``(edge_id, seq, SchedulerOutput)`` triples.  The
+        global queue preserves arrival order; ``_promote_multi_edge`` (called
+        from ``schedule``) moves per-edge head segments into the legacy
+        ready queues so all downstream dispatch machinery is unchanged.
+        """
+        while True:
+            try:
+                edge_id, seq, so = self._me_inbox.get_nowait()
+            except queue.Empty:
+                break
+            self._me_seq += 1
+            self._remember_arrival_seq(so, self._me_seq)
+            self._wrap_segment(edge_id, so)
+            self._me_queue.append((edge_id, self._me_seq, so))
+            self._me_edge_head.setdefault(edge_id, self._me_seq)
+            logger.debug(
+                "[ME] ingress edge=%d seq=%d batch_type=%s",
+                edge_id, self._me_seq,
+                so.batch_type.value if so.batch_type else "<none>",
+            )
+
+    def _me_get_partition(self):
+        """Lazily resolve the static KV partition (ratio-based in the
+        registry; only materializable once the cloud's real num_blocks is
+        known — i.e. after KV sizing, which precedes any segment ingress)."""
+        if self._me_partition is None:
+            kv_cfg = getattr(self._me_vllm_config, "kv_cache_config", None)
+            num_blocks = getattr(kv_cfg, "num_blocks", None)
+            if not num_blocks:
+                # Passive cloud may not have kv_cache_config set — fall back
+                # to cache_config.num_gpu_blocks (set by the engine after KV
+                # sizing).
+                num_blocks = getattr(
+                    getattr(self._me_vllm_config, "cache_config", None),
+                    "num_gpu_blocks", None)
+            if not num_blocks:
+                # The passive cloud engine never runs KV sizing itself — its
+                # workers are physically initialized by the rank0 edge's
+                # world-scoped broadcast, and neither local fallback above is
+                # ever populated.  The cloud's real pool size is published to
+                # the world TCPStore by the rank0 edge's sizing (its
+                # clamp-to-min over the world specs IS the cloud's value);
+                # read it from there.  Timing is safe: E0 publishes during
+                # its own engine startup, which necessarily precedes any
+                # segment ingress here.
+                pc = getattr(self._me_vllm_config, "parallel_config", None)
+                cloud_id = getattr(pc, "cloud_id", None) or 0
+                import torch.distributed as _dist
+                from datetime import timedelta as _td
+                _w = self._me_registry.world
+                _store = _dist.TCPStore(
+                    host_name=_w.master_addr, port=_w.master_port,
+                    is_master=False, timeout=_td(seconds=300))
+                num_blocks = int(
+                    _store.get(f"cloud_{cloud_id}_num_blocks"))
+                logger.info(
+                    "[ME] resolved cloud %d num_blocks=%d from world store",
+                    cloud_id, num_blocks)
+            self._me_partition = self._me_registry.resolve_kv_partition(
+                num_blocks)
+        return self._me_partition
+
+    def _wrap_segment(self, edge_id: int, so: SchedulerOutput) -> None:
+        """Wrap all req_id/head_token fields with the edge prefix (F6) and
+        translate edge-local block ids to cloud-physical ids (F2).
+
+        The SO arriving over ZMQ is a fresh deserialized copy, so in-place
+        mutation is safe and keeps every downstream consumer (queues,
+        pending_heads, prepare-cache keys, worker) on the wrapped namespace.
+        """
+        from vllm_ascend.edge_cloud.id_adapter import (
+            wrap_head_token, wrap_req_id)
+        # num_scheduled_tokens: dict keyed by req_id
+        so.num_scheduled_tokens = {
+            wrap_req_id(edge_id, rid): n
+            for rid, n in so.num_scheduled_tokens.items()
+        }
+        partition = self._me_get_partition() if self._me_registry else None
+        for req_data in so.scheduled_new_reqs or []:
+            raw_req_id = req_data.req_id
+            req_data.req_id = wrap_req_id(edge_id, req_data.req_id)
+            if partition is not None and req_data.block_ids:
+                try:
+                    req_data.block_ids = tuple(
+                        partition.to_physical(edge_id, list(ids))
+                        for ids in req_data.block_ids
+                    )
+                except ValueError:
+                    # Diagnostic for block-id namespace mismatches (MTP draft
+                    # chains, spec-state blocks): dump the full context so we
+                    # can tell edge-local ids apart from already-physical or
+                    # out-of-pool ids.
+                    logger.exception(
+                        "[ME] block-id translation failed: edge=%d "
+                        "batch_type=%s req_id=%s draft_task_id=%s "
+                        "draft_step_idx=%s block_ids_per_group=%s "
+                        "partition=%s",
+                        edge_id,
+                        so.batch_type,
+                        raw_req_id,
+                        getattr(so, "draft_task_id", None),
+                        getattr(so, "draft_step_idx", None),
+                        [
+                            [b for b in ids if b >= partition.num_blocks_of(edge_id)][:4]
+                            for ids in req_data.block_ids
+                        ],
+                        partition.split if partition else None,
+                    )
+                    raise
+        cached = so.scheduled_cached_reqs
+        if cached is not None:
+            if getattr(cached, "req_ids", None):
+                cached.req_ids = [
+                    wrap_req_id(edge_id, rid) for rid in cached.req_ids]
+            if getattr(cached, "resumed_req_ids", None):
+                cached.resumed_req_ids = {
+                    wrap_req_id(edge_id, rid)
+                    for rid in cached.resumed_req_ids
+                }
+            if partition is not None and getattr(
+                    cached, "new_block_ids", None):
+                # new_block_ids: list per request of (tuple of per-group
+                # list[int] | None) — translate each per-group list.
+                cached.new_block_ids = [
+                    (tuple(
+                        partition.to_physical(edge_id, list(g))
+                        for g in ids)
+                     if ids is not None else None)
+                    for ids in cached.new_block_ids
+                ]
+            if getattr(cached, "all_token_ids", None):
+                cached.all_token_ids = {
+                    wrap_req_id(edge_id, rid): ids
+                    for rid, ids in cached.all_token_ids.items()
+                }
+        if so.finished_req_ids:
+            so.finished_req_ids = {
+                wrap_req_id(edge_id, rid) for rid in so.finished_req_ids
+            }
+        # spec decode: per-req draft token map is keyed by req_id — must be
+        # wrapped too, otherwise the cloud's draft/verify lookup by wrapped
+        # req_id would KeyError.
+        # NOTE: the live SchedulerOutput field is ``scheduled_spec_decode_tokens``;
+        # ``scheduled_spec_token_ids`` is a stale name kept for backward compat.
+        if getattr(so, "scheduled_spec_decode_tokens", None):
+            so.scheduled_spec_decode_tokens = {
+                wrap_req_id(edge_id, rid): ids
+                for rid, ids in so.scheduled_spec_decode_tokens.items()
+            }
+        if getattr(so, "scheduled_spec_token_ids", None):
+            so.scheduled_spec_token_ids = {
+                wrap_req_id(edge_id, rid): ids
+                for rid, ids in so.scheduled_spec_token_ids.items()
+            }
+        if getattr(so, "structured_output_request_ids", None):
+            so.structured_output_request_ids = {
+                wrap_req_id(edge_id, rid): v
+                for rid, v in so.structured_output_request_ids.items()
+            }
+        if getattr(so, "head_token", None):
+            so.head_token = wrap_head_token(edge_id, so.head_token)
+        # draft_task_id mirrors the target batch's head_token: the cloud
+        # worker caches draft metadata keyed by the WRAPPED head_token, so
+        # the id must enter the cloud namespace too, otherwise DRAFT lookups
+        # miss ("DRAFT has no matching target positions").
+        if getattr(so, "draft_task_id", None):
+            so.draft_task_id = wrap_head_token(edge_id, so.draft_task_id)
+        if getattr(so, "cloud_draft_invalidate_task_ids", None):
+            so.cloud_draft_invalidate_task_ids = [
+                wrap_head_token(edge_id, tid)
+                for tid in so.cloud_draft_invalidate_task_ids
+            ]
+        # DRAFT_FIRST step 0 carries accepted/sampling counts as dicts keyed
+        # by RAW edge req_ids (built in EngineCore from the edge worker's
+        # ModelRunnerOutput).  The cloud pairs them with its cached state by
+        # wrapped req_id, so the dict keys must enter the cloud namespace.
+        for field in ("num_accepted_tokens", "valid_sampled_token_count"):
+            value = getattr(so, field, None)
+            if isinstance(value, dict):
+                setattr(
+                    so,
+                    field,
+                    {wrap_req_id(edge_id, rid): v for rid, v in value.items()},
+                )
+
+    def _promote_multi_edge(self) -> None:
+        """Move per-edge head segments from the global queue into the legacy
+        ready queues, in global arrival order (same-edge order is implied).
+        """
+        while self._me_queue:
+            edge_id, seq, so = self._me_queue[0]
+            if self._me_edge_head.get(edge_id) != seq:
+                # Not the head of its edge — cannot happen if we only advance
+                # on promotion; guard anyway.
+                break
+            self._me_queue.popleft()
+            nxt = next((s for s in self._me_queue if s[0] == edge_id), None)
+            if nxt is not None:
+                self._me_edge_head[edge_id] = nxt[1]
+            else:
+                self._me_edge_head.pop(edge_id, None)
+            self._me_route_to_ready_queue(so)
+
+    def _me_route_to_ready_queue(self, so: SchedulerOutput) -> None:
+        bt = so.batch_type
+        if bt in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST):
+            self.ready_prefills.append(so)
+        elif bt in (BatchType.PURE_DECODE, BatchType.DECODE_FIRST):
+            self.ready_decodes.append(so)
+        elif bt == BatchType.DRAFT_FIRST:
+            self.ready_drafts.append(so)
+        elif bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST,
+                    BatchType.DRAFT_LAST, BatchType.EMPTY):
+            return
+        else:
+            self.ready_pdmixes.append(so)
 
     # ------------------------------------------------------------------ #
     # Layer-slice config loading                                         #
@@ -590,6 +861,11 @@ class PassiveScheduler:
         slices.  Draft priority is enforced inside the state machine, not via
         an early out-of-band check.
         """
+        if self._me_enabled:
+            # Promote per-edge head segments from the global arrival queue
+            # into the legacy ready queues (global FIFO + per-edge causal
+            # order), then run the legacy state machine unchanged.
+            self._promote_multi_edge()
         if self.dispatch_policy == DispatchPolicy.EXPECT_ALTERNATION:
             return self._schedule_expect_alternation()
 

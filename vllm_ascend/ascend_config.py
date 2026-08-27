@@ -997,6 +997,37 @@ class EdgeCloudConfig:
             )
 
         self._validate_incompatible_parallel_features()
+        self._validate_registry_identity()
+
+    def _validate_registry_identity(self):
+        """Multi-instance mode: role/id must be explicit and registered.
+
+        When ``parallel_config.role_registry`` is set, the deployment is
+        multi-instance (e.g. 2E1C): every instance must carry an explicit
+        ``edge_id``/``cloud_id`` that exists in the registry, and the
+        registry role must match this config's ``role``.
+        """
+        parallel_cfg = getattr(self._vllm_config, "parallel_config", None)
+        registry_path = getattr(parallel_cfg, "role_registry", None)
+        if not registry_path:
+            return
+        role = self.role
+        instance_id = (
+            getattr(parallel_cfg, "edge_id", None) if role == "edge" else
+            getattr(parallel_cfg, "cloud_id", None))
+        if instance_id is None:
+            raise ValueError(
+                f"role_registry is set but edge_cloud_config.role={role} "
+                "has no explicit --edge-id/--cloud-id. Multi-instance "
+                "mode requires explicit instance identity."
+            )
+        from vllm_ascend.edge_cloud.role_registry import init_role_registry
+        registry = init_role_registry(registry_path)
+        registry.validate_self(role, instance_id)
+        logger.info(
+            "Edge-cloud registry identity validated: role=%s id=%d "
+            "(digest=%s)", role, instance_id, registry.config_digest,
+        )
 
     def _validate_incompatible_parallel_features(self):
         """Reject parallel features that break the metadata-free PP path.

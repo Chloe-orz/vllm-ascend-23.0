@@ -130,6 +130,38 @@ def _patched_engine_core_init(self, *args, **kwargs):
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
     self._pp_pd_channel = None
     if pd_enabled and getattr(parallel_config, "is_edge_node", False):
+        # Multi-instance (2E1C): channels come from the role registry (no
+        # TCPStore discovery).  The edge keeps a dict of channels keyed by
+        # cloud_id; 2E1C has exactly one cloud but the dict form is the
+        # multi-cloud-ready shape.
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry, init_role_registry)
+        _registry = get_role_registry()
+        if _registry is None and getattr(
+                parallel_config, "role_registry", None):
+            _registry = init_role_registry(parallel_config.role_registry)
+        if _registry is not None:
+            _edge_id = parallel_config.edge_id
+            self._pp_pd_channels = {}
+            for _cloud_id in _registry.cloud_ids:
+                _pre_port = _registry.edge(_edge_id).zmq_base_port
+                _post_ep = _registry.endpoint(_edge_id, _cloud_id, "post_out")
+                self._pp_pd_channels[_cloud_id] = PPSchedulerZmqChannel(
+                    send_endpoint=f"tcp://*:{_pre_port}",
+                    recv_endpoint=_post_ep,
+                    name=f"pd-edge-e{_edge_id}-c{_cloud_id}",
+                )
+            # 2E1C convenience: the single channel also exposed via the
+            # legacy attribute so the rest of the publish path works.
+            self._pp_pd_channel = self._pp_pd_channels[
+                _registry.cloud_ids[0]]
+            logger.info(
+                "PD-separation edge channels from registry: %d clouds "
+                "(edge_id=%s, digest=%s)",
+                len(self._pp_pd_channels), _edge_id, _registry.config_digest,
+            )
+            return
+
         dp_rank = getattr(parallel_config, "data_parallel_rank", 0)
 
         # Discover the cloud's IP via a one-shot TCPStore. The edge
@@ -885,6 +917,15 @@ def _patched_step_with_batch_queue(self):
 
     # Block until the next result is available.
     future, scheduler_output, exec_model_fut = batch_queue.pop()
+    # [2E1C-TRACE] bracket the worker-response wait: if the engine hangs here,
+    # the worker never answered this batch — pair with the worker's
+    # exec START/DONE/resp SENT trace lines to see which hop died.
+    vllm_logger.info(
+        "[2E1C-TRACE] engine wait result: bt=%s ht=%s queue_len=%d",
+        scheduler_output.batch_type.value if scheduler_output.batch_type else None,
+        getattr(scheduler_output, "head_token", None),
+        len(batch_queue),
+    )
     with (
         self.log_error_detail(scheduler_output),
         self.log_iteration_details(scheduler_output),
@@ -893,6 +934,11 @@ def _patched_step_with_batch_queue(self):
         if model_output is None:
             exec_model_fut.result()
             raise RuntimeError("unexpected error")
+    vllm_logger.info(
+        "[2E1C-TRACE] engine got result: bt=%s ht=%s",
+        scheduler_output.batch_type.value if scheduler_output.batch_type else None,
+        getattr(scheduler_output, "head_token", None),
+    )
 
     # Register the deferred draft before abort/model completion can free
     # requests referenced by this parent batch.
