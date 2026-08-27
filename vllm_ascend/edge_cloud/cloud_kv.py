@@ -665,29 +665,45 @@ class CloudKVRequestManager:
                 raise RuntimeError("cloud finish has a different control request ID")
             if final.prompt_tokens != state.manifest.prompt_tokens:
                 raise RuntimeError("cloud finish has a different prompt length")
-            expected_hashes = (final.prompt_tokens + final.completion_tokens) // self.block_size
-            if len(final.full_block_hashes) != expected_hashes:
-                raise RuntimeError("cloud finish hash count is inconsistent")
-            prompt_hash_count = len(state.manifest.full_block_hashes)
-            if final.full_block_hashes[:prompt_hash_count] != state.manifest.full_block_hashes:
-                raise RuntimeError("cloud finish hash chain changed the prompt prefix")
+            if final.publish_cache:
+                expected_hashes = (final.prompt_tokens + final.completion_tokens) // self.block_size
+                if len(final.full_block_hashes) != expected_hashes:
+                    raise RuntimeError("cloud finish hash count is inconsistent")
+                prompt_hash_count = len(state.manifest.full_block_hashes)
+                if final.full_block_hashes[:prompt_hash_count] != state.manifest.full_block_hashes:
+                    raise RuntimeError("cloud finish hash chain changed the prompt prefix")
             self._sync_output_length(
                 request,
                 final.completion_tokens,
                 allow_shrink=self._mtp_enabled,
             )
-            max_safe_computed_tokens = max(
-                0,
-                final.prompt_tokens + final.completion_tokens - 1,
-            )
-            request.num_computed_tokens = min(
-                request.num_computed_tokens,
-                max_safe_computed_tokens,
-            )
-            request.block_hashes = [BlockHash(digest) for digest in final.full_block_hashes]
-            self._kv.cache_blocks(request, request.num_computed_tokens)
-            completed_blocks = request.num_computed_tokens // self.block_size
-            self._completed_hashes.update(final.full_block_hashes[:completed_blocks])
+            if final.publish_cache:
+                max_safe_computed_tokens = max(
+                    0,
+                    final.prompt_tokens + final.completion_tokens - 1,
+                )
+                request.num_computed_tokens = min(
+                    request.num_computed_tokens,
+                    max_safe_computed_tokens,
+                )
+                request.block_hashes = [BlockHash(digest) for digest in final.full_block_hashes]
+                self._kv.cache_blocks(request, request.num_computed_tokens)
+                completed_blocks = request.num_computed_tokens // self.block_size
+                self._completed_hashes.update(final.full_block_hashes[:completed_blocks])
+            else:
+                # Fail-closed finish (e.g. the edge could not reconstruct the
+                # media identity): complete accounting and release the
+                # request, but publish none of its blocks into the cache.
+                completed_blocks = 0
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_finish_cache_publish_suppressed",
+                    control_request_id=state.manifest.request_id,
+                    engine_request_id=request_id,
+                    prompt_tokens=state.manifest.prompt_tokens,
+                    completion_tokens=final.completion_tokens,
+                )
             self._kv.free(request)
             self._requests.pop(request_id, None)
             for task_id, corrections in list(self._mtp_actual_computed_by_task.items()):

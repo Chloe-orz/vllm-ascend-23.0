@@ -126,6 +126,7 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
                 CloudControlBridge,
                 run_cloud_control_server,
             )
+            from vllm_ascend.edge_cloud.mm_identity import compute_processor_fingerprint
 
             assert command_queue is not None and event_queue is not None
             bridge = CloudControlBridge(command_queue, event_queue)
@@ -141,6 +142,7 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
                 coordination.listen_host,
                 coordination.listen_port,
                 proc,
+                processor_fingerprint=compute_processor_fingerprint(vllm_config.model_config),
             )
         else:
             proc.join()

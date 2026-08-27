@@ -540,3 +540,264 @@ def test_cloud_mtp_applies_rejection_correction_after_draft_chain():
     cloud_final_draft, _ = manager.rewrite_scheduler_output(final_draft)
     manager.complete_scheduler_output(cloud_final_draft)
     assert manager._requests["internal-1"].request.num_computed_tokens == 10
+
+
+def _admitted_manager(block_size=4, prompt=None):
+    prompt = list(range(8)) if prompt is None else prompt
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_kv_cache_config(block_size),
+        vllm_config=_vllm_config(block_size),
+        instance_id="cloud-a",
+    )
+    hasher = PrefixHasher(b"tenant-a-secret-key-material", block_size)
+    manifest = hasher.build_manifest("control-1", prompt)
+    manager.probe(manifest)
+    new_request = NewRequestData(
+        req_id="internal-1",
+        prompt_token_ids=[0] * len(prompt),
+        mm_features=[],
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        block_ids=([99, 100],),
+        num_computed_tokens=0,
+        lora_request=None,
+        edge_cloud_request_id="control-1",
+    )
+    cloud_output, _ = manager.rewrite_scheduler_output(_scheduler_output(new_request))
+    manager.complete_scheduler_output(cloud_output)
+    return manager, hasher
+
+
+def _suppressed_finish(**overrides):
+    fields = dict(
+        control_request_id="control-1",
+        prompt_tokens=8,
+        completion_tokens=1,
+        full_block_hashes=(),
+        publish_cache=False,
+    )
+    fields.update(overrides)
+    return EdgeCloudFinishedRequest(**fields)
+
+
+def test_suppressed_publish_finish_releases_request_without_caching():
+    manager, hasher = _admitted_manager()
+    completed_before = set(manager._completed_hashes)
+
+    _, usage = manager.rewrite_scheduler_output(
+        _scheduler_output(
+            finished={"internal-1"},
+            finish_data={"internal-1": _suppressed_finish(completion_tokens=9)},
+        )
+    )
+
+    # Accounting closes out normally and the request is released.
+    assert usage[0][0] == "control-1"
+    assert usage[0][1].prompt_tokens == 8
+    assert usage[0][1].completion_tokens == 9
+    assert "internal-1" not in manager._requests
+    # The finish published nothing: _completed_hashes still holds only the
+    # two prompt blocks admitted via the ACK path, so a replay whose prompt
+    # reaches into the (unpublished) output region hits the prompt prefix
+    # only. A publish_cache=True finish would have published the output
+    # blocks and made 12 tokens hittable.
+    assert manager._completed_hashes == completed_before
+    replay = hasher.build_manifest("control-2", list(range(16)))
+    assert manager.probe(replay).hit_tokens == 8
+
+    # A duplicated finish is idempotent: no state, no usage, no error.
+    _, usage = manager.rewrite_scheduler_output(
+        _scheduler_output(
+            finished={"internal-1"},
+            finish_data={"internal-1": _suppressed_finish()},
+        )
+    )
+    assert usage == []
+
+
+def test_suppressed_publish_finish_still_validates_accounting():
+    manager, _ = _admitted_manager()
+
+    with pytest.raises(RuntimeError, match="different control request ID"):
+        manager.rewrite_scheduler_output(
+            _scheduler_output(
+                finished={"internal-1"},
+                finish_data={"internal-1": _suppressed_finish(control_request_id="control-other")},
+            )
+        )
+    with pytest.raises(RuntimeError, match="different prompt length"):
+        manager.rewrite_scheduler_output(
+            _scheduler_output(
+                finished={"internal-1"},
+                finish_data={"internal-1": _suppressed_finish(prompt_tokens=4)},
+            )
+        )
+    assert "internal-1" in manager._requests
+
+    # The request can still finish correctly afterwards.
+    _, usage = manager.rewrite_scheduler_output(
+        _scheduler_output(
+            finished={"internal-1"},
+            finish_data={"internal-1": _suppressed_finish()},
+        )
+    )
+    assert usage[0][0] == "control-1"
+    assert "internal-1" not in manager._requests
+
+
+_MEDIA_TENANT_KEY = b"tenant-a-secret-key-material"
+_MEDIA_PROCESSOR_FINGERPRINT = bytes(range(32))
+
+
+def _media_hasher(block_size):
+    return PrefixHasher(
+        _MEDIA_TENANT_KEY,
+        block_size,
+        processor_fingerprint=_MEDIA_PROCESSOR_FINGERPRINT,
+    )
+
+
+def _media_item(offset, length):
+    return SimpleNamespace(
+        modality="image",
+        digest=b"fake-image-content-digest",
+        offset=offset,
+        length=length,
+    )
+
+
+def test_cloud_mtp_media_blocks_follow_draft_ack_gating():
+    block_size = 4
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_kv_cache_config(block_size),
+        vllm_config=_vllm_config(block_size, mtp_tokens=3),
+        instance_id="cloud-a",
+    )
+    hasher = _media_hasher(block_size)
+    media_items = [_media_item(offset=4, length=8)]
+    manifest = hasher.build_manifest("control-1", list(range(16)), media_items=media_items)
+    assert manager.probe(manifest).hit_tokens == 0
+
+    new_request = NewRequestData(
+        req_id="internal-1",
+        prompt_token_ids=[0] * 16,
+        mm_features=[],
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+        block_ids=([99, 100, 101, 102],),
+        num_computed_tokens=0,
+        lora_request=None,
+        edge_cloud_request_id="control-1",
+    )
+    target = _scheduler_output(new_request, num_scheduled_tokens=16)
+    cloud_target, _ = manager.rewrite_scheduler_output(target)
+    manager.complete_scheduler_output(cloud_target)
+
+    # The target ACK alone must not publish any prompt block digest, media
+    # blocks included: the draft chain has not populated its KV group yet.
+    assert not set(manifest.full_block_hashes) & manager._completed_hashes
+    replay_before = hasher.build_manifest("control-2", list(range(16)), media_items=media_items)
+    assert manager.probe(replay_before).hit_tokens == 0
+
+    draft = _scheduler_output(
+        new_request,
+        num_scheduled_tokens=16,
+        batch_type=BatchType.DRAFT_FIRST,
+    )
+    draft.draft_task_id = "target-1"
+    draft.draft_step_idx = 2
+    cloud_draft, _ = manager.rewrite_scheduler_output(draft)
+    manager.complete_scheduler_output(cloud_draft)
+
+    # Only the final draft ACK publishes the chain, media blocks included.
+    # The last prompt token is excluded from reuse, so a 16-token prompt
+    # matches 3 blocks; MTP then drops the trailing hit block (the draft
+    # head needs its hidden states recomputed), leaving 2 reusable blocks.
+    assert set(manifest.full_block_hashes) <= manager._completed_hashes
+    replay_after = hasher.build_manifest("control-3", list(range(16)), media_items=media_items)
+    assert manager.probe(replay_after).hit_tokens == 2 * block_size
+
+    # The media-aware digests stay isolated on the MTP path too: a text-only
+    # chain over the same tokens shares only the pre-media block digest.
+    text_hasher = PrefixHasher(_MEDIA_TENANT_KEY, block_size)
+    text_manifest = text_hasher.build_manifest("control-4", list(range(16)))
+    assert text_manifest.full_block_hashes[0] in manager._completed_hashes
+    assert not set(text_manifest.full_block_hashes[1:]) & manager._completed_hashes
+
+
+def test_cloud_mtp_rejection_correction_preserves_media_manifest_chain():
+    block_size = 4
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_kv_cache_config(block_size),
+        vllm_config=_vllm_config(block_size, mtp_tokens=3),
+        instance_id="cloud-a",
+    )
+    hasher = _media_hasher(block_size)
+    media_items = [_media_item(offset=4, length=4)]
+    manifest = hasher.build_manifest("control-1", list(range(8)), media_items=media_items)
+    assert manager.probe(manifest).hit_tokens == 0
+    new_request = NewRequestData(
+        req_id="internal-1",
+        prompt_token_ids=[0] * 8,
+        mm_features=[],
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+        block_ids=([99, 100],),
+        num_computed_tokens=0,
+        lora_request=None,
+        edge_cloud_request_id="control-1",
+    )
+    prefill, _ = manager.rewrite_scheduler_output(_scheduler_output(new_request))
+    manager.complete_scheduler_output(prefill)
+
+    state = manager._requests["internal-1"]
+    manifest_before = state.manifest
+    hashes_before = state.manifest.full_block_hashes
+    block_hashes_before = list(state.request.block_hashes)
+
+    cached = CachedRequestData(
+        req_ids=["internal-1"],
+        resumed_req_ids=set(),
+        new_token_ids=[[]],
+        all_token_ids={},
+        new_block_ids=[None],
+        num_computed_tokens=[8],
+        num_output_tokens=[1],
+    )
+    target = _scheduler_output()
+    target.scheduled_cached_reqs = cached
+    target.num_scheduled_tokens = {"internal-1": 4}
+    target.total_num_scheduled_tokens = 4
+    target.scheduled_spec_decode_tokens = {"internal-1": [101, 102, 103]}
+    target.batch_type = BatchType.DECODE_FIRST
+    cloud_target, _ = manager.rewrite_scheduler_output(target)
+    manager.complete_scheduler_output(cloud_target)
+    assert manager._requests["internal-1"].request.num_computed_tokens == 12
+
+    draft = copy.copy(target)
+    draft.batch_type = BatchType.DRAFT_FIRST
+    draft.draft_task_id = "target-2"
+    draft.draft_step_idx = 0
+    draft.valid_sampled_token_count = {"internal-1": 2}
+    cloud_draft, _ = manager.rewrite_scheduler_output(draft)
+    manager.complete_scheduler_output(cloud_draft)
+
+    final_draft = copy.copy(draft)
+    final_draft.draft_step_idx = 2
+    cloud_final_draft, _ = manager.rewrite_scheduler_output(final_draft)
+    manager.complete_scheduler_output(cloud_final_draft)
+
+    state = manager._requests["internal-1"]
+    # The edge accepted 2 of the 4 sampled tokens, so the shadow request
+    # rolls back to the same point.
+    assert state.request.num_computed_tokens == 10
+    # The rollback touches neither the manifest nor the held hash chain.
+    assert state.manifest is manifest_before
+    assert state.manifest.full_block_hashes == hashes_before
+    assert list(state.request.block_hashes) == block_hashes_before
+    # Only the two prompt blocks (the second one media-aware) publish;
+    # nothing beyond the corrected boundary leaks into _completed_hashes.
+    assert manager._completed_hashes == set(manifest.full_block_hashes)
