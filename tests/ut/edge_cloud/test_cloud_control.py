@@ -251,6 +251,20 @@ def test_v2_request_with_mismatched_fingerprint_is_rejected(control_client):
     assert commands.empty()
 
 
+def test_v2_request_is_rejected_when_cloud_has_no_local_fingerprint():
+    commands = queue.Queue()
+    events = queue.Queue()
+    bridge = CloudControlBridge(commands, events)
+    app = create_cloud_control_app(bridge)
+    headers, body = _control_payload(protocol=PROTOCOL_VERSION_MM, mm_abi=MM_ABI)
+
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", headers=headers, json=body)
+
+    assert response.status_code == 400
+    assert commands.empty()
+
+
 def test_unknown_protocol_version_is_rejected(control_client):
     client, _, _ = control_client
     headers, body = _control_payload(protocol="edge-cloud-prefix-v9")

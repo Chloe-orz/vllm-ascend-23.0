@@ -71,7 +71,15 @@ def _negotiate_protocol_headers(
     mm_abi = normalized.get(HEADER_MM_ABI.lower())
     if protocol == PROTOCOL_VERSION_MM:
         value = _validate_mm_abi_header(mm_abi)
-        if expected_mm_abi is not None and value != expected_mm_abi:
+        if expected_mm_abi is None:
+            log_event(
+                logger,
+                "warning",
+                "cloud_protocol_rejected",
+                reason="mm_abi_unavailable",
+            )
+            raise ValueError(f"{PROTOCOL_VERSION_MM} requires a locally computed {HEADER_MM_ABI} fingerprint")
+        if value != expected_mm_abi:
             log_event(logger, "warning", "cloud_protocol_rejected", reason="mm_abi_mismatch")
             raise ValueError(f"{HEADER_MM_ABI} fingerprint does not match this cloud instance")
         return value

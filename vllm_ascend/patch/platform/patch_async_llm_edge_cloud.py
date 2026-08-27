@@ -43,9 +43,7 @@ async def _negotiate_edge_cloud_prefix(
             block_size=self.vllm_config.cache_config.block_size,
             connect_timeout=coordination.connect_timeout,
             edge_id=self.vllm_config.parallel_config.edge_id,
-            processor_fingerprint=compute_processor_fingerprint(
-                self.vllm_config.model_config
-            ),
+            processor_fingerprint=compute_processor_fingerprint(self.vllm_config.model_config),
         )
         self._edge_cloud_prefix_client = client
         log_event(
@@ -54,9 +52,7 @@ async def _negotiate_edge_cloud_prefix(
             "edge_admission_client_created",
             block_size=client.block_size,
         )
-    result = await client.negotiate(
-        request_id, prompt_token_ids, openai_request, media_items=media_items
-    )
+    result = await client.negotiate(request_id, prompt_token_ids, openai_request, media_items=media_items)
     log_event(
         logger,
         "info",

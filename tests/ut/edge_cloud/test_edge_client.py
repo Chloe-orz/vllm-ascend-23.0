@@ -178,9 +178,7 @@ def test_image_request_uses_v2_protocol_and_media_manifest(mm_client):
     tokens = [1, 2, 3, 4, 5, 6, 7, 8]
     media_items = [MediaItem("image", IMAGE_DIGEST, 4, 4)]
 
-    headers, body = mm_client.build_control_request(
-        "req-mm-1", tokens, _image_request(), media_items=media_items
-    )
+    headers, body = mm_client.build_control_request("req-mm-1", tokens, _image_request(), media_items=media_items)
 
     assert headers[HEADER_PROTOCOL] == PROTOCOL_VERSION_MM
     assert headers[HEADER_MM_ABI] == mm_abi_header_value(PROCESSOR_FINGERPRINT)
@@ -225,9 +223,7 @@ def test_image_content_parts_are_accepted(mm_client, content_part):
     }
     media_items = [MediaItem("image", IMAGE_DIGEST, 0, 2)]
 
-    headers, _ = mm_client.build_control_request(
-        "req-1", [1, 2], request, media_items=media_items
-    )
+    headers, _ = mm_client.build_control_request("req-1", [1, 2], request, media_items=media_items)
 
     assert headers[HEADER_PROTOCOL] == PROTOCOL_VERSION_MM
 
@@ -277,18 +273,14 @@ def test_media_items_without_image_request_are_rejected(mm_client):
     request = {"messages": [{"role": "user", "content": "text only"}]}
 
     with pytest.raises(ValueError, match="require an image request"):
-        mm_client.build_control_request(
-            "req-1", [1, 2], request, media_items=media_items
-        )
+        mm_client.build_control_request("req-1", [1, 2], request, media_items=media_items)
 
 
 def test_media_items_without_processor_fingerprint_are_rejected(client):
     media_items = [MediaItem("image", IMAGE_DIGEST, 0, 2)]
 
     with pytest.raises(ValueError, match="processor_fingerprint is required"):
-        client.build_control_request(
-            "req-1", [1, 2], _image_request(), media_items=media_items
-        )
+        client.build_control_request("req-1", [1, 2], _image_request(), media_items=media_items)
 
 
 def test_multimodal_cache_salt_is_rejected(mm_client):
@@ -296,48 +288,46 @@ def test_multimodal_cache_salt_is_rejected(mm_client):
     request = _image_request(cache_salt="tenant-salt")
 
     with pytest.raises(ValueError, match="cache_salt"):
-        mm_client.build_control_request(
-            "req-1", [1, 2], request, media_items=media_items
-        )
+        mm_client.build_control_request("req-1", [1, 2], request, media_items=media_items)
 
 
 @pytest.mark.parametrize(
-    "content_part",
+    "uuid",
     [
-        # A hex-shaped uuid is still a client-asserted media identity.
-        {
-            "type": "image_url",
-            "image_url": {"url": "https://example/image.png"},
-            "uuid": "0123456789abcdef0123456789abcdef",
-        },
-        # The gate fires on key presence, not on the value.
-        {"type": "image_url", "image_url": {"url": "https://example/image.png"}, "uuid": None},
-        # Even a uuid on a non-media part is rejected fail-closed.
-        {"type": "text", "text": "describe", "uuid": "tenant-asserted-id"},
+        "0123456789abcdef0123456789abcdef",
+        None,
     ],
 )
-def test_content_part_uuid_is_rejected(client, content_part):
+def test_content_part_uuid_follows_upstream_identity_semantics(mm_client, uuid):
     request = {
         "messages": [
             {
                 "role": "user",
-                "content": [{"type": "text", "text": "describe this"}, content_part],
+                "content": [
+                    {"type": "text", "text": "describe this"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example/image.png"},
+                        "uuid": uuid,
+                    },
+                ],
             }
         ]
     }
+    media_items = [MediaItem("image", IMAGE_DIGEST, 0, 2)]
 
-    with pytest.raises(ValueError, match="client-asserted media identities"):
-        client.build_control_request("req-1", [1, 2], request)
+    _, body = mm_client.build_control_request("req-1", [1, 2], request, media_items=media_items)
+
+    assert "uuid" not in json.dumps(body)
 
 
-def test_multimodal_media_io_kwargs_are_rejected(mm_client):
+def test_multimodal_media_io_kwargs_follow_upstream_identity_semantics(mm_client):
     media_items = [MediaItem("image", IMAGE_DIGEST, 0, 2)]
     request = _image_request(media_io_kwargs={"rgba_background_color": [255, 255, 255]})
 
-    with pytest.raises(ValueError, match="media_io_kwargs"):
-        mm_client.build_control_request(
-            "req-1", [1, 2], request, media_items=media_items
-        )
+    _, body = mm_client.build_control_request("req-1", [1, 2], request, media_items=media_items)
+
+    assert "media_io_kwargs" not in body
 
 
 def test_text_only_media_io_kwargs_are_allowed(client):
@@ -362,9 +352,7 @@ def test_text_only_media_io_kwargs_are_allowed(client):
         ("prompt_logprobs", 1, "prompt logprobs"),
     ],
 )
-def test_phase_one_rejects_unsupported_request_features(
-    client, request_field, value, message
-):
+def test_phase_one_rejects_unsupported_request_features(client, request_field, value, message):
     request = {"messages": [], request_field: value}
 
     with pytest.raises(ValueError, match=message):
@@ -389,9 +377,7 @@ class _FakeResponse:
     def __init__(self, headers):
         self.status = 200
         self.headers = CIMultiDict(headers)
-        usage = json.dumps(
-            {"usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}}
-        ).encode()
+        usage = json.dumps({"usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}}).encode()
         self.content = _FakeContent([b"data: " + usage + b"\n", b"data: [DONE]\n"])
         self.closed = False
 
@@ -431,18 +417,14 @@ def _probe_headers(request_id, protocol=PROTOCOL_VERSION, mm_abi=None):
 
 def _install_fake_session(monkeypatch, response):
     session = _FakeSession(response)
-    monkeypatch.setattr(
-        edge_client_module.aiohttp, "ClientSession", lambda timeout: session
-    )
+    monkeypatch.setattr(edge_client_module.aiohttp, "ClientSession", lambda timeout: session)
     return session
 
 
 def _run_negotiate(client, *args, **kwargs):
     async def run():
         result = await client.negotiate(*args, **kwargs)
-        tasks = [
-            task for task in asyncio.all_tasks() if task is not asyncio.current_task()
-        ]
+        tasks = [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
         await asyncio.gather(*tasks)
         return result
 
@@ -464,9 +446,7 @@ def test_v1_negotiate_unchanged(client, monkeypatch):
 
 def test_v2_negotiate_accepts_matching_mm_abi_echo(mm_client, monkeypatch):
     mm_abi = mm_abi_header_value(PROCESSOR_FINGERPRINT)
-    response = _FakeResponse(
-        _probe_headers("req-mm", protocol=PROTOCOL_VERSION_MM, mm_abi=mm_abi)
-    )
+    response = _FakeResponse(_probe_headers("req-mm", protocol=PROTOCOL_VERSION_MM, mm_abi=mm_abi))
     session = _install_fake_session(monkeypatch, response)
     media_items = [MediaItem("image", IMAGE_DIGEST, 4, 4)]
 
@@ -503,9 +483,7 @@ def test_v2_negotiate_rejects_missing_mm_abi_echo(mm_client, monkeypatch):
 
 def test_v2_negotiate_rejects_mismatched_mm_abi_echo(mm_client, monkeypatch):
     other_abi = mm_abi_header_value(hashlib.sha256(b"other-config").digest())
-    response = _FakeResponse(
-        _probe_headers("req-mm", protocol=PROTOCOL_VERSION_MM, mm_abi=other_abi)
-    )
+    response = _FakeResponse(_probe_headers("req-mm", protocol=PROTOCOL_VERSION_MM, mm_abi=other_abi))
     session = _install_fake_session(monkeypatch, response)
     media_items = [MediaItem("image", IMAGE_DIGEST, 4, 4)]
 
@@ -555,3 +533,131 @@ def test_aiohttp_timeout_kwarg_still_used(client, monkeypatch):
     _run_negotiate(client, "req-1", [1, 2, 3, 4, 5], request)
 
     assert captured["timeout"].connect == 1.0
+
+
+def test_concurrent_duplicate_request_id_is_rejected_atomically(client, monkeypatch):
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        response = _FakeResponse(_probe_headers("req-1"))
+
+        class _BlockingSession(_FakeSession):
+            async def post(self, url, headers=None, json=None):
+                self.last_headers = headers
+                self.last_body = json
+                started.set()
+                await release.wait()
+                return self._response
+
+        session = _BlockingSession(response)
+        monkeypatch.setattr(
+            edge_client_module.aiohttp,
+            "ClientSession",
+            lambda timeout: session,
+        )
+        request = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        first = asyncio.create_task(client.negotiate("req-1", [1, 2, 3, 4], request))
+        await started.wait()
+
+        with pytest.raises(ValueError, match="duplicate"):
+            await client.negotiate("req-1", [1, 2, 3, 4], request)
+
+        release.set()
+        result = await first
+        await client._streams["req-1"]
+        await asyncio.sleep(0)
+        return result
+
+    result = asyncio.run(run())
+
+    assert result.request_id == "req-1"
+    assert client._streams == {}
+    assert client._request_ids_in_use == set()
+
+
+def test_session_construction_failure_releases_request_id(client, monkeypatch):
+    def fail_session(*, timeout):
+        raise RuntimeError("session construction failed")
+
+    monkeypatch.setattr(edge_client_module.aiohttp, "ClientSession", fail_session)
+    request = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+
+    with pytest.raises(RuntimeError, match="session construction failed"):
+        asyncio.run(client.negotiate("req-1", [1, 2, 3, 4], request))
+
+    assert client._streams == {}
+    assert client._request_ids_in_use == set()
+
+
+def test_cleanup_failures_do_not_mask_probe_error_or_leak_request_id(
+    mm_client,
+    monkeypatch,
+):
+    class _FailingCloseResponse(_FakeResponse):
+        def close(self):
+            raise RuntimeError("response close failed")
+
+    class _FailingCloseSession(_FakeSession):
+        async def close(self):
+            raise RuntimeError("session close failed")
+
+    response = _FailingCloseResponse(
+        _probe_headers("req-mm", protocol=PROTOCOL_VERSION),
+    )
+    session = _FailingCloseSession(response)
+    monkeypatch.setattr(
+        edge_client_module.aiohttp,
+        "ClientSession",
+        lambda timeout: session,
+    )
+    media_items = [MediaItem("image", IMAGE_DIGEST, 4, 4)]
+
+    with pytest.raises(RuntimeError, match="did not acknowledge"):
+        asyncio.run(
+            mm_client.negotiate(
+                "req-mm",
+                [1, 2, 3, 4, 5, 6, 7, 8],
+                _image_request(),
+                media_items=media_items,
+            )
+        )
+
+    assert mm_client._streams == {}
+    assert mm_client._request_ids_in_use == set()
+
+
+def test_usage_cleanup_failures_do_not_mask_cancellation(client):
+    class _CancelledContent:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise asyncio.CancelledError
+
+    class _FailingCloseResponse(_FakeResponse):
+        def __init__(self):
+            super().__init__(_probe_headers("req-1"))
+            self.content = _CancelledContent()
+            self.close_called = False
+
+        def close(self):
+            self.close_called = True
+            raise RuntimeError("response close failed")
+
+    class _FailingCloseSession(_FakeSession):
+        def __init__(self, response):
+            super().__init__(response)
+            self.close_called = False
+
+        async def close(self):
+            self.close_called = True
+            raise RuntimeError("session close failed")
+
+    response = _FailingCloseResponse()
+    session = _FailingCloseSession(response)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(client._drain_stream("req-1", response, session))
+
+    assert response.close_called is True
+    assert session.close_called is True

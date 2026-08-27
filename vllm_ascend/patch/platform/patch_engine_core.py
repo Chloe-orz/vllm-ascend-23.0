@@ -357,8 +357,13 @@ def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
             originals[head_token] = scheduler_output
         cloud_so = _make_cloud_safe_scheduler_output(cloud_so)
 
+    published_invalidations = list(getattr(cloud_so, "cloud_draft_invalidate_task_ids", None) or ())
     try:
-        channel.publish(cloud_so)
+        publish_control = getattr(channel, "publish_control", None)
+        if (cloud_finished or published_invalidations) and publish_control is not None:
+            publish_control(cloud_so)
+        else:
+            channel.publish(cloud_so)
     except Exception as exc:
         if coordination_enabled:
             logger.exception(
@@ -372,14 +377,32 @@ def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
             )
         raise
 
-    if published_finish_data:
-        acknowledge_finish_data = getattr(
+    if published_invalidations:
+        acknowledge_invalidations = getattr(
+            self.scheduler,
+            "acknowledge_cloud_draft_invalidations",
+            None,
+        )
+        if acknowledge_invalidations is not None:
+            acknowledge_invalidations(
+                published_invalidations,
+                worker_purged=cloud_so.batch_type
+                in (
+                    BatchType.PREFILL_FIRST,
+                    BatchType.DECODE_FIRST,
+                    BatchType.DRAFT_FIRST,
+                ),
+            )
+
+    if cloud_finished:
+        acknowledge_finish = getattr(
             self.scheduler,
             "acknowledge_cloud_finished_request_data",
             None,
         )
-        if acknowledge_finish_data is not None:
-            acknowledge_finish_data(set(published_finish_data))
+        if acknowledge_finish is not None:
+            acknowledge_finish(cloud_finished)
+    if published_finish_data:
         log_event(
             logger,
             "debug",
@@ -417,11 +440,11 @@ def _make_cloud_safe_scheduler_output(
     """Project one SchedulerOutput into its cloud-facing privacy form.
 
     Token IDs are replaced with same-length zeros and multimodal identity /
-    encoder metadata is dropped (see EDGE_CLOUD_MULTIMODAL_PREFIX_ISOLATION_
-    DESIGN.md section 10). Only the published copy is scrubbed; the local
-    worker keeps the original SchedulerOutput untouched. Batch-level
-    scheduling metadata (including the dynamically stamped ``has_mrope``)
-    survives ``_copy.copy`` and stays available to the cloud.
+    encoder metadata is dropped according to the edge-cloud SchedulerOutput
+    privacy projection. Only the published copy is scrubbed; the local worker
+    keeps the original SchedulerOutput untouched. Batch-level scheduling
+    metadata (including the dynamically stamped ``has_mrope``) survives
+    ``_copy.copy`` and stays available to the cloud.
     """
     cloud_so = _copy.copy(scheduler_output)
     cloud_so.scheduled_new_reqs = []
@@ -502,7 +525,17 @@ def _maybe_publish_pre_out(self, scheduler_output: SchedulerOutput) -> None:
     ):
         self._publish_to_cloud(scheduler_output)
     elif bt == BatchType.EMPTY:
-        if scheduler_output.finished_req_ids:
+        pending_invalidations = getattr(
+            scheduler_output,
+            "cloud_draft_invalidate_task_ids",
+            None,
+        )
+        released_finishes = getattr(
+            self.scheduler,
+            "_cloud_released_finished_req_ids",
+            None,
+        )
+        if scheduler_output.finished_req_ids or pending_invalidations or released_finishes:
             self._publish_to_cloud(scheduler_output)
     elif bt in (
         BatchType.PREFILL_LAST,
@@ -973,8 +1006,11 @@ def _patched_step_with_batch_queue(self):
 
         # [ascend insert] Publish head-segment batches immediately at
         # schedule time to keep the pipeline full.
-        if scheduler_output.batch_type in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST, BatchType.DRAFT_FIRST) or (
-            scheduler_output.batch_type == BatchType.EMPTY and scheduler_output.finished_req_ids
+        if scheduler_output.batch_type in (
+            BatchType.PREFILL_FIRST,
+            BatchType.DECODE_FIRST,
+            BatchType.DRAFT_FIRST,
+            BatchType.EMPTY,
         ):
             self._maybe_publish_pre_out(scheduler_output)
 

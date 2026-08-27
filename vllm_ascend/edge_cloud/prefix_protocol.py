@@ -24,11 +24,6 @@ PROTOCOL_VERSION_MM = "edge-cloud-prefix-v2"
 BLOCK_HASH_PREFIX = "ecb1:"
 TAIL_HASH_PREFIX = "ect1:"
 DIGEST_SIZE = hashlib.sha256().digest_size
-# Largest raw media content digest accepted from the upstream hasher
-# (SHA-512 under VLLM_MM_HASHER_ALGORITHM=sha512). Raw digests are always
-# normalized to SHA-256 before entering the hash chain, so the protocol
-# identity is decoupled from the configured vLLM digest algorithm.
-MAX_SOURCE_DIGEST_SIZE = hashlib.sha512().digest_size
 
 HEADER_PROTOCOL = "X-Edge-Cloud-Protocol"
 HEADER_REQUEST_ID = "X-Edge-Cloud-Request-ID"
@@ -73,9 +68,7 @@ def _encode_digest(digest: bytes) -> str:
 def _decode_digest(value: str) -> bytes:
     try:
         raw = value.encode("ascii")
-        digest = base64.b64decode(
-            raw + b"=" * (-len(raw) % 4), altchars=b"-_", validate=True
-        )
+        digest = base64.b64decode(raw + b"=" * (-len(raw) % 4), altchars=b"-_", validate=True)
     except (UnicodeEncodeError, ValueError) as exc:
         raise ValueError("invalid base64url digest") from exc
     if len(digest) != DIGEST_SIZE:
@@ -113,9 +106,7 @@ class PrefixManifest:
             raise ValueError("block_size must be positive")
         expected_blocks = self.prompt_tokens // self.block_size
         if len(self.full_block_hashes) != expected_blocks:
-            raise ValueError(
-                "full block hash count does not match prompt_tokens and block_size"
-            )
+            raise ValueError("full block hash count does not match prompt_tokens and block_size")
         for digest in self.full_block_hashes:
             if len(digest) != DIGEST_SIZE:
                 raise ValueError(f"digest must contain {DIGEST_SIZE} bytes")
@@ -133,8 +124,7 @@ class PrefixManifest:
     def to_messages(self) -> list[dict[str, str]]:
         """Render the manifest as OpenAI-compatible chat messages."""
         messages = [
-            {"role": "user", "content": BLOCK_HASH_PREFIX + _encode_digest(digest)}
-            for digest in self.full_block_hashes
+            {"role": "user", "content": BLOCK_HASH_PREFIX + _encode_digest(digest)} for digest in self.full_block_hashes
         ]
         if self.tail_hash is not None:
             messages.append(
@@ -154,9 +144,7 @@ class PrefixManifest:
         }
 
     @classmethod
-    def from_openai_request(
-        cls, headers: Mapping[str, str], body: Mapping[str, Any]
-    ) -> PrefixManifest:
+    def from_openai_request(cls, headers: Mapping[str, str], body: Mapping[str, Any]) -> PrefixManifest:
         """Parse and validate a manifest from an OpenAI chat request."""
         normalized_headers = {key.lower(): value for key, value in headers.items()}
 
@@ -198,9 +186,7 @@ class PrefixManifest:
                 raise ValueError("message content is not an edge-cloud hash")
 
         prompt_tokens_value = body.get("edge_cloud_prompt_tokens")
-        if not isinstance(prompt_tokens_value, int) or isinstance(
-            prompt_tokens_value, bool
-        ):
+        if not isinstance(prompt_tokens_value, int) or isinstance(prompt_tokens_value, bool):
             raise ValueError("edge_cloud_prompt_tokens must be an integer")
         return cls(
             request_id=request_id,
@@ -224,13 +210,8 @@ class PrefixHasher:
             raise ValueError("tenant_key must contain at least 16 bytes")
         if block_size <= 0:
             raise ValueError("block_size must be positive")
-        if (
-            processor_fingerprint is not None
-            and len(processor_fingerprint) != DIGEST_SIZE
-        ):
-            raise ValueError(
-                f"processor_fingerprint must contain {DIGEST_SIZE} bytes"
-            )
+        if processor_fingerprint is not None and len(processor_fingerprint) != DIGEST_SIZE:
+            raise ValueError(f"processor_fingerprint must contain {DIGEST_SIZE} bytes")
         self._tenant_key = tenant_key
         self.block_size = block_size
         self._processor_fingerprint = processor_fingerprint
@@ -245,30 +226,23 @@ class PrefixHasher:
         Returns ``(modality, digest, offset, length)`` tuples sorted by
         offset. Offsets are absolute token positions in the prompt; the
         chain position already implies the block index. Any non-empty raw
-        content digest of at most ``MAX_SOURCE_DIGEST_SIZE`` bytes is
-        accepted and normalized to ``SHA-256(raw digest)``, so the external
-        ABI media identity is always ``SHA-256(source content digest)``
-        regardless of the configured vLLM hasher algorithm.
+        content digest must be exactly ``DIGEST_SIZE`` bytes and enters the
+        external ABI unchanged. The Edge startup gate rejects upstream
+        multimodal hash algorithms that do not produce this size.
         """
         validated: list[tuple[str, bytes, int, int]] = []
         for item in media_items:
             if item.modality not in _MODALITY_IDS:
                 raise ValueError(f"unsupported media modality {item.modality!r}")
-            if not 0 < len(item.digest) <= MAX_SOURCE_DIGEST_SIZE:
-                raise ValueError(
-                    f"media digest must contain between 1 and "
-                    f"{MAX_SOURCE_DIGEST_SIZE} bytes"
-                )
+            if len(item.digest) != DIGEST_SIZE:
+                raise ValueError(f"media digest must contain {DIGEST_SIZE} bytes")
             if item.offset < 0:
                 raise ValueError("media offset must not be negative")
             if item.length <= 0:
                 raise ValueError("media length must be positive")
             if item.offset + item.length > prompt_tokens:
                 raise ValueError("media item range exceeds the prompt length")
-            normalized_digest = hashlib.sha256(item.digest).digest()
-            validated.append(
-                (item.modality, normalized_digest, item.offset, item.length)
-            )
+            validated.append((item.modality, item.digest, item.offset, item.length))
         validated.sort(key=lambda entry: entry[2])
         previous_end = 0
         for _, _, offset, length in validated:
@@ -277,9 +251,7 @@ class PrefixHasher:
             previous_end = offset + length
         return tuple(validated)
 
-    def _encode_media_fields(
-        self, covered_items: Sequence[tuple[str, bytes, int, int]]
-    ) -> bytes:
+    def _encode_media_fields(self, covered_items: Sequence[tuple[str, bytes, int, int]]) -> bytes:
         """Encode the media trailer shared by the 0x04 and 0x05 domains."""
         fingerprint = self._processor_fingerprint
         assert fingerprint is not None  # guaranteed by build_manifest
@@ -299,11 +271,7 @@ class PrefixHasher:
         block_end: int,
     ) -> list[tuple[str, bytes, int, int]]:
         """Return media items whose token range intersects the block."""
-        return [
-            item
-            for item in validated_items
-            if item[2] < block_end and block_start < item[2] + item[3]
-        ]
+        return [item for item in validated_items if item[2] < block_end and block_start < item[2] + item[3]]
 
     def build_manifest(
         self,
@@ -321,9 +289,7 @@ class PrefixHasher:
         prompt_tokens = len(prompt_token_ids)
         validated_items = self._validate_media_items(media_items, prompt_tokens)
         if validated_items and self._processor_fingerprint is None:
-            raise ValueError(
-                "processor_fingerprint is required when media items are present"
-            )
+            raise ValueError("processor_fingerprint is required when media items are present")
 
         token_bytes = _encode_tokens(prompt_token_ids)
         parent = self._seed
@@ -337,21 +303,13 @@ class PrefixHasher:
             start = block_start * _UINT32.size
             end = start + self.block_size * _UINT32.size
             block_bytes = token_bytes[start:end]
-            covered = self._covered_media_items(
-                validated_items, block_start, block_end
-            )
+            covered = self._covered_media_items(validated_items, block_start, block_end)
             if covered:
                 message = (
-                    _MEDIA_BLOCK_DOMAIN
-                    + parent
-                    + encoded_block_size
-                    + block_bytes
-                    + self._encode_media_fields(covered)
+                    _MEDIA_BLOCK_DOMAIN + parent + encoded_block_size + block_bytes + self._encode_media_fields(covered)
                 )
             else:
-                message = (
-                    _FULL_BLOCK_DOMAIN + parent + encoded_block_size + block_bytes
-                )
+                message = _FULL_BLOCK_DOMAIN + parent + encoded_block_size + block_bytes
             parent = hmac.digest(self._tenant_key, message, "sha256")
             full_hashes.append(parent)
 
@@ -360,9 +318,7 @@ class PrefixHasher:
         if remainder:
             tail_start = full_count * self.block_size
             tail_bytes = token_bytes[tail_start * _UINT32.size :]
-            covered = self._covered_media_items(
-                validated_items, tail_start, prompt_tokens
-            )
+            covered = self._covered_media_items(validated_items, tail_start, prompt_tokens)
             if covered:
                 message = (
                     _MEDIA_TAIL_BLOCK_DOMAIN
@@ -372,9 +328,7 @@ class PrefixHasher:
                     + self._encode_media_fields(covered)
                 )
             else:
-                message = (
-                    _TAIL_BLOCK_DOMAIN + parent + _UINT32.pack(remainder) + tail_bytes
-                )
+                message = _TAIL_BLOCK_DOMAIN + parent + _UINT32.pack(remainder) + tail_bytes
             tail_hash = hmac.digest(self._tenant_key, message, "sha256")
 
         return PrefixManifest(

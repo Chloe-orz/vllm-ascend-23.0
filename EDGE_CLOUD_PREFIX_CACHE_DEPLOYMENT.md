@@ -8,9 +8,10 @@ Cloud HTTP 控制服务；第二阶段只将该连接切换到 Higress。
 
 当前实现支持以下组合：
 
-- Qwen3.5-Dense 文本模型，Hugging Face `model_type` 必须为 `qwen3_5`
-  或 `qwen3_5_text`。允许加载 `Qwen3_5ForConditionalGeneration` 这类统一多模态
-  制品，但当前只允许发起纯文本请求。
+- Qwen3.5-Dense 模型，Hugging Face `model_type` 必须为 `qwen3_5`
+  或 `qwen3_5_text`。支持纯文本请求，以及
+  `Qwen3_5ForConditionalGeneration` 的图片请求；图片请求使用
+  `edge-cloud-prefix-v2` 媒体感知 Hash ABI。
 - OpenAI Chat Completions API：`/v1/chat/completions`。
 - `embedding_only` 和 `head_tail` 边云切分配置。其中本文以
   `embedding_only` 为例。
@@ -24,8 +25,8 @@ Cloud HTTP 控制服务；第二阶段只将该连接切换到 Higress。
 当前不支持：
 
 - Qwen3.5 MoE、其他模型系列或未经校验的 `model_type`。
-- Multimodal 请求、LoRA、prompt embeds。允许使用多模态模型制品，但不能传入
-  图片、音频、视频或预计算 embedding。
+- 音频、视频、LoRA、prompt embeds、image embeds。图片以外的多模态输入和
+  预计算 embedding 仍不支持。
 - EAGLE/EAGLE3、独立 Draft Model 及 MTP 之外的 speculative decoding。
 - `n > 1`、beam search 和 prompt logprobs。
 - PCP/DCP 上下文并行。
@@ -109,6 +110,11 @@ Edge 和 Cloud 必须使用完全相同的：
 
 协议不会把模型版本或 Tokenizer 内容发送给 Cloud。两侧配置不一致可能造成
 错误推理，因此部署系统必须保证这些文件来自同一个模型制品。
+
+Edge 与 Cloud 可以把同一制品挂载到不同本地目录（本指南示例分别为
+`/home/extra/...` 与 `/weight/...`）；MM-ABI 指纹不会把本地挂载路径当作执行
+语义。revision、resolved commit、模型/MM graph hash、processor 配置和主要软件
+版本仍必须一致。
 
 ### 3.4 创建 Edge 租户密钥
 
@@ -259,6 +265,14 @@ MTP 模式下 Cloud KV 管理器会使用与主 Scheduler 相同的 EAGLE/MTP KV
 重复推进 `num_computed_tokens`。只有匹配的 MTP draft chain 完成，Prompt block
 才会对后续 Prefix probe 可见；若 draft token 被拒绝，Cloud 影子请求会在 chain
 结束时回退到 Edge 给出的实际 accepted token 数。
+
+若 draft task 在最终 ACK 前被丢弃，Edge 会先通过 control-only EMPTY 通知 Cloud
+禁止该请求在 FINISH 新增发布缓存，再释放被 MTP 扣留的 FINISH 和 usage。即使此时
+已经没有后续计算 batch，控制面仍会完整闭环；runner metadata 会在未来 FIRST
+batch 中幂等清理。同步与 async scheduling 使用相同的 EMPTY 发布判定；PRE_OUT
+携带 FINISH/invalidation 时会等待后台 publisher 完成序列化并把消息交给 ZMQ；
+stopped、bridge queue 满、序列化或 socket send 失败不会静默确认，控制状态仅在
+本地交付成功后消费。
 
 当前该组合仅适配 `method=mtp`。配置 EAGLE/EAGLE3 或独立 Draft Model 会在启动
 阶段被拒绝。
@@ -598,17 +612,22 @@ prefix cache coordination currently supports only Qwen3.5-Dense
 
 检查实际 `hf_text_config.model_type`。不要通过删除校验强行运行未适配模型。
 
-统一多模态模型制品可直接启动，但实际多模态请求会在 Edge 发起 Cloud HTTP
+统一多模态模型制品可直接启动并处理图片请求。图片请求必须满足媒体感知共享的
+部署前提；不支持的音频、视频或预计算 embedding 会在 Edge 发起 Cloud HTTP
 预约前被拒绝，并记录：
 
 ```text
 [EDGE_CLOUD_PREFIX] event=edge_request_rejected ...
-edge-cloud prefix coordination supports text-only requests;
-media and prompt embeds are not supported
+edge-cloud prefix coordination does not support audio, video,
+prompt embeds, or media embeds
 ```
 
-当前验证请只发送纯文本 `messages`。如果希望让 vLLM 自身也拒绝多模态输入，
-可在 Edge 和 Cloud 命令中同时加入 `--language-model-only`。
+图片共享直接复用 vLLM `mm_hash` 语义。当前正确性边界要求调用方避免客户端媒体
+`uuid`、请求级 `media_io_kwargs` 和不可信 EXIF ImageID；这些快捷路径可能令
+不同执行输入具有相同摘要。如果只需要纯文本，可在 Edge 和 Cloud 命令中同时
+加入 `--language-model-only`。可接收图片的 Edge 要求
+`VLLM_MM_HASHER_ALGORITHM` 产生 32 字节摘要（如 blake3/sha256）；纯文本模式不使用
+媒体摘要，继续兼容 v1 支持的算法配置。
 
 ### 8.2 Edge 无法连接 Cloud 8100
 

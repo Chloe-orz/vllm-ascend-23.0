@@ -439,6 +439,11 @@ class PDSeparatedScheduler(Scheduler):
         # the cloud model runner can purge the entries instead of
         # leaking them until the bounded cache evicts.
         self._pending_cloud_draft_invalidations: list[str] = []
+        # EMPTY batches reach CloudKVRequestManager but do not execute the
+        # cloud worker purge hook. Track which pending invalidations have
+        # already crossed that control-only path: they remain pending for the
+        # next FIRST worker batch without keeping an idle EngineCore spinning.
+        self._cloud_reported_draft_invalidations: set[str] = set()
         # Finishes deliberately withheld from the cloud: the edge keeps a
         # finished-but-chain-referenced request in self.requests and
         # retains its KV blocks, but upstream _free_request has already
@@ -458,7 +463,11 @@ class PDSeparatedScheduler(Scheduler):
         """Queue cloud-side draft metadata invalidations (edge only)."""
         if not self._edge_cloud_draft_retention_enabled:
             return
-        self._pending_cloud_draft_invalidations.extend(task_ids)
+        known = set(self._pending_cloud_draft_invalidations)
+        for task_id in task_ids:
+            if task_id and task_id not in known:
+                self._pending_cloud_draft_invalidations.append(task_id)
+                known.add(task_id)
 
     def filter_cloud_finished_req_ids(self, finished_req_ids: set[str]) -> set[str]:
         """Compute the finished_req_ids a cloud-bound batch should carry.
@@ -512,6 +521,7 @@ class PDSeparatedScheduler(Scheduler):
             )
         if self._cloud_released_finished_req_ids:
             still_valid: set[str] = set()
+            stale: set[str] = set()
             for req_id in self._cloud_released_finished_req_ids:
                 request = self.requests.get(req_id)
                 if request is not None and not request.is_finished():
@@ -524,10 +534,11 @@ class PDSeparatedScheduler(Scheduler):
                         "the new request",
                         req_id,
                     )
+                    stale.add(req_id)
                     continue
                 still_valid.add(req_id)
             cloud_finished |= still_valid
-            self._cloud_released_finished_req_ids = set()
+            self._cloud_released_finished_req_ids.difference_update(stale)
         return cloud_finished
 
     def get_cloud_finished_request_data(
@@ -551,9 +562,26 @@ class PDSeparatedScheduler(Scheduler):
         self,
         finished_req_ids: set[str],
     ) -> None:
-        """Consume accounting records after their cloud publish succeeds."""
+        """Consume finish state after its cloud publish succeeds."""
+        self._cloud_released_finished_req_ids.difference_update(finished_req_ids)
         for request_id in finished_req_ids:
             self._edge_cloud_finished_request_data.pop(request_id, None)
+
+    def acknowledge_cloud_draft_invalidations(
+        self,
+        task_ids: list[str],
+        *,
+        worker_purged: bool,
+    ) -> None:
+        """Commit invalidation delivery only after PRE_OUT publish succeeds."""
+        if worker_purged:
+            acknowledged = set(task_ids)
+            self._pending_cloud_draft_invalidations = [
+                task_id for task_id in self._pending_cloud_draft_invalidations if task_id not in acknowledged
+            ]
+            self._cloud_reported_draft_invalidations.difference_update(acknowledged)
+        else:
+            self._cloud_reported_draft_invalidations.update(task_ids)
 
     def schedule(self) -> SchedulerOutput:
         scheduler_output = self._schedule_pd_separated()
@@ -565,16 +593,25 @@ class PDSeparatedScheduler(Scheduler):
         # batch type would silently discard the pending list, so
         # keep the invalidations queued until a cloud-bound batch can carry
         # them.
-        if self._pending_cloud_draft_invalidations and (
-            scheduler_output.batch_type
-            in (
+        if self._pending_cloud_draft_invalidations:
+            if scheduler_output.batch_type in (
                 BatchType.PREFILL_FIRST,
                 BatchType.DECODE_FIRST,
                 BatchType.DRAFT_FIRST,
-            )
-        ):
-            scheduler_output.cloud_draft_invalidate_task_ids = self._pending_cloud_draft_invalidations
-            self._pending_cloud_draft_invalidations = []
+            ):
+                scheduler_output.cloud_draft_invalidate_task_ids = list(self._pending_cloud_draft_invalidations)
+            elif scheduler_output.batch_type == BatchType.EMPTY:
+                # A control-only EMPTY must inform CloudKVRequestManager before
+                # a released FINISH is applied, otherwise target-only KV can be
+                # published after its draft task was dropped. Keep the IDs in
+                # the pending list so a future FIRST also purges runner state.
+                unreported = [
+                    task_id
+                    for task_id in self._pending_cloud_draft_invalidations
+                    if task_id not in self._cloud_reported_draft_invalidations
+                ]
+                if unreported:
+                    scheduler_output.cloud_draft_invalidate_task_ids = unreported
         finished_data = {
             request_id: self._edge_cloud_finished_request_data[request_id]
             for request_id in scheduler_output.finished_req_ids
@@ -2043,11 +2080,12 @@ class PDSeparatedScheduler(Scheduler):
         hasher = self._edge_cloud_prefix_hasher
         if control_request_id is None or hasher is None:
             return
+
         def record_suppressed_finish() -> None:
-            # Fail closed means "publish nothing", not "send no FINISH": the
-            # record still carries the accounting fields so the cloud can
-            # release the request and close out usage, while
-            # publish_cache=False forbids publishing any of its blocks.
+            # Fail closed means "publish nothing from FINISH", not "send no
+            # FINISH": the record still carries the accounting fields so the
+            # cloud can release the request and close out usage, while
+            # publish_cache=False forbids FINISH from publishing more blocks.
             self._edge_cloud_finished_request_data[request.request_id] = EdgeCloudFinishedRequest(
                 control_request_id=control_request_id,
                 prompt_tokens=request.num_prompt_tokens,
@@ -2826,7 +2864,16 @@ class PDSeparatedScheduler(Scheduler):
         )
 
     def has_requests(self) -> bool:
-        return super().has_requests() or self._has_draft_work()
+        pending_control_invalidations = any(
+            task_id not in self._cloud_reported_draft_invalidations
+            for task_id in self._pending_cloud_draft_invalidations
+        )
+        return (
+            super().has_requests()
+            or self._has_draft_work()
+            or bool(self._cloud_released_finished_req_ids)
+            or pending_control_invalidations
+        )
 
     def finish_requests(
         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
