@@ -174,7 +174,31 @@ def test_edge_coordination_rejects_oversized_mm_hasher_digest(monkeypatch):
     monkeypatch.setenv("VLLM_MM_HASHER_ALGORITHM", "sha512")
 
     with pytest.raises(ValueError, match="digest"):
-        EdgeCloudConfig(_config(), _vllm_config())
+        EdgeCloudConfig(
+            _config(),
+            _vllm_config(
+                hf_model_type="qwen3_5",
+                multimodal_config=SimpleNamespace(language_model_only=False),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "multimodal_config",
+    [None, SimpleNamespace(language_model_only=True)],
+)
+def test_text_only_edge_coordination_does_not_gate_mm_hasher_digest(
+    monkeypatch,
+    multimodal_config,
+):
+    monkeypatch.setenv("VLLM_MM_HASHER_ALGORITHM", "sha512")
+
+    parsed = EdgeCloudConfig(
+        _config(),
+        _vllm_config(multimodal_config=multimodal_config),
+    )
+
+    assert parsed.prefix_cache_coordination.enabled
 
 
 def test_cloud_coordination_does_not_gate_mm_hasher_digest(monkeypatch):

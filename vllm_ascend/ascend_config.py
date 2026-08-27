@@ -1011,12 +1011,17 @@ class EdgeCloudConfig:
                 "edge_cloud_config.prefix_cache_coordination.enabled=True "
                 "requires edge_cloud_config.pd_separation.enabled=True"
             )
-        if self.role == "edge":
-            self._validate_mm_hasher_digest_size()
         if self._vllm_config is None:
             return
 
         model_config = self._vllm_config.model_config
+        multimodal_config = getattr(model_config, "multimodal_config", None)
+        if (
+            self.role == "edge"
+            and multimodal_config is not None
+            and not getattr(multimodal_config, "language_model_only", False)
+        ):
+            self._validate_mm_hasher_digest_size()
         hf_config = getattr(model_config, "hf_config", None)
         top_model_type = getattr(hf_config, "model_type", "")
         hf_text_config = getattr(model_config, "hf_text_config", None)

@@ -77,6 +77,10 @@ class EdgePrefixClient:
         self._consumer_id = consumer_id
         self._connect_timeout = connect_timeout
         self._streams: dict[str, asyncio.Task[None]] = {}
+        # Covers both the HTTP probe and the subsequently drained usage stream.
+        # Check-and-add happens before the first await in negotiate(), making
+        # duplicate request IDs atomic within the owning event loop.
+        self._request_ids_in_use: set[str] = set()
         log_event(
             logger,
             "info",
@@ -141,7 +145,7 @@ class EdgePrefixClient:
         media_items: Sequence[EdgeCloudMediaItem] = (),
     ) -> EdgeCloudPrefixResult:
         """Reserve a cloud prefix and leave its accounting stream open."""
-        if request_id in self._streams:
+        if request_id in self._request_ids_in_use:
             log_event(
                 logger,
                 "warning",
@@ -149,9 +153,17 @@ class EdgePrefixClient:
                 request_id=request_id,
             )
             raise ValueError(f"duplicate edge-cloud request ID {request_id!r}")
-        headers, body = self.build_control_request(
-            request_id, prompt_token_ids, openai_request, media_items=media_items
-        )
+        self._request_ids_in_use.add(request_id)
+        try:
+            headers, body = self.build_control_request(
+                request_id,
+                prompt_token_ids,
+                openai_request,
+                media_items=media_items,
+            )
+        except BaseException:
+            self._request_ids_in_use.discard(request_id)
+            raise
         log_event(
             logger,
             "info",
@@ -164,8 +176,10 @@ class EdgePrefixClient:
             block_size=self.block_size,
         )
         timeout = aiohttp.ClientTimeout(total=None, connect=self._connect_timeout)
-        session = aiohttp.ClientSession(timeout=timeout)
+        session: aiohttp.ClientSession | None = None
+        response: aiohttp.ClientResponse | None = None
         try:
+            session = aiohttp.ClientSession(timeout=timeout)
             response = await session.post(
                 self._control_url,
                 headers={**headers, "Accept": "text/event-stream"},
@@ -179,7 +193,6 @@ class EdgePrefixClient:
                     request_id=request_id,
                     http_status=response.status,
                 )
-                response.close()
                 raise RuntimeError(f"edge-cloud prefix negotiation failed with HTTP {response.status}")
             if media_items:
                 probe = self._parse_mm_probe_response(request_id, response)
@@ -193,6 +206,11 @@ class EdgePrefixClient:
                 )
             if probe.hit_tokens > len(prompt_token_ids):
                 raise RuntimeError("cloud prefix hit exceeds the prompt length")
+
+            task = asyncio.create_task(
+                self._drain_stream(request_id, response, session),
+                name=f"edge-cloud-usage-{request_id}",
+            )
         except BaseException as exc:
             logger.exception(
                 "%s",
@@ -202,7 +220,34 @@ class EdgePrefixClient:
                     error_type=type(exc).__name__,
                 ),
             )
-            await session.close()
+            try:
+                if response is not None:
+                    response.close()
+            except BaseException as cleanup_exc:
+                logger.exception(
+                    "%s",
+                    format_event(
+                        "edge_probe_cleanup_failed",
+                        request_id=request_id,
+                        resource="response",
+                        error_type=type(cleanup_exc).__name__,
+                    ),
+                )
+            try:
+                if session is not None:
+                    await session.close()
+            except BaseException as cleanup_exc:
+                logger.exception(
+                    "%s",
+                    format_event(
+                        "edge_probe_cleanup_failed",
+                        request_id=request_id,
+                        resource="session",
+                        error_type=type(cleanup_exc).__name__,
+                    ),
+                )
+            finally:
+                self._request_ids_in_use.discard(request_id)
             raise
 
         log_event(
@@ -216,12 +261,8 @@ class EdgePrefixClient:
             block_size=probe.block_size,
         )
 
-        task = asyncio.create_task(
-            self._drain_stream(request_id, response, session),
-            name=f"edge-cloud-usage-{request_id}",
-        )
         self._streams[request_id] = task
-        task.add_done_callback(lambda _task: self._streams.pop(request_id, None))
+        task.add_done_callback(lambda completed, rid=request_id: self._finish_stream(rid, completed))
         log_event(
             logger,
             "debug",
@@ -234,6 +275,16 @@ class EdgePrefixClient:
             block_size=probe.block_size,
             hit_tokens=probe.hit_tokens,
         )
+
+    def _finish_stream(
+        self,
+        request_id: str,
+        completed: asyncio.Task[None],
+    ) -> None:
+        """Release one request ID only for its currently registered task."""
+        if self._streams.get(request_id) is completed:
+            self._streams.pop(request_id, None)
+            self._request_ids_in_use.discard(request_id)
 
     async def _drain_stream(
         self,
@@ -290,8 +341,30 @@ class EdgePrefixClient:
                 ),
             )
         finally:
-            response.close()
-            await session.close()
+            try:
+                response.close()
+            except BaseException as cleanup_exc:
+                logger.exception(
+                    "%s",
+                    format_event(
+                        "edge_usage_cleanup_failed",
+                        request_id=request_id,
+                        resource="response",
+                        error_type=type(cleanup_exc).__name__,
+                    ),
+                )
+            try:
+                await session.close()
+            except BaseException as cleanup_exc:
+                logger.exception(
+                    "%s",
+                    format_event(
+                        "edge_usage_cleanup_failed",
+                        request_id=request_id,
+                        resource="session",
+                        error_type=type(cleanup_exc).__name__,
+                    ),
+                )
             log_event(
                 logger,
                 "debug",
@@ -307,18 +380,17 @@ class EdgePrefixClient:
         """Validate a v2 probe response and parse it as a v1 manifest result.
 
         Fail closed when the cloud does not speak v2 or echoes a different
-        MM-ABI fingerprint: the reservation is released and the request is
-        rejected instead of degrading to a token-only interpretation.
+        MM-ABI fingerprint: reject the request instead of degrading to a
+        token-only interpretation. The v1 control plane has no post-Probe
+        cancel/TTL yet, so closing this response does not claim to release an
+        already-created Cloud reservation.
         """
         if response.headers.get(HEADER_PROTOCOL) != PROTOCOL_VERSION_MM:
-            response.close()
             raise RuntimeError(f"cloud did not acknowledge {PROTOCOL_VERSION_MM} for request {request_id!r}")
         echoed_mm_abi = response.headers.get(HEADER_MM_ABI)
         if echoed_mm_abi is None:
-            response.close()
             raise RuntimeError(f"cloud response is missing {HEADER_MM_ABI}")
         if echoed_mm_abi != self._mm_abi_header:
-            response.close()
             raise RuntimeError("cloud MM-ABI fingerprint does not match the local processor fingerprint")
         # The v2 manifest wire format is isomorphic to v1; parse the probe
         # result with the v1 header reader after the protocol marker checks.
@@ -342,38 +414,24 @@ class EdgePrefixClient:
         messages = openai_request.get("messages")
         if not isinstance(messages, list):
             raise ValueError("edge-cloud coordination requires chat messages")
-        has_unsupported, has_image, has_client_uuid = (
-            EdgePrefixClient._scan_message_content(messages)
-        )
+        has_unsupported, has_image = EdgePrefixClient._scan_message_content(messages)
         if has_unsupported:
             raise ValueError(
                 "edge-cloud prefix coordination does not support audio, video, prompt embeds, or media embeds"
-            )
-        if has_client_uuid:
-            raise ValueError(
-                "edge-cloud shared cache does not accept client-asserted media identities: "
-                "uuid content-part fields bypass content hashing "
-                "(see the uuid field semantics in vllm/entrypoints/chat_utils.py)"
             )
         if media_items:
             if not has_image:
                 raise ValueError("edge-cloud media descriptions require an image request")
             if openai_request.get("cache_salt") is not None:
                 raise ValueError("edge-cloud prefix coordination does not support cache_salt for multimodal requests")
-            if openai_request.get("media_io_kwargs") is not None:
-                raise ValueError(
-                    "request-level media_io_kwargs change decoded media bytes without "
-                    "changing content digests; not supported by edge-cloud prefix coordination"
-                )
         elif has_image:
             raise ValueError("edge-cloud image request is missing media placeholder descriptions")
 
     @staticmethod
-    def _scan_message_content(messages: Sequence[Any]) -> tuple[bool, bool, bool]:
-        """Return ``(has_unsupported_content, has_image_content, has_client_uuid)``."""
+    def _scan_message_content(messages: Sequence[Any]) -> tuple[bool, bool]:
+        """Return ``(has_unsupported_content, has_image_content)``."""
         has_unsupported = False
         has_image = False
-        has_client_uuid = False
         for message in messages:
             if not isinstance(message, Mapping):
                 continue
@@ -385,12 +443,10 @@ class EdgePrefixClient:
             for part in content:
                 if not isinstance(part, Mapping):
                     continue
-                if "uuid" in part:
-                    has_client_uuid = True
                 if part.get("type") in _IMAGE_CONTENT_TYPES:
                     has_image = True
                 elif part.get("type") in _UNSUPPORTED_CONTENT_TYPES:
                     has_unsupported = True
                 if _UNSUPPORTED_CONTENT_FIELDS.intersection(part):
                     has_unsupported = True
-        return has_unsupported, has_image, has_client_uuid
+        return has_unsupported, has_image

@@ -591,7 +591,7 @@ def _media_hasher(block_size):
 def _media_item(offset, length):
     return SimpleNamespace(
         modality="image",
-        digest=b"fake-image-content-digest",
+        digest=bytes(range(32)),
         offset=offset,
         length=length,
     )
@@ -655,6 +655,59 @@ def test_cloud_mtp_media_blocks_follow_draft_ack_gating():
     text_manifest = text_hasher.build_manifest("control-4", list(range(16)))
     assert text_manifest.full_block_hashes[0] in manager._completed_hashes
     assert not set(text_manifest.full_block_hashes[1:]) & manager._completed_hashes
+
+
+def test_cloud_mtp_invalidation_suppresses_finish_cache_publish():
+    block_size = 4
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_kv_cache_config(block_size),
+        vllm_config=_vllm_config(block_size, mtp_tokens=3),
+        instance_id="cloud-a",
+    )
+    hasher = _media_hasher(block_size)
+    media_items = [_media_item(offset=4, length=8)]
+    manifest = hasher.build_manifest("control-1", list(range(16)), media_items=media_items)
+    manager.probe(manifest)
+
+    new_request = NewRequestData(
+        req_id="internal-1",
+        prompt_token_ids=[0] * 16,
+        mm_features=[],
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+        block_ids=([99, 100, 101, 102],),
+        num_computed_tokens=0,
+        lora_request=None,
+        edge_cloud_request_id="control-1",
+    )
+    target = _scheduler_output(
+        new_request,
+        num_scheduled_tokens=16,
+    )
+    target.head_token = "target-1"
+    cloud_target, _ = manager.rewrite_scheduler_output(target)
+    manager.complete_scheduler_output(cloud_target)
+
+    assert not set(manifest.full_block_hashes) & manager._completed_hashes
+
+    finish = EdgeCloudFinishedRequest(
+        control_request_id="control-1",
+        prompt_tokens=16,
+        completion_tokens=0,
+        full_block_hashes=manifest.full_block_hashes,
+    )
+    invalidation = _scheduler_output(
+        finished={"internal-1"},
+        finish_data={"internal-1": finish},
+    )
+    invalidation.cloud_draft_invalidate_task_ids = ["target-1"]
+
+    _, usage = manager.rewrite_scheduler_output(invalidation)
+
+    assert not set(manifest.full_block_hashes) & manager._completed_hashes
+    assert "internal-1" not in manager._requests
+    assert usage[0][0] == "control-1"
 
 
 def test_cloud_mtp_rejection_correction_preserves_media_manifest_chain():

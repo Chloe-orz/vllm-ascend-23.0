@@ -84,6 +84,8 @@ class CloudKVRequestManager:
         self._requests: dict[str, _CloudRequest] = {}
         self._completed_hashes: set[bytes] = set()
         self._mtp_actual_computed_by_task: dict[str, dict[str, int]] = {}
+        self._mtp_request_ids_by_task: dict[str, set[str]] = {}
+        self._mtp_cache_publish_suppressed_request_ids: set[str] = set()
         self._needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         log_event(
             logger,
@@ -164,6 +166,7 @@ class CloudKVRequestManager:
         if not is_mtp_draft:
             self._kv.new_step_starts()
         self._discard_invalidated_mtp_tasks(scheduler_output)
+        self._record_mtp_target_task(scheduler_output)
         usage = self._finish_requests(
             scheduler_output.finished_req_ids,
             scheduler_output.edge_cloud_finished_requests or {},
@@ -493,6 +496,16 @@ class CloudKVRequestManager:
                 corrected_requests=len(actual_by_request),
             )
 
+    def _record_mtp_target_task(self, scheduler_output: SchedulerOutput) -> None:
+        """Remember which requests require a matching final draft ACK."""
+        if (
+            not self._mtp_enabled
+            or scheduler_output.batch_type == BatchType.DRAFT_FIRST
+            or not scheduler_output.head_token
+        ):
+            return
+        self._mtp_request_ids_by_task[scheduler_output.head_token] = set(scheduler_output.num_scheduled_tokens)
+
     def _complete_mtp_draft_output(
         self,
         scheduler_output: SchedulerOutput,
@@ -502,6 +515,8 @@ class CloudKVRequestManager:
             return
         task_id = scheduler_output.draft_task_id
         corrections = self._mtp_actual_computed_by_task.pop(task_id, {}) if task_id is not None else {}
+        if task_id is not None:
+            self._mtp_request_ids_by_task.pop(task_id, None)
         completed_prompt_blocks = 0
         for request_id in scheduler_output.num_scheduled_tokens:
             state = self._requests.get(request_id)
@@ -567,7 +582,10 @@ class CloudKVRequestManager:
         task_ids = scheduler_output.cloud_draft_invalidate_task_ids or []
         discarded = 0
         for task_id in task_ids:
-            if self._mtp_actual_computed_by_task.pop(task_id, None) is not None:
+            had_correction = self._mtp_actual_computed_by_task.pop(task_id, None) is not None
+            request_ids = self._mtp_request_ids_by_task.pop(task_id, set())
+            self._mtp_cache_publish_suppressed_request_ids.update(request_ids)
+            if had_correction or request_ids:
                 discarded += 1
         if discarded:
             log_event(
@@ -642,7 +660,8 @@ class CloudKVRequestManager:
                 raise RuntimeError("cloud finish has a different control request ID")
             if final.prompt_tokens != state.manifest.prompt_tokens:
                 raise RuntimeError("cloud finish has a different prompt length")
-            if final.publish_cache:
+            publish_cache = final.publish_cache and request_id not in self._mtp_cache_publish_suppressed_request_ids
+            if publish_cache:
                 expected_hashes = (final.prompt_tokens + final.completion_tokens) // self.block_size
                 if len(final.full_block_hashes) != expected_hashes:
                     raise RuntimeError("cloud finish hash count is inconsistent")
@@ -654,7 +673,7 @@ class CloudKVRequestManager:
                 final.completion_tokens,
                 allow_shrink=self._mtp_enabled,
             )
-            if final.publish_cache:
+            if publish_cache:
                 max_safe_computed_tokens = max(
                     0,
                     final.prompt_tokens + final.completion_tokens - 1,
@@ -669,8 +688,9 @@ class CloudKVRequestManager:
                 self._completed_hashes.update(final.full_block_hashes[:completed_blocks])
             else:
                 # Fail-closed finish (e.g. the edge could not reconstruct the
-                # media identity): complete accounting and release the
-                # request, but publish none of its blocks into the cache.
+                # media identity): complete accounting and release the request,
+                # but publish no additional blocks from FINISH. Prompt blocks
+                # already made visible after worker ACKs are not revoked.
                 completed_blocks = 0
                 log_event(
                     logger,
@@ -680,9 +700,15 @@ class CloudKVRequestManager:
                     engine_request_id=request_id,
                     prompt_tokens=state.manifest.prompt_tokens,
                     completion_tokens=final.completion_tokens,
+                    mtp_draft_invalidated=(request_id in self._mtp_cache_publish_suppressed_request_ids),
                 )
             self._kv.free(request)
             self._requests.pop(request_id, None)
+            self._mtp_cache_publish_suppressed_request_ids.discard(request_id)
+            for task_id, request_ids in list(self._mtp_request_ids_by_task.items()):
+                request_ids.discard(request_id)
+                if not request_ids:
+                    self._mtp_request_ids_by_task.pop(task_id, None)
             for task_id, corrections in list(self._mtp_actual_computed_by_task.items()):
                 corrections.pop(request_id, None)
                 if not corrections:
