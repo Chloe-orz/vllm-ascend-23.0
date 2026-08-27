@@ -5298,16 +5298,54 @@ class NPUModelRunner(GPUModelRunner):
             # The first draft pass ran over all scheduled tokens; only the
             # last row of each request produces the proposed draft token and
             # feeds the next speculative step.
+            diagnose_eagle3 = self.speculative_config.method == "eagle3"
+
+            def diag_begin(stage: str) -> None:
+                if diagnose_eagle3:
+                    logger.info(
+                        "[DRAFT-TAIL-DIAG] %s_BEGIN task=%s step=%d",
+                        stage,
+                        task_id,
+                        draft_step_idx,
+                    )
+
+            def diag_sync_done(stage: str) -> None:
+                if diagnose_eagle3:
+                    torch.npu.current_stream().synchronize()
+                    logger.info(
+                        "[DRAFT-TAIL-DIAG] %s_DONE task=%s step=%d",
+                        stage,
+                        task_id,
+                        draft_step_idx,
+                    )
+
+            # SEGMENT_E_DONE only proves that Python returned the tensors.
+            # This first barrier distinguishes an unfinished earlier NPU
+            # task/event from a stall in the row-selection operations below.
+            diag_begin("STREAM_SYNC")
+            diag_sync_done("STREAM_SYNC")
+
+            diag_begin("SAMPLE_ROWS_TO")
             sample_rows = context["sample_row_indices"].to(
                 hidden_states.device
             )
+            diag_sync_done("SAMPLE_ROWS_TO")
+
+            diag_begin("LOGITS_ROWS")
             logits_hidden_states = last_hidden_states[sample_rows]
+            diag_sync_done("LOGITS_ROWS")
+
+            diag_begin("NEXT_ROWS")
             next_hidden_states = hidden_states[sample_rows]
+            diag_sync_done("NEXT_ROWS")
+
+            diag_begin("POSITION_ROWS")
             step_positions = (
                 positions[:, sample_rows]
                 if self.uses_mrope
                 else positions[sample_rows]
             )
+            diag_sync_done("POSITION_ROWS")
         else:
             logits_hidden_states = last_hidden_states
             next_hidden_states = hidden_states
