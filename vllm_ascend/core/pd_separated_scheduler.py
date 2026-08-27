@@ -25,8 +25,24 @@ from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
+from vllm_ascend.edge_cloud.mm_identity import compute_processor_fingerprint
 from vllm_ascend.edge_cloud.observability import log_event
-from vllm_ascend.edge_cloud.prefix_protocol import PrefixHasher
+from vllm_ascend.edge_cloud.prefix_protocol import DIGEST_SIZE, PrefixHasher
+
+
+@dataclass(frozen=True)
+class _EdgeCloudFinishMediaItem:
+    """Media identity persisted for FINISH-time manifest recomputation.
+
+    Duck-type compatible with the media items accepted by
+    ``PrefixHasher.build_manifest``; carries no media content, only the
+    content digest and placeholder position.
+    """
+
+    modality: str
+    digest: bytes
+    offset: int
+    length: int
 
 
 class PrefillState(enum.Enum):
@@ -234,6 +250,7 @@ class PDSeparatedScheduler(Scheduler):
             self._edge_cloud_prefix_hasher = PrefixHasher(
                 Path(tenant_key_file).read_bytes().strip(),
                 self.vllm_config.cache_config.block_size,
+                processor_fingerprint=compute_processor_fingerprint(self.vllm_config.model_config),
             )
             log_event(
                 logger,
@@ -1970,10 +1987,43 @@ class PDSeparatedScheduler(Scheduler):
         hasher = self._edge_cloud_prefix_hasher
         if control_request_id is None or hasher is None:
             return
-        manifest = hasher.build_manifest(
-            control_request_id,
-            request.all_token_ids,
-        )
+        def record_suppressed_finish() -> None:
+            # Fail closed means "publish nothing", not "send no FINISH": the
+            # record still carries the accounting fields so the cloud can
+            # release the request and close out usage, while
+            # publish_cache=False forbids publishing any of its blocks.
+            self._edge_cloud_finished_request_data[request.request_id] = EdgeCloudFinishedRequest(
+                control_request_id=control_request_id,
+                prompt_tokens=request.num_prompt_tokens,
+                completion_tokens=request.num_output_tokens,
+                full_block_hashes=(),
+                publish_cache=False,
+            )
+
+        media_items = self._edge_cloud_finish_media_items(request)
+        if media_items is None:
+            # A multimodal request with an unusable media identity must
+            # never degrade to a token-only manifest (that would fold
+            # different media into one cache identity).
+            record_suppressed_finish()
+            return
+        try:
+            manifest = hasher.build_manifest(
+                control_request_id,
+                request.all_token_ids,
+                media_items=media_items,
+            )
+        except ValueError as exc:
+            log_event(
+                logger,
+                "error",
+                "edge_finish_manifest_rejected",
+                control_request_id=control_request_id,
+                engine_request_id=request.request_id,
+                error=str(exc),
+            )
+            record_suppressed_finish()
+            return
         self._edge_cloud_finished_request_data[request.request_id] = EdgeCloudFinishedRequest(
             control_request_id=control_request_id,
             prompt_tokens=request.num_prompt_tokens,
@@ -1988,8 +2038,62 @@ class PDSeparatedScheduler(Scheduler):
             engine_request_id=request.request_id,
             prompt_tokens=request.num_prompt_tokens,
             completion_tokens=request.num_output_tokens,
+            media_items=len(media_items),
             full_blocks=manifest.full_block_count,
         )
+
+    @staticmethod
+    def _edge_cloud_finish_media_items(request: Request) -> tuple[_EdgeCloudFinishMediaItem, ...] | None:
+        """Rebuild media identity items from ``request.mm_features``.
+
+        Returns an empty tuple for text-only requests and ``None`` when any
+        media item is unusable (caller must then fail closed). ``mm_hash``
+        is the hex-encoded 32-byte content digest produced by the Edge
+        processor pipeline; offsets/lengths are absolute token positions of
+        the media placeholder in the prompt.
+        """
+        media_items: list[_EdgeCloudFinishMediaItem] = []
+        for feature in request.mm_features:
+            mm_hash = feature.mm_hash
+            if not isinstance(mm_hash, str) or len(mm_hash) != 2 * DIGEST_SIZE:
+                log_event(
+                    logger,
+                    "error",
+                    "edge_finish_media_item_rejected",
+                    engine_request_id=request.request_id,
+                    reason="invalid_mm_hash",
+                )
+                return None
+            try:
+                digest = bytes.fromhex(mm_hash)
+            except ValueError:
+                log_event(
+                    logger,
+                    "error",
+                    "edge_finish_media_item_rejected",
+                    engine_request_id=request.request_id,
+                    reason="mm_hash_not_hex",
+                )
+                return None
+            if len(digest) != DIGEST_SIZE:
+                log_event(
+                    logger,
+                    "error",
+                    "edge_finish_media_item_rejected",
+                    engine_request_id=request.request_id,
+                    reason="mm_digest_wrong_size",
+                )
+                return None
+            position = feature.mm_position
+            media_items.append(
+                _EdgeCloudFinishMediaItem(
+                    modality=feature.modality,
+                    digest=digest,
+                    offset=position.offset,
+                    length=position.length,
+                )
+            )
+        return tuple(media_items)
 
     def release_draft_retained_blocks(self, task_id: str) -> None:
         """Free KV blocks retained for a completed/dropped draft task.

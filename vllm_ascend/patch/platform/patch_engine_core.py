@@ -382,24 +382,36 @@ def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
 def _make_cloud_safe_scheduler_output(
     scheduler_output: SchedulerOutput,
 ) -> SchedulerOutput:
-    """Replace prompt and generated token IDs with same-length placeholders."""
+    """Project one SchedulerOutput into its cloud-facing privacy form.
+
+    Token IDs are replaced with same-length zeros and multimodal identity /
+    encoder metadata is dropped (see EDGE_CLOUD_MULTIMODAL_PREFIX_ISOLATION_
+    DESIGN.md section 10). Only the published copy is scrubbed; the local
+    worker keeps the original SchedulerOutput untouched. Batch-level
+    scheduling metadata (including the dynamically stamped ``has_mrope``)
+    survives ``_copy.copy`` and stays available to the cloud.
+    """
     cloud_so = _copy.copy(scheduler_output)
     cloud_so.scheduled_new_reqs = []
     for request_data in scheduler_output.scheduled_new_reqs:
-        if request_data.mm_features or request_data.prompt_embeds is not None:
+        if request_data.prompt_embeds is not None:
             log_event(
                 logger,
                 "error",
                 "edge_scheduler_scrub_rejected",
                 engine_request_id=request_data.req_id,
-                reason="multimodal_request",
+                reason="prompt_embeds",
             )
-            raise ValueError("prefix cache coordination currently supports text-only requests")
+            raise ValueError("prefix cache coordination currently does not support prompt_embeds")
         cloud_request = _copy.copy(request_data)
         if request_data.prompt_token_ids is not None:
             cloud_request.prompt_token_ids = [0] * len(request_data.prompt_token_ids)
         if request_data.prefill_token_ids is not None:
             cloud_request.prefill_token_ids = [0] * len(request_data.prefill_token_ids)
+        # Media identity stays on the edge: the cloud never runs the vision
+        # encoder and must not see mm_features (section 10 projection).
+        cloud_request.mm_features = []
+        cloud_request.prompt_is_token_ids = None
         cloud_so.scheduled_new_reqs.append(cloud_request)
 
     cached = _copy.copy(scheduler_output.scheduled_cached_reqs)
@@ -413,6 +425,8 @@ def _make_cloud_safe_scheduler_output(
         request_id: [0] * len(token_ids)
         for request_id, token_ids in (scheduler_output.scheduled_spec_decode_tokens.items())
     }
+    cloud_so.scheduled_encoder_inputs = {}
+    cloud_so.free_encoder_mm_hashes = []
     log_event(
         logger,
         "debug",

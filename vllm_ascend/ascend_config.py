@@ -13,12 +13,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import hashlib
 import json
 import os
 from typing import TYPE_CHECKING, Any
 
+from vllm import envs
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
+
+from vllm_ascend.edge_cloud.prefix_protocol import DIGEST_SIZE
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -928,6 +932,15 @@ class PDSeparationConfig:
         )
 
 
+# Model types allowed for edge-cloud prefix cache coordination.
+# "qwen3_5_text" is the text-only Qwen3.5 Dense deployment and also the text
+# backbone (hf_text_config) of the image-capable VL variant; "qwen3_5" is the
+# top-level HF config model_type of Qwen3_5ForConditionalGeneration, the Dense
+# VL variant whose image requests are enabled in the first phase. MoE variants
+# (qwen3_5_moe / qwen3_5_moe_text) stay rejected.
+_EDGE_CLOUD_COORDINATION_MODEL_TYPES = frozenset({"qwen3_5", "qwen3_5_text"})
+
+
 class EdgeCloudConfig:
     """Configuration for edge-cloud collaborative inference."""
 
@@ -998,17 +1011,24 @@ class EdgeCloudConfig:
                 "edge_cloud_config.prefix_cache_coordination.enabled=True "
                 "requires edge_cloud_config.pd_separation.enabled=True"
             )
+        if self.role == "edge":
+            self._validate_mm_hasher_digest_size()
         if self._vllm_config is None:
             return
 
         model_config = self._vllm_config.model_config
+        hf_config = getattr(model_config, "hf_config", None)
+        top_model_type = getattr(hf_config, "model_type", "")
         hf_text_config = getattr(model_config, "hf_text_config", None)
-        model_type = getattr(hf_text_config, "model_type", "")
-        if model_type not in ("qwen3_5", "qwen3_5_text"):
+        text_model_type = getattr(hf_text_config, "model_type", "")
+        if (
+            top_model_type not in _EDGE_CLOUD_COORDINATION_MODEL_TYPES
+            or text_model_type not in _EDGE_CLOUD_COORDINATION_MODEL_TYPES
+        ):
             raise ValueError(
                 "prefix cache coordination currently supports only "
                 "Qwen3.5-Dense (model_type='qwen3_5' or 'qwen3_5_text'), got "
-                f"model_type={model_type!r}"
+                f"model_type={top_model_type!r} (text backbone {text_model_type!r})"
             )
         if self._vllm_config.lora_config is not None:
             raise ValueError("prefix cache coordination does not currently support LoRA")
@@ -1018,6 +1038,35 @@ class EdgeCloudConfig:
         cache_config = self._vllm_config.cache_config
         if not getattr(cache_config, "enable_prefix_caching", False):
             raise ValueError("prefix cache coordination requires enable_prefix_caching=True")
+
+    @staticmethod
+    def _validate_mm_hasher_digest_size() -> None:
+        """Reject multimodal hashers whose digest does not fit the media ABI.
+
+        The edge-cloud media-aware hash ABI carries media content digests in
+        a fixed ``DIGEST_SIZE``-byte field, so the effective
+        ``VLLM_MM_HASHER_ALGORITHM`` must produce digests of exactly that
+        size. The size is measured from the algorithm name instead of
+        blacklisting algorithm names.
+        """
+        algorithm = envs.VLLM_MM_HASHER_ALGORITHM
+        try:
+            digest_size = hashlib.new(algorithm).digest_size
+        except ValueError:
+            # blake3 (the vLLM default) comes from the external blake3
+            # package and is not resolvable through hashlib; measure it via
+            # vLLM's own hasher factory.
+            from vllm.multimodal.hasher import _get_hasher_factory
+
+            digest_size = _get_hasher_factory(algorithm)().digest_size
+        if digest_size != DIGEST_SIZE:
+            raise ValueError(
+                "edge-cloud prefix cache coordination requires a "
+                f"{DIGEST_SIZE}-byte multimodal content digest, but "
+                f"VLLM_MM_HASHER_ALGORITHM={algorithm!r} produces "
+                f"{digest_size}-byte digests; choose an algorithm with a "
+                f"{DIGEST_SIZE}-byte digest (e.g. blake3 or sha256)"
+            )
 
     def _validate_incompatible_parallel_features(self):
         """Reject parallel features that break the metadata-free PP path.

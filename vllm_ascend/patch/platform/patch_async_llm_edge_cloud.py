@@ -3,15 +3,16 @@
 
 """Attach the Ascend edge-cloud prefix client to upstream AsyncLLM."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from vllm.engine.protocol import EdgeCloudPrefixResult
+from vllm.engine.protocol import EdgeCloudMediaItem, EdgeCloudPrefixResult
 from vllm.logger import logger
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.edge_cloud.edge_client import EdgePrefixClient
+from vllm_ascend.edge_cloud.mm_identity import compute_processor_fingerprint
 from vllm_ascend.edge_cloud.observability import log_event
 
 _INSTALLED_FLAG = "_vllm_ascend_edge_prefix_client_installed"
@@ -22,6 +23,8 @@ async def _negotiate_edge_cloud_prefix(
     request_id: str,
     prompt_token_ids: list[int],
     openai_request: Mapping[str, Any],
+    *,
+    media_items: Sequence[EdgeCloudMediaItem] = (),
 ) -> EdgeCloudPrefixResult | None:
     edge_cloud_config = get_ascend_config().edge_cloud_config
     coordination = edge_cloud_config.prefix_cache_coordination
@@ -39,6 +42,9 @@ async def _negotiate_edge_cloud_prefix(
             consumer_id=coordination.consumer_id,
             block_size=self.vllm_config.cache_config.block_size,
             connect_timeout=coordination.connect_timeout,
+            processor_fingerprint=compute_processor_fingerprint(
+                self.vllm_config.model_config
+            ),
         )
         self._edge_cloud_prefix_client = client
         log_event(
@@ -47,7 +53,9 @@ async def _negotiate_edge_cloud_prefix(
             "edge_admission_client_created",
             block_size=client.block_size,
         )
-    result = await client.negotiate(request_id, prompt_token_ids, openai_request)
+    result = await client.negotiate(
+        request_id, prompt_token_ids, openai_request, media_items=media_items
+    )
     log_event(
         logger,
         "info",

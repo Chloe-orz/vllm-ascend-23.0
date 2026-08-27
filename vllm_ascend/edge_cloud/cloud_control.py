@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import queue
 import threading
 import time
+from collections.abc import Mapping
 from contextlib import suppress
 from typing import Any
 
@@ -17,12 +19,62 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from vllm.logger import logger
 
+from vllm_ascend.edge_cloud.mm_identity import MM_ABI_VERSION, mm_abi_header_value
 from vllm_ascend.edge_cloud.observability import format_event, log_event
 from vllm_ascend.edge_cloud.prefix_protocol import (
+    DIGEST_SIZE,
+    HEADER_MM_ABI,
+    HEADER_PROTOCOL,
     HEADER_REQUEST_ID,
+    PROTOCOL_VERSION,
+    PROTOCOL_VERSION_MM,
     PrefixManifest,
     UsageInfo,
 )
+
+
+def _validate_mm_abi_header(value: str | None) -> str:
+    """Validate a ``X-Edge-Cloud-MM-ABI`` header and return it unchanged."""
+    if value is None:
+        raise ValueError(f"missing required header {HEADER_MM_ABI}")
+    version, separator, encoded = value.partition(":")
+    if not separator or version != MM_ABI_VERSION or not encoded:
+        raise ValueError(f"{HEADER_MM_ABI} must be '{MM_ABI_VERSION}:<base64url fingerprint>'")
+    try:
+        raw = encoded.encode("ascii")
+        fingerprint = base64.b64decode(raw + b"=" * (-len(raw) % 4), altchars=b"-_", validate=True)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise ValueError(f"{HEADER_MM_ABI} carries an invalid base64url fingerprint") from exc
+    if len(fingerprint) != DIGEST_SIZE:
+        raise ValueError(f"{HEADER_MM_ABI} fingerprint must contain {DIGEST_SIZE} bytes")
+    return value
+
+
+def _negotiate_protocol_headers(
+    headers: Mapping[str, str],
+    expected_mm_abi: str | None = None,
+) -> str | None:
+    """Return the validated MM-ABI header value for v2 requests, else None.
+
+    v1 requests keep their exact legacy behavior; a v1 request carrying the
+    MM-ABI header and a v2 request with a missing or malformed one are both
+    rejected so the two protocol stacks never relax into each other. When
+    ``expected_mm_abi`` is given, a v2 request must carry exactly this
+    locally computed fingerprint so an edge with a diverging processor
+    configuration never probes (and pins) cloud KV blocks.
+    """
+    normalized = {key.lower(): value for key, value in headers.items()}
+    protocol = normalized.get(HEADER_PROTOCOL.lower())
+    mm_abi = normalized.get(HEADER_MM_ABI.lower())
+    if protocol == PROTOCOL_VERSION_MM:
+        value = _validate_mm_abi_header(mm_abi)
+        if expected_mm_abi is not None and value != expected_mm_abi:
+            log_event(logger, "warning", "cloud_protocol_rejected", reason="mm_abi_mismatch")
+            raise ValueError(f"{HEADER_MM_ABI} fingerprint does not match this cloud instance")
+        return value
+    if mm_abi is not None:
+        raise ValueError(f"{HEADER_MM_ABI} requires protocol {PROTOCOL_VERSION_MM}")
+    return None
 
 
 class CloudControlBridge:
@@ -269,9 +321,13 @@ class CloudControlProcessor:
         self.event_queue.put({"type": "usage", "request_id": request_id, "usage": usage})
 
 
-def create_cloud_control_app(bridge: CloudControlBridge) -> FastAPI:
+def create_cloud_control_app(
+    bridge: CloudControlBridge,
+    processor_fingerprint: bytes | None = None,
+) -> FastAPI:
     """Create the minimal OpenAI-compatible cloud control endpoint."""
     app = FastAPI(title="vLLM Ascend edge-cloud control plane")
+    expected_mm_abi = mm_abi_header_value(processor_fingerprint) if processor_fingerprint is not None else None
 
     @app.on_event("startup")
     async def start_bridge() -> None:
@@ -290,7 +346,17 @@ def create_cloud_control_app(bridge: CloudControlBridge) -> FastAPI:
         request_id = request.headers.get(HEADER_REQUEST_ID)
         try:
             body = await request.json()
-            manifest = PrefixManifest.from_openai_request(request.headers, body)
+            mm_abi_header = _negotiate_protocol_headers(request.headers, expected_mm_abi)
+            parse_headers: Mapping[str, str] = request.headers
+            if mm_abi_header is not None:
+                # The v2 manifest wire format is isomorphic to v1: after the
+                # protocol marker and MM-ABI checks, parse the body with the
+                # shared v1 manifest reader.
+                parse_headers = {
+                    key: value for key, value in request.headers.items() if key.lower() != HEADER_PROTOCOL.lower()
+                }
+                parse_headers[HEADER_PROTOCOL] = PROTOCOL_VERSION
+            manifest = PrefixManifest.from_openai_request(parse_headers, body)
             probe = await bridge.probe(manifest)
         except ValueError as exc:
             log_event(
@@ -379,6 +445,9 @@ def create_cloud_control_app(bridge: CloudControlBridge) -> FastAPI:
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         }
+        if mm_abi_header is not None:
+            headers[HEADER_PROTOCOL] = PROTOCOL_VERSION_MM
+            headers[HEADER_MM_ABI] = mm_abi_header
         return StreamingResponse(events(), media_type="text/event-stream", headers=headers)
 
     return app
@@ -389,6 +458,7 @@ def run_cloud_control_server(
     host: str,
     port: int,
     process: Any,
+    processor_fingerprint: bytes | None = None,
 ) -> None:
     """Run Uvicorn until the PassiveEngineCore child exits."""
     import uvicorn
@@ -403,7 +473,7 @@ def run_cloud_control_server(
 
     server = uvicorn.Server(
         uvicorn.Config(
-            create_cloud_control_app(bridge),
+            create_cloud_control_app(bridge, processor_fingerprint),
             host=host,
             port=port,
             log_level="info",

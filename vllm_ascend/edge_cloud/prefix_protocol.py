@@ -16,12 +16,19 @@ import hmac
 import struct
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from types import MappingProxyType
+from typing import Any, Protocol
 
 PROTOCOL_VERSION = "edge-cloud-prefix-v1"
+PROTOCOL_VERSION_MM = "edge-cloud-prefix-v2"
 BLOCK_HASH_PREFIX = "ecb1:"
 TAIL_HASH_PREFIX = "ect1:"
 DIGEST_SIZE = hashlib.sha256().digest_size
+# Largest raw media content digest accepted from the upstream hasher
+# (SHA-512 under VLLM_MM_HASHER_ALGORITHM=sha512). Raw digests are always
+# normalized to SHA-256 before entering the hash chain, so the protocol
+# identity is decoupled from the configured vLLM digest algorithm.
+MAX_SOURCE_DIGEST_SIZE = hashlib.sha512().digest_size
 
 HEADER_PROTOCOL = "X-Edge-Cloud-Protocol"
 HEADER_REQUEST_ID = "X-Edge-Cloud-Request-ID"
@@ -29,10 +36,31 @@ HEADER_INSTANCE_ID = "X-Edge-Cloud-Instance-ID"
 HEADER_BLOCK_SIZE = "X-Edge-Cloud-Block-Size"
 HEADER_HIT_BLOCKS = "X-Edge-Cloud-Prefix-Hit-Blocks"
 HEADER_HIT_TOKENS = "X-Edge-Cloud-Prefix-Hit-Tokens"
+HEADER_MM_ABI = "X-Edge-Cloud-MM-ABI"
 
 _FULL_BLOCK_DOMAIN = b"\x01"
 _TAIL_BLOCK_DOMAIN = b"\x02"
+_MEDIA_BLOCK_DOMAIN = b"\x04"
+_MEDIA_TAIL_BLOCK_DOMAIN = b"\x05"
 _UINT32 = struct.Struct(">I")
+
+# Modality encodings for the media-aware hash domains. Audio and video IDs
+# are reserved for future modalities. The mapping is immutable: protocol
+# constants must not be redefinable at runtime.
+_MODALITY_IDS = MappingProxyType({"image": 1})
+
+
+class _MediaItem(Protocol):
+    """Duck-typed media identity description.
+
+    The protocol module stays pure stdlib, so media items are accessed by
+    attribute instead of importing a concrete class from vLLM.
+    """
+
+    modality: str
+    digest: bytes
+    offset: int
+    length: int
 
 
 def _encode_digest(digest: bytes) -> str:
@@ -185,48 +213,172 @@ class PrefixManifest:
 class PrefixHasher:
     """Build a tenant-scoped HMAC-SHA256 chain at KV block boundaries."""
 
-    def __init__(self, tenant_key: bytes, block_size: int) -> None:
+    def __init__(
+        self,
+        tenant_key: bytes,
+        block_size: int,
+        processor_fingerprint: bytes | None = None,
+    ) -> None:
         if len(tenant_key) < 16:
             raise ValueError("tenant_key must contain at least 16 bytes")
         if block_size <= 0:
             raise ValueError("block_size must be positive")
+        if (
+            processor_fingerprint is not None
+            and len(processor_fingerprint) != DIGEST_SIZE
+        ):
+            raise ValueError(
+                f"processor_fingerprint must contain {DIGEST_SIZE} bytes"
+            )
         self._tenant_key = tenant_key
         self.block_size = block_size
+        self._processor_fingerprint = processor_fingerprint
         self._seed = hmac.digest(tenant_key, PROTOCOL_VERSION.encode(), "sha256")
 
+    @staticmethod
+    def _validate_media_items(
+        media_items: Sequence[_MediaItem], prompt_tokens: int
+    ) -> tuple[tuple[str, bytes, int, int], ...]:
+        """Fail-closed validation performed before any hash is computed.
+
+        Returns ``(modality, digest, offset, length)`` tuples sorted by
+        offset. Offsets are absolute token positions in the prompt; the
+        chain position already implies the block index. Any non-empty raw
+        content digest of at most ``MAX_SOURCE_DIGEST_SIZE`` bytes is
+        accepted and normalized to ``SHA-256(raw digest)``, so the external
+        ABI media identity is always ``SHA-256(source content digest)``
+        regardless of the configured vLLM hasher algorithm.
+        """
+        validated: list[tuple[str, bytes, int, int]] = []
+        for item in media_items:
+            if item.modality not in _MODALITY_IDS:
+                raise ValueError(f"unsupported media modality {item.modality!r}")
+            if not 0 < len(item.digest) <= MAX_SOURCE_DIGEST_SIZE:
+                raise ValueError(
+                    f"media digest must contain between 1 and "
+                    f"{MAX_SOURCE_DIGEST_SIZE} bytes"
+                )
+            if item.offset < 0:
+                raise ValueError("media offset must not be negative")
+            if item.length <= 0:
+                raise ValueError("media length must be positive")
+            if item.offset + item.length > prompt_tokens:
+                raise ValueError("media item range exceeds the prompt length")
+            normalized_digest = hashlib.sha256(item.digest).digest()
+            validated.append(
+                (item.modality, normalized_digest, item.offset, item.length)
+            )
+        validated.sort(key=lambda entry: entry[2])
+        previous_end = 0
+        for _, _, offset, length in validated:
+            if offset < previous_end:
+                raise ValueError("media item ranges must not overlap")
+            previous_end = offset + length
+        return tuple(validated)
+
+    def _encode_media_fields(
+        self, covered_items: Sequence[tuple[str, bytes, int, int]]
+    ) -> bytes:
+        """Encode the media trailer shared by the 0x04 and 0x05 domains."""
+        fingerprint = self._processor_fingerprint
+        assert fingerprint is not None  # guaranteed by build_manifest
+        encoded = bytearray(fingerprint)
+        encoded.extend(_UINT32.pack(len(covered_items)))
+        for modality, digest, offset, length in covered_items:
+            encoded.append(_MODALITY_IDS[modality])
+            encoded.extend(digest)
+            encoded.extend(_UINT32.pack(offset))
+            encoded.extend(_UINT32.pack(length))
+        return bytes(encoded)
+
+    @staticmethod
+    def _covered_media_items(
+        validated_items: tuple[tuple[str, bytes, int, int], ...],
+        block_start: int,
+        block_end: int,
+    ) -> list[tuple[str, bytes, int, int]]:
+        """Return media items whose token range intersects the block."""
+        return [
+            item
+            for item in validated_items
+            if item[2] < block_end and block_start < item[2] + item[3]
+        ]
+
     def build_manifest(
-        self, request_id: str, prompt_token_ids: Sequence[int]
+        self,
+        request_id: str,
+        prompt_token_ids: Sequence[int],
+        media_items: Sequence[_MediaItem] = (),
     ) -> PrefixManifest:
-        """Hash a tokenized prompt and return its wire manifest."""
+        """Hash a tokenized prompt and return its wire manifest.
+
+        Blocks that cover no media range keep the byte-identical v1
+        encoding; blocks intersecting at least one media range use the
+        media-aware domains and mix in the processor fingerprint plus
+        each covered media item.
+        """
+        prompt_tokens = len(prompt_token_ids)
+        validated_items = self._validate_media_items(media_items, prompt_tokens)
+        if validated_items and self._processor_fingerprint is None:
+            raise ValueError(
+                "processor_fingerprint is required when media items are present"
+            )
+
         token_bytes = _encode_tokens(prompt_token_ids)
         parent = self._seed
         full_hashes: list[bytes] = []
-        full_count = len(prompt_token_ids) // self.block_size
+        full_count = prompt_tokens // self.block_size
         encoded_block_size = _UINT32.pack(self.block_size)
 
         for index in range(full_count):
-            start = index * self.block_size * _UINT32.size
+            block_start = index * self.block_size
+            block_end = block_start + self.block_size
+            start = block_start * _UINT32.size
             end = start + self.block_size * _UINT32.size
-            parent = hmac.digest(
-                self._tenant_key,
-                _FULL_BLOCK_DOMAIN + parent + encoded_block_size + token_bytes[start:end],
-                "sha256",
+            block_bytes = token_bytes[start:end]
+            covered = self._covered_media_items(
+                validated_items, block_start, block_end
             )
+            if covered:
+                message = (
+                    _MEDIA_BLOCK_DOMAIN
+                    + parent
+                    + encoded_block_size
+                    + block_bytes
+                    + self._encode_media_fields(covered)
+                )
+            else:
+                message = (
+                    _FULL_BLOCK_DOMAIN + parent + encoded_block_size + block_bytes
+                )
+            parent = hmac.digest(self._tenant_key, message, "sha256")
             full_hashes.append(parent)
 
-        remainder = len(prompt_token_ids) % self.block_size
+        remainder = prompt_tokens % self.block_size
         tail_hash = None
         if remainder:
-            tail_bytes = token_bytes[full_count * self.block_size * _UINT32.size :]
-            tail_hash = hmac.digest(
-                self._tenant_key,
-                _TAIL_BLOCK_DOMAIN + parent + _UINT32.pack(remainder) + tail_bytes,
-                "sha256",
+            tail_start = full_count * self.block_size
+            tail_bytes = token_bytes[tail_start * _UINT32.size :]
+            covered = self._covered_media_items(
+                validated_items, tail_start, prompt_tokens
             )
+            if covered:
+                message = (
+                    _MEDIA_TAIL_BLOCK_DOMAIN
+                    + parent
+                    + _UINT32.pack(remainder)
+                    + tail_bytes
+                    + self._encode_media_fields(covered)
+                )
+            else:
+                message = (
+                    _TAIL_BLOCK_DOMAIN + parent + _UINT32.pack(remainder) + tail_bytes
+                )
+            tail_hash = hmac.digest(self._tenant_key, message, "sha256")
 
         return PrefixManifest(
             request_id=request_id,
-            prompt_tokens=len(prompt_token_ids),
+            prompt_tokens=prompt_tokens,
             block_size=self.block_size,
             full_block_hashes=tuple(full_hashes),
             tail_hash=tail_hash,
