@@ -4,22 +4,29 @@ import enum
 import os
 import time
 from collections import deque
-from dataclasses import dataclass, replace
-
-import numpy as np
 from collections.abc import Iterable
+from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from vllm.logger import logger
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import BatchType, HiddenChannelType, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    BatchType,
+    EdgeCloudFinishedRequest,
+    HiddenChannelType,
+    SchedulerOutput,
+)
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.sched.utils import remove_all
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+
+from vllm_ascend.edge_cloud.observability import log_event
+from vllm_ascend.edge_cloud.prefix_protocol import PrefixHasher
 
 
 class PrefillState(enum.Enum):
@@ -27,9 +34,10 @@ class PrefillState(enum.Enum):
 
     See Phase5 design in ``PDbatch分离边云协同Phase5&7详细设计.md``.
     """
-    IDLE = "idle"       # prefill_inflight_count == 0
-    LOW = "low"         # prefill_inflight_count == 1
-    HIGH = "high"       # prefill_inflight_count >= prefill_inflight_limit
+
+    IDLE = "idle"  # prefill_inflight_count == 0
+    LOW = "low"  # prefill_inflight_count == 1
+    HIGH = "high"  # prefill_inflight_count >= prefill_inflight_limit
 
 
 @dataclass
@@ -58,6 +66,7 @@ class PrefillChunkFlight:
     num_scheduled_tokens : int
         Number of tokens scheduled in this chunk.
     """
+
     request_id: str
     head_token: str
     hidden_channel: HiddenChannelType
@@ -108,8 +117,7 @@ class HiddenChannelManager:
             dp_rank = 0
         prefill_start = dp_rank * prefill_per_dp + 1
         self._free_prefills: deque[HiddenChannelType] = deque(
-            HiddenChannelType.prefill(i)
-            for i in range(prefill_start, prefill_start + prefill_per_dp)
+            HiddenChannelType.prefill(i) for i in range(prefill_start, prefill_start + prefill_per_dp)
         )
         self._decode_channel = HiddenChannelType.decode(dp_rank + 1)
         self._head_token_to_channel: dict[str, HiddenChannelType] = {}
@@ -121,14 +129,14 @@ class HiddenChannelManager:
         """Allocate a free prefill channel for the batch identified by
         ``head_token``. Raises if none available."""
         if not self._free_prefills:
-            raise RuntimeError(
-                "No free prefill hidden channel available"
-            )
+            raise RuntimeError("No free prefill hidden channel available")
         channel = self._free_prefills.popleft()
         self._head_token_to_channel[head_token] = channel
         logger.info(
             "[PD] allocate_prefill: channel=%s head_token=%s free_left=%s",
-            channel.value, head_token, list(self._free_prefills),
+            channel.value,
+            head_token,
+            list(self._free_prefills),
         )
         return channel
 
@@ -141,7 +149,9 @@ class HiddenChannelManager:
         self._free_prefills.append(channel)
         logger.info(
             "[PD] release_prefill: channel=%s head_token=%s free=%s",
-            channel.value, head_token, list(self._free_prefills),
+            channel.value,
+            head_token,
+            list(self._free_prefills),
         )
         return channel
 
@@ -162,11 +172,7 @@ class HiddenChannelManager:
 
     @property
     def in_use_prefills(self) -> list[HiddenChannelType]:
-        return [
-            channel
-            for channel in self._head_token_to_channel.values()
-            if channel.value.startswith("prefill_")
-        ]
+        return [channel for channel in self._head_token_to_channel.values() if channel.value.startswith("prefill_")]
 
     @property
     def prefill_pool(self) -> frozenset[HiddenChannelType]:
@@ -216,6 +222,25 @@ class PDSeparatedScheduler(Scheduler):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self._edge_cloud_prefix_hasher: PrefixHasher | None = None
+        self._edge_cloud_finished_request_data: dict[str, EdgeCloudFinishedRequest] = {}
+        additional_config = self.vllm_config.additional_config or {}
+        edge_cloud_config = additional_config.get("edge_cloud_config", {})
+        coordination = edge_cloud_config.get("prefix_cache_coordination", {})
+        if coordination.get("enabled", False):
+            tenant_key_file = coordination.get("tenant_key_file")
+            if not tenant_key_file:
+                raise ValueError("edge prefix cache coordination requires tenant_key_file")
+            self._edge_cloud_prefix_hasher = PrefixHasher(
+                Path(tenant_key_file).read_bytes().strip(),
+                self.vllm_config.cache_config.block_size,
+            )
+            log_event(
+                logger,
+                "info",
+                "edge_finish_hasher_initialized",
+                block_size=self.vllm_config.cache_config.block_size,
+            )
         # Requests that have started their P-first segment but have not yet
         # been fully consumed (still chunking, or still in flight on cloud).
         self.chunk_prefill_first: list[Request] = []
@@ -233,7 +258,8 @@ class PDSeparatedScheduler(Scheduler):
 
         # In-flight prefill limit (head-segment batches).
         self.prefill_inflight_limit: int = getattr(
-            self.scheduler_config, "pd_prefill_inflight_limit",
+            self.scheduler_config,
+            "pd_prefill_inflight_limit",
             _PREFILL_CHANNELS_PER_DP,
         )
         self.prefill_inflight_count: int = 0
@@ -249,10 +275,8 @@ class PDSeparatedScheduler(Scheduler):
         self.draft_remote_pending_count: int = 0
 
         # Phase6 data-plane channel manager — per-dp_rank slice.
-        dp_rank = getattr(self.vllm_config.parallel_config,
-                          "data_parallel_rank", 0)
-        is_shared = getattr(self.vllm_config.parallel_config,
-                            "is_shared_model_edge", False)
+        dp_rank = getattr(self.vllm_config.parallel_config, "data_parallel_rank", 0)
+        is_shared = getattr(self.vllm_config.parallel_config, "is_shared_model_edge", False)
         self.hidden_channel_manager = HiddenChannelManager(
             dp_rank=dp_rank,
             is_shared_model_edge=is_shared,
@@ -278,16 +302,10 @@ class PDSeparatedScheduler(Scheduler):
         # scheduler yields a freed prefill slot to a *different* request
         # (cross-request head-prior, MindIE-style P1首->P2首) instead of
         # ahead-dispatching the same request's next chunk.
-        self.next_prefill_prior_enable: bool = getattr(
-            self.scheduler_config, "pd_next_prefill_prior_enable", False
-        )
+        self.next_prefill_prior_enable: bool = getattr(self.scheduler_config, "pd_next_prefill_prior_enable", False)
         # Enabled via pd_separation.chunk_prefill_prior_enable.
-        self.chunk_prefill_prior_enable: bool = getattr(
-            self.scheduler_config, "pd_chunk_prefill_prior_enable", False
-        )
-        self.max_chunk_prefill_ahead: int = getattr(
-            self.scheduler_config, "pd_max_chunk_prefill_ahead", 1
-        )
+        self.chunk_prefill_prior_enable: bool = getattr(self.scheduler_config, "pd_chunk_prefill_prior_enable", False)
+        self.max_chunk_prefill_ahead: int = getattr(self.scheduler_config, "pd_max_chunk_prefill_ahead", 1)
 
         # Per-chunk flight tracking: head_token → PrefillChunkFlight.
         # Populated on PF, consumed on PL.
@@ -308,9 +326,7 @@ class PDSeparatedScheduler(Scheduler):
         # The count (rather than a bool) supports multiple ahead-scheduled
         # prefill chunks for the same request.
         self._pd_active_flight_count: dict[str, int] = {}
-        self._pd_active_flight_by_key: dict[
-            tuple[BatchType, str], PDActiveFlight
-        ] = {}
+        self._pd_active_flight_by_key: dict[tuple[BatchType, str], PDActiveFlight] = {}
 
         # 限制 PREFILL_FIRST 每个 batch 最多只组 1 个请求。
         # 配置路径: additional_config.edge_cloud_config.pd_separation.limit_prefill_batch_size
@@ -319,9 +335,7 @@ class PDSeparatedScheduler(Scheduler):
         if isinstance(_additional, dict):
             _ec = _additional.get("edge_cloud_config", {})
             _pd = _ec.get("pd_separation", {})
-            self.limit_prefill_batch_size = bool(
-                _pd.get("limit_prefill_batch_size", False)
-            )
+            self.limit_prefill_batch_size = bool(_pd.get("limit_prefill_batch_size", False))
 
         # [新增] DECODE_LAST 延迟调度计时器。
         # D首 pick 后启动，D尾 在延迟到期前不可被调度。
@@ -374,9 +388,7 @@ class PDSeparatedScheduler(Scheduler):
         # Everything is gated on `_edge_cloud_draft_retention_enabled` so
         # deployments without the scheduled edge-cloud draft behave exactly
         # as upstream.
-        self._edge_cloud_draft_retention_enabled: bool = (
-            self._check_scheduled_edge_cloud_draft()
-        )
+        self._edge_cloud_draft_retention_enabled: bool = self._check_scheduled_edge_cloud_draft()
         self._edge_cloud_draft_req_tasks: dict[str, set[str]] = {}
         self._edge_cloud_draft_task_reqs: dict[str, set[str]] = {}
         self._draft_retained_requests: dict[str, dict[str, Request]] = {}
@@ -411,9 +423,7 @@ class PDSeparatedScheduler(Scheduler):
             return
         self._pending_cloud_draft_invalidations.extend(task_ids)
 
-    def filter_cloud_finished_req_ids(
-        self, finished_req_ids: set[str]
-    ) -> set[str]:
+    def filter_cloud_finished_req_ids(self, finished_req_ids: set[str]) -> set[str]:
         """Compute the finished_req_ids a cloud-bound batch should carry.
 
         The edge retains finished requests that are still referenced by an
@@ -455,11 +465,13 @@ class PDSeparatedScheduler(Scheduler):
                 continue
             cloud_finished.discard(req_id)
             self._cloud_withheld_finished_req_ids.add(req_id)
-            logger.info(
-                "[PD] withholding cloud finish for req=%s until draft "
-                "tasks %s release it",
-                req_id,
-                self._edge_cloud_draft_req_tasks.get(req_id),
+            draft_tasks = self._edge_cloud_draft_req_tasks.get(req_id) or set()
+            log_event(
+                logger,
+                "info",
+                "edge_finish_withheld_for_mtp",
+                engine_request_id=req_id,
+                draft_task_count=len(draft_tasks),
             )
         if self._cloud_released_finished_req_ids:
             still_valid: set[str] = set()
@@ -481,13 +493,39 @@ class PDSeparatedScheduler(Scheduler):
             self._cloud_released_finished_req_ids = set()
         return cloud_finished
 
+    def get_cloud_finished_request_data(
+        self,
+        finished_req_ids: set[str],
+    ) -> dict[str, EdgeCloudFinishedRequest]:
+        """Return accounting records without consuming withheld finishes.
+
+        MTP may remove a finished request from one cloud-bound output and
+        re-emit it after the in-flight draft chain releases the request. The
+        accounting record must remain available until that later publish
+        succeeds.
+        """
+        return {
+            request_id: self._edge_cloud_finished_request_data[request_id]
+            for request_id in finished_req_ids
+            if request_id in self._edge_cloud_finished_request_data
+        }
+
+    def acknowledge_cloud_finished_request_data(
+        self,
+        finished_req_ids: set[str],
+    ) -> None:
+        """Consume accounting records after their cloud publish succeeds."""
+        for request_id in finished_req_ids:
+            self._edge_cloud_finished_request_data.pop(request_id, None)
+
     def schedule(self) -> SchedulerOutput:
         scheduler_output = self._schedule_pd_separated()
         # Only FIRST-segment batches are published to the cloud over PRE_OUT
         # (the publish hook drops PL/DL/DRL tails), and only batches whose
         # cloud-side execution runs the purge hook can deliver the
-        # invalidations.  EMPTY batches are not broadcast either.  Stamping
-        # any other batch type would silently discard the pending list, so
+        # invalidations. EMPTY finish batches are broadcast to the control
+        # manager but do not execute a worker purge hook. Stamping any other
+        # batch type would silently discard the pending list, so
         # keep the invalidations queued until a cloud-bound batch can carry
         # them.
         if self._pending_cloud_draft_invalidations and (
@@ -498,10 +536,22 @@ class PDSeparatedScheduler(Scheduler):
                 BatchType.DRAFT_FIRST,
             )
         ):
-            scheduler_output.cloud_draft_invalidate_task_ids = (
-                self._pending_cloud_draft_invalidations
-            )
+            scheduler_output.cloud_draft_invalidate_task_ids = self._pending_cloud_draft_invalidations
             self._pending_cloud_draft_invalidations = []
+        finished_data = {
+            request_id: self._edge_cloud_finished_request_data[request_id]
+            for request_id in scheduler_output.finished_req_ids
+            if request_id in self._edge_cloud_finished_request_data
+        }
+        if finished_data:
+            scheduler_output.edge_cloud_finished_requests = finished_data
+            log_event(
+                logger,
+                "debug",
+                "edge_finish_records_attached",
+                batch_type=scheduler_output.batch_type,
+                finished_requests=len(finished_data),
+            )
         return scheduler_output
 
     # ------------------------------------------------------------------ #
@@ -509,9 +559,7 @@ class PDSeparatedScheduler(Scheduler):
     # ------------------------------------------------------------------ #
     def _can_ahead_schedule(self, req_id: str) -> bool:
         """True when the request can have one more chunk PF dispatched ahead."""
-        return (
-            self._ahead_chunk_count.get(req_id, 0) < self.max_chunk_prefill_ahead
-        )
+        return self._ahead_chunk_count.get(req_id, 0) < self.max_chunk_prefill_ahead
 
     def _has_other_prefill_request(self, current_req_id: str) -> bool:
         """True if a different request has prefill work ready to fill the next
@@ -535,8 +583,7 @@ class PDSeparatedScheduler(Scheduler):
         running = getattr(self, "running", None)
         if running:
             for req in running:
-                if (req.request_id != current_req_id
-                        and getattr(req, "is_prefill_chunk", False)):
+                if req.request_id != current_req_id and getattr(req, "is_prefill_chunk", False):
                     return True
         return len(self.waiting) > 0
 
@@ -558,13 +605,11 @@ class PDSeparatedScheduler(Scheduler):
         """
         if is_last or not self._can_ahead_schedule(req.request_id):
             return False
-        if (self.next_prefill_prior_enable
-                and self._has_other_prefill_request(req.request_id)):
-            return False
-        return True
+        return not (self.next_prefill_prior_enable and self._has_other_prefill_request(req.request_id))
 
     def _select_single_prefill_candidate(
-        self, candidates: list[Request],
+        self,
+        candidates: list[Request],
     ) -> tuple[list[Request], list[Request]]:
         """Pick at most one prefill candidate to expose to ``super().schedule()``.
 
@@ -586,7 +631,8 @@ class PDSeparatedScheduler(Scheduler):
         return [candidates[0]], list(candidates[1:])
 
     def _select_pf_candidate_head_prior(
-        self, candidates: list[Request],
+        self,
+        candidates: list[Request],
     ) -> tuple[Request | None, list[Request]]:
         """Pick at most one PF candidate for cross-request head-prior.
 
@@ -648,9 +694,7 @@ class PDSeparatedScheduler(Scheduler):
         the value returned here directly bounds the PF batch size.
         """
         if self.chunk_prefill_prior_enable:
-            exposed, rest_candidates = self._select_pf_candidate_head_prior(
-                saved_chunk_prefill_first
-            )
+            exposed, rest_candidates = self._select_pf_candidate_head_prior(saved_chunk_prefill_first)
             if exposed is not None:
                 # Continue one candidate; cap at 1 so the base does not admit
                 # a new request alongside it (one-per-batch).
@@ -689,10 +733,7 @@ class PDSeparatedScheduler(Scheduler):
         self._pending_tail_count.pop(req_id, None)
         self._ahead_chunk_count.pop(req_id, None)
         # Remove flights for this request.
-        to_remove = [
-            token for token, flight in self._prefill_flight_by_token.items()
-            if flight.request_id == req_id
-        ]
+        to_remove = [token for token, flight in self._prefill_flight_by_token.items() if flight.request_id == req_id]
         for token in to_remove:
             self._prefill_flight_by_token.pop(token, None)
 
@@ -714,9 +755,7 @@ class PDSeparatedScheduler(Scheduler):
         else:
             flight_id = scheduler_output.head_token
             if not flight_id:
-                raise RuntimeError(
-                    f"{first_batch_type.value} flight is missing head_token"
-                )
+                raise RuntimeError(f"{first_batch_type.value} flight is missing head_token")
         return first_batch_type, str(flight_id)
 
     @staticmethod
@@ -733,9 +772,7 @@ class PDSeparatedScheduler(Scheduler):
         first_batch_type = scheduler_output.batch_type
         last_batch_type = _PD_FIRST_TO_LAST.get(first_batch_type)
         if last_batch_type is None:
-            raise RuntimeError(
-                f"Cannot register non-First PD batch: {first_batch_type}"
-            )
+            raise RuntimeError(f"Cannot register non-First PD batch: {first_batch_type}")
 
         key = self._pd_flight_key(scheduler_output, first_batch_type)
         if key in self._pd_active_flight_by_key:
@@ -743,9 +780,7 @@ class PDSeparatedScheduler(Scheduler):
 
         request_ids = self._pd_flight_request_ids(scheduler_output)
         if not request_ids:
-            raise RuntimeError(
-                f"{first_batch_type.value} flight has no associated requests"
-            )
+            raise RuntimeError(f"{first_batch_type.value} flight has no associated requests")
 
         self._pd_active_flight_by_key[key] = PDActiveFlight(
             request_ids=request_ids,
@@ -755,18 +790,14 @@ class PDSeparatedScheduler(Scheduler):
             created_at=time.monotonic(),
         )
         for req_id in request_ids:
-            self._pd_active_flight_count[req_id] = (
-                self._pd_active_flight_count.get(req_id, 0) + 1
-            )
+            self._pd_active_flight_count[req_id] = self._pd_active_flight_count.get(req_id, 0) + 1
 
     def _complete_pd_flight(self, scheduler_output: SchedulerOutput) -> bool:
         """Unprotect requests after a matching Last batch has completed."""
         last_batch_type = scheduler_output.batch_type
         first_batch_type = _PD_LAST_TO_FIRST.get(last_batch_type)
         if first_batch_type is None:
-            raise RuntimeError(
-                f"Cannot complete non-Last PD batch: {last_batch_type}"
-            )
+            raise RuntimeError(f"Cannot complete non-Last PD batch: {last_batch_type}")
 
         key = self._pd_flight_key(scheduler_output, first_batch_type)
         flight = self._pd_active_flight_by_key.pop(key, None)
@@ -779,18 +810,13 @@ class PDSeparatedScheduler(Scheduler):
             return False
         if flight.last_batch_type != last_batch_type:
             raise RuntimeError(
-                "PD flight type mismatch: "
-                f"expected={flight.last_batch_type}, got={last_batch_type}, "
-                f"key={key}"
+                f"PD flight type mismatch: expected={flight.last_batch_type}, got={last_batch_type}, key={key}"
             )
 
         for req_id in flight.request_ids:
             count = self._pd_active_flight_count.get(req_id, 0)
             if count <= 0:
-                raise RuntimeError(
-                    "PD active flight count underflow: "
-                    f"request_id={req_id}, key={key}"
-                )
+                raise RuntimeError(f"PD active flight count underflow: request_id={req_id}, key={key}")
             if count == 1:
                 self._pd_active_flight_count.pop(req_id)
             else:
@@ -799,19 +825,12 @@ class PDSeparatedScheduler(Scheduler):
 
     def _is_request_preemptible(self, request: Request) -> bool:
         """Only idle RUNNING requests are safe preemption candidates."""
-        return (
-            request.status == RequestStatus.RUNNING
-            and self._pd_active_flight_count.get(request.request_id, 0) == 0
-        )
+        return request.status == RequestStatus.RUNNING and self._pd_active_flight_count.get(request.request_id, 0) == 0
 
     def _select_preemption_candidate(self) -> Request | None:
         """Select an idle request without touching active edge-cloud work."""
         if self.policy == SchedulingPolicy.PRIORITY:
-            candidates = (
-                request
-                for request in self.running
-                if self._is_request_preemptible(request)
-            )
+            candidates = (request for request in self.running if self._is_request_preemptible(request))
             return max(
                 candidates,
                 key=lambda request: (request.priority, request.arrival_time),
@@ -819,11 +838,7 @@ class PDSeparatedScheduler(Scheduler):
             )
 
         return next(
-            (
-                request
-                for request in reversed(self.running)
-                if self._is_request_preemptible(request)
-            ),
+            (request for request in reversed(self.running) if self._is_request_preemptible(request)),
             None,
         )
 
@@ -858,10 +873,8 @@ class PDSeparatedScheduler(Scheduler):
         # mismatch). Dynamic attr; survives the edge->cloud SO pickle
         # (SchedulerOutput has no __slots__ - PassiveScheduler already relies
         # on this for _ARRIVAL_SEQ_ATTR).
-        scheduler_output.has_mrope = (
-            any(req.mm_features for req in self.requests.values())
-            or any(getattr(nr, "mm_features", None)
-                   for nr in scheduler_output.scheduled_new_reqs)
+        scheduler_output.has_mrope = any(req.mm_features for req in self.requests.values()) or any(
+            getattr(nr, "mm_features", None) for nr in scheduler_output.scheduled_new_reqs
         )
         return scheduler_output
 
@@ -902,9 +915,7 @@ class PDSeparatedScheduler(Scheduler):
 
     def _pick_by_state(self, state: PrefillState) -> SchedulerOutput:
         if self._decode_first_placeholder_parent is not None:
-            self._prepare_next_decode_first_placeholder(
-                self._decode_first_placeholder_parent
-            )
+            self._prepare_next_decode_first_placeholder(self._decode_first_placeholder_parent)
         # A placeholder DECODE_FIRST prepared when the final DRAFT_LAST was
         # dispatched must stay immediately behind that draft tail.  Its real
         # draft token IDs are filled from the worker-local _draft_token_ids
@@ -928,10 +939,7 @@ class PDSeparatedScheduler(Scheduler):
         # (the placeholder is pre-built); it only removes the unsafe
         # overlap window.  Fall through to the normal priority picks while
         # gated.
-        if (
-            self.decodes_first_ready
-            and self.draft_remote_pending_count == 0
-        ):
+        if self.decodes_first_ready and self.draft_remote_pending_count == 0:
             return self.decodes_first_ready.popleft()
 
         first_only = self._pick_decode_or_draft_first_only_or_empty()
@@ -958,11 +966,7 @@ class PDSeparatedScheduler(Scheduler):
             # into decodes_last_ready at creation time; while the head is
             # gated above, the tail must not overtake it (the worker would
             # find no suspended HeadState for it).
-            if (
-                self.decodes_last_ready
-                and not self.decodes_first_ready
-                and self._can_schedule_decode_last()
-            ):
+            if self.decodes_last_ready and not self.decodes_first_ready and self._can_schedule_decode_last():
                 return self._pick_decode_last_batch()
             if self._can_schedule_decode_first():
                 return self._pick_decode_first_batch()
@@ -977,11 +981,7 @@ class PDSeparatedScheduler(Scheduler):
             return self._pick_draft_first_batch()
         # Same overtake guard as the IDLE branch above: a queued placeholder
         # DECODE_FIRST's self-posted tail must wait for its head.
-        if (
-            self.decodes_last_ready
-            and not self.decodes_first_ready
-            and self._can_schedule_decode_last()
-        ):
+        if self.decodes_last_ready and not self.decodes_first_ready and self._can_schedule_decode_last():
             return self._pick_decode_last_batch()
         if self._can_schedule_decode_first():
             return self._pick_decode_first_batch()
@@ -1013,10 +1013,7 @@ class PDSeparatedScheduler(Scheduler):
     def _prefill_state(self) -> PrefillState:
         if self.prefill_inflight_count <= 0:
             return PrefillState.IDLE
-        if (
-            self.prefill_inflight_limit > 1
-            and self.prefill_inflight_count >= self.prefill_inflight_limit
-        ):
+        if self.prefill_inflight_limit > 1 and self.prefill_inflight_count >= self.prefill_inflight_limit:
             return PrefillState.HIGH
         return PrefillState.LOW
 
@@ -1051,9 +1048,7 @@ class PDSeparatedScheduler(Scheduler):
         if not self.drafts_first_ready:
             return False
         next_output = self.drafts_first_ready[0]
-        is_pregenerated = (
-            next_output.draft_task_id in self._pregenerated_draft_task_ids
-        )
+        is_pregenerated = next_output.draft_task_id in self._pregenerated_draft_task_ids
         if is_pregenerated:
             # The edge and cloud workers consume the pre-generated chain in
             # strict FIFO order.  Do not wait for a DRAFT_FIRST result merely
@@ -1075,8 +1070,7 @@ class PDSeparatedScheduler(Scheduler):
             # heads only, allowing draft+draft but not draft+decode.
             return bool(
                 self.decode_head_inflight_count == 0
-                and self.draft_remote_pending_count
-                < self._draft_remote_pending_limit
+                and self.draft_remote_pending_count < self._draft_remote_pending_limit
                 and not self.drafts_last_ready
                 and not self._force_decode_last
                 and not self._force_draft_last
@@ -1097,7 +1091,7 @@ class PDSeparatedScheduler(Scheduler):
     def _log_scheduler_state(self, state: PrefillState, batch_type: BatchType) -> None:
         self._step_counter += 1
         if self.chunk_prefill_prior_enable:
-            logger.info(
+            message = (
                 f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
                 f"waiting[]: {len(self.waiting)}, "
                 f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
@@ -1109,13 +1103,15 @@ class PDSeparatedScheduler(Scheduler):
                 f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
                 f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
                 f"draft_remote_pending: {self.draft_remote_pending_count}, "
-                f"decode_or_draft_inflight: {self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}, "
+                "decode_or_draft_inflight: "
+                f"{self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}, "
                 f"chunk_flights: {len(self._prefill_flight_by_token)}, "
                 f"pending_tails: {self._total_pending_tails()}, "
-                f"ahead_chunks: {sum(self._ahead_chunk_count.values())}",
+                f"ahead_chunks: {sum(self._ahead_chunk_count.values())}"
             )
+            logger.info("%s", message)
         else:
-            logger.info(
+            message = (
                 f"[PD] Step{self._step_counter}, state is {state}, batch_type is {batch_type}, "
                 f"waiting[]: {len(self.waiting)}, "
                 f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}, "
@@ -1127,8 +1123,9 @@ class PDSeparatedScheduler(Scheduler):
                 f"decodes_last_ready[]: {len(self.decodes_last_ready)}, "
                 f"prefill_inflight: {self.prefill_inflight_count}/{self.prefill_inflight_limit}, "
                 f"draft_remote_pending: {self.draft_remote_pending_count}, "
-                f"decode_or_draft_inflight: {self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}",
+                f"decode_or_draft_inflight: {self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}"
             )
+            logger.info("%s", message)
 
     # ------------------------------------------------------------------ #
     # Layer-slice config loading (Edge side)                             #
@@ -1137,21 +1134,18 @@ class PDSeparatedScheduler(Scheduler):
         """Load decode_last_delay_schedule_ms from layer_slice_config.yaml."""
         yaml_path = os.environ.get("VLLM_LAYER_SLICE_CONFIG")
         if yaml_path is None:
-            yaml_path = os.path.join(
-                os.path.dirname(__file__), "layer_slice_config.yaml"
-            )
+            yaml_path = os.path.join(os.path.dirname(__file__), "layer_slice_config.yaml")
         if not os.path.exists(yaml_path):
             self._layer_slice_config_path = None
             self._layer_slice_config_mtime = 0.0
             return
         try:
             import yaml
-            with open(yaml_path, "r", encoding="utf-8") as f:
+
+            with open(yaml_path, encoding="utf-8") as f:
                 raw = yaml.safe_load(f)
             if not isinstance(raw, dict):
-                logger.warning(
-                    "Layer-slice config %s is not a dict; ignoring.", yaml_path
-                )
+                logger.warning("Layer-slice config %s is not a dict; ignoring.", yaml_path)
                 return
             _key = "decode_last_delay_schedule_ms"
             if _key in raw:
@@ -1159,12 +1153,16 @@ class PDSeparatedScheduler(Scheduler):
                     self._decode_last_delay_schedule_ms = int(raw[_key])
                     logger.info(
                         "[PDSeparatedScheduler] %s set to %d from %s",
-                        _key, self._decode_last_delay_schedule_ms, yaml_path,
+                        _key,
+                        self._decode_last_delay_schedule_ms,
+                        yaml_path,
                     )
                 except (ValueError, TypeError):
                     logger.warning(
                         "Invalid %s value %r in %s; keeping %d",
-                        _key, raw[_key], yaml_path,
+                        _key,
+                        raw[_key],
+                        yaml_path,
                         self._decode_last_delay_schedule_ms,
                     )
             _draft_key = "draft_last_delay_schedule_ms"
@@ -1173,12 +1171,16 @@ class PDSeparatedScheduler(Scheduler):
                     self._draft_last_delay_schedule_ms = int(raw[_draft_key])
                     logger.info(
                         "[PDSeparatedScheduler] %s set to %d from %s",
-                        _draft_key, self._draft_last_delay_schedule_ms, yaml_path,
+                        _draft_key,
+                        self._draft_last_delay_schedule_ms,
+                        yaml_path,
                     )
                 except (ValueError, TypeError):
                     logger.warning(
                         "Invalid %s value %r in %s; keeping %d",
-                        _draft_key, raw[_draft_key], yaml_path,
+                        _draft_key,
+                        raw[_draft_key],
+                        yaml_path,
                         self._draft_last_delay_schedule_ms,
                     )
             self._layer_slice_config_path = yaml_path
@@ -1200,8 +1202,7 @@ class PDSeparatedScheduler(Scheduler):
             self._load_layer_slice_config()
             if self._decode_last_delay_schedule_ms != old_value:
                 logger.info(
-                    "[PDSeparatedScheduler] Layer-slice config hot-reloaded: "
-                    "%s=%d",
+                    "[PDSeparatedScheduler] Layer-slice config hot-reloaded: %s=%d",
                     "decode_last_delay_schedule_ms",
                     self._decode_last_delay_schedule_ms,
                 )
@@ -1281,16 +1282,12 @@ class PDSeparatedScheduler(Scheduler):
             self.chunk_prefill_first = []
             saved_waiting_rest = []
 
-
         # Snapshot num_computed_tokens before super().schedule() so that
         # the is_last computation below uses the pre-schedule value.
         # (super().schedule() → _update_after_schedule increments
         # num_computed_tokens; without the snapshot we would double-count
         # the current chunk's tokens.)
-        _num_computed_before: dict[str, int] = {
-            req.request_id: req.num_computed_tokens
-            for req in self.running
-        }
+        _num_computed_before: dict[str, int] = {req.request_id: req.num_computed_tokens for req in self.running}
 
         scheduler_output = None
         try:
@@ -1315,24 +1312,18 @@ class PDSeparatedScheduler(Scheduler):
                     # never sees them, KV is never freed by finished decodes, and
                     # prefill keeps returning empty -> deadlock.  Also re-prepend
                     # the candidates that were not exposed to super() this round.
-                    self.chunk_prefill_first = (
-                        rest_candidates + self.chunk_prefill_first
-                    )
+                    self.chunk_prefill_first = rest_candidates + self.chunk_prefill_first
                     self.running = saved_running
                 else:
                     scheduler_output.batch_type = BatchType.PREFILL_FIRST
                     scheduler_output.head_token = uuid4().hex
-                    scheduler_output.hidden_channel = (
-                        self.hidden_channel_manager.allocate_prefill(
-                            scheduler_output.head_token
-                        )
+                    scheduler_output.hidden_channel = self.hidden_channel_manager.allocate_prefill(
+                        scheduler_output.head_token
                     )
                     self.prefill_inflight_count += 1
                     self._register_pd_flight(scheduler_output)
 
-                    scheduled_req_ids = set(
-                        scheduler_output.num_scheduled_tokens.keys()
-                    )
+                    scheduled_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
 
                     if self.chunk_prefill_prior_enable:
                         # === Chunk-prefill-prior routing ===
@@ -1343,43 +1334,33 @@ class PDSeparatedScheduler(Scheduler):
                         # before the current chunk's PL returns.
                         for req in self.running:
                             if req.request_id in scheduled_req_ids:
-                                num_scheduled = (
-                                    scheduler_output.num_scheduled_tokens[
-                                        req.request_id
-                                    ]
-                                )
+                                num_scheduled = scheduler_output.num_scheduled_tokens[req.request_id]
                                 # Use pre-schedule num_computed_tokens
                                 # to avoid double-counting the current
                                 # chunk's tokens.
-                                num_comp_before = (
-                                    _num_computed_before.get(
-                                        req.request_id, 0
-                                    )
-                                )
-                                remaining = (
-                                    req.num_prompt_tokens
-                                    - num_comp_before
-                                    - num_scheduled
-                                )
+                                num_comp_before = _num_computed_before.get(req.request_id)
+                                if num_comp_before is None:
+                                    # A newly admitted waiting request was not
+                                    # present when the snapshot was taken.
+                                    # Upstream discovers its prefix-cache hit
+                                    # inside schedule(), then advances
+                                    # num_computed_tokens by this chunk before
+                                    # returning. Subtract the scheduled suffix
+                                    # to recover the true pre-schedule progress.
+                                    num_comp_before = req.num_computed_tokens - num_scheduled
+                                remaining = req.num_prompt_tokens - num_comp_before - num_scheduled
                                 is_last = remaining <= 0
                                 flight = PrefillChunkFlight(
                                     request_id=req.request_id,
                                     head_token=scheduler_output.head_token,
-                                    hidden_channel=(
-                                        scheduler_output.hidden_channel
-                                    ),
+                                    hidden_channel=(scheduler_output.hidden_channel),
                                     chunk_index=max(0, req.chunk_num - 1),
                                     is_last_chunk=is_last,
                                     num_scheduled_tokens=num_scheduled,
                                 )
-                                self._prefill_flight_by_token[
-                                    scheduler_output.head_token
-                                ] = flight
+                                self._prefill_flight_by_token[scheduler_output.head_token] = flight
                                 self._pending_tail_count[req.request_id] = (
-                                    self._pending_tail_count.get(
-                                        req.request_id, 0
-                                    )
-                                    + 1
+                                    self._pending_tail_count.get(req.request_id, 0) + 1
                                 )
 
                                 if self._should_ahead_schedule(req, is_last):
@@ -1389,13 +1370,8 @@ class PDSeparatedScheduler(Scheduler):
                                     # the single-request pipeline (both 2P1D
                                     # slots serve the same request).
                                     self.chunk_prefill_first.append(req)
-                                    self._ahead_chunk_count[
-                                        req.request_id
-                                    ] = (
-                                        self._ahead_chunk_count.get(
-                                            req.request_id, 0
-                                        )
-                                        + 1
+                                    self._ahead_chunk_count[req.request_id] = (
+                                        self._ahead_chunk_count.get(req.request_id, 0) + 1
                                     )
                                     logger.info(
                                         "[PD-CHUNK-PRIOR] Ahead-scheduled "
@@ -1406,9 +1382,7 @@ class PDSeparatedScheduler(Scheduler):
                                         req.request_id,
                                         scheduler_output.head_token,
                                         num_scheduled,
-                                        self._ahead_chunk_count[
-                                            req.request_id
-                                        ],
+                                        self._ahead_chunk_count[req.request_id],
                                     )
                                 else:
                                     # Wait for PL before next chunk. Reasons:
@@ -1420,12 +1394,8 @@ class PDSeparatedScheduler(Scheduler):
                                     if (
                                         self.next_prefill_prior_enable
                                         and not is_last
-                                        and self._can_ahead_schedule(
-                                            req.request_id
-                                        )
-                                        and self._has_other_prefill_request(
-                                            req.request_id
-                                        )
+                                        and self._can_ahead_schedule(req.request_id)
+                                        and self._has_other_prefill_request(req.request_id)
                                     ):
                                         wait_reason = "yield"
                                     elif is_last:
@@ -1444,9 +1414,7 @@ class PDSeparatedScheduler(Scheduler):
                                         scheduler_output.head_token,
                                         num_scheduled,
                                         is_last,
-                                        self._pending_tail_count.get(
-                                            req.request_id, 0
-                                        ),
+                                        self._pending_tail_count.get(req.request_id, 0),
                                         wait_reason,
                                     )
                             elif req.is_prefill_chunk:
@@ -1471,9 +1439,7 @@ class PDSeparatedScheduler(Scheduler):
 
                 # Restore prefill candidates not exposed to super() this round
                 # so each is scheduled in its own PF batch (one-per-batch).
-                self.chunk_prefill_first = (
-                    rest_candidates + self.chunk_prefill_first
-                )
+                self.chunk_prefill_first = rest_candidates + self.chunk_prefill_first
                 self.running = saved_running
 
                 # [方案B] Edge 侧建议 Cloud 是否切层。
@@ -1529,24 +1495,17 @@ class PDSeparatedScheduler(Scheduler):
         if not self.prefills_last_ready:
             return self._make_empty_batch()
         so = self.prefills_last_ready.popleft()
-        assert so.batch_type == BatchType.PREFILL_LAST, (
-            f"prefills_last_ready expects PREFILL_LAST, got {so.batch_type}"
-        )
+        assert so.batch_type == BatchType.PREFILL_LAST, f"prefills_last_ready expects PREFILL_LAST, got {so.batch_type}"
         # Mark whether this PL is the request's last prefill chunk.  Mid-chunk
         # PL still has to run the drafter so that the MTP layer populates its
         # KV cache for every prompt chunk; its sampled/draft tokens are only
         # discarded after the draft forward.  The flight is still in the map
         # here and is popped later in
         # _update_from_output_prefill_last_chunk_prior.
-        flight = (
-            self._prefill_flight_by_token.get(so.head_token)
-            if so.head_token else None
-        )
+        flight = self._prefill_flight_by_token.get(so.head_token) if so.head_token else None
         batch_req_ids = tuple(so.num_scheduled_tokens)
         if flight is not None:
-            draft_output_req_ids = (
-                batch_req_ids if flight.is_last_chunk else ()
-            )
+            draft_output_req_ids = batch_req_ids if flight.is_last_chunk else ()
         else:
             # Legacy mode may batch several prefill requests.  Preserve the
             # per-request distinction: every row warms draft KV, while only
@@ -1554,8 +1513,7 @@ class PDSeparatedScheduler(Scheduler):
             draft_output_req_ids = tuple(
                 req_id
                 for req_id in batch_req_ids
-                if (request := self.requests.get(req_id)) is not None
-                and not request.is_prefill_chunk
+                if (request := self.requests.get(req_id)) is not None and not request.is_prefill_chunk
             )
         so.draft_output_req_ids = draft_output_req_ids
         so.is_last_prefill_chunk = bool(draft_output_req_ids)
@@ -1563,10 +1521,7 @@ class PDSeparatedScheduler(Scheduler):
         # prefill_last_pending until update_from_output() moves them to running.
         last_req_ids = set(so.num_scheduled_tokens.keys())
         if last_req_ids:
-            self.chunk_prefill_first = [
-                req for req in self.chunk_prefill_first
-                if req.request_id not in last_req_ids
-            ]
+            self.chunk_prefill_first = [req for req in self.chunk_prefill_first if req.request_id not in last_req_ids]
         self._validate_prefill_tail_channel(so)
         # Every chunk needs a draft-prefill pass.  Only the last chunk's draft
         # tokens are published to the following target verify batch; the
@@ -1581,28 +1536,21 @@ class PDSeparatedScheduler(Scheduler):
             raise RuntimeError("PREFILL_LAST missing head_token")
         pool = self.hidden_channel_manager.prefill_pool
         if channel not in pool:
-            raise RuntimeError(
-                f"PREFILL_LAST expects a prefill hidden channel from "
-                f"{pool}, got {channel}"
-            )
+            raise RuntimeError(f"PREFILL_LAST expects a prefill hidden channel from {pool}, got {channel}")
         expected = self.hidden_channel_manager.get_channel(token)
         if expected != channel:
             raise RuntimeError(
-                f"PREFILL_LAST hidden channel mismatch: expected {expected}, "
-                f"got {channel}, head_token={token}"
+                f"PREFILL_LAST hidden channel mismatch: expected {expected}, got {channel}, head_token={token}"
             )
 
     def _validate_decode_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
         pool = self.hidden_channel_manager.decode_pool
         if scheduler_output.hidden_channel not in pool:
             raise RuntimeError(
-                f"DECODE_LAST expects a decode hidden channel from "
-                f"{pool}, got {scheduler_output.hidden_channel}"
+                f"DECODE_LAST expects a decode hidden channel from {pool}, got {scheduler_output.hidden_channel}"
             )
 
-    def _validate_draft_tail_channel(
-        self, scheduler_output: SchedulerOutput
-    ) -> None:
+    def _validate_draft_tail_channel(self, scheduler_output: SchedulerOutput) -> None:
         if not scheduler_output.head_token:
             raise RuntimeError("DRAFT_LAST missing head_token")
         if not scheduler_output.draft_task_id:
@@ -1610,29 +1558,20 @@ class PDSeparatedScheduler(Scheduler):
         if scheduler_output.draft_step_idx is None:
             raise RuntimeError("DRAFT_LAST missing draft_step_idx")
         if scheduler_output.hidden_channel != HiddenChannelType.DECODE:
-            raise RuntimeError(
-                "DRAFT_LAST expects decode hidden channel, got "
-                f"{scheduler_output.hidden_channel}"
-            )
+            raise RuntimeError(f"DRAFT_LAST expects decode hidden channel, got {scheduler_output.hidden_channel}")
 
     def _pick_draft_first_batch(self) -> SchedulerOutput:
         while self.drafts_first_ready:
             scheduler_output = self.drafts_first_ready.popleft()
             if self._is_stale_draft_output(scheduler_output):
                 if scheduler_output.draft_task_id:
-                    self._pregenerated_draft_task_ids.discard(
-                        scheduler_output.draft_task_id
-                    )
-                    self._pregenerated_draft_req_ids.pop(
-                        scheduler_output.draft_task_id, None
-                    )
+                    self._pregenerated_draft_task_ids.discard(scheduler_output.draft_task_id)
+                    self._pregenerated_draft_req_ids.pop(scheduler_output.draft_task_id, None)
                     # Report the cut chain so EngineCore can release the
                     # retained KV blocks and invalidate the cloud-side
                     # cached draft metadata (which will never be fully
                     # consumed now).
-                    self._dropped_draft_task_ids_to_report.append(
-                        scheduler_output.draft_task_id
-                    )
+                    self._dropped_draft_task_ids_to_report.append(scheduler_output.draft_task_id)
                 if scheduler_output is self._draft_first_cloud_publish_pending:
                     self._draft_first_cloud_publish_pending = None
                     self._draft_first_scalars_patched = False
@@ -1673,9 +1612,7 @@ class PDSeparatedScheduler(Scheduler):
         )
         # is_last_prefill_chunk is a downstream dynamic SchedulerOutput
         # attribute, so dataclasses.replace() does not preserve it.
-        draft_last.is_last_prefill_chunk = getattr(
-            scheduler_output, "is_last_prefill_chunk", True
-        )
+        draft_last.is_last_prefill_chunk = getattr(scheduler_output, "is_last_prefill_chunk", True)
         draft_last.draft_output_req_ids = getattr(
             scheduler_output,
             "draft_output_req_ids",
@@ -1716,13 +1653,9 @@ class PDSeparatedScheduler(Scheduler):
         if method != "mtp":
             return False
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
-        return "qwen" in str(
-            getattr(hf_config, "model_type", "")
-        ).lower()
+        return "qwen" in str(getattr(hf_config, "model_type", "")).lower()
 
-    def _pregenerate_draft_chain(
-        self, target_tail: SchedulerOutput
-    ) -> None:
+    def _pregenerate_draft_chain(self, target_tail: SchedulerOutput) -> None:
         """Create fixed-length placeholder DRF tasks at target-tail pick time.
 
         The real token IDs remain in the edge worker.  FIFO ordering ensures
@@ -1732,16 +1665,10 @@ class PDSeparatedScheduler(Scheduler):
         """
         if not self._uses_async_scheduled_mtp_placeholders():
             return
-        if (
-            self.drafts_first_ready
-            or self.drafts_last_ready
-            or self._draft_first_cloud_publish_pending is not None
-        ):
+        if self.drafts_first_ready or self.drafts_last_ready or self._draft_first_cloud_publish_pending is not None:
             return
         req_ids = list(target_tail.num_scheduled_tokens)
-        if not req_ids or any(
-            req_id not in self.requests for req_id in req_ids
-        ):
+        if not req_ids or any(req_id not in self.requests for req_id in req_ids):
             return
         task_id = target_tail.head_token
         if not task_id:
@@ -1762,9 +1689,7 @@ class PDSeparatedScheduler(Scheduler):
             # Preserve the parent prefill phase across the independently
             # scheduled draft chain.  Mid-chunk chains warm the draft KV but
             # must not seed a target decode placeholder.
-            draft_first.is_last_prefill_chunk = getattr(
-                target_tail, "is_last_prefill_chunk", True
-            )
+            draft_first.is_last_prefill_chunk = getattr(target_tail, "is_last_prefill_chunk", True)
             draft_first.draft_output_req_ids = getattr(
                 target_tail,
                 "draft_output_req_ids",
@@ -1793,10 +1718,7 @@ class PDSeparatedScheduler(Scheduler):
     ) -> SchedulerOutput | None:
         """Patch cloud-only sampling state into the queued step-0 control."""
         pending = self._draft_first_cloud_publish_pending
-        if (
-            pending is None
-            or pending.draft_task_id != draft_task_id
-        ):
+        if pending is None or pending.draft_task_id != draft_task_id:
             return None
         pending.num_accepted_tokens = num_accepted_tokens
         pending.valid_sampled_token_count = valid_sampled_token_count
@@ -1807,21 +1729,14 @@ class PDSeparatedScheduler(Scheduler):
         self._draft_first_scalars_patched = False
         return pending
 
-    def is_pre_generated_draft(
-        self, scheduler_output: SchedulerOutput
-    ) -> bool:
-        task_id = (
-            scheduler_output.draft_task_id
-            or scheduler_output.head_token
-        )
+    def is_pre_generated_draft(self, scheduler_output: SchedulerOutput) -> bool:
+        task_id = scheduler_output.draft_task_id or scheduler_output.head_token
         return bool(task_id and task_id in self._pregenerated_draft_task_ids)
 
     def active_pre_generated_draft_req_ids(self) -> set[str]:
         active: set[str] = set()
         for task_id in self._pregenerated_draft_task_ids:
-            active.update(
-                self._pregenerated_draft_req_ids.get(task_id, ())
-            )
+            active.update(self._pregenerated_draft_req_ids.get(task_id, ()))
         return active
 
     def enqueue_draft_first(
@@ -1847,9 +1762,7 @@ class PDSeparatedScheduler(Scheduler):
         # output was processed).  The chain then can never (fully) run:
         # report the task so EngineCore releases the retained KV blocks
         # and invalidates the cloud-side cached metadata.
-        if not req_ids or any(
-            req_id not in self.requests for req_id in req_ids
-        ):
+        if not req_ids or any(req_id not in self.requests for req_id in req_ids):
             if draft_task_id:
                 self._dropped_draft_task_ids_to_report.append(draft_task_id)
             return False
@@ -1865,9 +1778,7 @@ class PDSeparatedScheduler(Scheduler):
             num_accepted_tokens=num_accepted_tokens,
             valid_sampled_token_count=valid_sampled_token_count,
         )
-        draft_first.is_last_prefill_chunk = getattr(
-            source, "is_last_prefill_chunk", True
-        )
+        draft_first.is_last_prefill_chunk = getattr(source, "is_last_prefill_chunk", True)
         draft_first.draft_output_req_ids = getattr(
             source,
             "draft_output_req_ids",
@@ -1876,9 +1787,7 @@ class PDSeparatedScheduler(Scheduler):
         self.drafts_first_ready.append(draft_first)
         return True
 
-    def _enqueue_next_draft_first(
-        self, draft_last: SchedulerOutput
-    ) -> bool:
+    def _enqueue_next_draft_first(self, draft_last: SchedulerOutput) -> bool:
         draft_step_idx = int(draft_last.draft_step_idx or 0)
         next_step_idx = draft_step_idx + 1
         task_id = draft_last.draft_task_id
@@ -1917,10 +1826,7 @@ class PDSeparatedScheduler(Scheduler):
         while self.drafts_last_ready:
             scheduler_output = self.drafts_last_ready.popleft()
             if scheduler_output.batch_type != BatchType.DRAFT_LAST:
-                raise RuntimeError(
-                    "drafts_last_ready expects DRAFT_LAST, got "
-                    f"{scheduler_output.batch_type}"
-                )
+                raise RuntimeError(f"drafts_last_ready expects DRAFT_LAST, got {scheduler_output.batch_type}")
             self._validate_draft_tail_channel(scheduler_output)
             # A DRAFT_LAST here always has its DRAFT_FIRST already dispatched
             # to the cloud (it was self-posted in _pick_draft_first_batch when
@@ -1940,32 +1846,27 @@ class PDSeparatedScheduler(Scheduler):
                 tuple(scheduler_output.num_scheduled_tokens),
             )
             has_live_output_req = any(
-                (request := self.requests.get(req_id)) is not None
-                and not request.is_finished()
+                (request := self.requests.get(req_id)) is not None and not request.is_finished()
                 for req_id in output_req_ids
             )
             if has_live_output_req:
                 self._prepare_next_decode_first_placeholder(scheduler_output)
             elif not output_req_ids:
                 logger.info(
-                    "[PD] finish DRAFT_LAST task_id=%s step=%s "
-                    "(mid-prefill KV warmup; no verify placeholder)",
+                    "[PD] finish DRAFT_LAST task_id=%s step=%s (mid-prefill KV warmup; no verify placeholder)",
                     scheduler_output.draft_task_id,
                     scheduler_output.draft_step_idx,
                 )
             else:
                 logger.info(
-                    "[PD] drain DRAFT_LAST task_id=%s step=%s "
-                    "(request gone; worker will drain cloud response)",
+                    "[PD] drain DRAFT_LAST task_id=%s step=%s (request gone; worker will drain cloud response)",
                     scheduler_output.draft_task_id,
                     scheduler_output.draft_step_idx,
                 )
             return scheduler_output
         return self._make_empty_batch()
 
-    def _prepare_next_decode_first_placeholder(
-        self, draft_last: SchedulerOutput
-    ) -> None:
+    def _prepare_next_decode_first_placeholder(self, draft_last: SchedulerOutput) -> None:
         """Prepare the next target verify batch behind the final draft tail.
 
         Scheduler-side spec token values are placeholders.  The edge worker
@@ -1989,11 +1890,7 @@ class PDSeparatedScheduler(Scheduler):
             # final DRL before EngineCore has applied the prefill result. Retry
             # on the next schedule turn after that request moves to running.
             return
-        if (
-            self.drafts_first_ready
-            or self.drafts_last_ready
-            or self.draft_remote_pending_count > 1
-        ):
+        if self.drafts_first_ready or self.drafts_last_ready or self.draft_remote_pending_count > 1:
             # Another draft chain still has steps queued or a head in flight
             # behind this tail (chains interleave when a newly admitted
             # request's prefill-warmup chain overlaps the decode chain).
@@ -2021,15 +1918,10 @@ class PDSeparatedScheduler(Scheduler):
             self._decode_first_placeholder_parent = None
 
     @staticmethod
-    def _scheduler_output_intersects_req_ids(
-        scheduler_output: SchedulerOutput, req_ids: set[str]
-    ) -> bool:
+    def _scheduler_output_intersects_req_ids(scheduler_output: SchedulerOutput, req_ids: set[str]) -> bool:
         if scheduler_output.parent_req_id in req_ids:
             return True
-        return any(
-            req_id in req_ids
-            for req_id in scheduler_output.num_scheduled_tokens
-        )
+        return any(req_id in req_ids for req_id in scheduler_output.num_scheduled_tokens)
 
     # ------------------------------------------------------------------ #
     # Edge-cloud deferred-draft KV retention                              #
@@ -2042,9 +1934,7 @@ class PDSeparatedScheduler(Scheduler):
         speculative_config = self.vllm_config.speculative_config
         if speculative_config is None:
             return False
-        if not getattr(
-            self.vllm_config.parallel_config, "enable_edge_cloud", False
-        ):
+        if not getattr(self.vllm_config.parallel_config, "enable_edge_cloud", False):
             return False
         method = getattr(speculative_config, "method", None)
         if method == "eagle3":
@@ -2056,15 +1946,9 @@ class PDSeparatedScheduler(Scheduler):
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)
         return "qwen" in str(getattr(hf_config, "model_type", "")).lower()
 
-    def register_edge_cloud_draft_task(
-        self, task_id: str, req_ids: set[str]
-    ) -> None:
+    def register_edge_cloud_draft_task(self, task_id: str, req_ids: set[str]) -> None:
         """Register a deferred draft before its parent output is applied."""
-        if (
-            not self._edge_cloud_draft_retention_enabled
-            or not task_id
-            or not req_ids
-        ):
+        if not self._edge_cloud_draft_retention_enabled or not task_id or not req_ids:
             return
         previous_req_ids = self._edge_cloud_draft_task_reqs.get(task_id)
         if previous_req_ids is not None:
@@ -2077,13 +1961,10 @@ class PDSeparatedScheduler(Scheduler):
             return
         self._edge_cloud_draft_task_reqs[task_id] = set(req_ids)
         for req_id in req_ids:
-            self._edge_cloud_draft_req_tasks.setdefault(req_id, set()).add(
-                task_id
-            )
+            self._edge_cloud_draft_req_tasks.setdefault(req_id, set()).add(task_id)
 
-    def _free_request(
-        self, request: Request, delay_free_blocks: bool = False
-    ) -> dict[str, Any] | None:
+    def _free_request(self, request: Request, delay_free_blocks: bool = False) -> dict[str, Any] | None:
+        self._record_edge_cloud_finish(request)
         task_ids = (
             self._edge_cloud_draft_req_tasks.get(request.request_id)
             if self._edge_cloud_draft_retention_enabled
@@ -2097,10 +1978,34 @@ class PDSeparatedScheduler(Scheduler):
         # ordering guarantee the non-edge-cloud path gets for free by
         # proposing drafts inside execute_model.
         for task_id in task_ids:
-            self._draft_retained_requests.setdefault(task_id, {})[
-                request.request_id
-            ] = request
+            self._draft_retained_requests.setdefault(task_id, {})[request.request_id] = request
         return super()._free_request(request, delay_free_blocks=True)
+
+    def _record_edge_cloud_finish(self, request: Request) -> None:
+        control_request_id = request.edge_cloud_request_id
+        hasher = self._edge_cloud_prefix_hasher
+        if control_request_id is None or hasher is None:
+            return
+        manifest = hasher.build_manifest(
+            control_request_id,
+            request.all_token_ids,
+        )
+        self._edge_cloud_finished_request_data[request.request_id] = EdgeCloudFinishedRequest(
+            control_request_id=control_request_id,
+            prompt_tokens=request.num_prompt_tokens,
+            completion_tokens=request.num_output_tokens,
+            full_block_hashes=manifest.full_block_hashes,
+        )
+        log_event(
+            logger,
+            "info",
+            "edge_finish_manifest_created",
+            control_request_id=control_request_id,
+            engine_request_id=request.request_id,
+            prompt_tokens=request.num_prompt_tokens,
+            completion_tokens=request.num_output_tokens,
+            full_blocks=manifest.full_block_count,
+        )
 
     def release_draft_retained_blocks(self, task_id: str) -> None:
         """Free KV blocks retained for a completed/dropped draft task.
@@ -2126,6 +2031,13 @@ class PDSeparatedScheduler(Scheduler):
             if req_id in self._cloud_withheld_finished_req_ids:
                 self._cloud_withheld_finished_req_ids.discard(req_id)
                 self._cloud_released_finished_req_ids.add(req_id)
+                log_event(
+                    logger,
+                    "info",
+                    "edge_finish_released_after_mtp",
+                    engine_request_id=req_id,
+                    accounting_record_present=(req_id in self._edge_cloud_finished_request_data),
+                )
             request = retained.get(req_id)
             if request is None:
                 continue
@@ -2137,12 +2049,8 @@ class PDSeparatedScheduler(Scheduler):
                 # request's blocks without evicting the new entry.
                 self.kv_cache_manager.free(request)
 
-    def _scheduler_output_all_requests_finished(
-        self, scheduler_output: SchedulerOutput
-    ) -> bool:
-        batch_req_ids = self._edge_cloud_draft_task_reqs.get(
-            scheduler_output.draft_task_id or ""
-        )
+    def _scheduler_output_all_requests_finished(self, scheduler_output: SchedulerOutput) -> bool:
+        batch_req_ids = self._edge_cloud_draft_task_reqs.get(scheduler_output.draft_task_id or "")
         if batch_req_ids is None:
             batch_req_ids = set(scheduler_output.num_scheduled_tokens)
         else:
@@ -2150,9 +2058,7 @@ class PDSeparatedScheduler(Scheduler):
         if scheduler_output.parent_req_id is not None:
             batch_req_ids.add(scheduler_output.parent_req_id)
         return bool(batch_req_ids) and all(
-            (request := self.requests.get(req_id)) is None
-            or request.is_finished()
-            for req_id in batch_req_ids
+            (request := self.requests.get(req_id)) is None or request.is_finished() for req_id in batch_req_ids
         )
 
     def _drop_stale_drafts_for_req_ids(self, req_ids: set[str]) -> None:
@@ -2166,10 +2072,9 @@ class PDSeparatedScheduler(Scheduler):
         # hold the enqueued context) via take_dropped_draft_task_ids().
         kept_first: deque[SchedulerOutput] = deque()
         for output in self.drafts_first_ready:
-            if (
-                self._scheduler_output_intersects_req_ids(output, req_ids)
-                and self._scheduler_output_all_requests_finished(output)
-            ):
+            if self._scheduler_output_intersects_req_ids(
+                output, req_ids
+            ) and self._scheduler_output_all_requests_finished(output):
                 task_id = output.draft_task_id
                 if task_id is not None:
                     self._pregenerated_draft_task_ids.discard(task_id)
@@ -2186,17 +2091,10 @@ class PDSeparatedScheduler(Scheduler):
         self.decodes_first_ready = deque(
             output
             for output in self.decodes_first_ready
-            if not self._scheduler_output_intersects_req_ids(
-                output, req_ids
-            )
+            if not self._scheduler_output_intersects_req_ids(output, req_ids)
         )
         pending_decode = self._decode_first_placeholder_parent
-        if (
-            pending_decode is not None
-            and self._scheduler_output_intersects_req_ids(
-                pending_decode, req_ids
-            )
-        ):
+        if pending_decode is not None and self._scheduler_output_intersects_req_ids(pending_decode, req_ids):
             self._decode_first_placeholder_parent = None
         # Never drop a queued DRAFT_LAST.  Tails are self-posted in
         # _pick_draft_first_batch at the moment their head is picked, and
@@ -2211,11 +2109,7 @@ class PDSeparatedScheduler(Scheduler):
         # DRAFT_FIRST/DECODE_FIRST and deadlocks the scheduler.
         for output in self.drafts_last_ready:
             if self._scheduler_output_intersects_req_ids(output, req_ids):
-                gone = {
-                    rid
-                    for rid in output.num_scheduled_tokens
-                    if rid in req_ids
-                }
+                gone = {rid for rid in output.num_scheduled_tokens if rid in req_ids}
                 if output.parent_req_id in req_ids:
                     gone.add(output.parent_req_id)
                 logger.info(
@@ -2234,9 +2128,7 @@ class PDSeparatedScheduler(Scheduler):
         self._dropped_draft_task_ids_to_report = []
         return dropped
 
-    def _is_stale_draft_output(
-        self, scheduler_output: SchedulerOutput
-    ) -> bool:
+    def _is_stale_draft_output(self, scheduler_output: SchedulerOutput) -> bool:
         # A draft output is stale when EVERY backing request has finished.
         # This drives the DRAFT_FIRST skip in _pick_draft_first_batch:
         # once all owning requests are gone, future (not-yet-dispatched)
@@ -2257,25 +2149,19 @@ class PDSeparatedScheduler(Scheduler):
         # _scheduler_output_all_requests_finished), not dict membership.
         return self._scheduler_output_all_requests_finished(scheduler_output)
 
-    def _draft_output_reqs_live(
-        self, scheduler_output: SchedulerOutput
-    ) -> bool:
+    def _draft_output_reqs_live(self, scheduler_output: SchedulerOutput) -> bool:
         """True if any request backing this draft output is still active.
 
         Used both to decide whether a DRAFT_LAST may spawn a verify
         placeholder and (inverted) whether a DRAFT_FIRST is stale.
         """
-        return not self._scheduler_output_all_requests_finished(
-            scheduler_output
-        )
+        return not self._scheduler_output_all_requests_finished(scheduler_output)
 
     def _pick_decode_last_batch(self) -> SchedulerOutput:
         if not self.decodes_last_ready:
             return self._make_empty_batch()
         so = self.decodes_last_ready.popleft()
-        assert so.batch_type == BatchType.DECODE_LAST, (
-            f"decodes_last_ready expects DECODE_LAST, got {so.batch_type}"
-        )
+        assert so.batch_type == BatchType.DECODE_LAST, f"decodes_last_ready expects DECODE_LAST, got {so.batch_type}"
         self._validate_decode_tail_channel(so)
         self._start_decode_or_draft_first_only_window()
         self._force_decode_last = False
@@ -2283,7 +2169,8 @@ class PDSeparatedScheduler(Scheduler):
         return so
 
     def _ensure_cached_all_token_ids(
-        self, scheduler_output: SchedulerOutput,
+        self,
+        scheduler_output: SchedulerOutput,
     ) -> None:
         """Ensure every cached decode req carries all_token_ids.
 
@@ -2317,8 +2204,7 @@ class PDSeparatedScheduler(Scheduler):
                 # Use the Request-level cached np.ndarray to avoid repeated
                 # np.asarray() conversion of the Python list (dominant
                 # bottleneck on long-sequence decode batches).
-                cached_reqs.all_token_ids[req_id] = (
-                    self.requests[req_id].cached_all_token_ids_np)
+                cached_reqs.all_token_ids[req_id] = self.requests[req_id].cached_all_token_ids_np
 
     def _pick_decode_first_batch(self) -> SchedulerOutput:
         if not self.running:
@@ -2340,16 +2226,13 @@ class PDSeparatedScheduler(Scheduler):
                 if scheduler_output.total_num_scheduled_tokens == 0:
                     scheduler_output.batch_type = BatchType.EMPTY
                     logger.debug(
-                        "DECODE_FIRST race: empty batch due to async "
-                        "update_from_output delay, running=%d",
+                        "DECODE_FIRST race: empty batch due to async update_from_output delay, running=%d",
                         len(self.running),
                     )
                 else:
                     scheduler_output.batch_type = BatchType.DECODE_FIRST
                     scheduler_output.head_token = uuid4().hex
-                    scheduler_output.hidden_channel = (
-                        self.hidden_channel_manager.decode_channel()
-                    )
+                    scheduler_output.hidden_channel = self.hidden_channel_manager.decode_channel()
                     self._ensure_cached_all_token_ids(scheduler_output)
                     self.decode_or_draft_inflight_count += 1
                     self.decode_head_inflight_count += 1
@@ -2391,9 +2274,9 @@ class PDSeparatedScheduler(Scheduler):
         pending tails are eligible to enter decode.
         """
         completed = [
-            req for req in self.chunk_prefill_first
-            if not req.is_prefill_chunk
-            and self._pending_tail_count.get(req.request_id, 0) == 0
+            req
+            for req in self.chunk_prefill_first
+            if not req.is_prefill_chunk and self._pending_tail_count.get(req.request_id, 0) == 0
         ]
         for req in completed:
             self.chunk_prefill_first.remove(req)
@@ -2440,9 +2323,7 @@ class PDSeparatedScheduler(Scheduler):
     # ------------------------------------------------------------------ #
     # update_from_output — chunk-prefill-prior routing                    #
     # ------------------------------------------------------------------ #
-    def _update_from_output_prefill_last_legacy(
-        self, scheduler_output: SchedulerOutput
-    ) -> None:
+    def _update_from_output_prefill_last_legacy(self, scheduler_output: SchedulerOutput) -> None:
         """Legacy PL routing: request-granularity pending list."""
         completed_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
         newly_running: list[Request] = []
@@ -2469,24 +2350,18 @@ class PDSeparatedScheduler(Scheduler):
         #     f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
         # )
 
-    def _update_from_output_prefill_last_chunk_prior(
-        self, scheduler_output: SchedulerOutput
-    ) -> None:
+    def _update_from_output_prefill_last_chunk_prior(self, scheduler_output: SchedulerOutput) -> None:
         """Chunk-prefill-prior PL routing: head_token → flight lookup."""
         head_token = scheduler_output.head_token
         if not head_token:
-            logger.warning(
-                "[PD-CHUNK-PRIOR] PREFILL_LAST missing head_token; "
-                "falling back to legacy routing."
-            )
+            logger.warning("[PD-CHUNK-PRIOR] PREFILL_LAST missing head_token; falling back to legacy routing.")
             self._update_from_output_prefill_last_legacy(scheduler_output)
             return
 
         flight = self._prefill_flight_by_token.pop(head_token, None)
         if flight is None:
             logger.warning(
-                "[PD-CHUNK-PRIOR] PREFILL_LAST head_token=%s not found "
-                "in flight map; falling back to legacy routing.",
+                "[PD-CHUNK-PRIOR] PREFILL_LAST head_token=%s not found in flight map; falling back to legacy routing.",
                 head_token,
             )
             self._update_from_output_prefill_last_legacy(scheduler_output)
@@ -2527,8 +2402,7 @@ class PDSeparatedScheduler(Scheduler):
                 self.running.append(req)
             self._cleanup_request_flight_state(req_id)
             logger.info(
-                "[PD-CHUNK-PRIOR] Request %s all chunks done, "
-                "moved to running[] (%d total).",
+                "[PD-CHUNK-PRIOR] Request %s all chunks done, moved to running[] (%d total).",
                 req_id,
                 len(self.running),
             )
@@ -2545,13 +2419,8 @@ class PDSeparatedScheduler(Scheduler):
             # ((0,1) then (2,3)) and left a slot idle between pairs.
             # Do NOT call _cleanup_request_flight_state here: ahead count
             # and in-flight flights are still needed for outstanding chunks.
-            has_more_chunks = (
-                req is not None
-                and req.num_computed_tokens < req.num_prompt_tokens
-            )
-            already_queued = (
-                req is not None and req in self.chunk_prefill_first
-            )
+            has_more_chunks = req is not None and req.num_computed_tokens < req.num_prompt_tokens
+            already_queued = req is not None and req in self.chunk_prefill_first
             if has_more_chunks and not already_queued:
                 self.chunk_prefill_first.append(req)
                 logger.info(
@@ -2585,9 +2454,7 @@ class PDSeparatedScheduler(Scheduler):
             if self.prefill_inflight_count > 0:
                 self.prefill_inflight_count -= 1
             if scheduler_output.head_token:
-                self.hidden_channel_manager.release_prefill(
-                    scheduler_output.head_token
-                )
+                self.hidden_channel_manager.release_prefill(scheduler_output.head_token)
 
             # logger.info(
             #     f"[PD] update_from_output PREFILL_LAST done, "
@@ -2598,13 +2465,9 @@ class PDSeparatedScheduler(Scheduler):
             #     f"chunk_prefill_first[]: {len(self.chunk_prefill_first)}",
             # )
             if self.chunk_prefill_prior_enable:
-                self._update_from_output_prefill_last_chunk_prior(
-                    scheduler_output
-                )
+                self._update_from_output_prefill_last_chunk_prior(scheduler_output)
             else:
-                self._update_from_output_prefill_last_legacy(
-                    scheduler_output
-                )
+                self._update_from_output_prefill_last_legacy(scheduler_output)
 
         if scheduler_output.batch_type == BatchType.DECODE_FIRST:
             # D首完成后立即释放 inflight 计数，使下一个 D首可以
@@ -2614,32 +2477,27 @@ class PDSeparatedScheduler(Scheduler):
             if self.decode_head_inflight_count > 0:
                 self.decode_head_inflight_count -= 1
             logger.info(
-                f"[PD] update_from_output DECODE_FIRST done, "
-                f"decode_or_draft_inflight: {self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}",
-            )
-        if scheduler_output.batch_type == BatchType.DRAFT_FIRST:
-            self.decode_or_draft_inflight_count = max(
-                0, self.decode_or_draft_inflight_count - 1
-            )
-            logger.info(
-                "[PD] update_from_output DRAFT_FIRST done, "
-                "decode_or_draft_inflight: %d/%d",
+                "[PD] update_from_output DECODE_FIRST done, decode_or_draft_inflight: %d/%d",
                 self.decode_or_draft_inflight_count,
                 self.decode_or_draft_inflight_limit,
             )
-        enqueue_next_draft = (
-            scheduler_output.batch_type == BatchType.DRAFT_LAST
-        )
-        if enqueue_next_draft:
-            self.draft_remote_pending_count = max(
-                0, self.draft_remote_pending_count - 1
+        if scheduler_output.batch_type == BatchType.DRAFT_FIRST:
+            self.decode_or_draft_inflight_count = max(0, self.decode_or_draft_inflight_count - 1)
+            logger.info(
+                "[PD] update_from_output DRAFT_FIRST done, decode_or_draft_inflight: %d/%d",
+                self.decode_or_draft_inflight_count,
+                self.decode_or_draft_inflight_limit,
             )
+        enqueue_next_draft = scheduler_output.batch_type == BatchType.DRAFT_LAST
+        if enqueue_next_draft:
+            self.draft_remote_pending_count = max(0, self.draft_remote_pending_count - 1)
         if scheduler_output.batch_type == BatchType.DECODE_LAST:
             # decode_or_draft_inflight_count 已在 DECODE_FIRST 的 update_from_output
             # 中释放，此处不再重复减 1。
             logger.info(
-                f"[PD] update_from_output DECODE_LAST done, "
-                f"decode_or_draft_inflight: {self.decode_or_draft_inflight_count}/{self.decode_or_draft_inflight_limit}",
+                "[PD] update_from_output DECODE_LAST done, decode_or_draft_inflight: %d/%d",
+                self.decode_or_draft_inflight_count,
+                self.decode_or_draft_inflight_limit,
             )
         outputs = super().update_from_output(scheduler_output, model_runner_output)
         if scheduler_output.batch_type in _PD_LAST_TO_FIRST:
@@ -2650,30 +2508,20 @@ class PDSeparatedScheduler(Scheduler):
             # not-yet-enqueued placeholder tasks for those requests.
             self._drop_stale_drafts_for_req_ids(self.finished_req_ids)
         if enqueue_next_draft:
-            next_draft_ready = self._enqueue_next_draft_first(
-                scheduler_output
-            )
+            next_draft_ready = self._enqueue_next_draft_first(scheduler_output)
             logger.info(
-                "[PD] update_from_output DRAFT_LAST done, "
-                "draft_remote_pending: %d, next_draft_ready: %s",
+                "[PD] update_from_output DRAFT_LAST done, draft_remote_pending: %d, next_draft_ready: %s",
                 self.draft_remote_pending_count,
                 next_draft_ready,
             )
-        self.chunk_prefill_first = [
-            req for req in self.chunk_prefill_first if not req.is_finished()
-        ]
-        self.prefill_last_pending = [
-            req for req in self.prefill_last_pending if not req.is_finished()
-        ]
+        self.chunk_prefill_first = [req for req in self.chunk_prefill_first if not req.is_finished()]
+        self.prefill_last_pending = [req for req in self.prefill_last_pending if not req.is_finished()]
         # Drain finished requests from running: update_from_output removes
         # completed requests from self.requests, but they may still be in
         # running.  That causes KeyError in super().schedule() /
         # _update_after_schedule when the base scheduler accesses
         # self.requests[req_id].  Clean them up here, once per step.
-        self.running = [
-            req for req in self.running
-            if req.request_id in self.requests
-        ]
+        self.running = [req for req in self.running if req.request_id in self.requests]
         return outputs
 
     def get_request_counts(self) -> tuple[int, int]:
@@ -2683,18 +2531,12 @@ class PDSeparatedScheduler(Scheduler):
             # multiple tracking structures (e.g. a request in
             # prefill_last_pending also has _pending_tail_count > 0).
             pending_ids: set[str] = set()
-            pending_ids.update(
-                req.request_id for req in self.chunk_prefill_first
-            )
-            pending_ids.update(
-                req.request_id for req in self.prefill_last_pending
-            )
+            pending_ids.update(req.request_id for req in self.chunk_prefill_first)
+            pending_ids.update(req.request_id for req in self.prefill_last_pending)
             pending_ids.update(self._pending_tail_count.keys())
             return (num_running + len(pending_ids), num_waiting)
         return (
-            num_running
-            + len(self.chunk_prefill_first)
-            + len(self.prefill_last_pending),
+            num_running + len(self.chunk_prefill_first) + len(self.prefill_last_pending),
             num_waiting,
         )
 
@@ -2704,19 +2546,11 @@ class PDSeparatedScheduler(Scheduler):
         base = super().get_num_unfinished_requests()
         if self.chunk_prefill_prior_enable:
             pending_ids: set[str] = set()
-            pending_ids.update(
-                req.request_id for req in self.chunk_prefill_first
-            )
-            pending_ids.update(
-                req.request_id for req in self.prefill_last_pending
-            )
+            pending_ids.update(req.request_id for req in self.chunk_prefill_first)
+            pending_ids.update(req.request_id for req in self.prefill_last_pending)
             pending_ids.update(self._pending_tail_count.keys())
             return base + len(pending_ids)
-        return (
-            base
-            + len(self.chunk_prefill_first)
-            + len(self.prefill_last_pending)
-        )
+        return base + len(self.chunk_prefill_first) + len(self.prefill_last_pending)
 
     def _has_draft_work(self) -> bool:
         return bool(
@@ -2752,31 +2586,22 @@ class PDSeparatedScheduler(Scheduler):
                 self._cleanup_request_flight_state(req_id)
 
         if to_remove:
-            self.chunk_prefill_first = remove_all(
-                self.chunk_prefill_first, to_remove
-            )
+            self.chunk_prefill_first = remove_all(self.chunk_prefill_first, to_remove)
 
         return result
 
-    def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
-    ) -> bool:
+    def reset_prefix_cache(self, reset_running_requests: bool = False, reset_connector: bool = False) -> bool:
         if reset_running_requests:
             if self._pd_active_flight_count:
                 logger.warning(
-                    "Cannot reset running requests while edge-cloud flights "
-                    "are active: %s",
+                    "Cannot reset running requests while edge-cloud flights are active: %s",
                     self._pd_active_flight_count,
                 )
                 return False
 
-            if any(
-                not self._is_request_preemptible(request)
-                for request in self.chunk_prefill_first
-            ):
+            if any(not self._is_request_preemptible(request) for request in self.chunk_prefill_first):
                 logger.warning(
-                    "Cannot reset edge-cloud prefill requests because at least "
-                    "one request is not safely preemptible"
+                    "Cannot reset edge-cloud prefill requests because at least one request is not safely preemptible"
                 )
                 return False
 
@@ -2784,9 +2609,7 @@ class PDSeparatedScheduler(Scheduler):
             while self.chunk_prefill_first:
                 request = self.chunk_prefill_first.pop()
                 self._preempt_request(request, timestamp)
-                request.async_tokens_to_discard = (
-                    request.num_output_placeholders
-                )
+                request.async_tokens_to_discard = request.num_output_placeholders
                 request.num_output_placeholders = 0
 
         return super().reset_prefix_cache(reset_running_requests, reset_connector)
@@ -2799,9 +2622,7 @@ class PDSeparatedScheduler(Scheduler):
 
     def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
         saved_running = self.running
-        self.running = list(self.running) + [
-            r for r in self.chunk_prefill_first if r not in self.running
-        ]
+        self.running = list(self.running) + [r for r in self.chunk_prefill_first if r not in self.running]
         try:
             result = super()._handle_invalid_blocks(invalid_block_ids)
         finally:
@@ -2811,4 +2632,5 @@ class PDSeparatedScheduler(Scheduler):
 
 class AsyncPDSeparatedScheduler(PDSeparatedScheduler, AsyncScheduler):
     """Async scheduler with PD separation."""
+
     pass

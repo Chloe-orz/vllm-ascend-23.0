@@ -708,7 +708,10 @@ class BatchedModelRunner(NPUModelRunner):
                 if deferred_state_corrections_fn:
                     deferred_state_corrections_fn()
                     deferred_state_corrections_fn = None
-                if self.cache_config.mamba_cache_mode == "align":
+                if (
+                    self.cache_config.mamba_cache_mode == "align"
+                    and self.need_accepted_tokens
+                ):
                     if vllm_version_is("0.20.2"):
                         mamba_bufs = self._get_mamba_copy_bufs()
                         preprocess_bufs = mamba_bufs

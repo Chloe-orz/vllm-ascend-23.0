@@ -19,6 +19,8 @@ import vllm
 from vllm.entrypoints.cli import serve
 from vllm.usage.usage_lib import UsageContext
 
+from vllm_ascend.edge_cloud.observability import log_event
+
 _original_run_headless = serve.run_headless
 
 
@@ -39,6 +41,7 @@ def _run_passive_engine_core_with_ascend_shims(**kwargs):
     from vllm_ascend.patch.platform.patch_pd_scheduler_shim import (
         install_ascend_passive_engine_core_shims,
     )
+
     install_ascend_passive_engine_core_shims()
 
     from vllm.v1.engine.core import PassiveEngineCoreProc
@@ -48,6 +51,8 @@ def _run_passive_engine_core_with_ascend_shims(**kwargs):
 
 def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     from vllm.utils.system_utils import get_mp_context
+
+    from vllm_ascend.ascend_config import init_ascend_config
 
     _install_ascend_passive_scheduler_shim()
     from vllm.version import __version__ as VLLM_VERSION
@@ -65,12 +70,31 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
 
     context = get_mp_context()
     ready_reader, ready_writer = context.Pipe(duplex=False)
+    edge_cloud_config = init_ascend_config(vllm_config).edge_cloud_config
+    coordination = edge_cloud_config.prefix_cache_coordination
+    coordination_enabled = bool(
+        edge_cloud_config.enabled and edge_cloud_config.role == "cloud" and coordination.enabled
+    )
+    command_queue = context.Queue() if coordination_enabled else None
+    event_queue = context.Queue() if coordination_enabled else None
+    if coordination_enabled:
+        log_event(
+            serve.logger,
+            "info",
+            "cloud_coordination_launch",
+            instance_id=coordination.instance_id,
+            listen_host=coordination.listen_host,
+            listen_port=coordination.listen_port,
+            block_size=vllm_config.cache_config.block_size,
+        )
 
     proc = context.Process(
         target=_run_passive_engine_core_with_ascend_shims,
         kwargs={
             "vllm_config": vllm_config,
             "ready_pipe": ready_writer,
+            "cloud_control_command_queue": command_queue,
+            "cloud_control_event_queue": event_queue,
         },
         name="PassiveEngineCore",
     )
@@ -80,20 +104,55 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
     try:
         response = ready_reader.recv()
         if response.get("status") != "READY":
-            raise RuntimeError("PassiveEngineCore failed to start. " f"Response: {response}")
+            raise RuntimeError(f"PassiveEngineCore failed to start. Response: {response}")
     except EOFError:
-        raise RuntimeError(
-            "PassiveEngineCore process died during startup. Check logs for details."
-        ) from None
+        raise RuntimeError("PassiveEngineCore process died during startup. Check logs for details.") from None
     finally:
         ready_reader.close()
 
     serve.logger.info("PassiveEngineCore is ready.")
+    if coordination_enabled:
+        log_event(
+            serve.logger,
+            "info",
+            "cloud_passive_core_ready",
+            instance_id=coordination.instance_id,
+            block_size=response.get("block_size"),
+        )
 
     try:
-        proc.join()
+        if coordination_enabled:
+            from vllm_ascend.edge_cloud.cloud_control import (
+                CloudControlBridge,
+                run_cloud_control_server,
+            )
+
+            assert command_queue is not None and event_queue is not None
+            bridge = CloudControlBridge(command_queue, event_queue)
+            serve.logger.info(
+                "Starting edge-cloud OpenAI control endpoint on %s:%d (instance_id=%s, block_size=%s)",
+                coordination.listen_host,
+                coordination.listen_port,
+                coordination.instance_id,
+                response.get("block_size"),
+            )
+            run_cloud_control_server(
+                bridge,
+                coordination.listen_host,
+                coordination.listen_port,
+                proc,
+            )
+        else:
+            proc.join()
         if proc.exitcode and proc.exitcode != 0:
             serve.logger.error("PassiveEngineCore exited with code %d", proc.exitcode)
+            if coordination_enabled:
+                log_event(
+                    serve.logger,
+                    "error",
+                    "cloud_passive_core_exited",
+                    exit_code=proc.exitcode,
+                )
     finally:
         timeout = None
         if shutdown_requested:
@@ -102,6 +161,18 @@ def _launch_passive_engine_core(vllm_config, shutdown_requested: bool) -> None:
         if proc.is_alive():
             proc.terminate()
             proc.join(timeout=timeout)
+        for ipc_queue in (command_queue, event_queue):
+            if ipc_queue is not None:
+                ipc_queue.close()
+                ipc_queue.join_thread()
+        if coordination_enabled:
+            log_event(
+                serve.logger,
+                "info",
+                "cloud_coordination_stopped",
+                instance_id=coordination.instance_id,
+                exit_code=proc.exitcode,
+            )
         serve.logger.info("Shutting down.")
 
 
