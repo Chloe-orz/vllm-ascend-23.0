@@ -54,13 +54,17 @@ _FLASHCOMM2_ODP: GroupCoordinator | None = None
 # per-channel stream, and handle.wait() syncs back to the default
 # stream before the broadcast.
 #
-# NOTE(2E1C debugging): streams are keyed by (channel, direction) —
-# sends and recvs of one channel never share a stream, so a blocked isend
-# cannot FIFO-starve a pending irecv (that FIFO coupling re-formed the
-# 2E1C reap deadlock even with per-pair send bookkeeping).  The pp_group
-# parameter is accepted for call-site compatibility but currently unused
-# (pair-level stream isolation is a latency optimization, not a
-# correctness requirement).
+# NOTE(2E1C): streams are keyed by (channel, direction, PAIR).  Two edges
+# are independent comms but were sharing one stream per (channel,
+# direction) -- and a stream executes its ops in strict FIFO.  A blocked
+# isend to edge X (peer hasn't posted the matching recv) then starves
+# every later op to edge Y on the same stream, even though Y's recv is
+# already posted: one edge's rendezvous stall becomes BOTH edges' stall
+# (the 2E1C dual-edge pending_sends pileup).  Pair-level isolation is a
+# correctness requirement in multi-edge mode, not a latency optimization:
+# the earlier reasoning ("within one direction, ops of different pairs
+# complete independently") is false -- completion depends on the PEER's
+# recv being posted, which is exactly what a stalled edge stops doing.
 _hidden_channel_streams: dict[Any, Any] = {}
 _hidden_channel_stream_lock = threading.Lock()
 
@@ -105,14 +109,17 @@ def _hidden_channel_stream_ctx(
     if channel is None:
         yield
         return
-    # Key by (channel, direction): a blocked send must never hold back a
-    # pending recv queued behind it on the same stream — on the cloud, one
-    # pair's pending c2e isend would otherwise FIFO-block the other pair's
-    # e2c irecv, re-forming the reap deadlock through the stream even after
-    # the send-work bookkeeping was split per pair.  (The pair dimension is
-    # deliberately NOT in the key: within one direction, recvs/sends of
-    # different pairs complete independently and the FIFO order is harmless.)
-    stream = _get_hidden_channel_stream((channel, direction))
+    # Key by (channel, direction, pair): a blocked send must never hold
+    # back a pending recv queued behind it on the same stream (direction
+    # split), AND one pair's blocked op must never FIFO-starve another
+    # pair's op (pair split -- the peer of a stalled pair stops posting
+    # recvs, so its stream head may never complete; without pair isolation
+    # that single stall cascades to every edge).  ``_current_active_pair``
+    # is thread-local and set by the worker's ``_pair_scope`` around every
+    # send/recv; it is None on legacy/scope-less paths, which then share
+    # one stream as before.
+    stream = _get_hidden_channel_stream(
+        (channel, direction, _current_active_pair()))
     if wait_for_default:
         stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
@@ -2334,21 +2341,30 @@ def edge_cloud_broadcast_recv_scheduled_draft(
 _PAIR_PP_GROUPS: dict[tuple[int, int], GroupCoordinator] = {}
 # (edge_id, cloud_id) -> {channel -> device_group}
 _PAIR_CHANNEL_GROUPS: dict[tuple[int, int], Any] = {}
-# The pair this process is currently executing against.  Workers set it
-# around each segment execution via ``active_pair``.
-_ACTIVE_PAIR: tuple[int, int] | None = None
+# The pair this THREAD is currently executing against.  Workers set it
+# around each segment execution via ``active_pair``.  Thread-local, NOT
+# process-global: the CHER guard thread and the busy_loop thread enter
+# pair scopes concurrently, and a shared global let one thread's scope
+# change the OTHER thread's group resolution mid-flight -- the busy_loop
+# could then post a send/recv on the wrong pair's comm (cross-pair
+# rendezvous mismatch -> hang or silent corruption).
+_ACTIVE_PAIR_TLS = threading.local()
+
+
+def _current_active_pair() -> tuple[int, int] | None:
+    """The active pair of the CALLING thread (None when outside a scope)."""
+    return getattr(_ACTIVE_PAIR_TLS, "value", None)
 
 
 @contextlib.contextmanager
 def active_pair(edge_id: int, cloud_id: int):
     """Scope the current thread's edge-cloud pair for send/recv resolution."""
-    global _ACTIVE_PAIR
-    prev = _ACTIVE_PAIR
-    _ACTIVE_PAIR = (edge_id, cloud_id)
+    prev = _current_active_pair()
+    _ACTIVE_PAIR_TLS.value = (edge_id, cloud_id)
     try:
         yield
     finally:
-        _ACTIVE_PAIR = prev
+        _ACTIVE_PAIR_TLS.value = prev
 
 
 def get_pair_pp_group(edge_id: int, cloud_id: int) -> GroupCoordinator:
@@ -2440,8 +2456,8 @@ def _effective_pp_group() -> GroupCoordinator:
     singleton PP group so TP-internal broadcast logic is unchanged).
     Legacy mode: the global PP group.
     """
-    if _ACTIVE_PAIR is not None:
-        pair = _PAIR_PP_GROUPS.get(_ACTIVE_PAIR)
+    if _current_active_pair() is not None:
+        pair = _PAIR_PP_GROUPS.get(_current_active_pair())
         if pair is not None:
             return pair
     return get_pp_group()
