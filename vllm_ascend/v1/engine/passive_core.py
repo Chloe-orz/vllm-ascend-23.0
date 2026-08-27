@@ -83,6 +83,14 @@ def _import_passive_scheduler_module():
     return passive_scheduler
 
 
+class _PublishAcknowledgement:
+    """Completion shared between the scheduler and publisher threads."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.error: BaseException | None = None
+
+
 class PPSchedulerZmqPublisher:
     """Publishes SchedulerOutput from pp rank0 EngineCore to pp rank1
     PassiveEngineCore via ZMQ PUSH/PULL pattern.
@@ -95,10 +103,14 @@ class PPSchedulerZmqPublisher:
     """
 
     SHUTDOWN_TIMEOUT: float = 2.0
+    CONTROL_PUBLISH_TIMEOUT: float = 5.0
+    ZMQ_SEND_TIMEOUT_MS: int = 4000
 
     def __init__(self, endpoint: str) -> None:
         self._endpoint = endpoint
-        self._queue: queue.Queue[tuple[int, SchedulerOutput] | None] = queue.Queue(maxsize=1000)
+        self._queue: queue.Queue[tuple[int, SchedulerOutput, _PublishAcknowledgement | None] | None] = queue.Queue(
+            maxsize=1000
+        )
         self._running = True
         self._seq = 0
 
@@ -106,6 +118,7 @@ class PPSchedulerZmqPublisher:
         self._ctx = zmq.Context.instance()
         self._push = self._ctx.socket(zmq.PUSH)
         self._push.set_hwm(1000)
+        self._push.setsockopt(zmq.SNDTIMEO, self.ZMQ_SEND_TIMEOUT_MS)
         # Bind if wildcard (pp rank0), otherwise connect
         if "*" in endpoint or "::" in endpoint:
             self._push.bind(endpoint)
@@ -131,9 +144,32 @@ class PPSchedulerZmqPublisher:
         try:
             seq = self._seq
             self._seq += 1
-            self._queue.put_nowait((seq, scheduler_output))
+            self._queue.put_nowait((seq, scheduler_output, None))
         except queue.Full:
             logger.warning("PP Scheduler ZMQ publish queue full, dropping message")
+
+    def publish_control(self, scheduler_output: SchedulerOutput) -> None:
+        """Publish lifecycle control state or raise if local delivery fails.
+
+        FINISH and draft invalidation state must not be consumed merely
+        because it entered the bridge queue. Wait until the publisher thread
+        has serialized the output and handed it to ZMQ; stopped/full queues,
+        serialization failures and socket send failures are surfaced to the
+        EngineCore caller.
+        """
+        if not self._running:
+            raise RuntimeError("PP Scheduler ZMQ publisher is stopped")
+        acknowledgement = _PublishAcknowledgement()
+        try:
+            seq = self._seq
+            self._seq += 1
+            self._queue.put_nowait((seq, scheduler_output, acknowledgement))
+        except queue.Full as exc:
+            raise RuntimeError("PP Scheduler ZMQ publish queue is full") from exc
+        if not acknowledgement.done.wait(self.CONTROL_PUBLISH_TIMEOUT):
+            raise TimeoutError("PP Scheduler ZMQ control publish timed out")
+        if acknowledgement.error is not None:
+            raise RuntimeError("PP Scheduler ZMQ control publish failed") from acknowledgement.error
 
     def _publisher_thread(self) -> None:
         while self._running or self._queue.qsize() > 0:
@@ -141,14 +177,18 @@ class PPSchedulerZmqPublisher:
                 item = self._queue.get(timeout=0.1)
                 if item is None:
                     break
-                seq, scheduler_output = item
+                seq, scheduler_output, acknowledgement = item
                 try:
                     data = pickle.dumps(scheduler_output, protocol=pickle.HIGHEST_PROTOCOL)
-                except Exception:
-                    logger.exception("Failed to serialize SchedulerOutput for ZMQ")
-                    continue
-                seq_bytes = seq.to_bytes(8, "big")
-                self._push.send_multipart((seq_bytes, data))
+                    seq_bytes = seq.to_bytes(8, "big")
+                    self._push.send_multipart((seq_bytes, data))
+                except Exception as exc:
+                    if acknowledgement is not None:
+                        acknowledgement.error = exc
+                    logger.exception("Failed to publish SchedulerOutput over ZMQ")
+                finally:
+                    if acknowledgement is not None:
+                        acknowledgement.done.set()
             except queue.Empty:
                 continue
             except Exception:
@@ -323,6 +363,10 @@ class PPSchedulerZmqChannel:
         #     f"{scheduler_output.batch_type}",
         # )
         self._publisher.publish(scheduler_output)
+
+    def publish_control(self, scheduler_output: SchedulerOutput) -> None:
+        """Publish lifecycle control state with observable local delivery."""
+        self._publisher.publish_control(scheduler_output)
 
     def consume_new_outputs(self) -> list[tuple[int, SchedulerOutput]]:
         """Return and clear all (seq, SchedulerOutput) pairs received since
