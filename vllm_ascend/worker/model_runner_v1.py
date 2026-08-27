@@ -7669,6 +7669,19 @@ class NPUModelRunner(GPUModelRunner):
             )
             return 0
 
+        # A draft chain following a prefill chunk bootstraps or advances the
+        # draft model's KV state; it does not correct a preceding target
+        # verify. Consequently its parent PREFILL_FIRST has no speculative
+        # tokens and deliberately registers no expected request corrections.
+        # The edge may still attach accepted/valid scalars to DRAFT_FIRST step
+        # 0 as part of the shared control schema, but they have no correction
+        # semantics for this prefill warmup task.
+        if (
+            position_state.is_prefill
+            and not target_output.scheduled_spec_decode_tokens
+        ):
+            return 0
+
         req_ids = position_state.req_ids
         if isinstance(valid_sampled_values, dict):
             valid_by_req = valid_sampled_values

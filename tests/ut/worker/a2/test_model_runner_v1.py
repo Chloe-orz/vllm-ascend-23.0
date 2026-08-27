@@ -1089,6 +1089,38 @@ class TestCloudRequestCorrections(unittest.TestCase):
             },
         )
 
+    def test_prefill_draft_warmup_skips_correction_recording(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner._cloud_scheduler_output_by_task = {
+            "prefill-task": SimpleNamespace(
+                scheduled_spec_decode_tokens={},
+            )
+        }
+        runner._cloud_draft_position_state_by_task = {
+            "prefill-task": SimpleNamespace(
+                is_prefill=True,
+                req_ids=("req-a",),
+            )
+        }
+        runner._cloud_target_generation_by_task = {"prefill-task": 1}
+        runner._cloud_expected_request_corrections = {}
+        scheduler_output = SimpleNamespace(
+            draft_task_id="prefill-task",
+            draft_step_idx=0,
+        )
+
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.logger.warning"
+        ) as warning:
+            recorded = runner._record_cloud_request_corrections(
+                scheduler_output,
+                {"req-a": 1},
+                {"req-a": 1},
+            )
+
+        self.assertEqual(recorded, 0)
+        warning.assert_not_called()
+
     def test_consumes_by_request_identity_after_batch_reorder(self):
         runner = self._build_runner()
         scheduler_output = SimpleNamespace(
