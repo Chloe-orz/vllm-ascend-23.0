@@ -1425,6 +1425,29 @@ class NPUWorker(WorkerBase):
             req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
         )
 
+    @staticmethod
+    def _fi_delay_ms(env_name: str, ht: object, where: str) -> None:
+        """[FAULT-INJECTION] Deterministically widen a rendezvous window.
+
+        Set e.g. EC_FI_DELAY_DRAFT_TAIL_RECV_MS=3000 in ONE edge's
+        environment only: that edge posts its matching recv 3s late, so the
+        cloud's c2e isend to this edge sits UNMATCHED at the head of the
+        shared (channel, send) stream while the other edge's isends queue
+        behind it.  If the other edge stalls during the window, the shared
+        stream is a cross-pair coupling (head-of-line blocking); with
+        pair-isolated streams it must be unaffected.  Default 0 = no-op.
+        """
+        try:
+            _ms = int(os.environ.get(env_name, "0"))
+        except ValueError:
+            _ms = 0
+        if _ms > 0:
+            logger.warning(
+                "[FI] %s: delaying %s by %d ms ht=%s",
+                env_name, where, _ms, ht,
+            )
+            time.sleep(_ms / 1000.0)
+
     def _execute_model_edge_tail(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1443,6 +1466,9 @@ class NPUWorker(WorkerBase):
         tensor_dict, comm_handles, comm_postprocess = None, None, None
         # Multi-instance (2E1C): scope the recv to this edge's pair group.
         self._set_batch_phase(scheduler_output, "tail-recv-post")
+        self._fi_delay_ms("EC_FI_DELAY_TAIL_RECV_MS",
+                          getattr(scheduler_output, "head_token", None),
+                          "tail recv post")
         with self._pair_scope(self._edge_instance_id()):
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=scheduler_output.total_num_scheduled_tokens,
@@ -1781,6 +1807,9 @@ class NPUWorker(WorkerBase):
         if not isinstance(output, IntermediateTensors):
             raise RuntimeError("DRAFT_FIRST did not produce intermediates")
         if get_pp_group().world_size == 2:
+            self._fi_delay_ms("EC_FI_DELAY_DRAFT_HEAD_SEND_MS",
+                              getattr(scheduler_output, "head_token", None),
+                              "draft-head send")
             tensor_dict = {
                 key: value.contiguous()
                 if isinstance(value, torch.Tensor)
@@ -1825,6 +1854,8 @@ class NPUWorker(WorkerBase):
         # default PP group has no channel groups in multi-edge mode.
         _ht = getattr(scheduler_output, "head_token", None)
         self._set_batch_phase(scheduler_output, "draft-tail-recv-post")
+        self._fi_delay_ms("EC_FI_DELAY_DRAFT_TAIL_RECV_MS", _ht,
+                          "draft-tail recv post")
         logger.info(
             "[2E1C-TRACE] draft-tail recv POST begin: ht=%s thread=%s",
             _ht, threading.current_thread().name,
