@@ -902,6 +902,14 @@ class NPUWorker(WorkerBase):
         )
         for handle in handles:
             handle.wait()
+        if handles:
+            # [2E1C-TRACE] a hang WITH the begin line but WITHOUT this done
+            # line localizes the stall to the previous isend's completion
+            # (peer never posted the matching recv).
+            logger.info(
+                "[2E1C-TRACE] _wait_pp_send_work done: channel=%s pair=%s",
+                channel.value, pair_edge_id,
+            )
 
     # ------------------------------------------------------------------ #
     # [CHER/EHER] Cloud/edge hidden early-receive primitives             #
@@ -961,6 +969,31 @@ class NPUWorker(WorkerBase):
             )
         except Exception:
             logger.exception("[2E1C-TRACE][CHER-DUMP] failed")
+
+    def _ensure_cher_watchdog(self) -> None:
+        """[2E1C-TRACE] Lazily start the hang watchdog (once, any role --
+        cloud AND edge: a 2E1C hang is only diagnosable with both halves of
+        the scene, and the edge worker has the same _pp_send_work state)."""
+        if getattr(self, "_cher_watchdog_started", False):
+            return
+        self._cher_watchdog_started = True
+        threading.Thread(
+            target=self._cher_state_watchdog,
+            name="cher-state-watchdog",
+            daemon=True,
+        ).start()
+        logger.info("[2E1C-TRACE] CHER state watchdog started")
+
+    def _set_batch_phase(self, scheduler_output: "SchedulerOutput",
+                         phase: str) -> None:
+        """[2E1C-TRACE] Record batch + pipeline phase so the hang watchdog
+        dump shows WHERE inside execute_model this worker is stuck (e.g.
+        draft-recv-post vs draft-recv-wait), not just which batch."""
+        self._cur_batch_desc = (
+            f"bt={scheduler_output.batch_type} "
+            f"ht={getattr(scheduler_output, 'head_token', None)} "
+            f"phase={phase}"
+        )
 
     def _cher_state_watchdog(self) -> None:
         """[2E1C-TRACE] Daemon: dump CHER state whenever the busy_loop makes
@@ -1153,8 +1186,24 @@ class NPUWorker(WorkerBase):
     def cleanup_early_recv(self, head_token: str) -> None:
         """Drop a leaked early-recv entry (e.g. request aborted mid-prefill)."""
         with self._early_recv_lock:
-            self._early_recv_handles.pop(head_token, None)
+            dropped = self._early_recv_handles.pop(head_token, None)
             self._early_recv_consumed.discard(head_token)
+        if dropped is not None:
+            # [2E1C-TRACE] The dropped entry's irecv may STILL be live on the
+            # channel: if the sender eventually sends, the data lands in a
+            # buffer nobody consumes -- and, worse, that orphaned recv has
+            # already consumed one slot of the channel FIFO, shifting every
+            # later pairing on this channel by one (silent corruption or a
+            # downstream hang).  Log loudly so a later channel-FIFO mismatch
+            # hang can be correlated back to this drop.
+            logger.warning(
+                "[2E1C-TRACE] cleanup_early_recv dropped a LIVE entry ht=%s "
+                "(age=%.1fs) -- the orphaned irecv may poison this channel's "
+                "FIFO pairing",
+                head_token,
+                time.monotonic() - self._early_recv_booked_at.get(
+                    head_token, time.monotonic()),
+            )
 
     def _all_gather_tensor_dict(
         self,
@@ -1234,25 +1283,36 @@ class NPUWorker(WorkerBase):
 
         # Edge-cloud PD-separation: dispatch by batch_type and role.
         if self.model_runner._edge_cloud_enabled:
-            bt = scheduler_output.batch_type
-            if is_cloud_device():
+            # [2E1C-TRACE] start the hang watchdog on ALL roles (cloud AND
+            # edge) and bracket the batch so a hang dump shows exactly where
+            # this worker is stuck.
+            self._ensure_cher_watchdog()
+            self._set_batch_phase(scheduler_output, "enter")
+            try:
+                bt = scheduler_output.batch_type
+                if is_cloud_device():
+                    if bt == BatchType.DRAFT_FIRST:
+                        return self._execute_model_cloud_draft(scheduler_output)
+                    return self._execute_model_cloud(
+                        scheduler_output, layer_slice_info
+                    )
                 if bt == BatchType.DRAFT_FIRST:
-                    return self._execute_model_cloud_draft(scheduler_output)
-                return self._execute_model_cloud(
-                    scheduler_output, layer_slice_info
-                )
-            if bt == BatchType.DRAFT_FIRST:
-                return self._execute_model_edge_draft_head(scheduler_output)
-            if bt == BatchType.DRAFT_LAST:
-                return self._execute_model_edge_draft_tail(scheduler_output)
-            if bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST):
-                return self._execute_model_edge_head(
-                    scheduler_output, layer_slice_info
-                )
-            if bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
-                return self._execute_model_edge_tail(
-                    scheduler_output, layer_slice_info
-                )
+                    return self._execute_model_edge_draft_head(scheduler_output)
+                if bt == BatchType.DRAFT_LAST:
+                    return self._execute_model_edge_draft_tail(scheduler_output)
+                if bt in (BatchType.PREFILL_FIRST, BatchType.DECODE_FIRST):
+                    return self._execute_model_edge_head(
+                        scheduler_output, layer_slice_info
+                    )
+                if bt in (BatchType.PREFILL_LAST, BatchType.DECODE_LAST):
+                    return self._execute_model_edge_tail(
+                        scheduler_output, layer_slice_info
+                    )
+            finally:
+                # busy_loop made it out of the batch (or slice): feed the
+                # watchdog regardless of which segment path ran.
+                self._cher_last_progress = time.monotonic()
+                self._cur_batch_desc = "idle"
 
         # Fallback: original path for non-edge-cloud or unhandled batch types.
         return self._execute_model_legacy(
@@ -1278,6 +1338,7 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Edge head segment (PF/DF): segment_a -> isend -> suspend -> return EMPTY."""
+        self._set_batch_phase(scheduler_output, "edge-head")
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors=None,
             layer_slice_info=layer_slice_info,
@@ -1381,6 +1442,7 @@ class NPUWorker(WorkerBase):
         # never sends and deadlock on the channel.
         tensor_dict, comm_handles, comm_postprocess = None, None, None
         # Multi-instance (2E1C): scope the recv to this edge's pair group.
+        self._set_batch_phase(scheduler_output, "tail-recv-post")
         with self._pair_scope(self._edge_instance_id()):
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=scheduler_output.total_num_scheduled_tokens,
@@ -1388,6 +1450,7 @@ class NPUWorker(WorkerBase):
                 sp_chunk=edge_sp,
                 include_mrope=False,
             )
+        self._set_batch_phase(scheduler_output, "tail-exec")
 
         intermediate_tensors = AsyncIntermediateTensors(
             tensor_dict,
@@ -1415,20 +1478,10 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Cloud middle segment: recv -> segment_b/c -> isend -> return."""
-        # [2E1C-TRACE] record the current batch for the CHER state dump, and
-        # lazily start the hang watchdog (once).
-        self._cur_batch_desc = (
-            f"bt={scheduler_output.batch_type} "
-            f"ht={getattr(scheduler_output, 'head_token', None)}"
-        )
-        if not getattr(self, "_cher_watchdog_started", False):
-            self._cher_watchdog_started = True
-            threading.Thread(
-                target=self._cher_state_watchdog,
-                name="cher-state-watchdog",
-                daemon=True,
-            ).start()
-            logger.info("[2E1C-TRACE] CHER state watchdog started")
+        # [2E1C-TRACE] batch+phase recorded by the execute_model dispatch
+        # wrapper (which also starts the watchdog on all roles); refine the
+        # phase as the batch progresses.
+        self._set_batch_phase(scheduler_output, "cloud-prepare")
         #     f"Execute model, batch_type: {scheduler_output.batch_type}, " + (
         #         f"slice: {layer_slice_info.slice_index + 1}/{layer_slice_info.total_slices}, "
         #         f"layers: [{layer_slice_info.start_layer},{layer_slice_info.end_layer})"
@@ -1452,6 +1505,7 @@ class NPUWorker(WorkerBase):
         if is_first_slice:
             self.model_runner.cloud_prepare_early(scheduler_output)
         if forward_pass and is_first_slice:
+            self._set_batch_phase(scheduler_output, "cloud-recv")
             # [CHER] Atomically reuse the guard thread's early-recv entry, or
             # post the irecv ourselves.  get_or_post_early_recv guarantees at
             # most one irecv per head_token even when the guard thread's hint
@@ -1534,6 +1588,7 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
+        self._set_batch_phase(scheduler_output, "cloud-exec")
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
@@ -1569,6 +1624,7 @@ class NPUWorker(WorkerBase):
         # the pair group), and pair scoping only selects WHICH pair group the
         # send goes on — never whether to send.
         if get_pp_group().world_size > 1:
+            self._set_batch_phase(scheduler_output, "cloud-send")
             channel = self._hidden_channel_for(scheduler_output)
             _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
             with self._pair_scope(_pair_edge_id):
@@ -1647,21 +1703,39 @@ class NPUWorker(WorkerBase):
         # pair) and, more importantly, never received hidden-channel groups
         # in multi-edge mode, so _hidden_channel_groups() raises IndexError.
         _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
+        _ht = getattr(scheduler_output, "head_token", None)
+        self._set_batch_phase(scheduler_output, "draft-recv-post")
+        logger.info(
+            "[2E1C-TRACE] draft recv POST begin: ht=%s pair=%s thread=%s",
+            _ht, _pair_edge_id, threading.current_thread().name,
+        )
         with self._pair_scope(_pair_edge_id):
             tensor_dict, comm_handles, comm_postprocess = (
                 edge_cloud_broadcast_recv_scheduled_draft(
                     tensor_meta=recv_tensor_meta,
                 )
             )
+            logger.info(
+                "[2E1C-TRACE] draft recv POST done: ht=%s handles=%d",
+                _ht, len(comm_handles),
+            )
+            self._set_batch_phase(scheduler_output, "draft-recv-wait")
+            logger.info(
+                "[2E1C-TRACE] draft recv WAIT start: ht=%s handles=%d",
+                _ht, len(comm_handles),
+            )
             for handle in comm_handles:
                 handle.wait()
+            logger.info("[2E1C-TRACE] draft recv WAIT done: ht=%s", _ht)
             for postprocess in comm_postprocess:
                 postprocess()
+        self._set_batch_phase(scheduler_output, "draft-compute")
         assert tensor_dict is not None
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
         )
         if get_pp_group().world_size == 2:
+            self._set_batch_phase(scheduler_output, "draft-send")
             out_tensor_dict = {
                 key: value.contiguous()
                 if isinstance(value, torch.Tensor)
@@ -1700,6 +1774,7 @@ class NPUWorker(WorkerBase):
     ) -> ModelRunnerOutput:
         """Run and send one edge-side scheduled draft first segment."""
         logger.info(f"Execute model, batch_type: {scheduler_output.batch_type}")
+        self._set_batch_phase(scheduler_output, "edge-draft-head")
         output = self.model_runner._run_edge_cloud_draft_first_segment(
             scheduler_output
         )
@@ -1748,16 +1823,34 @@ class NPUWorker(WorkerBase):
         )
         # 2E1C: pair scope is required for hidden-channel resolution — the
         # default PP group has no channel groups in multi-edge mode.
+        _ht = getattr(scheduler_output, "head_token", None)
+        self._set_batch_phase(scheduler_output, "draft-tail-recv-post")
+        logger.info(
+            "[2E1C-TRACE] draft-tail recv POST begin: ht=%s thread=%s",
+            _ht, threading.current_thread().name,
+        )
         with self._pair_scope(self._edge_instance_id()):
             tensor_dict, comm_handles, comm_postprocess = (
                 edge_cloud_broadcast_recv_scheduled_draft(
                     tensor_meta=recv_tensor_meta,
                 )
             )
+            logger.info(
+                "[2E1C-TRACE] draft-tail recv POST done: ht=%s handles=%d",
+                _ht, len(comm_handles),
+            )
+            self._set_batch_phase(scheduler_output, "draft-tail-recv-wait")
+            logger.info(
+                "[2E1C-TRACE] draft-tail recv WAIT start: ht=%s handles=%d",
+                _ht, len(comm_handles),
+            )
             for handle in comm_handles:
                 handle.wait()
+            logger.info(
+                "[2E1C-TRACE] draft-tail recv WAIT done: ht=%s", _ht)
             for postprocess in comm_postprocess:
                 postprocess()
+        self._set_batch_phase(scheduler_output, "draft-tail-compute")
         logger.info(
             "Receive intermediate tensors from cloud after, "
             f"hidden_channel: {HiddenChannelType.DECODE.value}"
