@@ -1891,6 +1891,22 @@ class PDSeparatedScheduler(Scheduler):
             return False
         if task_id is None:
             raise RuntimeError("DRAFT_LAST missing draft_task_id")
+        # Do not spawn the next step for a chain whose requests have all
+        # finished (e.g. aborted while this tail was in flight).  The worker
+        # drains such tails without writing last_draft_* results, so a
+        # follow-up DRAFT_FIRST would find an incomplete context.
+        live_req_ids = {req.request_id for req in self.running}
+        if not any(
+            req_id in live_req_ids
+            for req_id in draft_last.num_scheduled_tokens
+        ):
+            logger.info(
+                "[PD] skip enqueue next DRAFT_FIRST: task_id=%s step=%d has "
+                "no running requests",
+                task_id,
+                next_step_idx,
+            )
+            return False
         return self.enqueue_draft_first(
             draft_last,
             draft_task_id=task_id,

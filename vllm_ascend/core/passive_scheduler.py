@@ -144,14 +144,20 @@ class PassiveScheduler:
             queue.Queue())
         self._me_edge_head: dict[int, int] = {}
         self._me_seq = 0
+        self._me_registry = None
         self._me_partition = None
+        self._me_vllm_config = vllm_config
         try:
             from vllm_ascend.edge_cloud.role_registry import (
                 get_role_registry)
             _registry = get_role_registry()
             if _registry is not None and len(_registry.edge_ids) > 1:
                 self._me_enabled = True
-                self._me_partition = _registry.kv_partition
+                # NOTE: do NOT touch _registry.kv_partition here — ratio-based
+                # partitions only resolve once the real block count is known
+                # (after KV sizing).  Resolved lazily on first ingress.
+                self._me_registry = _registry
+                self._me_vllm_config = vllm_config
                 logger.info(
                     "PassiveScheduler multi-edge mode enabled: %d edges "
                     "(registry digest=%s)",
@@ -418,6 +424,47 @@ class PassiveScheduler:
                 so.batch_type.value if so.batch_type else "<none>",
             )
 
+    def _me_get_partition(self):
+        """Lazily resolve the static KV partition (ratio-based in the
+        registry; only materializable once the cloud's real num_blocks is
+        known — i.e. after KV sizing, which precedes any segment ingress)."""
+        if self._me_partition is None:
+            kv_cfg = getattr(self._me_vllm_config, "kv_cache_config", None)
+            num_blocks = getattr(kv_cfg, "num_blocks", None)
+            if not num_blocks:
+                # Passive cloud may not have kv_cache_config set — fall back
+                # to cache_config.num_gpu_blocks (set by the engine after KV
+                # sizing).
+                num_blocks = getattr(
+                    getattr(self._me_vllm_config, "cache_config", None),
+                    "num_gpu_blocks", None)
+            if not num_blocks:
+                # The passive cloud engine never runs KV sizing itself — its
+                # workers are physically initialized by the rank0 edge's
+                # world-scoped broadcast, and neither local fallback above is
+                # ever populated.  The cloud's real pool size is published to
+                # the world TCPStore by the rank0 edge's sizing (its
+                # clamp-to-min over the world specs IS the cloud's value);
+                # read it from there.  Timing is safe: E0 publishes during
+                # its own engine startup, which necessarily precedes any
+                # segment ingress here.
+                pc = getattr(self._me_vllm_config, "parallel_config", None)
+                cloud_id = getattr(pc, "cloud_id", None) or 0
+                import torch.distributed as _dist
+                from datetime import timedelta as _td
+                _w = self._me_registry.world
+                _store = _dist.TCPStore(
+                    host_name=_w.master_addr, port=_w.master_port,
+                    is_master=False, timeout=_td(seconds=300))
+                num_blocks = int(
+                    _store.get(f"cloud_{cloud_id}_num_blocks"))
+                logger.info(
+                    "[ME] resolved cloud %d num_blocks=%d from world store",
+                    cloud_id, num_blocks)
+            self._me_partition = self._me_registry.resolve_kv_partition(
+                num_blocks)
+        return self._me_partition
+
     def _wrap_segment(self, edge_id: int, so: SchedulerOutput) -> None:
         """Wrap all req_id/head_token fields with the edge prefix (F6) and
         translate edge-local block ids to cloud-physical ids (F2).
@@ -433,13 +480,38 @@ class PassiveScheduler:
             wrap_req_id(edge_id, rid): n
             for rid, n in so.num_scheduled_tokens.items()
         }
+        partition = self._me_get_partition() if self._me_registry else None
         for req_data in so.scheduled_new_reqs or []:
+            raw_req_id = req_data.req_id
             req_data.req_id = wrap_req_id(edge_id, req_data.req_id)
-            if self._me_partition is not None and req_data.block_ids:
-                req_data.block_ids = tuple(
-                    self._me_partition.to_physical(edge_id, list(ids))
-                    for ids in req_data.block_ids
-                )
+            if partition is not None and req_data.block_ids:
+                try:
+                    req_data.block_ids = tuple(
+                        partition.to_physical(edge_id, list(ids))
+                        for ids in req_data.block_ids
+                    )
+                except ValueError:
+                    # Diagnostic for block-id namespace mismatches (MTP draft
+                    # chains, spec-state blocks): dump the full context so we
+                    # can tell edge-local ids apart from already-physical or
+                    # out-of-pool ids.
+                    logger.exception(
+                        "[ME] block-id translation failed: edge=%d "
+                        "batch_type=%s req_id=%s draft_task_id=%s "
+                        "draft_step_idx=%s block_ids_per_group=%s "
+                        "partition=%s",
+                        edge_id,
+                        so.batch_type,
+                        raw_req_id,
+                        getattr(so, "draft_task_id", None),
+                        getattr(so, "draft_step_idx", None),
+                        [
+                            [b for b in ids if b >= partition.num_blocks_of(edge_id)][:4]
+                            for ids in req_data.block_ids
+                        ],
+                        partition.split if partition else None,
+                    )
+                    raise
         cached = so.scheduled_cached_reqs
         if cached is not None:
             if getattr(cached, "req_ids", None):
@@ -450,13 +522,13 @@ class PassiveScheduler:
                     wrap_req_id(edge_id, rid)
                     for rid in cached.resumed_req_ids
                 }
-            if self._me_partition is not None and getattr(
+            if partition is not None and getattr(
                     cached, "new_block_ids", None):
                 # new_block_ids: list per request of (tuple of per-group
                 # list[int] | None) — translate each per-group list.
                 cached.new_block_ids = [
                     (tuple(
-                        self._me_partition.to_physical(edge_id, list(g))
+                        partition.to_physical(edge_id, list(g))
                         for g in ids)
                      if ids is not None else None)
                     for ids in cached.new_block_ids
@@ -473,6 +545,13 @@ class PassiveScheduler:
         # spec decode: per-req draft token map is keyed by req_id — must be
         # wrapped too, otherwise the cloud's draft/verify lookup by wrapped
         # req_id would KeyError.
+        # NOTE: the live SchedulerOutput field is ``scheduled_spec_decode_tokens``;
+        # ``scheduled_spec_token_ids`` is a stale name kept for backward compat.
+        if getattr(so, "scheduled_spec_decode_tokens", None):
+            so.scheduled_spec_decode_tokens = {
+                wrap_req_id(edge_id, rid): ids
+                for rid, ids in so.scheduled_spec_decode_tokens.items()
+            }
         if getattr(so, "scheduled_spec_token_ids", None):
             so.scheduled_spec_token_ids = {
                 wrap_req_id(edge_id, rid): ids
@@ -485,6 +564,29 @@ class PassiveScheduler:
             }
         if getattr(so, "head_token", None):
             so.head_token = wrap_head_token(edge_id, so.head_token)
+        # draft_task_id mirrors the target batch's head_token: the cloud
+        # worker caches draft metadata keyed by the WRAPPED head_token, so
+        # the id must enter the cloud namespace too, otherwise DRAFT lookups
+        # miss ("DRAFT has no matching target positions").
+        if getattr(so, "draft_task_id", None):
+            so.draft_task_id = wrap_head_token(edge_id, so.draft_task_id)
+        if getattr(so, "cloud_draft_invalidate_task_ids", None):
+            so.cloud_draft_invalidate_task_ids = [
+                wrap_head_token(edge_id, tid)
+                for tid in so.cloud_draft_invalidate_task_ids
+            ]
+        # DRAFT_FIRST step 0 carries accepted/sampling counts as dicts keyed
+        # by RAW edge req_ids (built in EngineCore from the edge worker's
+        # ModelRunnerOutput).  The cloud pairs them with its cached state by
+        # wrapped req_id, so the dict keys must enter the cloud namespace.
+        for field in ("num_accepted_tokens", "valid_sampled_token_count"):
+            value = getattr(so, field, None)
+            if isinstance(value, dict):
+                setattr(
+                    so,
+                    field,
+                    {wrap_req_id(edge_id, rid): v for rid, v in value.items()},
+                )
 
     def _promote_multi_edge(self) -> None:
         """Move per-edge head segments from the global queue into the legacy

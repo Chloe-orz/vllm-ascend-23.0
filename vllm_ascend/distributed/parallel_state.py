@@ -53,6 +53,14 @@ _FLASHCOMM2_ODP: GroupCoordinator | None = None
 # synchronized; only the cross-node P2P (isend/irecv) uses the
 # per-channel stream, and handle.wait() syncs back to the default
 # stream before the broadcast.
+#
+# NOTE(2E1C debugging): streams are keyed by (channel, direction) —
+# sends and recvs of one channel never share a stream, so a blocked isend
+# cannot FIFO-starve a pending irecv (that FIFO coupling re-formed the
+# 2E1C reap deadlock even with per-pair send bookkeeping).  The pp_group
+# parameter is accepted for call-site compatibility but currently unused
+# (pair-level stream isolation is a latency optimization, not a
+# correctness requirement).
 _hidden_channel_streams: dict[Any, Any] = {}
 _hidden_channel_stream_lock = threading.Lock()
 
@@ -77,7 +85,11 @@ def _get_hidden_channel_stream(channel: Any) -> Any:
 
 @contextlib.contextmanager
 def _hidden_channel_stream_ctx(
-    channel: Any | None, *, wait_for_default: bool = True,
+    channel: Any | None,
+    *,
+    direction: str = "send",
+    pp_group: Any | None = None,
+    wait_for_default: bool = True,
 ):
     """Switch to the channel's dedicated stream for P2P isend/irecv.
 
@@ -93,7 +105,14 @@ def _hidden_channel_stream_ctx(
     if channel is None:
         yield
         return
-    stream = _get_hidden_channel_stream(channel)
+    # Key by (channel, direction): a blocked send must never hold back a
+    # pending recv queued behind it on the same stream — on the cloud, one
+    # pair's pending c2e isend would otherwise FIFO-block the other pair's
+    # e2c irecv, re-forming the reap deadlock through the stream even after
+    # the send-work bookkeeping was split per pair.  (The pair dimension is
+    # deliberately NOT in the key: within one direction, recvs/sends of
+    # different pairs complete independently and the FIFO order is harmless.)
+    stream = _get_hidden_channel_stream((channel, direction))
     if wait_for_default:
         stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
@@ -545,7 +564,24 @@ def init_ascend_model_parallel(
         backend = torch.distributed.get_backend(get_world_group().device_group)
         edge_npu_count = parallel_config.edge_npu_count
         cloud_npu_count = parallel_config.cloud_npu_count
-        if parallel_config.is_shared_model_edge:
+
+        # Multi-instance (2E1C): EP/MC2 membership comes from the registry
+        # (all edge ranks in one group, all cloud ranks in another), NOT from
+        # the legacy contiguous [edge..., cloud...] arithmetic — that formula
+        # silently mis-assigns ranks once a second edge exists (cloud rank 5
+        # fell outside every group and crashed GroupCoordinator init).
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry, init_role_registry)
+        _registry = get_role_registry()
+        if _registry is None and getattr(
+                parallel_config, "role_registry", None):
+            _registry = init_role_registry(parallel_config.role_registry)
+        if _registry is not None:
+            ep_edge_ranks = [r for e in _registry.edge_ids
+                             for r in _registry.edge(e).ranks]
+            ep_cloud_ranks = [r for c in _registry.cloud_ids
+                              for r in _registry.cloud(c).ranks]
+        elif parallel_config.is_shared_model_edge:
             # Shared-model edge-cloud topology: the edge has a
             # single distributed rank (rank 0) and the cloud
             # occupies ranks 1..1 + N*C.
@@ -574,7 +610,17 @@ def init_ascend_model_parallel(
         # DECODE_1, and extra hidden-channel groups are created for
         # PREFILL_2..N and DECODE_2..M when dp_size > 1.
         pp_group = get_pp_group()
-        if pp_group.world_size > 1:
+        # Multi-instance (2E1C): skip legacy default-PP channel setup and
+        # warmup entirely — channels live on per-pair groups (created below).
+        # Running the legacy warmup here would rendezvous the two edges on
+        # DIFFERENT default groups (GroupCoordinator picks the LAST group
+        # containing a rank, so the cloud's default PP is the last pair),
+        # deadlocking the first edge.
+        from vllm_ascend.edge_cloud.role_registry import (
+            get_role_registry as _get_reg)
+        _reg = _get_reg()
+        _multi_edge = _reg is not None and len(_reg.edge_ids) > 1
+        if pp_group.world_size > 1 and not _multi_edge:
             pp_group.create_alternate_groups(backend)
             if hasattr(pp_group, "create_hidden_channel_groups"):
                 dp_size = parallel_config.data_parallel_size
@@ -1323,7 +1369,9 @@ def edge_cloud_isend_tensor_dict(
             "was initialized with inconsistent per-tensor shapes; re-init "
             "it or unset VLLM_ASCEND_EDGE_CLOUD_MERGE_PAYLOAD."
         )
-        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+        with _hidden_channel_stream_ctx(
+            channel, direction="send", pp_group=pp_group, wait_for_default=True
+        ):
             handle = torch.distributed.isend(
                 merged, dst=pp_group.ranks[dst], group=group
             )
@@ -1356,7 +1404,9 @@ def edge_cloud_isend_tensor_dict(
             # only happens when upstream code returned a non-standard
             # layout, in which case we materialize once.
             value = value.contiguous()
-        with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+        with _hidden_channel_stream_ctx(
+            channel, direction="send", pp_group=pp_group, wait_for_default=True
+        ):
             handle = torch.distributed.isend(
                 value, dst=pp_group.ranks[dst], group=group
             )
@@ -1366,6 +1416,14 @@ def edge_cloud_isend_tensor_dict(
                 value.record_stream(torch.npu.current_stream(value.device))
         handles.append(handle)
 
+    # [2E1C-TRACE] The pre-log above fires BEFORE the actual isend posts;
+    # this one confirms they all reached the device queue — the gap between
+    # them is the only place a "sent but never posted" hang can hide.
+    logger.info(
+        "[PD] edge_cloud_isend posted: channel=%s dst=%s num_tokens=%s handles=%d",
+        channel.value if channel else "default",
+        dst, num_tokens, len(handles),
+    )
     return handles
 
 
@@ -1503,7 +1561,7 @@ def edge_cloud_irecv_tensor_dict(
         # comm_postprocess list so it runs *after* the irecv handle is
         # waited on by AsyncIntermediateTensors.wait_for_comm().
         with _hidden_channel_stream_ctx(
-            channel, wait_for_default=False
+            channel, direction="recv", pp_group=pp_group, wait_for_default=False
         ):
             # Allocation and first use must share the channel stream. If
             # torch.empty runs on the default stream, a recycled block can
@@ -1558,7 +1616,7 @@ def edge_cloud_irecv_tensor_dict(
         full_size = (recv_num_tokens,) + value.size[1:]
         if key in send_keys:
             with _hidden_channel_stream_ctx(
-                channel, wait_for_default=False
+                channel, direction="recv", pp_group=pp_group, wait_for_default=False
             ):
                 full_tensor = torch.empty(
                     full_size, dtype=value.dtype, device=value.device
@@ -1687,7 +1745,9 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
             )
             if not tensor.is_contiguous():
                 tensor = tensor.contiguous()
-            with _hidden_channel_stream_ctx(channel, wait_for_default=True):
+            with _hidden_channel_stream_ctx(
+                channel, direction="send", pp_group=pp_group, wait_for_default=True
+            ):
                 handle = torch.distributed.isend(
                     tensor,
                     dst=pp_group.ranks[dst],
@@ -2122,7 +2182,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
 
             if is_pp_npu0 and key in send_keys:
                 with _hidden_channel_stream_ctx(
-                    channel, wait_for_default=False
+                    channel, direction="recv", pp_group=pp_group, wait_for_default=False
                 ):
                     # Scheduled-draft buffers follow the same allocation-
                     # stream rule as the generic receive path.
@@ -2324,6 +2384,9 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
     if registry is None:
         return
     backend = torch.distributed.get_backend(get_world_group().device_group)
+    # HiddenChannelType enum init (legacy does it on the default-PP path
+    # which multi-edge mode skips).
+    HiddenChannelType.init(dp_size=1)
 
     for edge_id in registry.edge_ids:
         for cloud_id in registry.cloud_ids:
@@ -2342,16 +2405,24 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
                 backend,
                 group_name=f"ec_pair_e{edge_id}_c{cloud_id}",
             )
-            if pair is not None:  # non-member ranks get None
+            # create_alternate_groups / create_hidden_channel_groups call
+            # torch.distributed.new_group internally, which is a collective
+            # on the DEFAULT (world) group — EVERY rank must participate,
+            # even non-members of this pair (non-members run it on their
+            # singleton group, harmless).  Calling them member-only desyncs
+            # the world-wide new_group counter and deadlocks all later
+            # rendezvous.  Only the *registration* is member-scoped.
+            if hasattr(pair, "create_alternate_groups"):
+                pair.create_alternate_groups(backend)
+            if hasattr(pair, "create_hidden_channel_groups"):
+                pair.create_hidden_channel_groups(
+                    backend, num_prefill=2, num_decode=1)
+            # Store ONLY on the two member ranks: init_model_parallel_group
+            # returns a real (singleton) group to non-member ranks because we
+            # cover every rank in each call — storing those would make
+            # non-members believe they are pair members.
+            if torch.distributed.get_rank() in (edge_rank0, cloud_rank0):
                 _PAIR_PP_GROUPS[(edge_id, cloud_id)] = pair
-                # Alternate + hidden channel groups on the pair group,
-                # mirroring the legacy single-pair setup (2 prefill +
-                # 1 decode channels).
-                if hasattr(pair, "create_alternate_groups"):
-                    pair.create_alternate_groups(backend)
-                if hasattr(pair, "create_hidden_channel_groups"):
-                    pair.create_hidden_channel_groups(
-                        backend, num_prefill=2, num_decode=1)
 
     logger.info(
         "[edge-cloud] multi-instance pair groups created: %d pairs (%s)",

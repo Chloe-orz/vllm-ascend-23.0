@@ -4148,6 +4148,28 @@ class NPUModelRunner(GPUModelRunner):
                 f"extra_in_so={sorted(so_req_ids - context_req_ids)}"
             )
         if draft_step_idx > 0:
+            missing = [
+                key
+                for key in (
+                    "last_draft_token_ids",
+                    "last_draft_positions",
+                    "last_draft_hidden_states",
+                )
+                if key not in context
+            ]
+            if missing:
+                # The previous step's DRAFT_LAST never wrote its results —
+                # the chain is broken (peer failure or an aborted tail).
+                # Purge the context so the rest of the chain fails fast with
+                # a clear error instead of a bare KeyError.
+                task_id = scheduler_output.draft_task_id
+                self._pending_edge_cloud_draft_contexts.pop(task_id, None)
+                raise RuntimeError(
+                    f"DRAFT step {draft_step_idx} is missing previous-step "
+                    f"results {missing}: task_id={task_id}. The previous "
+                    "DRAFT_LAST did not complete on this worker; the broken "
+                    "chain context has been purged."
+                )
             return (
                 context["last_draft_token_ids"],
                 context["last_draft_positions"] + 1,
@@ -10744,6 +10766,21 @@ class NPUModelRunner(GPUModelRunner):
             and self.edge_cloud_cfg.mode == "embedding_only"
             and self.edge_cloud_cfg.role == "edge"
         ):
+            # [2E1C-TRACE] em edge returns an empty spec by design (no local
+            # attention layers).  With MTP, the DRAFT model DOES have an mtp
+            # attention layer on the edge that needs KV — log what attention
+            # layers this early return is dropping, so a draft-KV starvation
+            # startup hang is visible instead of silent.
+            _attn = get_layers_from_vllm_config(
+                self.vllm_config, AttentionLayerBase)
+            if _attn:
+                logger.warning(
+                    "[2E1C-TRACE] get_kv_cache_spec: em-edge early return {} "
+                    "but %d attention layers exist (draft MTP layers would "
+                    "get NO kv cache): %s",
+                    len(_attn),
+                    list(_attn.keys())[:8],
+                )
             return {}
 
         if (

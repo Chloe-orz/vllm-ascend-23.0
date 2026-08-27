@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
-
+import os
 from enum import Enum
 from typing import Any
 import copy
@@ -225,7 +225,10 @@ class NPUWorker(WorkerBase):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.23.0; falling back to v1 model runner.")
             self.use_v2_model_runner = False
         self._pp_send_work: list[Handle] = []
-        self._pp_send_work_by_channel: dict[str, list[Handle]] = {}
+        # Keyed by (channel.value, pair_edge_id) — the pair dimension keeps
+        # one edge's unreaped send from gating another edge's channel reuse
+        # in multi-instance (2E1C) mode.
+        self._pp_send_work_by_channel: dict[tuple[str, int | None], list[Handle]] = {}
 
         # [CHER/EHER] Cloud-side hidden early-receive (and its edge-side
         # mirror) cache.  The guard thread posts irecv ahead of the batch's
@@ -241,6 +244,11 @@ class NPUWorker(WorkerBase):
         # Prevents the guard thread from posting a duplicate (orphan) irecv
         # when its hint arrives after busy_loop already posted its own.
         self._early_recv_consumed: set[str] = set()
+        # [2E1C-TRACE] CHER debugging state: booking timestamps and a progress
+        # heartbeat so a hang can be localized to a thread/op/lock.
+        self._early_recv_booked_at: dict[str, float] = {}
+        self._cher_last_progress: float = time.monotonic()
+        self._cur_batch_desc: str = "none"
         # Whether cloud-side hidden early-receive (CHER) is active on this
         # worker.  CHER is a built-in part of PD-separation masking, so on a
         # PD-separated cloud worker (local_rank==0) this is always True; False
@@ -658,25 +666,39 @@ class NPUWorker(WorkerBase):
                 and not getattr(_pc, "is_edge_node", True)
                 and _pd.get("enabled", False)
                 and self.local_rank == 0
+                # Debug kill-switch for the multi-instance bring-up: CHER's
+                # early-posted irecv holds NIC/DMA resources until the edge
+                # sends; if that edge is behind, the pending op can starve
+                # the compute/copy engines.  VLLM_ASCEND_EC_CHER=0 turns it
+                # off to isolate that failure mode (correctness is unaffected
+                # — the busy_loop then posts the recv itself when the batch
+                # actually runs).
+                and os.environ.get("VLLM_ASCEND_EC_CHER", "1") != "0"
             )
             # Max in-flight prefill batches on the cloud = prefill_inflight_limit
             # (2 when next_prefill_prior_enable, else 1).  At most that many
-            # early-recv entries are ever useful, so the guard thread caps the
-            # cache at this size (see start_early_irecv): it posts ahead-of-time
-            # for the P-middle batches that will actually run, and skips the rest
-            # (busy_loop posts those itself).  This keeps the cache bounded (no
-            # unbounded growth / OOM) and the guard draining fast (skipped hints
-            # cost no NPU alloc), so the small hint ring never fills.
+            # early-recv entries PER EDGE are ever useful, so the guard thread
+            # caps the cache at this size per source edge (see
+            # start_early_irecv): it posts ahead-of-time for the P-middle
+            # batches that will actually run, and skips the rest (busy_loop
+            # posts those itself).  The per-edge cap is load-bearing in
+            # multi-instance mode: it is what keeps the same-channel
+            # rendezvous cycle broken for EVERY pair, not just whichever
+            # edge grabbed a global slot first.  This keeps the cache bounded
+            # (no unbounded growth / OOM) and the guard draining fast
+            # (skipped hints cost no NPU alloc), so the small hint ring never
+            # fills.
             if self._cloud_hidden_early_recv_enabled:
-                # CHER early-recv cache cap.  Empirically (see logs) the guard
-                # thread posts one entry at a time: each chunk's POST is
-                # followed by a busy_loop HIT before the next POST, so the
-                # cache never holds more than 1 entry even when
-                # next_prefill_prior_enable (2P) is on.  Capping at 1 keeps
-                # exactly one recv buffer (~80MB at 8192 tokens) resident
-                # instead of two, reducing caching-allocator fragmentation in
-                # the "64k then 4k" workload (different-sized buffers in the
-                # free list could not be reused).
+                # CHER early-recv cache cap (per edge).  Empirically (see
+                # logs) the guard thread posts one entry at a time: each
+                # chunk's POST is followed by a busy_loop HIT before the next
+                # POST, so the cache never holds more than 1 entry per edge
+                # even when next_prefill_prior_enable (2P) is on.  Capping at
+                # 1 keeps exactly one recv buffer (~80MB at 8192 tokens)
+                # resident per edge instead of two, reducing
+                # caching-allocator fragmentation in the "64k then 4k"
+                # workload (different-sized buffers in the free list could
+                # not be reused).
                 self._early_recv_max_inflight = 1
             else:
                 self._early_recv_max_inflight = 0
@@ -695,6 +717,7 @@ class NPUWorker(WorkerBase):
         Then, it calculates the free memory that can be used for KV cache in
         bytes.
         """
+        logger.info("[2E1C-TRACE] worker determine_available_memory start")
         GiB = lambda b: b / GiB_bytes
 
         # Fast path: user has explicitly specified KV cache size via
@@ -776,20 +799,33 @@ class NPUWorker(WorkerBase):
             "Available KV cache memory: %.2f GiB", GiB(self.available_kv_cache_memory_bytes), scope="local"
         )
 
+        logger.info(
+            "[2E1C-TRACE] worker determine_available_memory done: %.2f GiB",
+            GiB(self.available_kv_cache_memory_bytes),
+        )
         return int(self.available_kv_cache_memory_bytes)
 
     def _record_pp_send_work(
-        self, handles: list[Handle], channel: HiddenChannelType | None = None
+        self, handles: list[Handle], channel: HiddenChannelType | None = None,
+        pair_edge_id: int | None = None,
     ) -> None:
         if channel is None:
             self._pp_send_work = handles
         else:
+            # Multi-instance (2E1C): key by (channel, source pair).  Each
+            # (edge, cloud) pair owns independent HCCL channel communicators,
+            # so a pending send on one pair must never gate the other pair's
+            # ops — keying by channel alone manufactured exactly such a
+            # cross-pair dependency and deadlocked the cloud (E0's unreaped
+            # prefill_2 send blocking E1's prefill_2 batch).
+            key = (channel.value, pair_edge_id)
             logger.info(
-                "[PD] _record_pp_send_work: channel=%s handles=%d",
+                "[PD] _record_pp_send_work: channel=%s pair=%s handles=%d",
                 channel.value,
+                pair_edge_id,
                 len(handles),
             )
-            self._pp_send_work_by_channel[channel.value] = handles
+            self._pp_send_work_by_channel[key] = handles
 
     # ------------------------------------------------------------------ #
     # Multi-instance (2E1C) pair resolution helpers
@@ -840,7 +876,10 @@ class NPUWorker(WorkerBase):
             return contextlib.nullcontext()
         return active_pair(edge_id, cloud_id)
 
-    def _wait_pp_send_work(self, channel: HiddenChannelType | None = None) -> None:
+    def _wait_pp_send_work(
+        self, channel: HiddenChannelType | None = None,
+        pair_edge_id: int | None = None,
+    ) -> None:
         if channel is None:
             for handle in self._pp_send_work:
                 handle.wait()
@@ -851,10 +890,14 @@ class NPUWorker(WorkerBase):
             self._pp_send_work_by_channel.clear()
             return
 
-        handles = self._pp_send_work_by_channel.pop(channel.value, [])
+        # Multi-instance (2E1C): wait only on THIS pair's outstanding send —
+        # see _record_pp_send_work for why the key carries the pair.
+        key = (channel.value, pair_edge_id)
+        handles = self._pp_send_work_by_channel.pop(key, [])
         logger.info(
-            "[PD] _wait_pp_send_work: channel=%s handles=%d",
+            "[PD] _wait_pp_send_work: channel=%s pair=%s handles=%d",
             channel.value,
+            pair_edge_id,
             len(handles),
         )
         for handle in handles:
@@ -869,6 +912,64 @@ class NPUWorker(WorkerBase):
     # agnostic: the hidden_channel + num_tokens fully determine the recv, so
     # the same
     # primitives serve CHER (cloud, edge->cloud) and EHER (edge, cloud->edge).
+    @staticmethod
+    def _edge_bucket_of_token(ht: str) -> int | None:
+        """Multi-instance (2E1C): the source edge of a wrapped head_token
+        ("{edge_id}:{token}").  None in legacy/unwrapped mode — all such
+        tokens share a single capacity bucket, preserving 1-1 behavior."""
+        try:
+            from vllm_ascend.edge_cloud.role_registry import (
+                get_role_registry)
+            _registry = get_role_registry()
+            if _registry is not None and len(_registry.edge_ids) > 1:
+                from vllm_ascend.edge_cloud.id_adapter import (
+                    parse_token_edge_id)
+                return parse_token_edge_id(ht)
+        except Exception:
+            pass
+        return None
+
+    def _dump_cher_state(self, reason: str) -> None:
+        """[2E1C-TRACE] Snapshot CHER + send-work state for hang diagnosis.
+
+        Dumps: pending early-recv handles (with age), consumed count, pending
+        sends per (channel,pair), the batch the busy_loop is currently in, and
+        the calling thread — so at hang time we can see exactly which op each
+        thread is stuck on and who (if anyone) is holding a lock.
+        """
+        try:
+            now = time.monotonic()
+            with self._early_recv_lock:
+                handles = {
+                    ht: f"{now - self._early_recv_booked_at.get(ht, now):.1f}s"
+                    for ht in self._early_recv_handles
+                }
+            pending_sends = {
+                f"{ch}/e{pair}": len(v)
+                for (ch, pair), v in self._pp_send_work_by_channel.items()
+            }
+            logger.warning(
+                "[2E1C-TRACE][CHER-DUMP] reason=%s thread=%s | "
+                "early_recv_handles(ht->age)=%s | consumed=%d | "
+                "pending_sends(chan/pair->n)=%s | cur_batch=%s",
+                reason,
+                threading.current_thread().name,
+                handles,
+                len(self._early_recv_consumed),
+                pending_sends,
+                self._cur_batch_desc,
+            )
+        except Exception:
+            logger.exception("[2E1C-TRACE][CHER-DUMP] failed")
+
+    def _cher_state_watchdog(self) -> None:
+        """[2E1C-TRACE] Daemon: dump CHER state whenever the busy_loop makes
+        no progress for >30s (i.e. a hang is forming)."""
+        while not getattr(self, "_cher_watchdog_shutdown", False):
+            time.sleep(5.0)
+            if time.monotonic() - self._cher_last_progress > 30.0:
+                self._dump_cher_state("no-progress>30s")
+
     def _post_early_irecv_locked(
         self, ht: str, channel: "HiddenChannelType", num_tokens: int,
         include_mrope: bool = True,
@@ -885,17 +986,13 @@ class NPUWorker(WorkerBase):
         # Multi-instance (2E1C): the wrapped head_token carries the source
         # edge id ("{edge_id}:{token}") — post the irecv on that pair's
         # group.  Legacy mode: unwrapped token, no scope (default PP group).
-        _pair_edge_id = None
-        try:
-            from vllm_ascend.edge_cloud.role_registry import (
-                get_role_registry)
-            _registry = get_role_registry()
-            if _registry is not None and len(_registry.edge_ids) > 1:
-                from vllm_ascend.edge_cloud.id_adapter import (
-                    parse_token_edge_id)
-                _pair_edge_id = parse_token_edge_id(ht)
-        except Exception:
-            _pair_edge_id = None
+        _pair_edge_id = self._edge_bucket_of_token(ht)
+        logger.info(
+            "[2E1C-TRACE] CHER irecv POST begin: ht=%s channel=%s pair=%s "
+            "ntokens=%d thread=%s",
+            ht, channel.value if channel else None, _pair_edge_id, num_tokens,
+            threading.current_thread().name,
+        )
         with self._pair_scope(_pair_edge_id):
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=num_tokens,
@@ -907,6 +1004,12 @@ class NPUWorker(WorkerBase):
             tensor_dict,
             comm_handles=comm_handles,
             comm_postprocess=comm_postprocess,
+        )
+        logger.info(
+            "[2E1C-TRACE] CHER irecv POST done: ht=%s channel=%s pair=%s "
+            "thread=%s",
+            ht, channel.value if channel else None, _pair_edge_id,
+            threading.current_thread().name,
         )
         return entry
 
@@ -940,34 +1043,64 @@ class NPUWorker(WorkerBase):
                 channel_str,
             )
             return
+        _tname = threading.current_thread().name
+        logger.info(
+            "[2E1C-TRACE] CHER guard: hint ht=%s channel=%s, acquiring "
+            "_early_recv_lock (thread=%s)",
+            ht, channel_str, _tname,
+        )
         with self._early_recv_lock:
+            logger.info(
+                "[2E1C-TRACE] CHER guard: lock acquired ht=%s thread=%s",
+                ht, _tname)
             if ht in self._early_recv_handles:
                 return  # idempotent: another thread already posted
             if ht in self._early_recv_consumed:
                 return  # busy_loop already consumed (posted its own); skip
-            # Cap the cache at prefill_inflight_limit: only that many P-middle
-            # batches are in flight on the cloud at once, so only that many
-            # early-recv entries are ever useful.  Extra hints (e.g. far-ahead
-            # chunks whose P-middle won't run until current ones drain) are
-            # skipped here -- busy_loop posts them via get_or_post_early_recv
-            # when they actually run.  This bounds cache memory (no OOM) and
-            # keeps the guard draining fast (skip costs no NPU alloc), so the
-            # small hint ring never fills and hints are never dropped.
+            # Cap the cache PER EDGE (multi-instance): only
+            # prefill_inflight_limit P-middle batches are in flight per edge
+            # at once, so only that many early-recv entries per edge are ever
+            # useful.  The per-edge cap is what actually breaks the 2E1C
+            # same-channel rendezvous deadlock: the cloud's busy_loop can be
+            # blocked on a c2e result isend to edge X while edge X's next
+            # prefill isend arrives — the early irecv posted by the guard is
+            # the ONLY thing that lets edge X proceed to its PL and recv the
+            # result.  With a single GLOBAL slot, edge Y's cached entry
+            # crowds out edge X's next prefill (its hint is skipped here and
+            # never re-queued; busy_loop cannot post it while blocked), and
+            # the classic 2P cross-direction cycle re-forms under dual-edge
+            # concurrency (single-edge load never trips it).  Per-edge slots
+            # restore the 1-1 cycle-breaking property for every pair; extra
+            # hints within the same edge are still skipped (busy_loop posts
+            # those via get_or_post_early_recv when they run), keeping the
+            # cache bounded and the guard draining fast.
             _max = getattr(self, "_early_recv_max_inflight", 2)
-            if len(self._early_recv_handles) >= _max:
+            _bucket = self._edge_bucket_of_token(ht)
+            _same_bucket = sum(
+                1 for key in self._early_recv_handles
+                if self._edge_bucket_of_token(key) == _bucket
+            )
+            if _same_bucket >= _max:
+                logger.info(
+                    "[2E1C-TRACE] CHER hint skipped (bucket %s full): "
+                    "head_token=%s channel=%s",
+                    _bucket, ht, channel_str,
+                )
                 return
             try:
                 entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
                 self._early_recv_handles[ht] = entry  # cache for busy_loop
+                self._early_recv_booked_at[ht] = time.monotonic()
             except Exception:
                 logger.exception(
                     "[CHER] start_early_irecv failed head_token=%s channel=%s",
                     ht, channel_str,
                 )
                 return
-        logger.debug(
-            "[CHER] early-recv posted head_token=%s channel=%s num_tokens=%d",
-            ht, channel_str, num_tokens,
+        logger.info(
+            "[2E1C-TRACE] CHER early-recv posted head_token=%s channel=%s "
+            "num_tokens=%d bucket=%s thread=%s",
+            ht, channel_str, num_tokens, _bucket, _tname,
         )
 
     def get_or_post_early_recv(
@@ -989,15 +1122,23 @@ class NPUWorker(WorkerBase):
         """
         if not head_token:
             return None
+        _tname = threading.current_thread().name
         with self._early_recv_lock:
             entry = self._early_recv_handles.pop(head_token, None)
             self._early_recv_consumed.add(head_token)
             if entry is not None:
+                logger.info(
+                    "[2E1C-TRACE] CHER consume(guard-entry) ht=%s thread=%s",
+                    head_token, _tname)
+                self._cher_last_progress = time.monotonic()
                 return entry  # guard thread posted it, consumed
             # Not posted by guard: post our own.  Do NOT cache in
             # _early_recv_handles -- we consume it immediately.  Marking
             # _early_recv_consumed above prevents the guard from posting a
             # duplicate (orphan irecv) when its hint arrives later.
+            logger.info(
+                "[2E1C-TRACE] CHER consume(self-post) ht=%s thread=%s",
+                head_token, _tname)
             try:
                 return self._post_early_irecv_locked(
                     head_token, channel, num_tokens, include_mrope=include_mrope)
@@ -1059,8 +1200,9 @@ class NPUWorker(WorkerBase):
             dp.step()
 
         # Edge-cloud PD separation can keep one outstanding send per hidden
-        # channel.  Only wait on the channel about to be reused; legacy PP waits
-        # for all outstanding sends to preserve the original behavior.
+        # channel PER PAIR.  Only wait on the (channel, pair) about to be
+        # reused; legacy PP waits for all outstanding sends to preserve the
+        # original behavior.
         if self.model_runner._edge_cloud_enabled:
             bt = scheduler_output.batch_type
             if bt in (
@@ -1071,7 +1213,20 @@ class NPUWorker(WorkerBase):
                 BatchType.DECODE_LAST,
                 BatchType.DRAFT_LAST,
             ):
-                self._wait_pp_send_work(self._hidden_channel_for(scheduler_output))
+                # Multi-instance (2E1C): resolve the pair this batch belongs
+                # to — edge workers use their own instance id; the cloud
+                # worker resolves the segment's source edge.  Waiting per
+                # (channel, pair) keeps one edge's unreaped send from
+                # freezing the other edge's channel reuse (the 2E1C
+                # prefill_2 reap deadlock).
+                _wait_pair = (
+                    self._edge_instance_id()
+                    if is_edge_device()
+                    else self._resolve_segment_edge_id(scheduler_output)
+                )
+                self._wait_pp_send_work(
+                    self._hidden_channel_for(scheduler_output), _wait_pair
+                )
             else:
                 self._wait_pp_send_work()
         else:
@@ -1198,6 +1353,7 @@ class NPUWorker(WorkerBase):
                     edge_cloud_send_tensor_dict(_gathered, channel=channel,
                     num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
                     channel=channel,
+                    pair_edge_id=self._edge_instance_id(),
                 )
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
@@ -1259,7 +1415,20 @@ class NPUWorker(WorkerBase):
         layer_slice_info: Any,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
         """Cloud middle segment: recv -> segment_b/c -> isend -> return."""
-        # logger.info(
+        # [2E1C-TRACE] record the current batch for the CHER state dump, and
+        # lazily start the hang watchdog (once).
+        self._cur_batch_desc = (
+            f"bt={scheduler_output.batch_type} "
+            f"ht={getattr(scheduler_output, 'head_token', None)}"
+        )
+        if not getattr(self, "_cher_watchdog_started", False):
+            self._cher_watchdog_started = True
+            threading.Thread(
+                target=self._cher_state_watchdog,
+                name="cher-state-watchdog",
+                daemon=True,
+            ).start()
+            logger.info("[2E1C-TRACE] CHER state watchdog started")
         #     f"Execute model, batch_type: {scheduler_output.batch_type}, " + (
         #         f"slice: {layer_slice_info.slice_index + 1}/{layer_slice_info.total_slices}, "
         #         f"layers: [{layer_slice_info.start_layer},{layer_slice_info.end_layer})"
@@ -1408,7 +1577,11 @@ class NPUWorker(WorkerBase):
                                                 num_tokens=scheduler_output.total_num_scheduled_tokens,
                                                 dst=_send_dst),
                     channel=channel,
+                    pair_edge_id=_pair_edge_id,
                 )
+        # [2E1C-TRACE] batch completed — feed the hang watchdog.
+        self._cher_last_progress = time.monotonic()
+        self._cur_batch_desc = "idle"
         return output
 
     def _scheduled_draft_tensor_meta(
@@ -1467,15 +1640,23 @@ class NPUWorker(WorkerBase):
             scheduler_output,
             "e2c",
         )
-        tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv_scheduled_draft(
-                tensor_meta=recv_tensor_meta,
+        # Multi-instance (2E1C): the scheduled-draft comm must run inside the
+        # pair scope of the source edge.  Without it, _effective_pp_group()
+        # falls back to this rank's default PP group — which for the cloud is
+        # the LAST pair containing its rank0 (not necessarily this edge's
+        # pair) and, more importantly, never received hidden-channel groups
+        # in multi-edge mode, so _hidden_channel_groups() raises IndexError.
+        _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
+        with self._pair_scope(_pair_edge_id):
+            tensor_dict, comm_handles, comm_postprocess = (
+                edge_cloud_broadcast_recv_scheduled_draft(
+                    tensor_meta=recv_tensor_meta,
+                )
             )
-        )
-        for handle in comm_handles:
-            handle.wait()
-        for postprocess in comm_postprocess:
-            postprocess()
+            for handle in comm_handles:
+                handle.wait()
+            for postprocess in comm_postprocess:
+                postprocess()
         assert tensor_dict is not None
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
@@ -1492,13 +1673,15 @@ class NPUWorker(WorkerBase):
                 scheduler_output,
                 "c2e",
             )
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict_scheduled_draft(
-                    out_tensor_dict,
-                    tensor_meta=send_tensor_meta,
-                ),
-                channel=HiddenChannelType.DECODE,
-            )
+            with self._pair_scope(_pair_edge_id):
+                self._record_pp_send_work(
+                    edge_cloud_send_tensor_dict_scheduled_draft(
+                        out_tensor_dict,
+                        tensor_meta=send_tensor_meta,
+                    ),
+                    channel=HiddenChannelType.DECODE,
+                    pair_edge_id=_pair_edge_id,
+                )
             logger.info(
                 "Send intermediate tensors to edge, "
                 f"hidden_channel: {HiddenChannelType.DECODE.value}"
@@ -1533,13 +1716,17 @@ class NPUWorker(WorkerBase):
                 scheduler_output,
                 "e2c",
             )
-            self._record_pp_send_work(
-                edge_cloud_send_tensor_dict_scheduled_draft(
-                    tensor_dict,
-                    tensor_meta=send_tensor_meta,
-                ),
-                channel=HiddenChannelType.DECODE,
-            )
+            # 2E1C: resolve the pair group explicitly — the default PP group
+            # has no hidden channels in multi-edge mode (IndexError).
+            with self._pair_scope(self._edge_instance_id()):
+                self._record_pp_send_work(
+                    edge_cloud_send_tensor_dict_scheduled_draft(
+                        tensor_dict,
+                        tensor_meta=send_tensor_meta,
+                    ),
+                    channel=HiddenChannelType.DECODE,
+                    pair_edge_id=self._edge_instance_id(),
+                )
             logger.info(
                 "Send intermediate tensors to cloud, "
                 f"hidden_channel: {HiddenChannelType.DECODE.value}"
@@ -1559,15 +1746,18 @@ class NPUWorker(WorkerBase):
             scheduler_output,
             "c2e",
         )
-        tensor_dict, comm_handles, comm_postprocess = (
-            edge_cloud_broadcast_recv_scheduled_draft(
-                tensor_meta=recv_tensor_meta,
+        # 2E1C: pair scope is required for hidden-channel resolution — the
+        # default PP group has no channel groups in multi-edge mode.
+        with self._pair_scope(self._edge_instance_id()):
+            tensor_dict, comm_handles, comm_postprocess = (
+                edge_cloud_broadcast_recv_scheduled_draft(
+                    tensor_meta=recv_tensor_meta,
+                )
             )
-        )
-        for handle in comm_handles:
-            handle.wait()
-        for postprocess in comm_postprocess:
-            postprocess()
+            for handle in comm_handles:
+                handle.wait()
+            for postprocess in comm_postprocess:
+                postprocess()
         logger.info(
             "Receive intermediate tensors from cloud after, "
             f"hidden_channel: {HiddenChannelType.DECODE.value}"
@@ -1683,6 +1873,7 @@ class NPUWorker(WorkerBase):
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         # Note: need to adapt for graph mode.
+        logger.info("[2E1C-TRACE] worker compile_or_warm_up_model start")
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes or []).copy()
         if not self.model_config.enforce_eager:
             cg_capture_sizes: list[int] = []
@@ -1704,10 +1895,13 @@ class NPUWorker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
+            logger.info("[2E1C-TRACE] worker warmup dummy_run done size=%d", size)
 
         npugraph_memory_bytes = 0
         if not self.model_config.enforce_eager:
+            logger.info("[2E1C-TRACE] worker capture_model start")
             npugraph_memory_bytes = self.model_runner.capture_model()
+            logger.info("[2E1C-TRACE] worker capture_model done")
 
         # Suggest an optimal --kv-cache-memory value for future runs.
         # Only emitted when we ran full profiling (kv_cache_memory_bytes was not
@@ -1867,7 +2061,12 @@ class NPUWorker(WorkerBase):
         return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
-        return self.model_runner.get_kv_cache_spec()
+        logger.info("[2E1C-TRACE] worker get_kv_cache_spec start")
+        spec = self.model_runner.get_kv_cache_spec()
+        logger.info(
+            "[2E1C-TRACE] worker get_kv_cache_spec done, entries=%d", len(spec)
+        )
+        return spec
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to NPU memory.
@@ -1884,6 +2083,11 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
+        logger.info(
+            "[2E1C-TRACE] worker initialize_from_config start, groups=%d blocks=%d",
+            len(kv_cache_config.kv_cache_groups),
+            kv_cache_config.num_blocks,
+        )
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
@@ -1894,6 +2098,8 @@ class NPUWorker(WorkerBase):
             context = nullcontext()  # type: ignore
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
+            logger.info(
+                "[2E1C-TRACE] worker initialize_from_config: kv_cache allocated")
 
             # Restrict to mamba and full attn hybrid models (e.g. Qwen3.x).
             #

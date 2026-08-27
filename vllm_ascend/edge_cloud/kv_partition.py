@@ -55,6 +55,37 @@ class KvPartition:
                    for k, v in cfg["split"].items()},
         )
 
+    @classmethod
+    def from_ratios(cls, ratios: dict[int, float],
+                    num_blocks_total: int) -> "KvPartition":
+        """Materialize absolute ranges from per-edge ratios.
+
+        The registry YAML carries *ratios* (the cloud's real num_blocks is
+        only known after memory profiling at startup); this resolves them
+        into absolute block ranges once the total is known.  Ranges are
+        contiguous in ascending edge_id order and always cover
+        ``[0, num_blocks_total)`` exactly (last edge takes the remainder).
+        """
+        total = 0.0
+        for r in ratios.values():
+            if r <= 0:
+                raise ValueError(f"kv partition ratio must be > 0, got {r}")
+            total += r
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(
+                f"kv partition ratios must sum to 1.0, got {total}")
+        split: dict[int, tuple[int, int]] = {}
+        start = 0
+        ids = sorted(ratios)
+        for i, edge_id in enumerate(ids):
+            if i == len(ids) - 1:
+                end = num_blocks_total  # last edge takes the remainder
+            else:
+                end = start + int(num_blocks_total * ratios[edge_id])
+            split[edge_id] = (start, end)
+            start = end
+        return cls(num_blocks_total=num_blocks_total, split=split)
+
     def range_of(self, edge_id: int) -> tuple[int, int]:
         """Return (offset, num_blocks) for the given edge."""
         start, end = self.split[edge_id]
@@ -74,3 +105,20 @@ class KvPartition:
                     f"for edge {edge_id}"
                 )
         return [offset + b for b in local_block_ids]
+
+    def to_local(self, edge_id: int, physical_block_ids: list[int]) -> list[int]:
+        """Inverse of to_physical: cloud-physical -> edge-local block ids.
+
+        Used on the cloud -> edge echo path (POST_OUT): the edge must get
+        its own local numbering back, otherwise re-publishing an echoed
+        batch (MTP draft chains copy the tail's fields) would double-offset
+        the ids / trip the range check for non-zero-offset edges.
+        """
+        offset, num_blocks = self.range_of(edge_id)
+        for b in physical_block_ids:
+            if b < offset or b >= offset + num_blocks:
+                raise ValueError(
+                    f"physical block id {b} out of range "
+                    f"[{offset}, {offset + num_blocks}) for edge {edge_id}"
+                )
+        return [b - offset for b in physical_block_ids]

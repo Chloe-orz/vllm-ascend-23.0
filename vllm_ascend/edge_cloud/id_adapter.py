@@ -100,6 +100,13 @@ def unwrap_scheduler_output_ids(so) -> None:
         so.finished_req_ids = {
             unwrap_req_id(rid) for rid in so.finished_req_ids
         }
+    # Live SchedulerOutput field name is scheduled_spec_decode_tokens;
+    # scheduled_spec_token_ids is the stale alias kept for compat.
+    if getattr(so, "scheduled_spec_decode_tokens", None):
+        so.scheduled_spec_decode_tokens = {
+            unwrap_req_id(rid): ids
+            for rid, ids in so.scheduled_spec_decode_tokens.items()
+        }
     if getattr(so, "scheduled_spec_token_ids", None):
         so.scheduled_spec_token_ids = {
             unwrap_req_id(rid): ids
@@ -110,3 +117,25 @@ def unwrap_scheduler_output_ids(so) -> None:
             unwrap_req_id(rid): v
             for rid, v in so.structured_output_request_ids.items()
         }
+    # draft_task_id lives in the wrapped (cloud) namespace after ingress
+    # wrapping; strip it so the edge keeps seeing its own raw ids.  Guard on
+    # the wrapped form for robustness against ids that never crossed ingress.
+    if getattr(so, "draft_task_id", None) and _TOKEN_RE.match(so.draft_task_id):
+        so.draft_task_id = unwrap_head_token(so.draft_task_id)
+    if getattr(so, "cloud_draft_invalidate_task_ids", None):
+        so.cloud_draft_invalidate_task_ids = [
+            unwrap_head_token(tid) if _TOKEN_RE.match(tid) else tid
+            for tid in so.cloud_draft_invalidate_task_ids
+        ]
+    # Accepted-count dicts keyed by req_id (DRAFT_FIRST step 0): unwrap keys.
+    for field in ("num_accepted_tokens", "valid_sampled_token_count"):
+        value = getattr(so, field, None)
+        if isinstance(value, dict):
+            setattr(
+                so,
+                field,
+                {
+                    unwrap_req_id(rid) if is_wrapped_req_id(rid) else rid: v
+                    for rid, v in value.items()
+                },
+            )
