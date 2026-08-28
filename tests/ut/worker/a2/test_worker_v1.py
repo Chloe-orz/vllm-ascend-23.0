@@ -1509,3 +1509,84 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.shutdown()
 
         engine.shutdown.assert_called_once()
+
+
+class TestScheduledDraftTensorMeta(TestBase):
+    def _make_worker(self):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.vllm_config = MagicMock()
+        worker.model_runner = MagicMock()
+        worker.model_runner.speculative_config.method = "eagle3"
+        worker.model_runner.drafter.hidden_size = 7168
+        worker.model_runner.dtype = torch.bfloat16
+        worker.model_runner._is_deepseek_v4_mtp_edge_cloud_draft.return_value = (
+            False
+        )
+        return worker
+
+    @patch("vllm_ascend.worker.worker.build_scheduled_draft_tensor_meta")
+    @patch("vllm_ascend.worker.worker.is_drafter_moe_model", return_value=False)
+    @patch("vllm_ascend.worker.worker.enable_sp", return_value=True)
+    def test_dense_drafter_uses_static_meta_with_target_sp(
+        self,
+        _mock_enable_sp,
+        _mock_is_drafter_moe_model,
+        mock_build_meta,
+    ):
+        worker = self._make_worker()
+        expected_meta = MagicMock()
+        mock_build_meta.return_value = expected_meta
+
+        result = worker._build_draft_tensor_meta("e2c", 0, 53)
+
+        self.assertIs(result, expected_meta)
+        mock_build_meta.assert_called_once_with(
+            method="eagle3",
+            direction="e2c",
+            draft_step_idx=0,
+            num_tokens=53,
+            hidden_size=7168,
+            dtype=torch.bfloat16,
+            hc_mult=1,
+        )
+
+    @patch("vllm_ascend.worker.worker.build_scheduled_draft_tensor_meta")
+    @patch("vllm_ascend.worker.worker.is_drafter_moe_model", return_value=True)
+    @patch("vllm_ascend.worker.worker.enable_sp", return_value=True)
+    def test_sp_enabled_moe_drafter_keeps_dynamic_meta(
+        self,
+        _mock_enable_sp,
+        _mock_is_drafter_moe_model,
+        mock_build_meta,
+    ):
+        worker = self._make_worker()
+
+        result = worker._build_draft_tensor_meta("e2c", 0, 53)
+
+        self.assertIsNone(result)
+        mock_build_meta.assert_not_called()
+
+    @patch("vllm_ascend.worker.worker.build_scheduled_draft_tensor_meta")
+    @patch("vllm_ascend.worker.worker.is_drafter_moe_model", return_value=True)
+    @patch("vllm_ascend.worker.worker.enable_sp", return_value=True)
+    def test_dsv4_mtp_keeps_static_meta_with_draft_sp(
+        self,
+        _mock_enable_sp,
+        _mock_is_drafter_moe_model,
+        mock_build_meta,
+    ):
+        worker = self._make_worker()
+        worker.model_runner._is_deepseek_v4_mtp_edge_cloud_draft.return_value = (
+            True
+        )
+        worker.model_runner.drafter.model.edge_cloud_draft_kind = None
+        expected_meta = MagicMock()
+        mock_build_meta.return_value = expected_meta
+
+        result = worker._build_draft_tensor_meta("e2c", 0, 53)
+
+        self.assertIs(result, expected_meta)
+        mock_build_meta.assert_called_once()

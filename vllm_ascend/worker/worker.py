@@ -102,6 +102,7 @@ from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_sp,
     get_ascend_device_type,
+    is_drafter_moe_model,
     register_ascend_customop,
     setup_ascend_local_comm_res,
     vllm_version_is,
@@ -1541,13 +1542,17 @@ class NPUWorker(WorkerBase):
     ) -> ScheduledDraftTensorMeta | None:
         """Build the scheduled draft wire schema for one draft step.
 
-        DeepSeek-V4 MTP uses a full-sequence wire contract under SP, so its
-        shape is independent of either peer's TP size and can use this static
-        schema. Other draft adapters still retain sender-side shard shapes and
-        remain on the dynamic compatibility path.
+        Dense drafters run without SP even when the target model enables it,
+        so their scheduled payloads retain a full-sequence static schema.
+        DeepSeek-V4 MTP also uses a full-sequence wire contract under SP.
+        Other SP-enabled drafters retain sender-side shard shapes and remain
+        on the dynamic compatibility path.
         """
+        draft_sp_enabled = enable_sp(self.vllm_config) and is_drafter_moe_model(
+            self.vllm_config
+        )
         if (
-            enable_sp()
+            draft_sp_enabled
             and not self.model_runner._is_deepseek_v4_mtp_edge_cloud_draft()
         ):
             return None
