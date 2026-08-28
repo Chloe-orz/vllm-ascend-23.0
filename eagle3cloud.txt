@@ -1,0 +1,888 @@
+
+(PassiveEngineCore pid=3233400) INFO 08-28 12:15:55 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=decode_up seqno=0 (watermark=-1)
+(PassiveEngineCore pid=3233400) INFO 08-28 12:15:55 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=1 (watermark=-1)
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [service.py:209] [edge-cloud-comm] created channel decode_up (peer=0 wire=hidden)
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=decode_up num_tokens=4 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.decode_up>
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=0
+(PassiveEngineCore pid=3233400) INFO 08-28 12:15:55 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=0
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=4 copy_len=4 shape=(53, 7168)
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP14_EP14 pid=3234145) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=4 shape=(0,)
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] PP worker execute_model failed.
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP14_EP14 pid=3234145) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP15_EP15 pid=3234200) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP11_EP11 pid=3233982) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] Traceback (most recent call last):
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/executor/multiproc_executor.py", line 1191, in worker_busy_loop
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP15_EP15 pid=3234200) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP10_EP10 pid=3233928) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = func(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm/vllm/v1/worker/worker_base.py", line 349, in execute_model
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP12_EP12 pid=3234036) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self.worker.execute_model(
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP13_EP13 pid=3234090) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP3_EP3 pid=3233553) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/usr/local/python3.11.15/lib/python3.11/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(Worker_TP2_EP2 pid=3233502) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return func(*args, **kwargs)
+(Worker_TP9_EP9 pid=3233874) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1216, in execute_model
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     return self._execute_model_cloud_draft(scheduler_output)
+(Worker_PP1_TP0_EP0 pid=3233427) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP1_EP1 pid=3233446) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP8_EP8 pid=3233820) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP11_EP11 pid=3233982) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/worker.py", line 1655, in _execute_model_cloud_draft
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP4_EP4 pid=3233604) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     output = self.model_runner._run_edge_cloud_draft_middle_segment(
+(Worker_TP5_EP5 pid=3233658) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 7952, in _run_edge_cloud_draft_middle_segment
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     self._prepare_eagle3_cloud_hidden_states(
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]   File "/vllm-workspace/vllm-ascend/vllm_ascend/worker/model_runner_v1.py", line 1748, in _prepare_eagle3_cloud_hidden_states
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]     assert aux_hidden_states.shape[0] > num_tokens, (
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198] AssertionError: aux_hidden_states batch size 4 is smaller than draft num_tokens 53
+(Worker_TP7_EP7 pid=3233766) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP6_EP6 pid=3233712) ERROR 08-28 12:15:55 [multiproc_executor.py:1198]
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP10_EP10 pid=3233928) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP12_EP12 pid=3234036) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP13_EP13 pid=3234090) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP3_EP3 pid=3233553) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP2_EP2 pid=3233502) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP9_EP9 pid=3233874) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=3233446) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_PP1_TP0_EP0 pid=3233427) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=3233820) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP5_EP5 pid=3233658) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP4_EP4 pid=3233604) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [model_runner_v1.py:2594] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP7_EP7 pid=3233766) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP6_EP6 pid=3233712) INFO 08-28 12:15:55 [model_runner_v1.py:2611] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
