@@ -1791,9 +1791,8 @@ class PDSeparatedScheduler(Scheduler):
         # after its worker acked DRAFT_FIRST. Pre-generating the tail here
         # removes that per-draft-step control-plane round trip and lets the
         # edge post the matching receive as soon as DRAFT_FIRST has completed
-        # locally. Per-worker FIFO ordering, the model-specific worker batch
-        # boundary, and the per-channel send-work wait preserve DRAFT_FIRST ->
-        # DRAFT_LAST data-plane ordering.
+        # locally. Worker FIFO ordering plus the per-channel send-work wait
+        # preserves DRAFT_FIRST -> DRAFT_LAST data-plane ordering.
         draft_last = replace(
             scheduler_output,
             batch_type=BatchType.DRAFT_LAST,
@@ -1875,10 +1874,8 @@ class PDSeparatedScheduler(Scheduler):
 
         The placeholders contain control metadata only. Real draft tokens and
         Eagle3 hidden-state/residual dependencies remain in the edge worker,
-        where per-worker FIFO ordering and the model-specific worker boundary
-        contract preserve the DRAFT_LAST(N) -> DRAFT_FIRST(N+1) dependency.
-        Eagle3 additionally aligns all TP workers after each edge-cloud draft
-        publication before any rank can dequeue the following batch.
+        where worker FIFO order guarantees that step N's DRAFT_LAST updates
+        the task context before step N+1's DRAFT_FIRST consumes it.
         """
         if not getattr(self.scheduler_config, "async_scheduling", False):
             return False
@@ -1901,11 +1898,10 @@ class PDSeparatedScheduler(Scheduler):
     ) -> None:
         """Create fixed-length placeholder DRF tasks at target-tail pick time.
 
-        The real token IDs remain in the edge worker. Per-worker FIFO ordering
-        plus the worker's model-specific batch boundary ensures every DRF
-        executes after the DRL that produces its local inputs. Only the step-0
-        accepted-token scalars are finalized later for the cloud; they are not
-        consumed by the edge worker.
+        The real token IDs remain in the edge worker.  FIFO ordering ensures
+        every DRF executes after the DRL that produces its local inputs.  Only
+        the step-0 accepted-token scalars are finalized later for the cloud;
+        they are not consumed by the edge worker.
         """
         if not self._uses_async_scheduled_draft_placeholders():
             return

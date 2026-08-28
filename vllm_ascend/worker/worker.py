@@ -1602,53 +1602,6 @@ class NPUWorker(WorkerBase):
             direction, draft_step_idx, num_tokens
         )
 
-    def _needs_eagle3_draft_publish_fence(self) -> bool:
-        speculative_config = self.model_runner.speculative_config
-        if (
-            speculative_config is None
-            or speculative_config.method != "eagle3"
-            or not self.vllm_config.scheduler_config.async_scheduling
-        ):
-            return False
-        return get_tp_group().world_size > 1
-
-    def _materialize_eagle3_draft_publish_payload(self) -> None:
-        """Finish Eagle3 device work before rank-local publication diverges.
-
-        Eagle3's edge segment returns the TP embedding output directly.  On a
-        non-PP-boundary TP rank that tensor has no later device consumer, so
-        with the Ascend task queue enabled its embedding collective can still
-        be pending when the worker reaches the CPU publish barrier.  The PP
-        boundary rank, meanwhile, consumes the tensor while submitting the
-        cross-PP send and can wait forever for that pending peer collective.
-
-        Synchronize the current stream on every TP rank before only the PP
-        boundary rank submits the payload.  This is deliberately separate
-        from the CPU barrier below: the stream fence establishes device-data
-        readiness, while the barrier orders Python worker batch progression.
-        """
-        if not self._needs_eagle3_draft_publish_fence():
-            return
-        torch.npu.current_stream().synchronize()
-
-    def _align_eagle3_draft_publish_boundary(self) -> None:
-        """Keep Eagle3 TP workers on the same async-queue batch.
-
-        Only the PP boundary rank publishes draft intermediates across the
-        edge-cloud link.  The other TP ranks can otherwise return from the
-        short Eagle3 segment and dequeue the following DRAFT_LAST while the
-        boundary rank is still snapshotting/submitting the current payload.
-        That lets the ranks enqueue different TP collectives and deadlock.
-
-        This CPU-group barrier orders worker batch progression only.  Device
-        stream/event ordering remains owned by the communication layer; no
-        NPU stream or edge-cloud transfer completion is synchronized here.
-        """
-        if not self._needs_eagle3_draft_publish_fence():
-            return
-        tp_group = get_tp_group()
-        tp_group.barrier()
-
     def _execute_model_cloud_draft(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput:
@@ -1695,7 +1648,6 @@ class NPUWorker(WorkerBase):
                 self._scheduled_draft_num_tokens(scheduler_output),
             )
         )
-        self._materialize_eagle3_draft_publish_payload()
         if get_pp_group().world_size == 2:
             out_tensor_dict = {
                 key: value.contiguous()
@@ -1723,7 +1675,6 @@ class NPUWorker(WorkerBase):
                 "Send intermediate tensors to edge, "
                 f"hidden_channel: {channel_for_direction(_kind, up=False).value}"
             )
-        self._align_eagle3_draft_publish_boundary()
         logger.info(
             f"Execute model, batch_type: {scheduler_output.batch_type}, after."
         )
@@ -1829,7 +1780,6 @@ class NPUWorker(WorkerBase):
                 self._scheduled_draft_num_tokens(scheduler_output),
             )
         )
-        self._materialize_eagle3_draft_publish_payload()
         if get_pp_group().world_size == 2:
             tensor_dict = {
                 key: value.contiguous()
@@ -1862,8 +1812,6 @@ class NPUWorker(WorkerBase):
                 f"hidden_channel: "
                 f"{channel_for(scheduler_output.batch_type, _kind).value}"
             )
-        self._align_eagle3_draft_publish_boundary()
-
     def _resume_deferred_edge_draft_head(
         self, completed_tail: "SchedulerOutput"
     ) -> None:
