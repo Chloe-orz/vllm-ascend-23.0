@@ -13,7 +13,6 @@ The class is intentionally minimal: it shares no implementation with
 `SchedulerOutput` / `BatchType` types.
 """
 import enum
-import math
 import os
 import queue
 import threading
@@ -22,7 +21,6 @@ from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
-from vllm import envs
 from vllm.logger import logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 
@@ -147,7 +145,6 @@ class PassiveScheduler:
         self._me_edge_head: dict[int, int] = {}
         self._me_seq = 0
         self._me_registry = None
-        self._me_vllm_config = vllm_config
         try:
             from vllm_ascend.edge_cloud.role_registry import (
                 get_role_registry)
@@ -155,7 +152,6 @@ class PassiveScheduler:
             if _registry is not None and len(_registry.edge_ids) > 1:
                 self._me_enabled = True
                 self._me_registry = _registry
-                self._me_vllm_config = vllm_config
                 logger.info(
                     "PassiveScheduler multi-edge mode enabled: %d edges "
                     "(registry digest=%s)",
@@ -747,13 +743,6 @@ class PassiveScheduler:
         # )
 
     def _clear_prefill_middle_throttle(self) -> None:
-        started_at = self._prefill_middle_throttle_started_at
-        if started_at is not None:
-            elapsed_ms = (time.monotonic() - started_at) * 1000
-            # logger.info(
-            #     f"[PD-PASSIVE] Prefill throttle cleared after "
-            #     f"{elapsed_ms:.1f}ms",
-            # )
         self._prefill_middle_throttle_started_at = None
 
     def _can_fallback_to_prefill_in_decode_state(self) -> bool:
