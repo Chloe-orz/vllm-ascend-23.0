@@ -480,6 +480,23 @@ class TestEagle3DraftPublishBoundary:
 
         tp_group.barrier.assert_called_once_with()
 
+    def test_eagle3_async_materializes_device_payload(self, monkeypatch):
+        worker = self._make_worker()
+        tp_group = MagicMock()
+        tp_group.world_size = 2
+        stream = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.worker.worker.get_tp_group", lambda: tp_group
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.worker.worker.torch.npu.current_stream",
+            lambda: stream,
+        )
+
+        worker._materialize_eagle3_draft_publish_payload()
+
+        stream.synchronize.assert_called_once_with()
+
     @pytest.mark.parametrize(
         ("method", "async_scheduling", "tp_world_size"),
         [
@@ -513,6 +530,7 @@ class TestEagle3DraftPublishBoundary:
         self, monkeypatch, pp_world_size
     ):
         worker = self._make_worker()
+        worker._materialize_eagle3_draft_publish_payload = MagicMock()
         worker._align_eagle3_draft_publish_boundary = MagicMock()
         worker._scheduled_draft_num_tokens = MagicMock(return_value=1)
         worker._scheduled_draft_tensor_meta = MagicMock(return_value=None)
@@ -536,6 +554,9 @@ class TestEagle3DraftPublishBoundary:
 
         worker._publish_edge_draft_head(head, output)
 
+        assert (
+            worker._materialize_eagle3_draft_publish_payload.call_count == 1
+        )
         worker._align_eagle3_draft_publish_boundary.assert_called_once_with()
         assert comm_service.submit_send.call_count == (pp_world_size == 2)
 
@@ -544,6 +565,7 @@ class TestEagle3DraftPublishBoundary:
         self, monkeypatch, pp_world_size
     ):
         worker = self._make_worker()
+        worker._materialize_eagle3_draft_publish_payload = MagicMock()
         worker._align_eagle3_draft_publish_boundary = MagicMock()
         worker._scheduled_draft_num_tokens = MagicMock(return_value=1)
         worker._scheduled_draft_tensor_meta = MagicMock(return_value=None)
@@ -576,6 +598,9 @@ class TestEagle3DraftPublishBoundary:
 
         worker._execute_model_cloud_draft(head)
 
+        assert (
+            worker._materialize_eagle3_draft_publish_payload.call_count == 1
+        )
         worker._align_eagle3_draft_publish_boundary.assert_called_once_with()
         assert comm_service.submit_send.call_count == (pp_world_size == 2)
 
