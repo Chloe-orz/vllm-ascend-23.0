@@ -1291,6 +1291,24 @@ class PDSeparatedScheduler(Scheduler):
         is_pregenerated = (
             next_output.draft_task_id in self._pregenerated_draft_task_ids
         )
+        if (
+            int(next_output.draft_step_idx or 0) == 0
+            and self.prefill_draft_remote_pending_count > 0
+        ):
+            # A chain's FIRST step may only start with no round trip in
+            # flight.  An in-flight round trip can still produce a
+            # continuation step: dynamic chains enqueue step k+1 only when
+            # step k's DRAFT_LAST output is processed, and that
+            # continuation owns a LOWER reserved seqno than any later
+            # chain's step-0.  Starting a new chain in that window lets the
+            # later chain's higher-seqno send overtake a not-yet-created
+            # lower-seqno DRF; the channel then holds it behind seqnos that
+            # can never be submitted in time (the new chain's own in-flight
+            # slot blocks the continuation's pick) -- permanent lane
+            # deadlock.  remote_pending == 0 means every in-flight output
+            # has been processed, so every continuation is enqueued and the
+            # seqno-ordered pick can see it.
+            return False
         # Prefill-phase chains travel on the dedicated PREFILL_DRAFT channel
         # pair, so no gating on DECODE-stream state (decode_head_inflight /
         # _force_decode_last / decode_or_draft_inflight) is needed here.
@@ -1306,10 +1324,10 @@ class PDSeparatedScheduler(Scheduler):
                 and not self.prefill_drafts_last_ready
                 and not self._force_prefill_draft_last
             )
-        # Dynamic (non-pre-generated) chains: recvs are not pre-posted for
-        # every step, so keep the strict serialization — do not start
-        # another head while an earlier head is still remote or its tail is
-        # ready locally.
+        # Dynamic (non-pre-generated) chains: continuation steps are created
+        # only when the previous step's DRAFT_LAST output is processed, so
+        # keep the strict serialization — do not start another head while an
+        # earlier head is still remote or its tail is ready locally.
         return bool(
             self.prefill_draft_remote_pending_count == 0
             and not self.prefill_drafts_last_ready
