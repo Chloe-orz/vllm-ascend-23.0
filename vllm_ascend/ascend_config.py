@@ -1015,6 +1015,18 @@ class EdgeCloudConfig:
         from vllm_ascend.edge_cloud.role_registry import init_role_registry
         registry = init_role_registry(registry_path)
         registry.validate_self(role, instance_id)
+        if (
+            len(registry.edge_ids) > 1
+            and not self.prefix_cache_coordination.enabled
+        ):
+            raise ValueError(
+                "multi-edge deployments (registry has more than one edge) "
+                "require edge_cloud_config.prefix_cache_coordination."
+                "enabled=True: the cloud manages its whole KV pool via "
+                "CloudKVRequestManager and edge-sent block ids are "
+                "discarded; without coordination there is no block-id "
+                "namespace isolation between edges."
+            )
         logger.info(
             "Edge-cloud registry identity validated: role=%s id=%d "
             "(digest=%s)", role, instance_id, registry.config_digest,

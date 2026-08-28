@@ -2,9 +2,9 @@
 # Edge-cloud multi-instance role registry (2E1C scenario).
 #
 # The registry is the single source of truth shared by all instances at
-# startup: who is edge / cloud, their addresses, ZMQ port planning and the
-# static KV partition.  Loaded once per process from a YAML file mounted
-# identically on every instance.
+# startup: who is edge / cloud, their addresses and ZMQ port planning.
+# Loaded once per process from a YAML file mounted identically on every
+# instance.
 """Static role registry for multi-edge edge-cloud deployment (2E1C)."""
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from dataclasses import dataclass
 import yaml
 
 from vllm.logger import init_logger
-from vllm_ascend.edge_cloud.kv_partition import KvPartition
 
 logger = init_logger(__name__)
 
@@ -62,15 +61,6 @@ class RoleRegistry:
         self._clouds = {int(c["id"]): PeerInfo(ranks=list(c["ranks"]), **{
             k: v for k, v in c.items() if k != "ranks"})
             for c in cfg["clouds"]}
-        # kv_partition supports two YAML forms:
-        #   ratio: {0: 0.5, 1: 0.5}          (preferred — resolved at startup
-        #                                     once the cloud's real block
-        #                                     count is known)
-        #   num_blocks_total + split: {...}  (absolute, pre-computed)
-        self._kv_partition_raw = cfg.get("kv_partition")
-        self._kv_partition: KvPartition | None = None
-        if self._kv_partition_raw is not None and "split" in self._kv_partition_raw:
-            self._kv_partition = KvPartition.from_config(self._kv_partition_raw)
         # Canonical digest of the whole config; all instances must compute
         # the same value (startup consistency check).
         self._config_digest = hashlib.sha256(
@@ -88,35 +78,6 @@ class RoleRegistry:
     @property
     def world(self) -> WorldInfo:
         return self._world
-
-    @property
-    def kv_partition(self) -> KvPartition:
-        """The materialized partition.  When the YAML used ratios, call
-        ``resolve_kv_partition(num_blocks_total)`` first (once the cloud's
-        real block count is known)."""
-        if self._kv_partition is None:
-            raise RuntimeError(
-                "kv_partition is ratio-based and not yet resolved; call "
-                "resolve_kv_partition(num_blocks_total) first"
-            )
-        return self._kv_partition
-
-    def resolve_kv_partition(self, num_blocks_total: int) -> KvPartition:
-        """Materialize ratio-based partition into absolute block ranges."""
-        if self._kv_partition is not None:
-            return self._kv_partition
-        raw = self._kv_partition_raw
-        if raw is None:
-            raise RuntimeError("no kv_partition in registry")
-        self._kv_partition = KvPartition.from_ratios(
-            {int(k): float(v) for k, v in raw["ratio"].items()},
-            num_blocks_total,
-        )
-        logger.info(
-            "kv partition resolved: total=%d split=%s",
-            num_blocks_total, self._kv_partition.split,
-        )
-        return self._kv_partition
 
     @property
     def config_digest(self) -> str:

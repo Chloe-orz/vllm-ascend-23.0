@@ -941,38 +941,9 @@ class PassiveEngineCoreProc:
             # Strip the cloud-internal wrapped namespace before returning:
             # the edge must see its own original ids (F6 egress discipline).
             unwrap_scheduler_output_ids(tail)
-            # Block ids were translated to cloud-physical at ingress (F2);
-            # restore the edge-local numbering too.  The edge reuses echoed
-            # tail batches beyond the tail itself — MTP draft chains copy
-            # the tail's scheduled_new_reqs into DRAFT_FIRST batches and
-            # re-publish them, so leaving physical ids here would make the
-            # ingress translator double-offset them (fatal for edges with a
-            # non-zero partition offset; silently identity for edge 0).
             # With prefix-cache coordination the cloud KV manager owns the
-            # whole pool (no static partition, no ingress translation) and
-            # coordination tails are ack-only, so there is nothing to
-            # restore — and treating cloud-owned ids as partition-physical
-            # would be wrong.
-            _partition = (
-                self.passive_scheduler._me_get_partition()
-                if self._cloud_kv_manager is None else None)
-            if _partition is not None:
-                for req_data in tail.scheduled_new_reqs or []:
-                    if req_data.block_ids:
-                        req_data.block_ids = tuple(
-                            _partition.to_local(_edge_id, list(ids))
-                            for ids in req_data.block_ids
-                        )
-                _cached = tail.scheduled_cached_reqs
-                if _cached is not None and getattr(
-                        _cached, "new_block_ids", None):
-                    _cached.new_block_ids = [
-                        (tuple(
-                            _partition.to_local(_edge_id, list(g))
-                            for g in ids)
-                         if ids is not None else None)
-                        for ids in _cached.new_block_ids
-                    ]
+            # whole pool and coordination tails are ack-only, so there are
+            # no edge-local block ids to restore — just route back.
             self._pp_pd_channel.publish_to_edge(_edge_id, tail)
         else:
             self._pp_pd_channel.publish(tail)

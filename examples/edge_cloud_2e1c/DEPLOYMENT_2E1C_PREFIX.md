@@ -35,9 +35,6 @@ clouds:
     addr: 10.0.0.13
     ranks: [2, 3, 4, 5]       # C0 为 TP=4
     zmq_base_port: 5760
-kv_partition:                  # coordination 开启后被忽略（云统一池），可留可删
-  num_blocks_total: 100000
-  split: {0: [0, 50000], 1: [50000, 100000]}
 ```
 
 注意：`ranks` 是【全局 rank】（HCCL 建组用），不是物理 NPU 号；物理选卡在各
@@ -183,8 +180,10 @@ vllm serve /weight/Qwen3.5-27B \
    `http://HIGRESS_HOST/<路由>/v1/chat/completions`，并确认网关透传
    `X-Edge-Cloud-*` 请求/响应头（含 `X-Edge-Cloud-Edge-Id`）；`consumer_id`
    用法不变。
-6. `kv_partition` 在 coordination 开启后被忽略（云侧 CloudKVRequestManager
-   统一管理整个 KV 池），保留仅为 legacy 兼容。
+6. 静态 `kv_partition` 已移除：多边部署必须开启 `prefix_cache_coordination`
+   （云侧 CloudKVRequestManager 统一管理整个 KV 池，边发来的 block id 一律
+   丢弃并在云侧重新分配），启动校验会拒绝"注册表多边 + coordination 关闭"
+   的组合。
 7. head_tail（首 x 尾 x）模式：三机 `mode` 改为 `"head_tail"` 并设
    `edge_head_tail_layers: x`，其余相同。
 8. em（embedding_only）模式下边侧无 KV：云确认的 prefix 命中按外部命中记账，

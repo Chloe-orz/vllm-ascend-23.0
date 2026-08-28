@@ -63,9 +63,8 @@ def main() -> int:
                   cloud)
     ok &= check("云 subscriber 通道 ×2", bool(m) and int(m.group(1)) == 2)
 
-    # 5. KV 分配：静态均分（legacy）或前缀协商的 cloud 统一管理
-    ok &= check("KV 分配配置", "kv_partition" in cloud or
-                "50000" in cloud or "cloud_kv_initialized" in cloud)
+    # 5. KV 分配：前缀协商的云侧统一管理（CloudKVRequestManager）
+    ok &= check("KV 云侧自管理已初始化", "cloud_kv_initialized" in cloud)
 
     print("\n== 就绪检查:", "全部通过 ✅" if ok else "存在失败项 ❌")
     return 0 if ok else 1

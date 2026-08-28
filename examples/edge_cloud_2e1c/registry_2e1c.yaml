@@ -23,12 +23,3 @@ clouds:
     addr: 10.0.0.13
     ranks: [2, 3, 4, 5]       # TP=4，4 个全局 rank
     zmq_base_port: 5760       # 云 POST_OUT bind 起始端口（每边 +2 偏移）
-
-# KV 静态均分（临时方案，仅 legacy 模式）：云物理 100000 块，E0/E1 各半
-# 注意：启用 prefix_cache_coordination 后此配置被忽略——云侧由
-# CloudKVRequestManager 统一管理整个 KV 池，不再静态切分。
-kv_partition:
-  num_blocks_total: 100000
-  split:
-    0: [0, 50000]
-    1: [50000, 100000]
