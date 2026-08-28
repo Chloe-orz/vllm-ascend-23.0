@@ -451,6 +451,135 @@ class TestDeferredDraftHeadPipeline:
         worker._run_and_send_edge_draft_head.assert_called_once_with(head)
 
 
+class TestEagle3DraftPublishBoundary:
+    """Eagle3 async workers must finish rank-0 publication as one TP batch."""
+
+    @staticmethod
+    def _make_worker(method="eagle3", *, async_scheduling=True):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        worker = NPUWorker.__new__(NPUWorker)
+        worker.model_runner = MagicMock()
+        worker.model_runner.speculative_config = MagicMock()
+        worker.model_runner.speculative_config.method = method
+        worker.vllm_config = MagicMock()
+        worker.vllm_config.scheduler_config.async_scheduling = (
+            async_scheduling
+        )
+        return worker
+
+    def test_eagle3_async_uses_cpu_tp_barrier(self, monkeypatch):
+        worker = self._make_worker()
+        tp_group = MagicMock()
+        tp_group.world_size = 2
+        monkeypatch.setattr(
+            "vllm_ascend.worker.worker.get_tp_group", lambda: tp_group
+        )
+
+        worker._align_eagle3_draft_publish_boundary()
+
+        tp_group.barrier.assert_called_once_with()
+
+    @pytest.mark.parametrize(
+        ("method", "async_scheduling", "tp_world_size"),
+        [
+            ("qwen3_5_mtp", True, 2),
+            ("eagle3", False, 2),
+            ("eagle3", True, 1),
+        ],
+    )
+    def test_unaffected_modes_skip_barrier(
+        self,
+        monkeypatch,
+        method,
+        async_scheduling,
+        tp_world_size,
+    ):
+        worker = self._make_worker(
+            method, async_scheduling=async_scheduling
+        )
+        tp_group = MagicMock()
+        tp_group.world_size = tp_world_size
+        monkeypatch.setattr(
+            "vllm_ascend.worker.worker.get_tp_group", lambda: tp_group
+        )
+
+        worker._align_eagle3_draft_publish_boundary()
+
+        tp_group.barrier.assert_not_called()
+
+    @pytest.mark.parametrize("pp_world_size", [1, 2])
+    def test_edge_head_aligns_boundary_and_non_boundary_ranks(
+        self, monkeypatch, pp_world_size
+    ):
+        worker = self._make_worker()
+        worker._align_eagle3_draft_publish_boundary = MagicMock()
+        worker._scheduled_draft_num_tokens = MagicMock(return_value=1)
+        worker._scheduled_draft_tensor_meta = MagicMock(return_value=None)
+        worker._require_comm_seqno = MagicMock(return_value=0)
+        worker.model_runner._gather_deepseek_v4_mtp_draft_tensors.return_value = {}
+        pp_group = MagicMock()
+        pp_group.world_size = pp_world_size
+        comm_service = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.worker.worker.get_pp_group", lambda: pp_group
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.worker.worker.get_comm_service",
+            lambda: comm_service,
+        )
+        head = _make_draft_first()
+        head.draft_prefill_phase = True
+        head.total_num_scheduled_tokens = 1
+        output = MagicMock()
+        output.tensors = {}
+
+        worker._publish_edge_draft_head(head, output)
+
+        worker._align_eagle3_draft_publish_boundary.assert_called_once_with()
+        assert comm_service.submit_send.call_count == (pp_world_size == 2)
+
+    @pytest.mark.parametrize("pp_world_size", [1, 2])
+    def test_cloud_middle_aligns_boundary_and_non_boundary_ranks(
+        self, monkeypatch, pp_world_size
+    ):
+        worker = self._make_worker()
+        worker._align_eagle3_draft_publish_boundary = MagicMock()
+        worker._scheduled_draft_num_tokens = MagicMock(return_value=1)
+        worker._scheduled_draft_tensor_meta = MagicMock(return_value=None)
+        worker._require_comm_seqno = MagicMock(return_value=0)
+        recv_future = MagicMock()
+        worker.get_or_post_early_recv = MagicMock(
+            return_value=recv_future
+        )
+        middle_output = MagicMock()
+        middle_output.tensors = {}
+        worker.model_runner._run_edge_cloud_draft_middle_segment.return_value = (
+            middle_output
+        )
+        worker.model_runner._gather_deepseek_v4_mtp_draft_tensors.return_value = (
+            {}
+        )
+        pp_group = MagicMock()
+        pp_group.world_size = pp_world_size
+        comm_service = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.worker.worker.get_pp_group", lambda: pp_group
+        )
+        monkeypatch.setattr(
+            "vllm_ascend.worker.worker.get_comm_service",
+            lambda: comm_service,
+        )
+        head = _make_draft_first()
+        head.draft_prefill_phase = True
+        head.total_num_scheduled_tokens = 1
+
+        worker._execute_model_cloud_draft(head)
+
+        worker._align_eagle3_draft_publish_boundary.assert_called_once_with()
+        assert comm_service.submit_send.call_count == (pp_world_size == 2)
+
+
 class TestMidPrefillDraftChain:
     """Every chunk warms MTP KV, but only the last chunk may seed verify."""
 
