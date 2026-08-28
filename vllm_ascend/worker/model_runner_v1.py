@@ -1584,6 +1584,28 @@ class NPUModelRunner(GPUModelRunner):
         if getattr(edge_model, "edge_cloud_dynamic_step_segments", False):
             return segment
 
+        # The regular proposer interprets speculative ``enforce_eager`` as
+        # applying to the complete draft-model forward.  Preserve that
+        # contract for Eagle3's independently scheduled edge/cloud segments.
+        # In particular, Segment A only packages the embedding output; putting
+        # that control-only boundary behind torch.compile/npugraph_ex can force
+        # a rank-local async-queue flush while PP0 is posting early receives.
+        # Target-model segments and the other MTP adapters keep their existing
+        # compilation policy.
+        if (
+            getattr(edge_model, "edge_cloud_draft_kind", None) == "eagle3"
+            and self.speculative_config is not None
+            and self.speculative_config.method == "eagle3"
+            and self.speculative_config.enforce_eager
+        ):
+            logger.info(
+                "Keeping Eagle3 edge-cloud draft segment [%d, %d) eager "
+                "because speculative enforce_eager is enabled.",
+                start_layer,
+                end_layer,
+            )
+            return segment
+
         # 若全局 enable_npugraph_ex 开启且当前处于全图模式，
         # 对 segment 应用 npugraph_ex 编译时优化（第1层）。
         # 第2层（ACLGraphWrapper 运行时捕获）由 _wrap_segment_if_needed 负责。
@@ -5081,9 +5103,11 @@ class NPUModelRunner(GPUModelRunner):
                 segment_kwargs["spec_step_idx"] = draft_step_idx
             if is_eagle3:
                 logger.info(
-                    "[EAGLE3-DRAFT-HEAD] segment begin tp_rank=%d step=%d",
+                    "[EAGLE3-DRAFT-HEAD] segment begin tp_rank=%d step=%d "
+                    "segment_type=%s",
                     tp_rank,
                     draft_step_idx,
+                    type(segment).__name__,
                 )
             output = segment(**segment_kwargs)
             if is_eagle3:

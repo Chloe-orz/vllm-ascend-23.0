@@ -60,14 +60,11 @@ def _forward_edge_cloud_segment_eagle3(
         return IntermediateTensors(
             {
                 "input_embeds": inputs_embeds,
-                # Step 0 does not put hidden_states on the wire.  Keep the
-                # schema's (0,) placeholder as a view of the embedding
-                # output instead of allocating a fresh NPU tensor here.  On
-                # the PP boundary rank this hot path overlaps early-recv
-                # buffer allocation from the communication thread; the
-                # otherwise unnecessary allocator entry can stall Segment A
-                # before draft publication.
-                "hidden_states": inputs_embeds[:0, 0],
+                "hidden_states": torch.empty(
+                    0,
+                    dtype=inputs_embeds.dtype,
+                    device=inputs_embeds.device,
+                ),
                 "residual": None,
             }
         )
@@ -170,6 +167,7 @@ Eagle3LlamaForCausalLM.forward_edge_cloud_segment = (
     _forward_edge_cloud_segment_eagle3
 )
 Eagle3LlamaForCausalLM.supports_pp = True
+Eagle3LlamaForCausalLM.edge_cloud_draft_kind = "eagle3"
 Eagle3LlamaForCausalLM.make_empty_intermediate_tensors = (
     _eagle3_make_empty_intermediate_tensors
 )

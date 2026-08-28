@@ -14,6 +14,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.worker.model_runner_v1 import (
     CloudExpectedRequestCorrection,
     CloudPendingRequestCorrection,
+    EdgeCloudSegment,
     NPUModelRunner,
     _get_edge_cloud_moe_start_index,
 )
@@ -38,6 +39,22 @@ class TestEdgeCloudMoEStartIndex(unittest.TestCase):
             _get_edge_cloud_moe_start_index(None, start_layer=60),
             0,
         )
+
+
+class TestEagle3EdgeCloudDraftCompilation(unittest.TestCase):
+    def test_speculative_enforce_eager_skips_segment_compilation(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.speculative_config = SimpleNamespace(
+            method="eagle3",
+            enforce_eager=True,
+        )
+        draft_model = torch.nn.Module()
+        draft_model.edge_cloud_draft_kind = "eagle3"
+        segment = EdgeCloudSegment(draft_model, 0, 0)
+
+        result = runner._maybe_compile_segment_callable(segment, 0, 0)
+
+        self.assertIs(result, segment)
 
 
 class TestDeepSeekV4MTPDraftSequenceParallel(unittest.TestCase):
