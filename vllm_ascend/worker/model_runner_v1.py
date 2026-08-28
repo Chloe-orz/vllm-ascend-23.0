@@ -2498,6 +2498,16 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        # PCP-only schedule layout, consumed by the pcp_manager call sites
+        # further below (get_logits_indices / cache_local_schedule_layout).
+        base_num_reqs = num_reqs
+        tokens_original = None
+        if self.pcp_size > 1:
+            tokens_original = [
+                scheduler_output.num_scheduled_tokens[i]
+                for i in self.input_batch.req_ids
+            ]
+
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
