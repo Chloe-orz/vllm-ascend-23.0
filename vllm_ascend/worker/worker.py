@@ -1629,16 +1629,7 @@ class NPUWorker(WorkerBase):
         """
         if not self._needs_eagle3_draft_publish_fence():
             return
-        tp_group = get_tp_group()
-        logger.info(
-            "[EAGLE3-TP-FENCE] device sync begin tp_rank=%d",
-            tp_group.rank_in_group,
-        )
         torch.npu.current_stream().synchronize()
-        logger.info(
-            "[EAGLE3-TP-FENCE] device sync done tp_rank=%d",
-            tp_group.rank_in_group,
-        )
 
     def _align_eagle3_draft_publish_boundary(self) -> None:
         """Keep Eagle3 TP workers on the same async-queue batch.

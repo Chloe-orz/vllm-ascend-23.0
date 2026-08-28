@@ -4975,23 +4975,12 @@ class NPUModelRunner(GPUModelRunner):
     def _run_edge_cloud_draft_first_segment(
         self, scheduler_output: "SchedulerOutput"
     ) -> IntermediateTensors:
-        is_eagle3 = (
-            self.speculative_config is not None
-            and self.speculative_config.method == "eagle3"
-        )
-        tp_rank = get_tp_group().rank_in_group if is_eagle3 else -1
         context = self._get_pending_edge_cloud_draft_context(
             scheduler_output
         )
         input_ids, positions, hidden_states, draft_step_idx = (
             self._prepare_edge_cloud_draft_step_inputs(scheduler_output)
         )
-        if is_eagle3:
-            logger.info(
-                "[EAGLE3-DRAFT-HEAD] inputs ready tp_rank=%d step=%d",
-                tp_rank,
-                draft_step_idx,
-            )
         full_num_tokens = int(
             scheduler_output.total_num_scheduled_tokens
             if draft_step_idx == 0
@@ -5069,25 +5058,11 @@ class NPUModelRunner(GPUModelRunner):
             # cached graph and crashes with "tensor does not have a device".
             inputs_embeds = None
             if getattr(self.drafter, "supports_mm_inputs", False):
-                if is_eagle3:
-                    logger.info(
-                        "[EAGLE3-DRAFT-HEAD] embedding begin "
-                        "tp_rank=%d step=%d",
-                        tp_rank,
-                        draft_step_idx,
-                    )
                 inputs_embeds = self.drafter.model.embed_input_ids(
                     input_ids,
                     multimodal_embeddings=None,
                     is_multimodal=None,
                 )
-                if is_eagle3:
-                    logger.info(
-                        "[EAGLE3-DRAFT-HEAD] embedding returned "
-                        "tp_rank=%d step=%d",
-                        tp_rank,
-                        draft_step_idx,
-                    )
             segment_kwargs: dict[str, Any] = {
                 "input_ids": input_ids,
                 "positions": positions,
@@ -5101,29 +5076,7 @@ class NPUModelRunner(GPUModelRunner):
                 False,
             ):
                 segment_kwargs["spec_step_idx"] = draft_step_idx
-            if is_eagle3:
-                logger.info(
-                    "[EAGLE3-DRAFT-HEAD] segment begin tp_rank=%d step=%d "
-                    "segment_type=%s",
-                    tp_rank,
-                    draft_step_idx,
-                    type(segment).__name__,
-                )
             output = segment(**segment_kwargs)
-            if is_eagle3:
-                logger.info(
-                    "[EAGLE3-DRAFT-HEAD] segment returned "
-                    "tp_rank=%d step=%d",
-                    tp_rank,
-                    draft_step_idx,
-                )
-        if is_eagle3:
-            logger.info(
-                "[EAGLE3-DRAFT-HEAD] forward context exited "
-                "tp_rank=%d step=%d",
-                tp_rank,
-                draft_step_idx,
-            )
         if not isinstance(output, IntermediateTensors):
             raise RuntimeError(
                 "Edge-cloud draft first segment returned no intermediates"
