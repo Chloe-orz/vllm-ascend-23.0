@@ -25,6 +25,7 @@ DIGEST_SIZE = hashlib.sha256().digest_size
 
 HEADER_PROTOCOL = "X-Edge-Cloud-Protocol"
 HEADER_REQUEST_ID = "X-Edge-Cloud-Request-ID"
+HEADER_EDGE_ID = "X-Edge-Cloud-Edge-Id"
 HEADER_INSTANCE_ID = "X-Edge-Cloud-Instance-ID"
 HEADER_BLOCK_SIZE = "X-Edge-Cloud-Block-Size"
 HEADER_HIT_BLOCKS = "X-Edge-Cloud-Prefix-Hit-Blocks"

@@ -39,6 +39,7 @@ async def _negotiate_edge_cloud_prefix(
             consumer_id=coordination.consumer_id,
             block_size=self.vllm_config.cache_config.block_size,
             connect_timeout=coordination.connect_timeout,
+            edge_id=self.vllm_config.parallel_config.edge_id,
         )
         self._edge_cloud_prefix_client = client
         log_event(

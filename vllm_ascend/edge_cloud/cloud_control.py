@@ -11,14 +11,17 @@ import queue
 import threading
 import time
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from vllm.logger import logger
 
+from vllm_ascend.edge_cloud.id_adapter import wrap_req_id
 from vllm_ascend.edge_cloud.observability import format_event, log_event
 from vllm_ascend.edge_cloud.prefix_protocol import (
+    HEADER_EDGE_ID,
     HEADER_REQUEST_ID,
     PrefixManifest,
     UsageInfo,
@@ -291,6 +294,24 @@ def create_cloud_control_app(bridge: CloudControlBridge) -> FastAPI:
         try:
             body = await request.json()
             manifest = PrefixManifest.from_openai_request(request.headers, body)
+            # Multi-edge namespace isolation happens entirely on the cloud:
+            # the edge only self-reports its edge_id header, and every
+            # internal key (probe/usage futures, KV reservations) uses the
+            # wrapped form. Responses strip the prefix so the edge stays
+            # unaware of the cloud-side namespace.
+            raw_request_id = manifest.request_id
+            edge_id_header = request.headers.get(HEADER_EDGE_ID)
+            if edge_id_header is not None:
+                try:
+                    edge_id = int(edge_id_header)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"invalid {HEADER_EDGE_ID} header {edge_id_header!r}"
+                    ) from exc
+                manifest = replace(
+                    manifest,
+                    request_id=wrap_req_id(edge_id, raw_request_id),
+                )
             probe = await bridge.probe(manifest)
         except ValueError as exc:
             log_event(
@@ -339,7 +360,7 @@ def create_cloud_control_app(bridge: CloudControlBridge) -> FastAPI:
                     cached_tokens=usage.cached_tokens,
                 )
                 chunk = {
-                    "id": manifest.request_id,
+                    "id": raw_request_id,
                     "object": "chat.completion.chunk",
                     "created": int(time.time()),
                     "model": model,
@@ -376,6 +397,9 @@ def create_cloud_control_app(bridge: CloudControlBridge) -> FastAPI:
 
         headers = {
             **probe.to_headers(),
+            # Strip the cloud-side namespace prefix: the edge validates that
+            # the returned request id matches the one it sent.
+            HEADER_REQUEST_ID: raw_request_id,
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         }

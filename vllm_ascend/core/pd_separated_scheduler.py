@@ -241,6 +241,15 @@ class PDSeparatedScheduler(Scheduler):
                 "edge_finish_hasher_initialized",
                 block_size=self.vllm_config.cache_config.block_size,
             )
+        # Embedding-only edges own no KV at all: the cloud-confirmed prefix
+        # hit must count as externally computed tokens so the edge only
+        # embeds and ships the suffix (consumed by vLLM Scheduler.schedule
+        # via the _edge_cloud_prefix_as_external flag). Head/tail edges keep
+        # the default: their local hit is merely capped by the reservation.
+        self._edge_cloud_prefix_as_external: bool = bool(
+            coordination.get("enabled", False)
+            and edge_cloud_config.get("mode", "head_tail") == "embedding_only"
+        )
         # Requests that have started their P-first segment but have not yet
         # been fully consumed (still chunking, or still in flight on cloud).
         self.chunk_prefill_first: list[Request] = []

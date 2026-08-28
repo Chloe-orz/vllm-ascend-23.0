@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import copy
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -209,6 +210,75 @@ def test_cloud_owns_blocks_and_reuses_only_acknowledged_prefix():
     replay = hasher.build_manifest("control-2", list(range(8)))
     hit = manager.probe(replay)
     assert hit.hit_tokens == block_size
+
+
+def test_multi_edge_control_ids_are_namespaced_cloud_side():
+    """Two edges reusing one raw control request id must not collide."""
+    block_size = 4
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_kv_cache_config(block_size),
+        vllm_config=_vllm_config(block_size),
+        instance_id="cloud-a",
+    )
+    hasher = PrefixHasher(b"tenant-a-secret-key-material", block_size)
+    tokens = list(range(8))
+    # The HTTP ingress wraps the raw control id with the self-reported edge
+    # id before it reaches the KV manager.
+    manifest_e0 = hasher.build_manifest("e0-req-1", tokens)
+    manifest_e1 = hasher.build_manifest("e1-req-1", tokens)
+    manager.probe(manifest_e0)
+    manager.probe(manifest_e1)  # same raw id from another edge: no conflict
+
+    def new_edge_request(edge_id: int) -> NewRequestData:
+        return NewRequestData(
+            req_id=f"e{edge_id}-internal-1",
+            prompt_token_ids=[0] * 8,
+            mm_features=[],
+            sampling_params=SamplingParams(max_tokens=4),
+            pooling_params=None,
+            block_ids=([99, 100],),
+            num_computed_tokens=0,
+            lora_request=None,
+            edge_cloud_request_id="req-1",  # raw edge-side control id
+        )
+
+    out0, _ = manager.rewrite_scheduler_output(
+        _scheduler_output(new_edge_request(0)))
+    manager.complete_scheduler_output(out0)
+    out1, _ = manager.rewrite_scheduler_output(
+        _scheduler_output(new_edge_request(1)))
+    manager.complete_scheduler_output(out1)
+    assert set(manager._requests) == {"e0-internal-1", "e1-internal-1"}
+
+    # Finish accounting also arrives with the raw control id; the manager
+    # re-wraps it using the engine request id's edge prefix.
+    finish = EdgeCloudFinishedRequest(
+        control_request_id="req-1",
+        prompt_tokens=8,
+        completion_tokens=1,
+        full_block_hashes=hasher.build_manifest(
+            "req-1", tokens + [9]).full_block_hashes,
+    )
+    _, usage = manager.rewrite_scheduler_output(
+        _scheduler_output(
+            finished={"e0-internal-1"},
+            finish_data={"e0-internal-1": finish},
+        )
+    )
+    assert usage[0][0] == "e0-req-1"
+    assert set(manager._requests) == {"e1-internal-1"}
+
+    # A finish whose control id belongs to the other edge must be rejected.
+    with pytest.raises(RuntimeError, match="different control request ID"):
+        manager.rewrite_scheduler_output(
+            _scheduler_output(
+                finished={"e1-internal-1"},
+                finish_data={
+                    "e1-internal-1": replace(finish, control_request_id="e0-req-1")
+                },
+            )
+        )
 
 
 def test_missing_finish_accounting_preserves_cloud_request_state():

@@ -24,6 +24,11 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request
 
+from vllm_ascend.edge_cloud.id_adapter import (
+    is_wrapped_req_id,
+    parse_req_edge_id,
+    wrap_req_id,
+)
 from vllm_ascend.edge_cloud.observability import log_event
 from vllm_ascend.edge_cloud.prefix_protocol import (
     PrefixManifest,
@@ -296,13 +301,28 @@ class CloudKVRequestManager:
                 completed_prompt_blocks=completed_prompt_blocks,
             )
 
+    @staticmethod
+    def _cloud_control_id(engine_request_id: str, control_request_id: str) -> str:
+        """Map an edge-side control request id into the cloud namespace.
+
+        Multi-edge scheduler outputs wrap engine request ids with the edge
+        prefix at ingress, while the control-plane id embedded in the
+        payload stays raw; reservations are keyed by the HTTP-ingress
+        wrapped id, so the match key must be re-wrapped here. Legacy
+        single-edge deployments leave both ids unwrapped.
+        """
+        if is_wrapped_req_id(engine_request_id):
+            return wrap_req_id(
+                parse_req_edge_id(engine_request_id), control_request_id
+            )
+        return control_request_id
+
     def _admit_new_request(
         self,
         data: NewRequestData,
         scheduler_output: SchedulerOutput,
     ) -> NewRequestData:
-        control_request_id = data.edge_cloud_request_id
-        if control_request_id is None:
+        if data.edge_cloud_request_id is None:
             log_event(
                 logger,
                 "error",
@@ -310,6 +330,9 @@ class CloudKVRequestManager:
                 engine_request_id=data.req_id,
             )
             raise RuntimeError("new cloud request has no control-plane request ID")
+        control_request_id = self._cloud_control_id(
+            data.req_id, data.edge_cloud_request_id
+        )
         reservation = self._reservations.pop(control_request_id, None)
         if reservation is None:
             log_event(
@@ -638,7 +661,7 @@ class CloudKVRequestManager:
                     finish_record_count=len(finish_data),
                 )
                 raise RuntimeError(f"cloud finish for {request_id!r} has no accounting data")
-            if final.control_request_id != state.manifest.request_id:
+            if self._cloud_control_id(request_id, final.control_request_id) != state.manifest.request_id:
                 raise RuntimeError("cloud finish has a different control request ID")
             if final.prompt_tokens != state.manifest.prompt_tokens:
                 raise RuntimeError("cloud finish has a different prompt length")

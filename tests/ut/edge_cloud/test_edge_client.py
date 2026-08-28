@@ -46,6 +46,34 @@ def test_build_control_request_removes_original_prompt(client):
     assert body["stream_options"] == {"include_usage": True}
     assert headers["X-Edge-Cloud-Request-ID"] == "req-1"
     assert headers["X-Mse-Consumer"] == "enterprise-a"
+    # No registry identity configured: the edge-id header stays absent so
+    # the cloud keeps the legacy single-edge (unwrapped) namespace.
+    assert "X-Edge-Cloud-Edge-Id" not in headers
+
+
+def test_build_control_request_self_reports_edge_id(tmp_path: Path):
+    key_file = tmp_path / "tenant-key"
+    key_file.write_bytes(b"tenant-a-secret-key-material")
+    edge_client = EdgePrefixClient(
+        control_url="http://cloud.example/v1/chat/completions",
+        tenant_key_file=str(key_file),
+        consumer_id="enterprise-a",
+        block_size=4,
+        connect_timeout=1.0,
+        edge_id=1,
+    )
+    headers, _ = edge_client.build_control_request(
+        "req-1",
+        [1, 2, 3, 4, 5],
+        {
+            "model": "Qwen/Qwen3.5-9B",
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+    # The edge only self-reports its identity; the request id itself stays
+    # raw and the cloud wraps/unwraps the namespace internally.
+    assert headers["X-Edge-Cloud-Edge-Id"] == "1"
+    assert headers["X-Edge-Cloud-Request-ID"] == "req-1"
 
 
 def test_build_control_request_accepts_structured_text_content(client):

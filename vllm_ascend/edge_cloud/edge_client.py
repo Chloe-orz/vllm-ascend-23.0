@@ -16,7 +16,11 @@ from vllm.engine.protocol import EdgeCloudPrefixResult
 from vllm.logger import logger
 
 from vllm_ascend.edge_cloud.observability import format_event, log_event
-from vllm_ascend.edge_cloud.prefix_protocol import PrefixHasher, ProbeResult
+from vllm_ascend.edge_cloud.prefix_protocol import (
+    HEADER_EDGE_ID,
+    PrefixHasher,
+    ProbeResult,
+)
 
 _UNSUPPORTED_CONTENT_TYPES = frozenset(
     {
@@ -58,12 +62,16 @@ class EdgePrefixClient:
         consumer_id: str,
         block_size: int,
         connect_timeout: float,
+        edge_id: int | None = None,
     ) -> None:
         tenant_key = Path(tenant_key_file).read_bytes().strip()
         self._hasher = PrefixHasher(tenant_key, block_size)
         self._control_url = control_url
         self._consumer_id = consumer_id
         self._connect_timeout = connect_timeout
+        # Self-reported identity only: the edge never sees the cloud-side
+        # namespace prefix; the cloud wraps/unwraps request ids internally.
+        self._edge_id = edge_id
         self._streams: dict[str, asyncio.Task[None]] = {}
         log_event(
             logger,
@@ -72,6 +80,7 @@ class EdgePrefixClient:
             consumer_id=consumer_id,
             block_size=block_size,
             connect_timeout=connect_timeout,
+            edge_id=edge_id,
         )
 
     @property
@@ -105,6 +114,8 @@ class EdgePrefixClient:
         body["edge_cloud_prompt_tokens"] = manifest.prompt_tokens
         headers = manifest.to_headers()
         headers[HIGRESS_CONSUMER_HEADER] = self._consumer_id
+        if self._edge_id is not None:
+            headers[HEADER_EDGE_ID] = str(self._edge_id)
         return headers, body
 
     async def negotiate(
