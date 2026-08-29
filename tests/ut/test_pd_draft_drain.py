@@ -256,35 +256,27 @@ class TestUnresolvedDraftParentGate:
         engine.scheduler.is_pre_generated_draft.return_value = pregenerated
         return engine
 
-    @pytest.mark.parametrize(
-        "batch_type", [BatchType.PREFILL_LAST, BatchType.DECODE_LAST]
-    )
-    def test_non_pregenerated_target_tail_blocks_queue_fill(
-        self, batch_type
-    ):
+    def test_non_pregenerated_final_prefill_blocks_queue_fill(self):
         from vllm_ascend.patch.platform.patch_engine_core import (
             _has_unresolved_edge_cloud_draft_parent,
         )
 
-        parent = _make_real_output(batch_type)
+        parent = _make_real_output(BatchType.PREFILL_LAST)
         engine = self._engine_with_parent(parent, pregenerated=False)
 
         assert _has_unresolved_edge_cloud_draft_parent(engine) is True
 
-    @pytest.mark.parametrize(
-        "batch_type", [BatchType.PREFILL_LAST, BatchType.DECODE_LAST]
-    )
-    def test_pregenerated_target_tail_allows_queue_fill(self, batch_type):
+    def test_pregenerated_final_prefill_allows_queue_fill(self):
         from vllm_ascend.patch.platform.patch_engine_core import (
             _has_unresolved_edge_cloud_draft_parent,
         )
 
-        parent = _make_real_output(batch_type)
+        parent = _make_real_output(BatchType.PREFILL_LAST)
         engine = self._engine_with_parent(parent, pregenerated=True)
 
         assert _has_unresolved_edge_cloud_draft_parent(engine) is False
 
-    def test_mid_prefill_tail_also_blocks_queue_fill(self):
+    def test_mid_prefill_tail_allows_queue_fill(self):
         from vllm_ascend.patch.platform.patch_engine_core import (
             _has_unresolved_edge_cloud_draft_parent,
         )
@@ -293,7 +285,17 @@ class TestUnresolvedDraftParentGate:
         parent.is_last_prefill_chunk = False
         engine = self._engine_with_parent(parent, pregenerated=False)
 
-        assert _has_unresolved_edge_cloud_draft_parent(engine) is True
+        assert _has_unresolved_edge_cloud_draft_parent(engine) is False
+
+    def test_decode_tail_allows_queue_fill(self):
+        from vllm_ascend.patch.platform.patch_engine_core import (
+            _has_unresolved_edge_cloud_draft_parent,
+        )
+
+        parent = _make_real_output(BatchType.DECODE_LAST)
+        engine = self._engine_with_parent(parent, pregenerated=False)
+
+        assert _has_unresolved_edge_cloud_draft_parent(engine) is False
 
 
 # ------------------------------------------------------------------ #

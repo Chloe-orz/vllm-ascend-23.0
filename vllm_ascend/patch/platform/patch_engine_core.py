@@ -852,17 +852,11 @@ def _uses_scheduled_edge_cloud_draft(self) -> bool:
 
 
 def _has_unresolved_edge_cloud_draft_parent(self) -> bool:
-    """Keep async scheduling behind a non-pre-generated target tail.
+    """Keep async scheduling behind a prefill tail only.
 
-    Normally async scheduled draft pre-generates its control chain when a
-    target tail is picked, so EngineCore can safely keep filling the worker
-    FIFO. If another chain already owns the single pending step-0 publication
-    slot, pre-generation deliberately declines and EngineCore must first
-    collect this target result. ``_advance_edge_cloud_draft`` then enqueues its
-    fallback dynamic DRAFT_FIRST before another target can overtake the
-    accepted-token correction. This applies to both PREFILL_LAST and
-    DECODE_LAST; limiting the guard to prefill leaves the Eagle3 decode race
-    that presents on the cloud as ``expected=..., pending=None``.
+    Async scheduled draft pre-generates the decode draft chain when
+    DECODE_LAST is picked, so DECODE_LAST must not hold back local edge
+    dispatch.
     """
     if not self._uses_scheduled_edge_cloud_draft():
         return False
@@ -870,13 +864,10 @@ def _has_unresolved_edge_cloud_draft_parent(self) -> bool:
     if not batch_queue:
         return False
     for _future, scheduler_output, _exec_future in batch_queue:
-        is_prefill_tail = (
+        if (
             scheduler_output.batch_type == BatchType.PREFILL_LAST
-        )
-        is_decode_tail = (
-            scheduler_output.batch_type == BatchType.DECODE_LAST
-        )
-        if is_prefill_tail or is_decode_tail:
+            and getattr(scheduler_output, "is_last_prefill_chunk", True)
+        ):
             is_pregenerated = getattr(
                 self.scheduler,
                 "is_pre_generated_draft",
