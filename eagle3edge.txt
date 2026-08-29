@@ -1,377 +1,387 @@
-(EngineCore pid=53121) INFO 08-29 07:28:49 [pd_separated_scheduler.py:1473] [PD-CHUNK-PRIOR] Ahead-scheduled chunk 0 of request chatcmpl-ab2dcccb211ceae1-bb3b9d00 (head_token=a5141392b8074617944e77fda0702610, 256 tokens, ahead_count=1)
-(EngineCore pid=53121) INFO 08-29 07:28:49 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=1, total_tokens=256
-(EngineCore pid=53121) INFO 08-29 07:28:49 [pd_separated_scheduler.py:1277] [PD] Step1, state is PrefillState.IDLE, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 0, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 1/2, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 1, pending_tails: 1, ahead_chunks: 1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [service.py:209] [edge-cloud-comm] created channel prefill_down (peer=1 wire=hidden)
-(EngineCore pid=53121) INFO 08-29 07:28:49 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_first, queue_len=1, types=['prefill_first']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
-(EngineCore pid=53121) INFO 08-29 07:28:49 [pd_separated_scheduler.py:1509] [PD-CHUNK-PRIOR] Chunk 1 of request chatcmpl-ab2dcccb211ceae1-bb3b9d00 waiting for PL (head_token=7639d58a156e4a34913030025665ea5c, 256 tokens, is_last=False, pending_tails=2, reason=ahead_full)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:49 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=345593.1463
-(EngineCore pid=53121) INFO 08-29 07:28:49 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=0, total_tokens=256
-(EngineCore pid=53121) INFO 08-29 07:28:49 [pd_separated_scheduler.py:1277] [PD] Step2, state is PrefillState.LOW, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=345593.1463
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_down>
-(EngineCore pid=53121) INFO 08-29 07:28:49 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_first, queue_len=2, types=['prefill_first', 'prefill_first']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [worker.py:1076] [early-irecv] submit_recv took 7.1 ms channel=prefill_down seqno=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [service.py:209] [edge-cloud-comm] created channel prefill_draft_down (peer=1 wire=draft)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_down>
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [worker.py:1076] [early-irecv] submit_recv took 23.3 ms channel=prefill_draft_down seqno=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:49 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=345593.3144
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:49 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=345593.3151
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=345593.3269
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=1 wire=hidden)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_up dst=1 num_tokens=256 tensor_keys=['hidden_states']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_up>
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=345593.3289
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:49 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=345593.3582
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=345593.3586
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:49 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_up dst=1 num_tokens=256 tensor_keys=['hidden_states']
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_down seqno=0 (watermark=-1)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:2024] [PD] pre-generated async draft placeholders task_id=a5141392b8074617944e77fda0702610 steps=3
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step3, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_LAST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 3, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_last, queue_len=1, types=['prefill_last']
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=345593.8070
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=a5141392b8074617944e77fda0702610, parent_req_id=chatcmpl-ab2dcccb211ceae1-bb3b9d00, draft_step_idx=0, head_token=a79136fd07c64d33a73a9284e2e375ed, prefill_phase=True, remaining_ready=2, decode_or_draft_inflight=0, prefill_draft_remote_pending=1, decode_draft_remote_pending=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=345593.8071
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step4, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [service.py:209] [edge-cloud-comm] created channel prefill_down (peer=0 wire=hidden)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=2, types=['prefill_draft_first', 'prefill_last']
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=0 (watermark=-1)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=a5141392b8074617944e77fda0702610 step=0 (mid-prefill KV warmup; no verify placeholder)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step5, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=3, types=['prefill_draft_last', 'prefill_draft_first', 'prefill_last']
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=a5141392b8074617944e77fda0702610, parent_req_id=chatcmpl-ab2dcccb211ceae1-bb3b9d00, draft_step_idx=1, head_token=80536270af7140e68f79ad04b14fb897, prefill_phase=True, remaining_ready=1, decode_or_draft_inflight=0, prefill_draft_remote_pending=2, decode_draft_remote_pending=0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step6, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=4, types=['prefill_draft_first', 'prefill_draft_last', 'prefill_draft_first', 'prefill_last']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:984] [early-irecv] completion reported channel=prefill_down seqno=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=a5141392b8074617944e77fda0702610
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=a5141392b8074617944e77fda0702610
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=a5141392b8074617944e77fda0702610, req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',), draft_step_idx=0, pending_contexts=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=a5141392b8074617944e77fda0702610, req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',), draft_step_idx=0, pending_contexts=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:2954] [PD-CHUNK-PRIOR] PL returned: request=chatcmpl-ab2dcccb211ceae1-bb3b9d00 chunk=0/mid head_token=a5141392b8074617944e77fda0702610 tokens=256 pending_tails: 2→1 ahead: 1→0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:3002] [PD-CHUNK-PRIOR] Request chatcmpl-ab2dcccb211ceae1-bb3b9d00 chunk 0 PL: re-added to chunk_prefill_first[] for next chunk (remaining=1, ahead=0).
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_down seqno=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [service.py:209] [edge-cloud-comm] created channel prefill_draft_up (peer=1 wire=draft)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=1 (watermark=-1)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=a5141392b8074617944e77fda0702610 step=0 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_up>
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=a5141392b8074617944e77fda0702610 step=0 num_tokens=256 keys=('hidden_states', 'residual')
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1473] [PD-CHUNK-PRIOR] Ahead-scheduled chunk 2 of request chatcmpl-ab2dcccb211ceae1-bb3b9d00 (head_token=d9872d4cdf3d4b4fb56ed41595679a8c, 256 tokens, ahead_count=1)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=1, total_tokens=256
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step7, state is PrefillState.LOW, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=a5141392b8074617944e77fda0702610 step=0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_first, queue_len=4, types=['prefill_first', 'prefill_draft_first', 'prefill_draft_last', 'prefill_draft_first']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=a5141392b8074617944e77fda0702610 step=0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=a5141392b8074617944e77fda0702610 step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=a5141392b8074617944e77fda0702610 step=0 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=a5141392b8074617944e77fda0702610 step=1 (mid-prefill KV warmup; no verify placeholder)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step8, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=4, types=['prefill_draft_last', 'prefill_first', 'prefill_draft_first', 'prefill_draft_last']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=a5141392b8074617944e77fda0702610 step=0 num_tokens=256 keys=('hidden_states', 'residual')
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=a5141392b8074617944e77fda0702610 step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=a5141392b8074617944e77fda0702610 step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=a5141392b8074617944e77fda0702610 step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:984] [early-irecv] completion reported channel=prefill_down seqno=1
-(APIServer pid=52813) INFO:     76.76.26.231:47286 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=a5141392b8074617944e77fda0702610 step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=a5141392b8074617944e77fda0702610 step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=0 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_down seqno=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=0 shape=(1, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=0 shape=(1, 163840)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=0 shape=(1, 163840)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=a5141392b8074617944e77fda0702610 step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=a5141392b8074617944e77fda0702610 step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=a5141392b8074617944e77fda0702610 step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=a5141392b8074617944e77fda0702610 step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=a5141392b8074617944e77fda0702610 step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=a5141392b8074617944e77fda0702610 step=0 next_step=1 context_retained=True
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=a5141392b8074617944e77fda0702610 step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=a5141392b8074617944e77fda0702610 step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=a5141392b8074617944e77fda0702610 step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=a5141392b8074617944e77fda0702610 step=0 next_step=1 context_retained=True
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=a5141392b8074617944e77fda0702610 step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=a5141392b8074617944e77fda0702610 step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:3108] [PD] update_from_output DRAFT_LAST done, prefill_phase=True, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, next_draft_ready: False
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_down seqno=1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_down seqno=0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1938] [PD] skip pre-generation (lane busy), chain goes dynamic: task_id=7639d58a156e4a34913030025665ea5c prefill_phase=True lane_first=1 lane_last=0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step9, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_LAST, waiting[]: 1, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_last, queue_len=4, types=['prefill_last', 'prefill_draft_last', 'prefill_first', 'prefill_draft_first']
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=345594.2961
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=345594.2978
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=345594.3067
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=a5141392b8074617944e77fda0702610 step=1 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=a5141392b8074617944e77fda0702610 step=1 num_tokens=1 keys=('hidden_states', 'residual')
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=a5141392b8074617944e77fda0702610 step=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=a5141392b8074617944e77fda0702610 step=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=a5141392b8074617944e77fda0702610 step=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=a5141392b8074617944e77fda0702610 step=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=1 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=345594.3103
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_up dst=1 num_tokens=256 tensor_keys=['hidden_states']
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=1 shape=(1, 163840)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=a5141392b8074617944e77fda0702610 step=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=a5141392b8074617944e77fda0702610 step=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=a5141392b8074617944e77fda0702610 step=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=a5141392b8074617944e77fda0702610 step=1 next_step=2 context_retained=True
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=a5141392b8074617944e77fda0702610 step=1 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=a5141392b8074617944e77fda0702610 step=1 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=a5141392b8074617944e77fda0702610 step=1 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=345594.3126
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=a5141392b8074617944e77fda0702610 step=1 num_tokens=1 keys=('hidden_states', 'residual')
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=a5141392b8074617944e77fda0702610 step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=a5141392b8074617944e77fda0702610 step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=a5141392b8074617944e77fda0702610 step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=a5141392b8074617944e77fda0702610 step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=1 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=1 shape=(1, 163840)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=a5141392b8074617944e77fda0702610 step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=a5141392b8074617944e77fda0702610 step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=a5141392b8074617944e77fda0702610 step=1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=a5141392b8074617944e77fda0702610 step=1 next_step=2 context_retained=True
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=a5141392b8074617944e77fda0702610 step=1 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=a5141392b8074617944e77fda0702610 step=1 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=345594.3176
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:3108] [PD] update_from_output DRAFT_LAST done, prefill_phase=True, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, next_draft_ready: False
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_down seqno=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=7639d58a156e4a34913030025665ea5c
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=7639d58a156e4a34913030025665ea5c
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=7639d58a156e4a34913030025665ea5c, req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',), draft_step_idx=0, pending_contexts=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=7639d58a156e4a34913030025665ea5c, req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',), draft_step_idx=0, pending_contexts=2
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:2954] [PD-CHUNK-PRIOR] PL returned: request=chatcmpl-ab2dcccb211ceae1-bb3b9d00 chunk=1/mid head_token=7639d58a156e4a34913030025665ea5c tokens=256 pending_tails: 2→1 ahead: 1→0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:3002] [PD-CHUNK-PRIOR] Request chatcmpl-ab2dcccb211ceae1-bb3b9d00 chunk 1 PL: re-added to chunk_prefill_first[] for next chunk (remaining=1, ahead=0).
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:2150] [PD] dynamic draft chain start: task_id=7639d58a156e4a34913030025665ea5c prefill_phase=True parent_batch=BatchType.PREFILL_LAST chain_dead=False
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_down seqno=1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=a5141392b8074617944e77fda0702610, parent_req_id=chatcmpl-ab2dcccb211ceae1-bb3b9d00, draft_step_idx=2, head_token=9021881507924652ab67a11472abceb4, prefill_phase=True, remaining_ready=1, decode_or_draft_inflight=0, prefill_draft_remote_pending=1, decode_draft_remote_pending=0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step10, state is PrefillState.LOW, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 1, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 1/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 1, pending_tails: 1, ahead_chunks: 0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=1, types=['prefill_draft_first']
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=2 (watermark=1)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1473] [PD-CHUNK-PRIOR] Ahead-scheduled chunk 0 of request chatcmpl-99cdadf41b527188-8accfc49 (head_token=f54a51ed914c4834a003eea804b1492a, 256 tokens, ahead_count=1)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=2, total_tokens=256
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step11, state is PrefillState.LOW, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 2, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_first, queue_len=2, types=['prefill_first', 'prefill_draft_first']
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=345594.3963
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=a5141392b8074617944e77fda0702610 step=2 (mid-prefill KV warmup; no verify placeholder)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step12, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 2, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=3, types=['prefill_draft_last', 'prefill_first', 'prefill_draft_first']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=345594.3975
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=345594.4051
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=a5141392b8074617944e77fda0702610 step=2 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=a5141392b8074617944e77fda0702610 step=2 num_tokens=1 keys=('hidden_states', 'residual')
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=a5141392b8074617944e77fda0702610 step=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=a5141392b8074617944e77fda0702610 step=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=a5141392b8074617944e77fda0702610 step=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=a5141392b8074617944e77fda0702610 step=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=2 shape=(1, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=2 shape=(1, 163840)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=a5141392b8074617944e77fda0702610 step=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=a5141392b8074617944e77fda0702610 step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=345594.4099
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=a5141392b8074617944e77fda0702610 step=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5503] [DRAFT-PREFILL] task=a5141392b8074617944e77fda0702610 completed for mid-prefill chunk; draft KV populated and proposals discarded
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=a5141392b8074617944e77fda0702610 step=2 next_step=3 context_retained=False
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=a5141392b8074617944e77fda0702610 step=2 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_up dst=1 num_tokens=256 tensor_keys=['hidden_states']
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=a5141392b8074617944e77fda0702610 step=2 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=a5141392b8074617944e77fda0702610 step=2 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=a5141392b8074617944e77fda0702610 step=2 num_tokens=1 keys=('hidden_states', 'residual')
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=a5141392b8074617944e77fda0702610 step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=a5141392b8074617944e77fda0702610 step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=a5141392b8074617944e77fda0702610 step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=a5141392b8074617944e77fda0702610 step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=2 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=2 shape=(1, 163840)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=a5141392b8074617944e77fda0702610 step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=a5141392b8074617944e77fda0702610 step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=a5141392b8074617944e77fda0702610 step=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5503] [DRAFT-PREFILL] task=a5141392b8074617944e77fda0702610 completed for mid-prefill chunk; draft KV populated and proposals discarded
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=a5141392b8074617944e77fda0702610 step=2 next_step=3 context_retained=False
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=a5141392b8074617944e77fda0702610 step=2 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=a5141392b8074617944e77fda0702610 step=2 batch_type=BatchType.PREFILL_DRAFT_LAST
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:3108] [PD] update_from_output DRAFT_LAST done, prefill_phase=True, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, next_draft_ready: False
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=7639d58a156e4a34913030025665ea5c, parent_req_id=chatcmpl-ab2dcccb211ceae1-bb3b9d00, draft_step_idx=0, head_token=99e4786861c9434ca2506015fbedc8bd, prefill_phase=True, remaining_ready=0, decode_or_draft_inflight=0, prefill_draft_remote_pending=1, decode_draft_remote_pending=0
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step13, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 2, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=1, types=['prefill_draft_first']
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:50 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:50 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(EngineCore pid=53121) INFO 08-29 07:28:50 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=3 (watermark=1)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=7639d58a156e4a34913030025665ea5c step=0 (mid-prefill KV warmup; no verify placeholder)
-(EngineCore pid=53121) INFO 08-29 07:28:50 [pd_separated_scheduler.py:1277] [PD] Step14, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 2, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:50 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=2, types=['prefill_draft_last', 'prefill_draft_first']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:984] [early-irecv] completion reported channel=prefill_down seqno=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_down seqno=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=7639d58a156e4a34913030025665ea5c step=0 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=7639d58a156e4a34913030025665ea5c step=0 num_tokens=256 keys=('hidden_states', 'residual')
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=7639d58a156e4a34913030025665ea5c step=0 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=1
-(EngineCore pid=53121) INFO 08-29 07:28:51 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_down seqno=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=7639d58a156e4a34913030025665ea5c step=0
-(EngineCore pid=53121) INFO 08-29 07:28:51 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_down seqno=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=7639d58a156e4a34913030025665ea5c step=0 num_tokens=256 keys=('hidden_states', 'residual')
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=7639d58a156e4a34913030025665ea5c step=0
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:2024] [PD] pre-generated async draft placeholders task_id=d9872d4cdf3d4b4fb56ed41595679a8c steps=3
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:1277] [PD] Step15, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_LAST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 3, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
-(EngineCore pid=53121) INFO 08-29 07:28:51 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_last, queue_len=2, types=['prefill_last', 'prefill_draft_last']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=7639d58a156e4a34913030025665ea5c step=0
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=d9872d4cdf3d4b4fb56ed41595679a8c, parent_req_id=chatcmpl-ab2dcccb211ceae1-bb3b9d00, draft_step_idx=0, head_token=2d96f9dbad3a49c1ac15c7e9c9473f69, prefill_phase=True, remaining_ready=2, decode_or_draft_inflight=0, prefill_draft_remote_pending=2, decode_draft_remote_pending=0
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:1277] [PD] Step16, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=7639d58a156e4a34913030025665ea5c step=0
-(EngineCore pid=53121) INFO 08-29 07:28:51 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=3, types=['prefill_draft_first', 'prefill_last', 'prefill_draft_last']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=7639d58a156e4a34913030025665ea5c step=0
-(EngineCore pid=53121) INFO 08-29 07:28:51 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=6 (watermark=2)
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=d9872d4cdf3d4b4fb56ed41595679a8c step=0 (mid-prefill KV warmup; no verify placeholder)
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:1277] [PD] Step17, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:51 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=4, types=['prefill_draft_last', 'prefill_draft_first', 'prefill_last', 'prefill_draft_last']
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:984] [early-irecv] completion reported channel=prefill_down seqno=3
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=0 shape=(1, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=0 shape=(1, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_down seqno=3
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=0 shape=(1, 163840)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=0 shape=(1, 163840)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=7639d58a156e4a34913030025665ea5c step=0 next_step=1 context_retained=True
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=7639d58a156e4a34913030025665ea5c step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=7639d58a156e4a34913030025665ea5c step=0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=7639d58a156e4a34913030025665ea5c step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=7639d58a156e4a34913030025665ea5c step=0 next_step=1 context_retained=True
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=7639d58a156e4a34913030025665ea5c step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=345595.0144
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=7639d58a156e4a34913030025665ea5c step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=345595.0151
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:3108] [PD] update_from_output DRAFT_LAST done, prefill_phase=True, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, next_draft_ready: True
-(EngineCore pid=53121) INFO 08-29 07:28:51 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_down seqno=3
-(EngineCore pid=53121) INFO 08-29 07:28:51 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_down seqno=3
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:1938] [PD] skip pre-generation (lane busy), chain goes dynamic: task_id=f54a51ed914c4834a003eea804b1492a prefill_phase=True lane_first=3 lane_last=0
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:1277] [PD] Step18, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_LAST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 3, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
-(EngineCore pid=53121) INFO 08-29 07:28:51 [patch_engine_core.py:1072] [BATCH_QUEUE] Enqueued prefill_last, queue_len=4, types=['prefill_last', 'prefill_draft_last', 'prefill_draft_first', 'prefill_last']
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=d9872d4cdf3d4b4fb56ed41595679a8c
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=d9872d4cdf3d4b4fb56ed41595679a8c
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=d9872d4cdf3d4b4fb56ed41595679a8c, req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',), draft_step_idx=0, pending_contexts=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=d9872d4cdf3d4b4fb56ed41595679a8c, req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',), draft_step_idx=0, pending_contexts=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:2954] [PD-CHUNK-PRIOR] PL returned: request=chatcmpl-ab2dcccb211ceae1-bb3b9d00 chunk=2/mid head_token=d9872d4cdf3d4b4fb56ed41595679a8c tokens=256 pending_tails: 1→0 ahead: 0→0
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:3002] [PD-CHUNK-PRIOR] Request chatcmpl-ab2dcccb211ceae1-bb3b9d00 chunk 2 PL: re-added to chunk_prefill_first[] for next chunk (remaining=0, ahead=0).
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=d9872d4cdf3d4b4fb56ed41595679a8c step=0 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=2
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=d9872d4cdf3d4b4fb56ed41595679a8c step=0 num_tokens=256 keys=('hidden_states', 'residual')
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=d9872d4cdf3d4b4fb56ed41595679a8c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=d9872d4cdf3d4b4fb56ed41595679a8c step=0
-(EngineCore pid=53121) INFO 08-29 07:28:51 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
-(Worker_TP1_EP1 pid=53169) INFO 08-29 07:28:51 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=d9872d4cdf3d4b4fb56ed41595679a8c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=d9872d4cdf3d4b4fb56ed41595679a8c step=0 req_ids=('chatcmpl-ab2dcccb211ceae1-bb3b9d00',) pending_contexts=2
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=d9872d4cdf3d4b4fb56ed41595679a8c step=0 num_tokens=256 keys=('hidden_states', 'residual')
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=d9872d4cdf3d4b4fb56ed41595679a8c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=d9872d4cdf3d4b4fb56ed41595679a8c step=0
-(Worker_PP0_TP0_EP0 pid=53150) INFO 08-29 07:28:51 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=d9872d4cdf3d4b4fb56ed41595679a8c step=0
-(APIServer pid=52813) INFO:     76.76.26.231:47294 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=52813) INFO:     76.76.26.231:47296 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=52813) INFO:     76.76.26.231:47298 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=52813) INFO:     76.76.26.231:47306 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=52813) INFO:     76.76.26.231:49206 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=52813) INFO:     76.76.26.231:49216 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=52813) INFO:     76.76.26.231:49224 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(APIServer pid=52813) INFO:     76.76.26.231:49228 - "POST /v1/chat/completions HTTP/1.1" 200 OK
-(EngineCore pid=53121) INFO 08-29 07:29:52 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1473] [PD-CHUNK-PRIOR] Ahead-scheduled chunk 0 of request chatcmpl-b8475d08607a9ebf-aa1f0540 (head_token=6a217eeea406455d89c93ff90398e19b, 256 tokens, ahead_count=1)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=1, total_tokens=256
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1277] [PD] Step1, state is PrefillState.IDLE, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 0, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 1/2, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 1, pending_tails: 1, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:14 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_first, queue_len=1, types=['prefill_first']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=355817.4648
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=355817.4649
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [service.py:209] [edge-cloud-comm] created channel prefill_down (peer=1 wire=hidden)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1509] [PD-CHUNK-PRIOR] Chunk 1 of request chatcmpl-b8475d08607a9ebf-aa1f0540 waiting for PL (head_token=69721d95059c4166b41967ec5b813f27, 256 tokens, is_last=False, pending_tails=2, reason=ahead_full)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=0, total_tokens=256
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1277] [PD] Step2, state is PrefillState.LOW, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:14 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_first, queue_len=2, types=['prefill_first', 'prefill_first']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_down>
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1076] [early-irecv] submit_recv took 6.5 ms channel=prefill_down seqno=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [service.py:209] [edge-cloud-comm] created channel prefill_draft_down (peer=1 wire=draft)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_down>
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=355817.6335
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=355817.6341
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=355817.6426
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=1 wire=hidden)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_up dst=1 num_tokens=256 tensor_keys=['hidden_states']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_up>
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=355817.6443
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=355817.6527
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=355817.6575
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_up dst=1 num_tokens=256 tensor_keys=['hidden_states']
+(EngineCore pid=60834) INFO 08-29 10:19:14 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_down seqno=0 (watermark=-1)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:2024] [PD] pre-generated async draft placeholders task_id=6a217eeea406455d89c93ff90398e19b steps=3
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1277] [PD] Step3, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_LAST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 3, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:14 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_last, queue_len=1, types=['prefill_last']
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=355818.1633
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=6a217eeea406455d89c93ff90398e19b, parent_req_id=chatcmpl-b8475d08607a9ebf-aa1f0540, draft_step_idx=0, head_token=58a8212a9e524daca40e7e5cfd5e8ef4, prefill_phase=True, remaining_ready=2, decode_or_draft_inflight=0, prefill_draft_remote_pending=1, decode_draft_remote_pending=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [service.py:209] [edge-cloud-comm] created channel prefill_down (peer=0 wire=hidden)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1277] [PD] Step4, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=355818.1636
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:984] [early-irecv] completion reported channel=prefill_down seqno=0
+(EngineCore pid=60834) INFO 08-29 10:19:14 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=2, types=['prefill_draft_first', 'prefill_last']
+(EngineCore pid=60834) INFO 08-29 10:19:14 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_down seqno=0
+(EngineCore pid=60834) INFO 08-29 10:19:14 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=0 (watermark=-1)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=6a217eeea406455d89c93ff90398e19b step=0 (mid-prefill KV warmup; no verify placeholder)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1277] [PD] Step5, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:14 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=3, types=['prefill_draft_last', 'prefill_draft_first', 'prefill_last']
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=6a217eeea406455d89c93ff90398e19b, parent_req_id=chatcmpl-b8475d08607a9ebf-aa1f0540, draft_step_idx=1, head_token=16eebb07ea864953a20a87c723285e06, prefill_phase=True, remaining_ready=1, decode_or_draft_inflight=0, prefill_draft_remote_pending=2, decode_draft_remote_pending=0
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1277] [PD] Step6, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:14 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=4, types=['prefill_draft_first', 'prefill_draft_last', 'prefill_draft_first', 'prefill_last']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=6a217eeea406455d89c93ff90398e19b
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=6a217eeea406455d89c93ff90398e19b
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=6a217eeea406455d89c93ff90398e19b, req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',), draft_step_idx=0, pending_contexts=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=6a217eeea406455d89c93ff90398e19b, req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',), draft_step_idx=0, pending_contexts=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:2954] [PD-CHUNK-PRIOR] PL returned: request=chatcmpl-b8475d08607a9ebf-aa1f0540 chunk=0/mid head_token=6a217eeea406455d89c93ff90398e19b tokens=256 pending_tails: 2→1 ahead: 1→0
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:3002] [PD-CHUNK-PRIOR] Request chatcmpl-b8475d08607a9ebf-aa1f0540 chunk 0 PL: re-added to chunk_prefill_first[] for next chunk (remaining=1, ahead=0).
+(EngineCore pid=60834) INFO 08-29 10:19:14 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=1 (watermark=-1)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1473] [PD-CHUNK-PRIOR] Ahead-scheduled chunk 2 of request chatcmpl-b8475d08607a9ebf-aa1f0540 (head_token=0654de0e8ed44c828a934f45bf42586f, 256 tokens, ahead_count=1)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [service.py:209] [edge-cloud-comm] created channel prefill_draft_up (peer=1 wire=draft)
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=1, total_tokens=256
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1277] [PD] Step7, state is PrefillState.LOW, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_up>
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=6a217eeea406455d89c93ff90398e19b step=0 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=1
+(EngineCore pid=60834) INFO 08-29 10:19:14 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_first, queue_len=4, types=['prefill_first', 'prefill_draft_first', 'prefill_draft_last', 'prefill_draft_first']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=6a217eeea406455d89c93ff90398e19b step=0 num_tokens=256 keys=('hidden_states', 'residual')
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=6a217eeea406455d89c93ff90398e19b step=1 (mid-prefill KV warmup; no verify placeholder)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=6a217eeea406455d89c93ff90398e19b step=0
+(EngineCore pid=60834) INFO 08-29 10:19:14 [pd_separated_scheduler.py:1277] [PD] Step8, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:14 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=6a217eeea406455d89c93ff90398e19b step=0
+(EngineCore pid=60834) INFO 08-29 10:19:14 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=4, types=['prefill_draft_last', 'prefill_first', 'prefill_draft_first', 'prefill_draft_last']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=6a217eeea406455d89c93ff90398e19b step=0 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=6a217eeea406455d89c93ff90398e19b step=0 num_tokens=256 keys=('hidden_states', 'residual')
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:14 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:984] [early-irecv] completion reported channel=prefill_down seqno=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=0 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=0 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_down seqno=0
+(APIServer pid=60526) INFO:     76.76.26.231:43740 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=0 shape=(1, 163840)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=0 shape=(1, 163840)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=6a217eeea406455d89c93ff90398e19b step=0 next_step=1 context_retained=True
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=6a217eeea406455d89c93ff90398e19b step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=6a217eeea406455d89c93ff90398e19b step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=6a217eeea406455d89c93ff90398e19b step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=6a217eeea406455d89c93ff90398e19b step=0 next_step=1 context_retained=True
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=6a217eeea406455d89c93ff90398e19b step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=6a217eeea406455d89c93ff90398e19b step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3108] [PD] update_from_output DRAFT_LAST done, prefill_phase=True, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, next_draft_ready: False
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_down seqno=1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_down seqno=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1938] [PD] skip pre-generation (lane busy), chain goes dynamic: task_id=69721d95059c4166b41967ec5b813f27 prefill_phase=True lane_first=1 lane_last=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step9, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_LAST, waiting[]: 1, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_last, queue_len=4, types=['prefill_last', 'prefill_draft_last', 'prefill_first', 'prefill_draft_first']
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=355818.5808
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=355818.5830
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=6a217eeea406455d89c93ff90398e19b, parent_req_id=chatcmpl-b8475d08607a9ebf-aa1f0540, draft_step_idx=2, head_token=7d45d9c316b3446bbbac7a78679a686c, prefill_phase=True, remaining_ready=0, decode_or_draft_inflight=0, prefill_draft_remote_pending=2, decode_draft_remote_pending=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step10, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 1, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=4, types=['prefill_draft_first', 'prefill_last', 'prefill_draft_last', 'prefill_first']
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=355818.5909
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=6a217eeea406455d89c93ff90398e19b step=1 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=6a217eeea406455d89c93ff90398e19b step=1 num_tokens=1 keys=('hidden_states', 'residual')
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=355818.5939
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=1 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_up dst=1 num_tokens=256 tensor_keys=['hidden_states']
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=1 shape=(1, 163840)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=2 (watermark=0)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=6a217eeea406455d89c93ff90398e19b step=1 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=6a217eeea406455d89c93ff90398e19b step=2 (mid-prefill KV warmup; no verify placeholder)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=6a217eeea406455d89c93ff90398e19b step=1 next_step=2 context_retained=True
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step11, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 1, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=6a217eeea406455d89c93ff90398e19b step=1 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=6a217eeea406455d89c93ff90398e19b step=1 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=6a217eeea406455d89c93ff90398e19b step=1 num_tokens=1 keys=('hidden_states', 'residual')
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=4, types=['prefill_draft_last', 'prefill_draft_first', 'prefill_last', 'prefill_draft_last']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=355818.5966
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=1 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=1 shape=(1, 163840)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=6a217eeea406455d89c93ff90398e19b step=1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=6a217eeea406455d89c93ff90398e19b step=1 next_step=2 context_retained=True
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=6a217eeea406455d89c93ff90398e19b step=1 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=6a217eeea406455d89c93ff90398e19b step=1 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=355818.6009
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3108] [PD] update_from_output DRAFT_LAST done, prefill_phase=True, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, next_draft_ready: False
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_down seqno=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=69721d95059c4166b41967ec5b813f27
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=69721d95059c4166b41967ec5b813f27
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=69721d95059c4166b41967ec5b813f27, req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',), draft_step_idx=0, pending_contexts=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=69721d95059c4166b41967ec5b813f27, req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',), draft_step_idx=0, pending_contexts=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:2954] [PD-CHUNK-PRIOR] PL returned: request=chatcmpl-b8475d08607a9ebf-aa1f0540 chunk=1/mid head_token=69721d95059c4166b41967ec5b813f27 tokens=256 pending_tails: 2→1 ahead: 1→0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3002] [PD-CHUNK-PRIOR] Request chatcmpl-b8475d08607a9ebf-aa1f0540 chunk 1 PL: re-added to chunk_prefill_first[] for next chunk (remaining=1, ahead=0).
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:2150] [PD] dynamic draft chain start: task_id=69721d95059c4166b41967ec5b813f27 prefill_phase=True parent_batch=BatchType.PREFILL_LAST chain_dead=False
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=6a217eeea406455d89c93ff90398e19b step=2 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=2
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_down seqno=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=6a217eeea406455d89c93ff90398e19b step=2 num_tokens=1 keys=('hidden_states', 'residual')
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1473] [PD-CHUNK-PRIOR] Ahead-scheduled chunk 0 of request chatcmpl-83a021774aeb24ef-a9c28cc5 (head_token=c45b35ba8cce48199b55e89a467a2c65, 256 tokens, ahead_count=1)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=2, total_tokens=256
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step12, state is PrefillState.LOW, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 2, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 1, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_first, queue_len=3, types=['prefill_first', 'prefill_draft_last', 'prefill_draft_first']
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=2 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=2 shape=(1, 163840)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=6a217eeea406455d89c93ff90398e19b step=2 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=6a217eeea406455d89c93ff90398e19b step=2 num_tokens=1 keys=('hidden_states', 'residual')
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5503] [DRAFT-PREFILL] task=6a217eeea406455d89c93ff90398e19b completed for mid-prefill chunk; draft KV populated and proposals discarded
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=6a217eeea406455d89c93ff90398e19b step=2 next_step=3 context_retained=False
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=6a217eeea406455d89c93ff90398e19b step=2 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=6a217eeea406455d89c93ff90398e19b step=2 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=355818.6807
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=2 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=2 shape=(1, 163840)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=6a217eeea406455d89c93ff90398e19b step=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5503] [DRAFT-PREFILL] task=6a217eeea406455d89c93ff90398e19b completed for mid-prefill chunk; draft KV populated and proposals discarded
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=6a217eeea406455d89c93ff90398e19b step=2 next_step=3 context_retained=False
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=6a217eeea406455d89c93ff90398e19b step=2 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=6a217eeea406455d89c93ff90398e19b step=2 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1250] [PD-TIMING] edge head enter batch_type=BatchType.PREFILL_FIRST ts=355818.6860
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3108] [PD] update_from_output DRAFT_LAST done, prefill_phase=True, prefill_draft_remote_pending: 0, decode_draft_remote_pending: 0, next_draft_ready: False
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=69721d95059c4166b41967ec5b813f27, parent_req_id=chatcmpl-b8475d08607a9ebf-aa1f0540, draft_step_idx=0, head_token=1a01925e130b405db5d8727ff4f759e3, prefill_phase=True, remaining_ready=0, decode_or_draft_inflight=0, prefill_draft_remote_pending=1, decode_draft_remote_pending=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step13, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 2, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=2, types=['prefill_draft_first', 'prefill_first']
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=3 (watermark=1)
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=69721d95059c4166b41967ec5b813f27 step=0 (mid-prefill KV warmup; no verify placeholder)
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step14, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 2, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 0, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=3, types=['prefill_draft_last', 'prefill_draft_first', 'prefill_first']
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=355818.6889
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1259] [PD-TIMING] edge head forward done batch_type=BatchType.PREFILL_FIRST ts=355818.6966
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_up dst=1 num_tokens=256 tensor_keys=['hidden_states']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:984] [early-irecv] completion reported channel=prefill_down seqno=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_down seqno=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=69721d95059c4166b41967ec5b813f27 step=0 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=69721d95059c4166b41967ec5b813f27 step=0 num_tokens=256 keys=('hidden_states', 'residual')
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=69721d95059c4166b41967ec5b813f27 step=0 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_down seqno=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=69721d95059c4166b41967ec5b813f27 step=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_down seqno=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=69721d95059c4166b41967ec5b813f27 step=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:2024] [PD] pre-generated async draft placeholders task_id=0654de0e8ed44c828a934f45bf42586f steps=3
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=69721d95059c4166b41967ec5b813f27 step=0 num_tokens=256 keys=('hidden_states', 'residual')
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step15, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_LAST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 3, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_last, queue_len=2, types=['prefill_last', 'prefill_draft_last']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=0654de0e8ed44c828a934f45bf42586f, parent_req_id=chatcmpl-b8475d08607a9ebf-aa1f0540, draft_step_idx=0, head_token=ed12e4c9ff2345b0a4daad9d71ee0142, prefill_phase=True, remaining_ready=2, decode_or_draft_inflight=0, prefill_draft_remote_pending=2, decode_draft_remote_pending=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step16, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=69721d95059c4166b41967ec5b813f27 step=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=3, types=['prefill_draft_first', 'prefill_last', 'prefill_draft_last']
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=6 (watermark=2)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=69721d95059c4166b41967ec5b813f27 step=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:2222] [PD] finish DRAFT_LAST task_id=0654de0e8ed44c828a934f45bf42586f step=0 (mid-prefill KV warmup; no verify placeholder)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=69721d95059c4166b41967ec5b813f27 step=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step17, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_DRAFT_LAST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_last, queue_len=4, types=['prefill_draft_last', 'prefill_draft_first', 'prefill_last', 'prefill_draft_last']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:984] [early-irecv] completion reported channel=prefill_down seqno=3
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_down seqno=3
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5397] [DRAFT-TAIL-DIAG] TOKEN_IDS_BEGIN task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=0 shape=(1, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5142] [DRAFT-TAIL-DIAG] LM_HEAD_BEGIN step=0 shape=(1, 7168)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5148] [DRAFT-TAIL-DIAG] LM_HEAD_DONE step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=0 shape=(1, 163840)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5155] [DRAFT-TAIL-DIAG] ARGMAX_BEGIN step=0 shape=(1, 163840)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5161] [DRAFT-TAIL-DIAG] ARGMAX_DONE step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5408] [DRAFT-TAIL-DIAG] TOKEN_IDS_DONE task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5413] [DRAFT-TAIL-DIAG] STATE_SAVE_BEGIN task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5424] [DRAFT-TAIL-DIAG] STATE_SAVE_DONE task=69721d95059c4166b41967ec5b813f27 step=0
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=69721d95059c4166b41967ec5b813f27 step=0 next_step=1 context_retained=True
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=69721d95059c4166b41967ec5b813f27 step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=69721d95059c4166b41967ec5b813f27 step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5542] [DRAFT-TAIL-DIAG] RETURN task=69721d95059c4166b41967ec5b813f27 step=0 next_step=1 context_retained=True
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1879] [DRAFT-TAIL-DIAG] RECV_DONE task=69721d95059c4166b41967ec5b813f27 step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1885] [DRAFT-TAIL-DIAG] WORKER_RETURN task=69721d95059c4166b41967ec5b813f27 step=0 batch_type=BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=355819.3355
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3108] [PD] update_from_output DRAFT_LAST done, prefill_phase=True, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, next_draft_ready: True
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1356] [PD-TIMING] edge tail enter batch_type=BatchType.PREFILL_LAST ts=355819.3361
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_down seqno=3
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_down seqno=3
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1938] [PD] skip pre-generation (lane busy), chain goes dynamic: task_id=c45b35ba8cce48199b55e89a467a2c65 prefill_phase=True lane_first=3 lane_last=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step18, state is PrefillState.HIGH, batch_type is BatchType.PREFILL_LAST, waiting[]: 0, chunk_prefill_first[]: 0, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 3, prefill_drafts_last_ready[]: 0, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 1, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 1
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_last, queue_len=4, types=['prefill_last', 'prefill_draft_last', 'prefill_draft_first', 'prefill_last']
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=0654de0e8ed44c828a934f45bf42586f
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:7015] [MTP-DEBUG] draft defer decision: method=eagle3, model_type=kimi_k25, batch_type=BatchType.PREFILL_LAST, scheduled_draft=True, edge_cloud_enabled=True, is_edge_device=True, has_drafter=True, defer=True, head_token=0654de0e8ed44c828a934f45bf42586f
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=0654de0e8ed44c828a934f45bf42586f, req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',), draft_step_idx=0, pending_contexts=2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:4811] [MTP-DEBUG] pending draft context stashed: task_id=0654de0e8ed44c828a934f45bf42586f, req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',), draft_step_idx=0, pending_contexts=2
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1729] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:2954] [PD-CHUNK-PRIOR] PL returned: request=chatcmpl-b8475d08607a9ebf-aa1f0540 chunk=2/mid head_token=0654de0e8ed44c828a934f45bf42586f tokens=256 pending_tails: 1→0 ahead: 0→0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3002] [PD-CHUNK-PRIOR] Request chatcmpl-b8475d08607a9ebf-aa1f0540 chunk 2 PL: re-added to chunk_prefill_first[] for next chunk (remaining=0, ahead=0).
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1843] [MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=0654de0e8ed44c828a934f45bf42586f, parent_req_id=chatcmpl-b8475d08607a9ebf-aa1f0540, draft_step_idx=1, head_token=9e79281bbf9242cb952fdc107d8a078e, prefill_phase=True, remaining_ready=2, decode_or_draft_inflight=0, prefill_draft_remote_pending=2, decode_draft_remote_pending=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step19, state is PrefillState.LOW, batch_type is BatchType.PREFILL_DRAFT_FIRST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 1/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 1, pending_tails: 1, ahead_chunks: 1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=0654de0e8ed44c828a934f45bf42586f step=0 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=2
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_draft_first, queue_len=4, types=['prefill_draft_first', 'prefill_last', 'prefill_draft_last', 'prefill_draft_first']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1820] Send intermediate tensors to cloud, hidden_channel: prefill_draft_up
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=0654de0e8ed44c828a934f45bf42586f step=0 num_tokens=256 keys=('hidden_states', 'residual')
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1850] Execute model, batch_type: BatchType.PREFILL_DRAFT_LAST
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:3068] [PD] update_from_output DRAFT_FIRST done, prefill_phase=True, decode_or_draft_inflight: 0/1
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [worker.py:1869] Receive intermediate tensors from cloud after, hidden_channel: prefill_draft_down
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5262] [DRAFT-TAIL-DIAG] ENTER task=0654de0e8ed44c828a934f45bf42586f step=0 req_ids=('chatcmpl-b8475d08607a9ebf-aa1f0540',) pending_contexts=2
+(EngineCore pid=60834) INFO 08-29 10:19:15 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_down seqno=7 (watermark=3)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=0654de0e8ed44c828a934f45bf42586f step=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1473] [PD-CHUNK-PRIOR] Ahead-scheduled chunk 3 of request chatcmpl-b8475d08607a9ebf-aa1f0540 (head_token=f6a21ba22f8b474aa39bc865f8ec0123, 256 tokens, ahead_count=1)
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5282] [DRAFT-TAIL-DIAG] SYNC_BEGIN task=0654de0e8ed44c828a934f45bf42586f step=0 num_tokens=256 keys=('hidden_states', 'residual')
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=0654de0e8ed44c828a934f45bf42586f step=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1559] [PD-EDGE-NO-SLICE] PREFILL_FIRST cloud_suggest_slicing=False, running=0, chunk_prefill_first=1, total_tokens=256
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=hidden_states recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP1_EP1 pid=60882) INFO 08-29 10:19:15 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=0654de0e8ed44c828a934f45bf42586f step=0
+(EngineCore pid=60834) INFO 08-29 10:19:15 [pd_separated_scheduler.py:1277] [PD] Step20, state is PrefillState.LOW, batch_type is BatchType.PREFILL_FIRST, waiting[]: 0, chunk_prefill_first[]: 1, prefill_last_pending[]: 1, running[]: 0, prefills_last_ready[]: 0, prefill_drafts_first_ready[]: 2, prefill_drafts_last_ready[]: 1, decode_drafts_first_ready[]: 0, decode_drafts_last_ready[]: 0, decodes_last_ready[]: 0, prefill_inflight: 2/2, prefill_draft_remote_pending: 2, decode_draft_remote_pending: 0, decode_or_draft_inflight: 0/1, chunk_flights: 2, pending_tails: 2, ahead_chunks: 2
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=hidden_states
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_down num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=edge key=residual recv_len=256 copy_len=256 shape=(256, 7168)
+(EngineCore pid=60834) INFO 08-29 10:19:15 [patch_engine_core.py:1063] [BATCH_QUEUE] Enqueued prefill_first, queue_len=4, types=['prefill_first', 'prefill_draft_first', 'prefill_last', 'prefill_draft_last']
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=edge key=residual
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5295] [DRAFT-TAIL-DIAG] SYNC_DONE task=0654de0e8ed44c828a934f45bf42586f step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5316] [DRAFT-TAIL-DIAG] SEGMENT_E_BEGIN task=0654de0e8ed44c828a934f45bf42586f step=0
+(Worker_PP0_TP0_EP0 pid=60863) INFO 08-29 10:19:15 [model_runner_v1.py:5325] [DRAFT-TAIL-DIAG] SEGMENT_E_DONE task=0654de0e8ed44c828a934f45bf42586f step=0
+(APIServer pid=60526) INFO:     76.76.26.231:39682 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(APIServer pid=60526) INFO:     76.76.26.231:39690 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(APIServer pid=60526) INFO:     76.76.26.231:39694 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(APIServer pid=60526) INFO:     76.76.26.231:39706 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(APIServer pid=60526) INFO:     76.76.26.231:39714 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(APIServer pid=60526) INFO:     76.76.26.231:39728 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(APIServer pid=60526) INFO:     76.76.26.231:39732 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(APIServer pid=60526) INFO:     76.76.26.231:39748 - "POST /v1/chat/completions HTTP/1.1" 200 OK
+(EngineCore pid=60834) INFO 08-29 10:20:16 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=60834) INFO 08-29 10:21:17 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=60834) INFO 08-29 10:22:17 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
