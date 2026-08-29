@@ -1159,9 +1159,7 @@ class PassiveEngineCoreProc:
                     master_addr = vllm_config.parallel_config.master_addr
                     master_port = vllm_config.parallel_config.master_port
 
-                if _registry is not None:
-                    pass  # multi-instance: channels built from registry above
-                else:
+                if _registry is None:
                     # Report this node's reachable IP to the edge so the
                     # edge can construct POST_OUT's connect endpoint
                     # without a CLI flag. Uses a one-shot TCPStore (edge

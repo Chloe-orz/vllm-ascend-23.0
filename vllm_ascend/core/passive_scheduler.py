@@ -420,11 +420,6 @@ class PassiveScheduler:
                 so = self.scheduler_output_handler(so)
             self._me_queue.append((edge_id, self._me_seq, so))
             self._me_edge_head.setdefault(edge_id, self._me_seq)
-            logger.debug(
-                "[ME] ingress edge=%d seq=%d batch_type=%s",
-                edge_id, self._me_seq,
-                so.batch_type.value if so.batch_type else "<none>",
-            )
 
     def _wrap_segment(self, edge_id: int, so: SchedulerOutput) -> None:
         """Wrap all req_id/head_token fields with the edge prefix (F6).

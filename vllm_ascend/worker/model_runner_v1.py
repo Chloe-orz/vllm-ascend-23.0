@@ -10801,21 +10801,8 @@ class NPUModelRunner(GPUModelRunner):
             and self.edge_cloud_cfg.mode == "embedding_only"
             and self.edge_cloud_cfg.role == "edge"
         ):
-            # [2E1C-TRACE] em edge returns an empty spec by design (no local
-            # attention layers).  With MTP, the DRAFT model DOES have an mtp
-            # attention layer on the edge that needs KV — log what attention
-            # layers this early return is dropping, so a draft-KV starvation
-            # startup hang is visible instead of silent.
-            _attn = get_layers_from_vllm_config(
-                self.vllm_config, AttentionLayerBase)
-            if _attn:
-                logger.warning(
-                    "[2E1C-TRACE] get_kv_cache_spec: em-edge early return {} "
-                    "but %d attention layers exist (draft MTP layers would "
-                    "get NO kv cache): %s",
-                    len(_attn),
-                    list(_attn.keys())[:8],
-                )
+            # em edge returns an empty spec by design (no local attention
+            # layers).
             return {}
 
         if (
