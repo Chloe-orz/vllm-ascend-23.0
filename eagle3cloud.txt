@@ -1,585 +1,590 @@
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:18 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=0 (watermark=-1)
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:18 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=1 (watermark=-1)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_up>
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_draft_up (peer=0 wire=draft)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_up>
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8205
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8244
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8254
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8266
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8267
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8272
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8276
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8308
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8329
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8350
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8454
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8475
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8640
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8689
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8720
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:18 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364123.8905
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [worker.py:984] [early-irecv] completion reported channel=prefill_up seqno=0
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:18 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=0
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:18 [worker.py:984] [early-irecv] completion reported channel=prefill_up seqno=1
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:18 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=1
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:18 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:18 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4595
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4595
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4597
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4597
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [service.py:209] [edge-cloud-comm] created channel prefill_down (peer=0 wire=hidden)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4598
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4599
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4599
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4599
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=256 tensor_keys=['hidden_states']
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4600
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4600
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4600
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4600
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4600
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4600
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_down>
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4602
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364124.4610
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=0 (watermark=-1)
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=2 (watermark=1)
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=1 (watermark=-1)
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [passive_scheduler.py:980] [PD-PASSIVE] Decode/draft ready and arrived before prefill: channel_seq=3, prefill_seq=4
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=0
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=0
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=256 tensor_keys=['hidden_states']
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [service.py:209] [edge-cloud-comm] created channel prefill_draft_down (peer=0 wire=draft)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_down>
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1687] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=1
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=1
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:984] [early-irecv] completion reported channel=prefill_up seqno=2
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=2
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0164
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0171
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0179
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0179
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0190
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0190
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0193
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0194
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0202
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1687] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0206
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0206
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0212
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0223
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0223
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0249
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.0249
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=2 (watermark=1)
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=3 (watermark=2)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=2
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=2
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:984] [early-irecv] completion reported channel=prefill_up seqno=3
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=3
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=3 (watermark=2)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=256 tensor_keys=['hidden_states']
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3590
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3591
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3592
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3592
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3592
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3592
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3592
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1687] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=364125.3608
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:19 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:19 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=3
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:19 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=3
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=256 tensor_keys=['hidden_states']
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [worker.py:1687] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
-(PassiveEngineCore pid=10977) INFO 08-29 07:27:20 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=6 (watermark=3)
-(Worker_TP10_EP10 pid=11505) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP4_EP4 pid=11181) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP2_EP2 pid=11079) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP15_EP15 pid=11777) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP13_EP13 pid=11667) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP12_EP12 pid=11613) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP11_EP11 pid=11559) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP5_EP5 pid=11235) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP6_EP6 pid=11289) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP14_EP14 pid=11722) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP7_EP7 pid=11343) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP3_EP3 pid=11130) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP8_EP8 pid=11397) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP1_EP1 pid=11023) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_TP9_EP9 pid=11451) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
-(Worker_PP1_TP0_EP0 pid=11004) INFO 08-29 07:27:20 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:42 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=0 (watermark=-1)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_up>
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:42 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=1 (watermark=-1)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0044
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0044
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0045
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0045
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0048
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0048
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0048
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0050
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0050
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0051
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0052
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0053
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0055
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0055
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [worker.py:1076] [early-irecv] submit_recv took 7.2 ms channel=prefill_up seqno=0
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_draft_up (peer=0 wire=draft)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_up>
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0269
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:42 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.0387
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [worker.py:984] [early-irecv] completion reported channel=prefill_up seqno=0
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:42 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=0
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:42 [worker.py:984] [early-irecv] completion reported channel=prefill_up seqno=1
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:42 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=1
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:42 [service.py:209] [edge-cloud-comm] created channel prefill_up (peer=0 wire=hidden)
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:42 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6861
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6861
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6862
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6862
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6863
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6863
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6863
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [service.py:209] [edge-cloud-comm] created channel prefill_down (peer=0 wire=hidden)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6866
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6866
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6866
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6866
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6866
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6866
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=256 tensor_keys=['hidden_states']
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6867
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_down>
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6869
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374348.6876
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=0 (watermark=-1)
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=1 (watermark=-1)
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=2 (watermark=1)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=0
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=0
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=256 tensor_keys=['hidden_states']
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [service.py:209] [edge-cloud-comm] created channel prefill_draft_down (peer=0 wire=draft)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [parallel_state.py:68] [edge-cloud] created dedicated stream for hidden channel <HiddenChannelType.prefill_draft_down>
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:1687] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=2 (watermark=0)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=1
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=1
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:984] [early-irecv] completion reported channel=prefill_up seqno=2
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=2
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1725
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1737
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1737
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1742
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1743
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:1687] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1749
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1751
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1753
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1758
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1760
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1766
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1802
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1806
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1806
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1818
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.1818
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=3 (watermark=2)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:43 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=2
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=2
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:43 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=3 (watermark=2)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=256 tensor_keys=['hidden_states']
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=1 copy_len=1 shape=(1, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5249
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5249
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5250
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5250
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5250
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5250
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5250
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5251
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5251
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5251
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5251
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5251
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5251
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5251
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5255
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:1687] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:1417] [PD-TIMING] cloud middle enter batch_type=BatchType.PREFILL_FIRST ts=374349.5268
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=1 is_pp_npu0=False
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:984] [early-irecv] completion reported channel=prefill_up seqno=3
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:44 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_up seqno=3
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:984] [early-irecv] completion reported channel=prefill_draft_up seqno=3
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:44 [scheduler_link.py:111] [scheduler_link] watermark advanced: channel=prefill_draft_up seqno=3
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [parallel_state.py:1161] [PD] edge_cloud_isend: channel=prefill_down dst=0 num_tokens=256 tensor_keys=['hidden_states']
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=input_embeds recv_len=256 copy_len=256 shape=(256, 7168)
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=input_embeds
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [model_runner_v1.py:2622] [DRAFT-TAIL-DIAG] BUFFER_COPY_BEGIN role=cloud key=hidden_states recv_len=0 copy_len=256 shape=(0,)
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [model_runner_v1.py:2639] [DRAFT-TAIL-DIAG] BUFFER_COPY_DONE role=cloud key=hidden_states
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:1687] Send intermediate tensors to edge, hidden_channel: prefill_draft_down
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:1691] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST, after.
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:44 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_up seqno=4 (watermark=3)
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:44 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=6 (watermark=3)
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:44 [passive_scheduler.py:980] [PD-PASSIVE] Decode/draft ready and arrived before prefill: channel_seq=8, prefill_seq=10
+(Worker_TP14_EP14 pid=926524) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP15_EP15 pid=926579) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP11_EP11 pid=926361) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP5_EP5 pid=926037) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP2_EP2 pid=925881) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP3_EP3 pid=925932) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP13_EP13 pid=926469) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP12_EP12 pid=926415) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP1_EP1 pid=925825) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP9_EP9 pid=926253) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP8_EP8 pid=926199) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:44 [scheduler_link.py:127] [scheduler_link] gated batch waiting on recv: channel=prefill_draft_up seqno=7 (watermark=3)
+(Worker_TP4_EP4 pid=925983) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP10_EP10 pid=926307) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP7_EP7 pid=926145) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(Worker_TP6_EP6 pid=926091) INFO 08-29 10:17:44 [worker.py:1633] Execute model, batch_type: BatchType.PREFILL_DRAFT_FIRST
+(PassiveEngineCore pid=925779) INFO 08-29 10:17:44 [passive_scheduler.py:980] [PD-PASSIVE] Decode/draft ready and arrived before prefill: channel_seq=9, prefill_seq=10
+(Worker_PP1_TP0_EP0 pid=925806) INFO 08-29 10:17:44 [parallel_state.py:1749] [PD] edge_cloud_broadcast_recv: channel=prefill_up num_tokens=256 src=None pp_world=2 is_pp_npu0=True
