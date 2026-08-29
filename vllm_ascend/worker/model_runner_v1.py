@@ -197,6 +197,7 @@ from vllm_ascend.utils import (
     get_ascend_device_type,
     get_c_env,
     global_stream,
+    is_drafter_moe_model,
     is_hidden_state_cache_spec,
     is_moe_model,
     kv_cache_spec_uses_sparse_c8,
@@ -1828,6 +1829,7 @@ class NPUModelRunner(GPUModelRunner):
         self,
         aux_hidden_states: torch.Tensor | None,
         layer_slice_info: Any,
+        forward_context: ForwardContext | None = None,
     ) -> None:
         """Retain target aux states until the matching cloud draft consumes them.
 
@@ -1843,6 +1845,20 @@ class NPUModelRunner(GPUModelRunner):
         ):
             self._eagle3_cloud_aux_hidden_states = None
             return
+
+        # The target model can run SP while the dense Eagle3 drafter does not.
+        # Materialize the target's TP-local token shard before retaining it for
+        # the later scheduled draft step. This reuses the standard target
+        # all-gather path, including removal of the SP padding tail.
+        if (
+            aux_hidden_states is not None
+            and forward_context is not None
+            and forward_context.flash_comm_v1_enabled
+            and self._is_dense_eagle3_edge_cloud_draft()
+        ):
+            aux_hidden_states = self._all_gather_hidden_states(
+                aux_hidden_states
+            )
 
         is_first_slice = (
             layer_slice_info is None or layer_slice_info.is_first_slice
@@ -2328,6 +2344,8 @@ class NPUModelRunner(GPUModelRunner):
             ):
                 tp_size = self.vllm_config.parallel_config.tensor_parallel_size
                 max_draft_tokens = (self.max_num_tokens + tp_size - 1) // tp_size
+            if self._is_dense_eagle3_edge_cloud_draft():
+                max_draft_tokens = self.max_num_tokens
             self._edge_cloud_draft_intermediate_buffers = make_empty_fn(
                 batch_size=max_draft_tokens,
                 dtype=self.dtype,
@@ -2360,6 +2378,14 @@ class NPUModelRunner(GPUModelRunner):
         return (
             getattr(draft_model, "edge_cloud_draft_kind", None)
             == "deepseek_v4_mtp"
+        )
+
+    def _is_dense_eagle3_edge_cloud_draft(self) -> bool:
+        """Whether the active edge-cloud drafter is a dense Eagle3 model."""
+        draft_model = getattr(self.drafter, "model", None)
+        return (
+            getattr(draft_model, "edge_cloud_draft_kind", None) == "eagle3"
+            and not is_drafter_moe_model(self.vllm_config)
         )
 
     def _gather_deepseek_v4_mtp_draft_tensors(
@@ -2561,6 +2587,8 @@ class NPUModelRunner(GPUModelRunner):
             if enable_sp() and (not dsv4_mtp_sp or chunk_on_cloud)
             else num_tokens
         )
+        if self._is_dense_eagle3_edge_cloud_draft():
+            copy_len = num_tokens
 
         prepared: dict[str, torch.Tensor | Any] = {}
         for key, value in intermediate_tensors.items():
@@ -9511,7 +9539,7 @@ class NPUModelRunner(GPUModelRunner):
         # because the returned object may be reused by ACL graph replay.
         aux_hidden_states = hidden_states.tensors.get("aux_hidden_states")
         self._cache_eagle3_cloud_aux_hidden_states(
-            aux_hidden_states, layer_slice_info
+            aux_hidden_states, layer_slice_info, forward_context
         )
         if aux_hidden_states is not None:
             return IntermediateTensors(

@@ -311,6 +311,52 @@ class TestDeepSeekV4MTPDraftSequenceParallel(unittest.TestCase):
         self.assertTrue(torch.equal(result, full_positions[:, 4:8]))
 
 
+class TestEagle3DraftSequenceParallelBoundary(unittest.TestCase):
+    def _build_runner(self) -> NPUModelRunner:
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.drafter = SimpleNamespace(
+            model=SimpleNamespace(edge_cloud_draft_kind="eagle3")
+        )
+        runner.edge_cloud_cfg = SimpleNamespace(role="cloud")
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(tensor_parallel_size=16)
+        )
+        runner._is_dense_eagle3_edge_cloud_draft = MagicMock(
+            return_value=True
+        )
+        return runner
+
+    @patch(
+        "vllm_ascend.worker.model_runner_v1.is_drafter_moe_model",
+        return_value=False,
+    )
+    def test_identifies_dense_eagle3_drafter(
+        self,
+        _mock_is_drafter_moe_model,
+    ):
+        runner = self._build_runner()
+        del runner._is_dense_eagle3_edge_cloud_draft
+
+        self.assertTrue(runner._is_dense_eagle3_edge_cloud_draft())
+
+    def test_dense_drafter_keeps_full_received_tensor(self):
+        runner = self._build_runner()
+        runner._edge_cloud_draft_intermediate_buffers = IntermediateTensors(
+            {"input_embeds": torch.zeros(64, 2)}
+        )
+        full_input_embeds = torch.arange(53 * 2).view(53, 2)
+
+        result = runner._sync_edge_cloud_draft_intermediate_tensors(
+            53,
+            IntermediateTensors({"input_embeds": full_input_embeds}),
+        )
+
+        self.assertEqual(result["input_embeds"].shape, (53, 2))
+        torch.testing.assert_close(
+            result["input_embeds"], full_input_embeds
+        )
+
+
 class TestNPUModelRunnerEdgeCloudGraphCapture(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -366,6 +412,9 @@ class TestNPUModelRunnerLayerwiseAuxOutput(unittest.TestCase):
         )
         runner._eagle3_uses_aux_hidden_state = MagicMock(
             return_value=uses_aux
+        )
+        runner._is_dense_eagle3_edge_cloud_draft = MagicMock(
+            return_value=True
         )
         runner.speculative_config = SimpleNamespace(method="eagle3")
         runner._last_scheduler_output = None
@@ -472,6 +521,50 @@ class TestNPUModelRunnerLayerwiseAuxOutput(unittest.TestCase):
         self.assertIsInstance(cached, torch.Tensor)
         self.assertIsNot(cached, aux_hidden_states)
         torch.testing.assert_close(cached, aux_hidden_states)
+
+    def test_materializes_target_sp_aux_before_cloud_draft_cache(self):
+        runner = self._build_aux_cache_runner()
+        runner._last_scheduler_output = SimpleNamespace(head_token="target")
+        runner._all_gather_hidden_states = MagicMock(
+            return_value=torch.randn(53, 12)
+        )
+        local_aux_hidden_states = torch.randn(4, 12)
+        forward_context = SimpleNamespace(flash_comm_v1_enabled=True)
+
+        runner._cache_eagle3_cloud_aux_hidden_states(
+            local_aux_hidden_states,
+            None,
+            forward_context,
+        )
+
+        runner._all_gather_hidden_states.assert_called_once_with(
+            local_aux_hidden_states
+        )
+        cached = runner._eagle3_cloud_aux_hidden_states_by_task["target"]
+        self.assertEqual(cached.shape, (53, 12))
+        torch.testing.assert_close(
+            cached,
+            runner._all_gather_hidden_states.return_value,
+        )
+
+    def test_keeps_local_aux_when_eagle3_drafter_uses_sp(self):
+        runner = self._build_aux_cache_runner()
+        runner._last_scheduler_output = SimpleNamespace(head_token="target")
+        runner._is_dense_eagle3_edge_cloud_draft.return_value = False
+        runner._all_gather_hidden_states = MagicMock()
+        local_aux_hidden_states = torch.randn(4, 12)
+        forward_context = SimpleNamespace(flash_comm_v1_enabled=True)
+
+        runner._cache_eagle3_cloud_aux_hidden_states(
+            local_aux_hidden_states,
+            None,
+            forward_context,
+        )
+
+        runner._all_gather_hidden_states.assert_not_called()
+        cached = runner._eagle3_cloud_aux_hidden_states_by_task["target"]
+        self.assertEqual(cached.shape, (4, 12))
+        torch.testing.assert_close(cached, local_aux_hidden_states)
 
     def test_rejects_incompatible_slice_shapes(self):
         with self.assertRaisesRegex(RuntimeError, "incompatible aux"):
