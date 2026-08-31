@@ -191,8 +191,17 @@ class CloudKVRequestManager:
         return self._kv.block_pool.get_num_free_blocks() >= needed
 
     def preemption_candidates(self) -> list[str]:
-        """Engine request ids, most-recently admitted first."""
-        return list(reversed(list(self._requests)))
+        """Engine request ids, most-recently admitted first, excluding
+        requests referenced by any in-flight MTP draft task (their draft
+        metadata lives here, so preemption would orphan it)."""
+        draft_referenced: set[str] = set()
+        for members in self._mtp_actual_computed_by_task.values():
+            draft_referenced.update(members)
+        return [
+            request_id
+            for request_id in reversed(list(self._requests))
+            if request_id not in draft_referenced
+        ]
 
     def preempt_request(self, request_id: str) -> str | None:
         """Free one admitted request for capacity and pin its prefix for

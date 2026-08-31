@@ -485,11 +485,7 @@ class PassiveScheduler:
         """Ask the engine to preempt one idle victim for this batch."""
         if self.capacity_relief_handler is None:
             return False
-        try:
-            return bool(self.capacity_relief_handler(so))
-        except Exception:
-            logger.exception("[ME] capacity relief failed")
-            return False
+        return bool(self.capacity_relief_handler(so))
 
     def _park_batch(self, edge_id: int, so: SchedulerOutput) -> None:
         """Park a batch whose allocation cannot currently succeed.

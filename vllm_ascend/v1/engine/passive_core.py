@@ -652,6 +652,9 @@ class PassiveEngineCoreProc:
         )
 
         if self._pp_pd_channel is None:
+            logger.error(
+                "[CLOUD-PREEMPT] no POST_OUT channel; notice for %r lost",
+                control_request_id)
             return
         notice = EdgeCloudPreemptNotice(request_id=control_request_id)
         if isinstance(self._pp_pd_channel, MultiEdgeChannelMux):
@@ -659,8 +662,8 @@ class PassiveEngineCoreProc:
                 is_wrapped_req_id, parse_req_edge_id)
             if not is_wrapped_req_id(control_request_id):
                 logger.error(
-                    "[CLOUD-PREEMPT] cannot route notice for unwrapped "
-                    "request id %r", control_request_id)
+                    "[CLOUD-PREEMPT] cannot route notice for "
+                    "unwrapped request id %r", control_request_id)
                 return
             self._pp_pd_channel.publish_to_edge(
                 parse_req_edge_id(control_request_id), notice)

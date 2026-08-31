@@ -2200,8 +2200,9 @@ class PDSeparatedScheduler(Scheduler):
         # No finish accounting for the preempted incarnation — the cloud
         # already released it; a finish manifest would double-free.
         self._edge_cloud_finished_request_data.pop(req_id, None)
-        # Draft chains and placeholder decode heads (MTP-series helpers).
-        self._drop_stale_drafts_for_req_ids({req_id})
+        # Draft chains and placeholder decode heads (forced: the request
+        # is being torn down even though it is not finished).
+        self._drop_stale_drafts_for_req_ids({req_id}, force=True)
         # Active PD flights and their per-request counters.
         for key, flight in list(self._pd_active_flight_by_key.items()):
             if req_id in flight.request_ids:
@@ -2488,20 +2489,28 @@ class PDSeparatedScheduler(Scheduler):
             len(gone),
         )
 
-    def _drop_stale_drafts_for_req_ids(self, req_ids: set[str]) -> None:
+    def _drop_stale_drafts_for_req_ids(
+        self, req_ids: set[str], *, force: bool = False
+    ) -> None:
         if not req_ids:
             return
         # Aligned with the model runner's deferred-draft policy: a draft
         # batch is dropped only when EVERY request it covers has finished.
         # Partial finishes keep the draft — the cloud-side cached
         # attention metadata is whole-batch and cannot be re-sliced.
+        # force=True (cloud preemption): the requests are being torn down
+        # regardless of finished state, so intersecting draft heads are
+        # dropped unconditionally (their cloud-side contexts are released
+        # via take_dropped_draft_task_ids invalidation).
         # Dropped task ids are reported to the runner (which may still
         # hold the enqueued context) via take_dropped_draft_task_ids().
         kept_first: deque[SchedulerOutput] = deque()
         for output in self.drafts_first_ready:
             if self._scheduler_output_intersects_req_ids(
                 output, req_ids
-            ) and self._scheduler_output_all_requests_finished(output):
+            ) and (
+                force or self._scheduler_output_all_requests_finished(output)
+            ):
                 task_id = output.draft_task_id
                 if task_id is not None:
                     self._pregenerated_draft_task_ids.discard(task_id)
