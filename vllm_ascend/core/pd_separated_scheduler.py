@@ -2127,25 +2127,7 @@ class PDSeparatedScheduler(Scheduler):
                 req_id,
             )
             return
-        self._cleanup_and_hold_preempted(target)
-        req_id = target.request_id
-        attempts = self._cloud_retry_attempts.get(req_id, 0) + 1
-        self._cloud_retry_attempts[req_id] = attempts
-        if attempts > self._CLOUD_RETRY_ATTEMPT_LIMIT:
-            logger.error(
-                "[PD] cloud-preempted request %s exceeded %d retry "
-                "attempts; still holding for the next capacity release",
-                req_id,
-                self._CLOUD_RETRY_ATTEMPT_LIMIT,
-            )
-        self._cloud_retry_hold[req_id] = target
-        logger.info(
-            "[PD] request %s preempted by cloud (reason=%s), held for "
-            "retry (attempt %d)",
-            req_id,
-            notice.reason,
-            attempts,
-        )
+        self._cleanup_and_hold_preempted(target, notice.reason)
 
     def release_preempt_gates(self) -> None:
         """Requeue held preempted requests at the front of waiting.
@@ -2178,9 +2160,41 @@ class PDSeparatedScheduler(Scheduler):
                 "[PD] request %s tails drained; finishing preempt cleanup",
                 req_id,
             )
-            self._cleanup_and_hold_preempted(request)
+            self._cleanup_and_hold_preempted(request, "kv_growth")
 
-    def _cleanup_preempted_request(self, request) -> None:
+    def _cleanup_and_hold_preempted(
+        self, target, reason: str = "kv_growth"
+    ) -> None:
+        """Clean a preempted request, then either hold it for a gated
+        retry or — once the retry budget is exhausted (e.g. its own
+        footprint exceeds the pool) — abort it to the client."""
+        req_id = target.request_id
+        attempts = self._cloud_retry_attempts.get(req_id, 0) + 1
+        self._cloud_retry_attempts[req_id] = attempts
+        if attempts > self._CLOUD_RETRY_ATTEMPT_LIMIT:
+            logger.error(
+                "[PD] cloud-preempted request %s exceeded %d retry "
+                "attempts; aborting to the client",
+                req_id,
+                self._CLOUD_RETRY_ATTEMPT_LIMIT,
+            )
+            # Structural cleanup WITHOUT freeing KV: finish_requests runs
+            # the standard free + finish-manifest path, which also makes
+            # the cloud release the pinned reservation (_preempted).
+            self._cleanup_preempted_request(target, free_kv=False)
+            self.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
+            return
+        self._cleanup_preempted_request(target)
+        self._cloud_retry_hold[req_id] = target
+        logger.info(
+            "[PD] request %s preempted by cloud (reason=%s), held for "
+            "retry (attempt %d)",
+            req_id,
+            reason,
+            attempts,
+        )
+
+    def _cleanup_preempted_request(self, request, *, free_kv: bool = True) -> None:
         """Release every edge-side trace of a cloud-preempted request."""
         req_id = request.request_id
         # No finish accounting for the preempted incarnation — the cloud
@@ -2204,6 +2218,10 @@ class PDSeparatedScheduler(Scheduler):
         self.prefill_last_pending = [
             r for r in self.prefill_last_pending if r.request_id != req_id
         ]
+        if not free_kv:
+            # Abort path: finish_requests performs the standard free and
+            # finish accounting.
+            return
         # Free edge-local KV and restart the request from scratch.  The
         # prefix-hit hint (edge_cloud_prefix_hit_tokens) stays on the
         # request so the retry re-derives the same start position against

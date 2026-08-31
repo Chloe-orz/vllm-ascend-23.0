@@ -777,14 +777,15 @@ class CloudKVRequestManager:
                 final = finish_data.get(request_id)
                 released = False
                 if final is not None:
-                    reservation = self._reservations.pop(
-                        self._cloud_control_id(
-                            request_id, final.control_request_id),
-                        None,
-                    )
-                    if reservation is not None:
-                        self._release_reservation(reservation)
-                        released = True
+                    control_id = self._cloud_control_id(
+                        request_id, final.control_request_id)
+                    # Also check the preempted store: an aborted retry
+                    # holds its reservation there and must be released too.
+                    for store in (self._reservations, self._preempted):
+                        reservation = store.pop(control_id, None)
+                        if reservation is not None:
+                            self._release_reservation(reservation)
+                            released = True
                 log_event(
                     logger,
                     "info" if released else "warning",
