@@ -362,12 +362,14 @@ def create_cloud_control_app(
     async def chat_completions(request: Request):
         request_id = request.headers.get(HEADER_REQUEST_ID)
         try:
-            body = await request.json()
+            # Protocol headers are validated before the body is consumed,
+            # so a malformed protocol stack is rejected without parsing.
             mm_abi_header = _negotiate_protocol_headers(
                 request.headers,
                 expected_mm_abi,
                 enforce_mm_abi_match=enforce_mm_abi_match,
             )
+            body = await request.json()
             parse_headers: Mapping[str, str] = request.headers
             if mm_abi_header is not None:
                 # The v2 manifest wire format is isomorphic to v1: after the
