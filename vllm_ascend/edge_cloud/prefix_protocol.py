@@ -40,6 +40,32 @@ _MEDIA_BLOCK_DOMAIN = b"\x04"
 _MEDIA_TAIL_BLOCK_DOMAIN = b"\x05"
 _UINT32 = struct.Struct(">I")
 
+
+class CloudAllocationFailed(Exception):
+    """A rewrite-time KV allocation failed inside CloudKVRequestManager.
+
+    Internal to the cloud: the passive scheduler catches this and applies
+    the stall / preempt / park fallbacks instead of letting a plain
+    RuntimeError kill the PassiveEngineCore process.
+    """
+
+    def __init__(self, request_ids: list[str]) -> None:
+        super().__init__("cloud KV allocation failed")
+        self.request_ids = request_ids
+
+
+@dataclass(frozen=True)
+class EdgeCloudPreemptNotice:
+    """Cloud->edge control frame: a request was preempted for KV capacity.
+
+    Travels on the POST_OUT ZMQ channel (pickled), next to SchedulerOutput
+    batches.  ``request_id`` is the cloud-internal (edge-prefixed) engine
+    request id; the edge strips the prefix to recover its own raw id.
+    """
+
+    request_id: str
+    reason: str = "kv_growth"
+
 # Modality encodings for the media-aware hash domains. Audio and video IDs
 # are reserved for future modalities. The mapping is immutable: protocol
 # constants must not be redefinable at runtime.

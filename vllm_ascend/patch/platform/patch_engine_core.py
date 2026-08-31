@@ -243,6 +243,25 @@ def _drain_pd_channel_inbox(self) -> None:
         return
     new_outputs = self._pp_pd_channel.consume_new_outputs()
     for _seq, so in new_outputs:
+        # KV-capacity control frames travel on the same POST_OUT channel,
+        # next to SchedulerOutput batches.
+        from vllm_ascend.edge_cloud.prefix_protocol import (
+            EdgeCloudPreemptNotice,
+        )
+        if isinstance(so, EdgeCloudPreemptNotice):
+            handler = getattr(self.scheduler, "handle_cloud_preempt", None)
+            if handler is not None:
+                handler(so)
+            else:
+                logger.warning(
+                    "[PD] preempt notice dropped: scheduler has no "
+                    "handle_cloud_preempt")
+            continue
+        # Any normal POST_OUT batch proves cloud-side work is completing
+        # (blocks being freed): release held preempted retries.
+        _release_gates = getattr(self.scheduler, "release_preempt_gates", None)
+        if _release_gates is not None:
+            _release_gates()
         bt = so.batch_type
         logger.info("Received scheduler_output from cloud, batch_type: %s", bt)
         if bt == BatchType.PREFILL_LAST:

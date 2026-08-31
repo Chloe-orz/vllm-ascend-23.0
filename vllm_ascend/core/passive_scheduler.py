@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, NamedTuple
 from vllm.logger import logger
 from vllm.v1.core.sched.output import BatchType, SchedulerOutput
 
+from vllm_ascend.edge_cloud.prefix_protocol import CloudAllocationFailed
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.v1.engine.core import PPSchedulerZmqSubscriber
@@ -128,6 +130,19 @@ class PassiveScheduler:
 
         self.ready_prefills: deque[SchedulerOutput] = deque()
         self.ready_pdmixes: deque[SchedulerOutput] = deque()
+        # KV-capacity fault handling (see edge_cloud_preemption_design):
+        # optional gate (can_admit) consulted before rewriting batches that
+        # contain new requests, and a relief handler that tries to preempt
+        # one idle victim when an allocation fails.
+        self.scheduler_output_gate = None
+        self.capacity_relief_handler = None
+        # Requests dispatched to the worker but not yet acked — never
+        # eligible as preemption victims (their blocks are being written).
+        self._inflight_req_ids: set[str] = set()
+        # Decode batches parked on allocation failure, per edge.  A parked
+        # batch blocks that edge's DECODE promotion (channel FIFO pairing)
+        # but never its prefill promotion (independent channels).
+        self._me_kv_stalled_by_edge: dict[int, deque] = {}
         self.ready_drafts: deque[SchedulerOutput] = deque()
         self.ready_decodes: deque[SchedulerOutput] = deque()
 
@@ -404,6 +419,7 @@ class PassiveScheduler:
         from ``schedule``) moves per-edge head segments into the legacy
         ready queues so all downstream dispatch machinery is unchanged.
         """
+        self._me_resume_stalled()
         while True:
             try:
                 edge_id, seq, so = self._me_inbox.get_nowait()
@@ -412,14 +428,135 @@ class PassiveScheduler:
             self._me_seq += 1
             self._remember_arrival_seq(so, self._me_seq)
             self._wrap_segment(edge_id, so)
-            # Apply the cloud KV rewrite (prefix-cache coordination) on the
-            # multi-edge path too — ids are already wrapped, so the cloud KV
-            # manager keys its state in the same wrapped namespace the rest
-            # of the pipeline (queues, worker acks, POST_OUT) uses.
             if self.scheduler_output_handler is not None:
-                so = self.scheduler_output_handler(so)
+                if so.scheduled_new_reqs:
+                    # Defer the KV rewrite (allocation) to promotion time:
+                    # the can_admit gate there may stall this batch instead
+                    # of allocating right away (F1 stall).
+                    so._me_defer_kv_rewrite = True
+                else:
+                    so = self._apply_kv_handler_with_relief(edge_id, so)
+                    if so is None:
+                        continue
             self._me_queue.append((edge_id, self._me_seq, so))
             self._me_edge_head.setdefault(edge_id, self._me_seq)
+
+    def _apply_kv_handler_with_relief(
+        self, edge_id: int, so: SchedulerOutput
+    ) -> SchedulerOutput | None:
+        """Run the cloud KV rewrite, applying capacity relief on failure.
+
+        Order: gate check (skip allocation entirely when the pool cannot
+        fit) -> preempt one idle victim via capacity_relief_handler ->
+        retry the rewrite once -> park the batch (decode only).  Returns
+        None when the batch was parked.
+        """
+        arrival_seq = getattr(so, self._ARRIVAL_SEQ_ATTR, None)
+        original = so
+        if (
+            self.scheduler_output_gate is not None
+            and not self.scheduler_output_gate(so)
+            and not self._try_capacity_relief(so)
+        ):
+            self._park_batch(edge_id, so)
+            return None
+        try:
+            rewritten = self.scheduler_output_handler(so)
+            if rewritten is not original and arrival_seq is not None:
+                setattr(rewritten, self._ARRIVAL_SEQ_ATTR, arrival_seq)
+            return rewritten
+        except CloudAllocationFailed:
+            if self._try_capacity_relief(so):
+                try:
+                    rewritten = self.scheduler_output_handler(so)
+                    if rewritten is not original and arrival_seq is not None:
+                        setattr(rewritten, self._ARRIVAL_SEQ_ATTR, arrival_seq)
+                    return rewritten
+                except CloudAllocationFailed:
+                    pass
+            # Finish manifests (if any) were already consumed by the failed
+            # rewrite — strip them so a later retry does not double-process.
+            so.finished_req_ids = set()
+            so.edge_cloud_finished_requests = None
+            self._park_batch(edge_id, so)
+            return None
+
+    def _try_capacity_relief(self, so: SchedulerOutput) -> bool:
+        """Ask the engine to preempt one idle victim for this batch."""
+        if self.capacity_relief_handler is None:
+            return False
+        try:
+            return bool(self.capacity_relief_handler(so))
+        except Exception:
+            logger.exception("[ME] capacity relief failed")
+            return False
+
+    def _park_batch(self, edge_id: int, so: SchedulerOutput) -> None:
+        """Park a batch whose allocation cannot currently succeed.
+
+        Prefill heads never reach here (they stay in _me_queue on gate
+        failure).  Every non-prefill batch kind is parked per edge and
+        blocks that edge's decode-lane promotion — the decode channel is
+        shared and FIFO-paired, so no later decode-lane batch of this edge
+        may overtake the parked one."""
+        self._me_kv_stalled_by_edge.setdefault(
+            edge_id, deque()).append(so)
+        logger.info(
+            "[ME] batch parked on KV capacity: edge=%d batch_type=%s "
+            "(edge decode promotion blocked)",
+            edge_id, so.batch_type,
+        )
+
+    def _me_resume_stalled(self) -> None:
+        """Retry parked decode heads; on success unblock that edge."""
+        for edge_id, parked in list(self._me_kv_stalled_by_edge.items()):
+            while parked:
+                so = parked[0]
+                if (
+                    self.scheduler_output_gate is not None
+                    and not self.scheduler_output_gate(so)
+                ):
+                    break
+                try:
+                    so = self.scheduler_output_handler(so)
+                except CloudAllocationFailed:
+                    break
+                parked.popleft()
+                self._me_route_to_ready_queue(so)
+            if not parked:
+                self._me_kv_stalled_by_edge.pop(edge_id, None)
+                logger.info(
+                    "[ME] decode batch resumed after KV free: edge=%d",
+                    edge_id,
+                )
+
+    # ------------------------------------------------------------------ #
+    # In-flight request tracking (preemption-victim exclusion)            #
+    # ------------------------------------------------------------------ #
+    def mark_dispatched(self, so: SchedulerOutput) -> None:
+        self._inflight_req_ids.update(so.num_scheduled_tokens)
+
+    def mark_settled(self, so: SchedulerOutput) -> None:
+        self._inflight_req_ids.difference_update(so.num_scheduled_tokens)
+
+    def inflight_request_ids(self) -> set[str]:
+        """Requests currently unsafe to preempt: dispatched to the worker
+        or sitting in any queue."""
+        ids = set(self._inflight_req_ids)
+        for _edge, _seq, so in self._me_queue:
+            ids.update(so.num_scheduled_tokens)
+        for ready in (
+            self.ready_prefills,
+            self.ready_decodes,
+            self.ready_drafts,
+            self.ready_pdmixes,
+        ):
+            for so in ready:
+                ids.update(so.num_scheduled_tokens)
+        for parked in self._me_kv_stalled_by_edge.values():
+            for so in parked:
+                ids.update(so.num_scheduled_tokens)
+        return ids
 
     def _wrap_segment(self, edge_id: int, so: SchedulerOutput) -> None:
         """Wrap all req_id/head_token fields with the edge prefix (F6).
@@ -517,18 +654,42 @@ class PassiveScheduler:
         """Move per-edge head segments from the global queue into the legacy
         ready queues, in global arrival order (same-edge order is implied).
         """
-        while self._me_queue:
-            edge_id, seq, so = self._me_queue[0]
+        promoted: list[tuple[int, int]] = []
+        for edge_id, seq, so in list(self._me_queue):
             if self._me_edge_head.get(edge_id) != seq:
-                # Not the head of its edge — cannot happen if we only advance
-                # on promotion; guard anyway.
-                break
-            self._me_queue.popleft()
+                continue
+            is_decode = so.batch_type in (
+                BatchType.PURE_DECODE, BatchType.DECODE_FIRST)
+            if (
+                self._me_kv_stalled_by_edge.get(edge_id)
+                and so.batch_type
+                not in (BatchType.PURE_PREFILL, BatchType.PREFILL_FIRST)
+            ):
+                # A parked decode batch blocks this edge's decode promotion
+                # (shared decode channel FIFO pairing).
+                continue
+            if getattr(so, "_me_defer_kv_rewrite", False):
+                if (
+                    self.scheduler_output_gate is not None
+                    and not self.scheduler_output_gate(so)
+                ):
+                    # F1 stall: leave the head parked; the gate is
+                    # re-evaluated every scheduling round.
+                    continue
+                so = self._apply_kv_handler_with_relief(edge_id, so)
+                if so is None:
+                    continue
+            # The rewrite may have replaced the SO object; locate by seq.
+            idx = next(
+                i for i, (e, q, _o) in enumerate(self._me_queue)
+                if e == edge_id and q == seq)
+            del self._me_queue[idx]
             nxt = next((s for s in self._me_queue if s[0] == edge_id), None)
             if nxt is not None:
                 self._me_edge_head[edge_id] = nxt[1]
             else:
                 self._me_edge_head.pop(edge_id, None)
+            promoted.append((edge_id, seq))
             self._me_route_to_ready_queue(so)
 
     def _me_route_to_ready_queue(self, so: SchedulerOutput) -> None:

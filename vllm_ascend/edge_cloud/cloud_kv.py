@@ -31,6 +31,7 @@ from vllm_ascend.edge_cloud.id_adapter import (
 )
 from vllm_ascend.edge_cloud.observability import log_event
 from vllm_ascend.edge_cloud.prefix_protocol import (
+    CloudAllocationFailed,
     PrefixManifest,
     ProbeResult,
     UsageInfo,
@@ -86,6 +87,9 @@ class CloudKVRequestManager:
             pcp_world_size=parallel_config.prefill_context_parallel_size,
         )
         self._reservations: dict[str, _Reservation] = {}
+        # Reservations of preempted requests, kept pinned so a retry sees
+        # the same prefix hit and start position as the first admission.
+        self._preempted: dict[str, _Reservation] = {}
         self._requests: dict[str, _CloudRequest] = {}
         self._completed_hashes: set[bytes] = set()
         self._mtp_actual_computed_by_task: dict[str, dict[str, int]] = {}
@@ -159,6 +163,85 @@ class CloudKVRequestManager:
             hit_tokens=hit_tokens,
         )
 
+    def _estimate_required_blocks(
+        self, scheduler_output: SchedulerOutput
+    ) -> int:
+        """Conservative upper bound of new blocks a batch will allocate.
+
+        Per-request charge: scheduled suffix blocks plus per-request MTP
+        lookahead (allocate_slots charges num_lookahead_tokens per request).
+        Reservation-pinned prefix blocks are already outside the free pool,
+        so they are not charged again.
+        """
+        lookahead_blocks = (
+            -(-self._num_speculative_tokens // self.block_size)
+            if self._num_speculative_tokens
+            else 0
+        )
+        needed = 0
+        for num_scheduled in scheduler_output.num_scheduled_tokens.values():
+            needed += -(-num_scheduled // self.block_size) + lookahead_blocks
+        return needed
+
+    def can_admit(self, scheduler_output: SchedulerOutput) -> bool:
+        """Estimate whether this batch fits the free pool."""
+        needed = self._estimate_required_blocks(scheduler_output)
+        if needed == 0:
+            return True
+        return self._kv.block_pool.get_num_free_blocks() >= needed
+
+    def preemption_candidates(self) -> list[str]:
+        """Engine request ids, most-recently admitted first."""
+        return list(reversed(list(self._requests)))
+
+    def preempt_request(self, request_id: str) -> str | None:
+        """Free one admitted request for capacity and pin its prefix for
+        retry.  Returns the control request id for the preempt notice, or
+        None when the request cannot be preempted safely (its prefix can no
+        longer be re-pinned at the original hit length)."""
+        state = self._requests.get(request_id)
+        if state is None:
+            return None
+        raw_blocks, hit_tokens = self._kv.coordinator.find_longest_cache_hit(
+            [BlockHash(digest) for digest in state.manifest.full_block_hashes],
+            state.cached_tokens,
+        )
+        if hit_tokens != state.cached_tokens:
+            # The prefix was partially evicted: retrying would hit a start
+            # position mismatch with the edge.  Refuse this victim.
+            log_event(
+                logger,
+                "warning",
+                "cloud_kv_preempt_refused_prefix_evicted",
+                engine_request_id=request_id,
+                cached_tokens=state.cached_tokens,
+                repinnable_hit_tokens=hit_tokens,
+            )
+            return None
+        control_request_id = state.manifest.request_id
+        blocks = self._kv.create_kv_cache_blocks(raw_blocks)
+        self._kv.block_pool.touch(chain.from_iterable(blocks.blocks))
+        self._preempted[control_request_id] = _Reservation(
+            manifest=state.manifest,
+            blocks=blocks,
+            hit_tokens=hit_tokens,
+        )
+        self._kv.free(state.request)
+        self._requests.pop(request_id, None)
+        for task_id, corrections in list(self._mtp_actual_computed_by_task.items()):
+            corrections.pop(request_id, None)
+            if not corrections:
+                self._mtp_actual_computed_by_task.pop(task_id, None)
+        log_event(
+            logger,
+            "info",
+            "cloud_kv_request_preempted",
+            engine_request_id=request_id,
+            control_request_id=control_request_id,
+            repinned_hit_tokens=hit_tokens,
+        )
+        return control_request_id
+
     def rewrite_scheduler_output(
         self, scheduler_output: SchedulerOutput
     ) -> tuple[SchedulerOutput, list[tuple[str, UsageInfo]]]:
@@ -190,6 +273,21 @@ class CloudKVRequestManager:
         if is_mtp_draft:
             return self._rewrite_mtp_draft_output(scheduler_output), usage
 
+        # Atomicity precheck: raise before ANY admission/allocation so a
+        # capacity failure never leaves partially admitted requests or
+        # half-allocated block tables behind (a later relief retry can then
+        # safely reprocess the whole batch).
+        required = self._estimate_required_blocks(scheduler_output)
+        if self._kv.block_pool.get_num_free_blocks() < required:
+            log_event(
+                logger,
+                "info",
+                "cloud_kv_rewrite_capacity_shortfall",
+                required_blocks=required,
+                kv_blocks_free=self._kv.block_pool.get_num_free_blocks(),
+            )
+            raise CloudAllocationFailed(
+                list(scheduler_output.num_scheduled_tokens))
         rewritten = copy.copy(scheduler_output)
         rewritten.scheduled_new_reqs = [
             self._admit_new_request(data, scheduler_output) for data in scheduler_output.scheduled_new_reqs
@@ -252,7 +350,7 @@ class CloudKVRequestManager:
                     kv_blocks_total=self._kv.block_pool.num_gpu_blocks,
                     kv_blocks_free=self._kv.block_pool.get_num_free_blocks(),
                 )
-                raise RuntimeError("cloud KV cache has insufficient free blocks")
+                raise CloudAllocationFailed([request_id])
             cached.new_block_ids[index] = new_blocks.get_block_ids(allow_none=True)
             log_event(
                 logger,
@@ -338,6 +436,18 @@ class CloudKVRequestManager:
         )
         reservation = self._reservations.pop(control_request_id, None)
         if reservation is None:
+            # Retry of a preempted request: its reservation was kept pinned
+            # so the prefix hit and start position match the first admission.
+            reservation = self._preempted.pop(control_request_id, None)
+            if reservation is not None:
+                log_event(
+                    logger,
+                    "info",
+                    "cloud_kv_preempted_reclaimed",
+                    control_request_id=control_request_id,
+                    engine_request_id=data.req_id,
+                )
+        if reservation is None:
             log_event(
                 logger,
                 "error",
@@ -405,7 +515,7 @@ class CloudKVRequestManager:
                     kv_blocks_total=self._kv.block_pool.num_gpu_blocks,
                     kv_blocks_free=self._kv.block_pool.get_num_free_blocks(),
                 )
-                raise RuntimeError("cloud KV cache has insufficient free blocks")
+                raise CloudAllocationFailed([data.req_id])
             request.num_computed_tokens = common_hit_tokens
             self._requests[data.req_id] = _CloudRequest(
                 request=request,
@@ -661,10 +771,25 @@ class CloudKVRequestManager:
         for request_id in finished_request_ids:
             state = self._requests.get(request_id)
             if state is None:
+                # Orphan finish (client abort / edge-side finish before the
+                # first admission): release the matching reservation so its
+                # pinned blocks do not leak.
+                final = finish_data.get(request_id)
+                released = False
+                if final is not None:
+                    reservation = self._reservations.pop(
+                        self._cloud_control_id(
+                            request_id, final.control_request_id),
+                        None,
+                    )
+                    if reservation is not None:
+                        self._release_reservation(reservation)
+                        released = True
                 log_event(
                     logger,
-                    "warning",
-                    "cloud_kv_finish_state_missing",
+                    "info" if released else "warning",
+                    "cloud_kv_orphan_finish_reservation_released"
+                    if released else "cloud_kv_finish_state_missing",
                     engine_request_id=request_id,
                 )
                 continue

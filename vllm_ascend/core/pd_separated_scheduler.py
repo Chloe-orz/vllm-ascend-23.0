@@ -240,6 +240,16 @@ class PDSeparatedScheduler(Scheduler):
         super().__init__(*args, **kwargs)
         self._edge_cloud_prefix_hasher: PrefixHasher | None = None
         self._edge_cloud_finished_request_data: dict[str, EdgeCloudFinishedRequest] = {}
+        # Cloud-preemption handling (KV-capacity fault model): requests
+        # preempted by the cloud are cleaned and HELD here until the next
+        # POST_OUT batch proves cloud-side work is completing (capacity
+        # release signal), then requeued at the front of waiting.
+        self._cloud_retry_hold: dict[str, Request] = {}
+        self._cloud_retry_attempts: dict[str, int] = {}
+        # Preempted requests whose PD flights are still in flight: cleanup
+        # is deferred until their queued tails DRAIN (channel pairing must
+        # not be broken by dropping a tail whose cloud-side send exists).
+        self._cloud_preempt_drain_pending: set[str] = set()
         additional_config = self.vllm_config.additional_config or {}
         edge_cloud_config = additional_config.get("edge_cloud_config", {})
         coordination = edge_cloud_config.get("prefix_cache_coordination", {})
@@ -886,7 +896,6 @@ class PDSeparatedScheduler(Scheduler):
             raise RuntimeError(
                 f"PD flight type mismatch: expected={flight.last_batch_type}, got={last_batch_type}, key={key}"
             )
-
         for req_id in flight.request_ids:
             count = self._pd_active_flight_count.get(req_id, 0)
             if count <= 0:
@@ -895,6 +904,7 @@ class PDSeparatedScheduler(Scheduler):
                 self._pd_active_flight_count.pop(req_id)
             else:
                 self._pd_active_flight_count[req_id] = count - 1
+        self._maybe_cleanup_drained_preempts()
         return True
 
     def _is_request_preemptible(self, request: Request) -> bool:
@@ -2074,6 +2084,134 @@ class PDSeparatedScheduler(Scheduler):
         for task_id in task_ids:
             self._draft_retained_requests.setdefault(task_id, {})[request.request_id] = request
         return super()._free_request(request, delay_free_blocks=True)
+
+    # ------------------------------------------------------------------ #
+    # Cloud preemption handling (KV-capacity fault model)                 #
+    # ------------------------------------------------------------------ #
+    _CLOUD_RETRY_ATTEMPT_LIMIT = 8
+
+    def handle_cloud_preempt(self, notice) -> None:
+        """Ingest a cloud PREEMPT notice: clean up the request locally and
+        hold it for a gated retry (released on the next POST_OUT batch)."""
+        from vllm_ascend.edge_cloud.id_adapter import (
+            is_wrapped_req_id, unwrap_req_id)
+
+        control_id = (
+            unwrap_req_id(notice.request_id)
+            if is_wrapped_req_id(notice.request_id)
+            else notice.request_id
+        )
+        target = next(
+            (
+                req
+                for req in self.requests.values()
+                if getattr(req, "edge_cloud_request_id", None) == control_id
+            ),
+            None,
+        )
+        if target is None:
+            logger.warning(
+                "[PD] preempt notice for unknown control request %s",
+                control_id,
+            )
+            return
+        req_id = target.request_id
+        if self._pd_active_flight_count.get(req_id, 0) > 0:
+            # The request still has PD flights (queued tails).  Dropping
+            # those tails would orphan the cloud-side sends and block the
+            # hidden channel — defer cleanup until they drain naturally.
+            self._cloud_preempt_drain_pending.add(req_id)
+            logger.info(
+                "[PD] request %s preempted by cloud; cleanup deferred "
+                "until in-flight tails drain",
+                req_id,
+            )
+            return
+        self._cleanup_and_hold_preempted(target)
+        req_id = target.request_id
+        attempts = self._cloud_retry_attempts.get(req_id, 0) + 1
+        self._cloud_retry_attempts[req_id] = attempts
+        if attempts > self._CLOUD_RETRY_ATTEMPT_LIMIT:
+            logger.error(
+                "[PD] cloud-preempted request %s exceeded %d retry "
+                "attempts; still holding for the next capacity release",
+                req_id,
+                self._CLOUD_RETRY_ATTEMPT_LIMIT,
+            )
+        self._cloud_retry_hold[req_id] = target
+        logger.info(
+            "[PD] request %s preempted by cloud (reason=%s), held for "
+            "retry (attempt %d)",
+            req_id,
+            notice.reason,
+            attempts,
+        )
+
+    def release_preempt_gates(self) -> None:
+        """Requeue held preempted requests at the front of waiting.
+
+        Called when any POST_OUT batch is drained from the cloud — proof
+        that cloud-side work is completing and freeing blocks, i.e. the
+        capacity-release signal that makes a retry worthwhile.
+        """
+        for req_id, request in self._cloud_retry_hold.items():
+            request.status = RequestStatus.WAITING
+            self.waiting.prepend_request(request)
+            logger.info(
+                "[PD] request %s requeued after capacity release", req_id)
+        self._cloud_retry_hold.clear()
+
+    def _maybe_cleanup_drained_preempts(self) -> None:
+        """Finish the deferred cleanup of preempted requests whose PD
+        flights have all drained (see handle_cloud_preempt)."""
+        if not self._cloud_preempt_drain_pending:
+            return
+        for req_id in list(self._cloud_preempt_drain_pending):
+            if self._pd_active_flight_count.get(req_id, 0) > 0:
+                continue
+            request = self.requests.get(req_id)
+            if request is None:
+                self._cloud_preempt_drain_pending.discard(req_id)
+                continue
+            self._cloud_preempt_drain_pending.discard(req_id)
+            logger.info(
+                "[PD] request %s tails drained; finishing preempt cleanup",
+                req_id,
+            )
+            self._cleanup_and_hold_preempted(request)
+
+    def _cleanup_preempted_request(self, request) -> None:
+        """Release every edge-side trace of a cloud-preempted request."""
+        req_id = request.request_id
+        # No finish accounting for the preempted incarnation — the cloud
+        # already released it; a finish manifest would double-free.
+        self._edge_cloud_finished_request_data.pop(req_id, None)
+        # Draft chains and placeholder decode heads (MTP-series helpers).
+        self._drop_stale_drafts_for_req_ids({req_id})
+        # Active PD flights and their per-request counters.
+        for key, flight in list(self._pd_active_flight_by_key.items()):
+            if req_id in flight.request_ids:
+                self._pd_active_flight_by_key.pop(key, None)
+        self._pd_active_flight_count.pop(req_id, None)
+        # Per-chunk flight tracking and pending tails.
+        self._pending_tail_count.pop(req_id, None)
+        for token, flight in list(self._prefill_flight_by_token.items()):
+            if flight.request_id == req_id:
+                self._prefill_flight_by_token.pop(token, None)
+        self.chunk_prefill_first = [
+            r for r in self.chunk_prefill_first if r.request_id != req_id
+        ]
+        self.prefill_last_pending = [
+            r for r in self.prefill_last_pending if r.request_id != req_id
+        ]
+        # Free edge-local KV and restart the request from scratch.  The
+        # prefix-hit hint (edge_cloud_prefix_hit_tokens) stays on the
+        # request so the retry re-derives the same start position against
+        # the cloud's pinned reservation.
+        if request in self.running:
+            self.running.remove(request)
+        self.kv_cache_manager.free(request)
+        request.num_computed_tokens = 0
 
     def _record_edge_cloud_finish(self, request: Request) -> None:
         control_request_id = request.edge_cloud_request_id

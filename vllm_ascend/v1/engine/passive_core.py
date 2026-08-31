@@ -552,6 +552,13 @@ class PassiveEngineCoreProc:
             dispatch_policy=dispatch_policy,
             scheduler_output_handler=scheduler_output_handler,
         )
+        if cloud_kv_manager is not None:
+            # KV-capacity fault handling: the stall gate and the preemption
+            # relief handler (see edge_cloud_preemption_design).
+            self.passive_scheduler.scheduler_output_gate = (
+                cloud_kv_manager.can_admit)
+            self.passive_scheduler.capacity_relief_handler = (
+                self._try_preempt_for_capacity)
         # Optional POST_OUT (cloud → edge) channel. Only set on the cloud
         # side in PD-separation mode; left None for the legacy PP path.
         self._pp_pd_channel = pp_pd_channel
@@ -611,6 +618,60 @@ class PassiveEngineCoreProc:
                 prefix_coordination=True,
                 post_out_channel=pp_pd_channel is not None,
             )
+
+    def _try_preempt_for_capacity(self, scheduler_output: SchedulerOutput) -> bool:
+        """Preempt one idle victim so the failing batch can allocate.
+
+        Victims are chosen most-recently-admitted first, excluding every
+        request that is unsafe to touch: members of the failing batch and
+        anything queued or dispatched (in-flight on the worker).
+        Returns True when a victim was freed (caller retries the rewrite).
+        """
+        if self._cloud_kv_manager is None:
+            return False
+        if self._pp_pd_channel is None:
+            # No way to notify the edge — never free a victim the edge
+            # still believes is running.
+            return False
+        ineligible = self.passive_scheduler.inflight_request_ids()
+        ineligible.update(scheduler_output.num_scheduled_tokens)
+        for candidate in self._cloud_kv_manager.preemption_candidates():
+            if candidate in ineligible:
+                continue
+            control_request_id = self._cloud_kv_manager.preempt_request(candidate)
+            if control_request_id is None:
+                continue
+            self._publish_preempt_notice(control_request_id)
+            return True
+        return False
+
+    def _publish_preempt_notice(self, control_request_id: str) -> None:
+        """Send the preempt notice to the victim request's source edge."""
+        from vllm_ascend.edge_cloud.prefix_protocol import (
+            EdgeCloudPreemptNotice,
+        )
+
+        if self._pp_pd_channel is None:
+            return
+        notice = EdgeCloudPreemptNotice(request_id=control_request_id)
+        if isinstance(self._pp_pd_channel, MultiEdgeChannelMux):
+            from vllm_ascend.edge_cloud.id_adapter import (
+                is_wrapped_req_id, parse_req_edge_id)
+            if not is_wrapped_req_id(control_request_id):
+                logger.error(
+                    "[CLOUD-PREEMPT] cannot route notice for unwrapped "
+                    "request id %r", control_request_id)
+                return
+            self._pp_pd_channel.publish_to_edge(
+                parse_req_edge_id(control_request_id), notice)
+        else:
+            self._pp_pd_channel.publish(notice)
+        log_event(
+            logger,
+            "info",
+            "cloud_preempt_notice_published",
+            control_request_id=control_request_id,
+        )
 
     def _handle_cloud_scheduler_output(self, scheduler_output: SchedulerOutput) -> SchedulerOutput:
         log_event(
@@ -674,6 +735,7 @@ class PassiveEngineCoreProc:
                 completed_output = self._cloud_kv_pending_by_head_token.pop(head_token, None)
                 if completed_output is not None:
                     self._cloud_kv_manager.complete_scheduler_output(completed_output)
+                    self.passive_scheduler.mark_settled(completed_output)
                     log_event(
                         logger,
                         "debug",
@@ -852,6 +914,7 @@ class PassiveEngineCoreProc:
             bt = batch.scheduler_output.batch_type.value
             # logger.info("[CLOUD-MQ] About to enqueue batch_type=%s", bt)
             _t0 = time.monotonic()
+            self.passive_scheduler.mark_dispatched(batch.scheduler_output)
             self.executor.rpc_broadcast_mq.enqueue((b"pp_scheduler_output", payload, {}, None))
             if _updates_worker_persistent_batch(batch.scheduler_output, slice_info):
                 self._prev_dispatch_req_ids = set(batch.scheduler_output.num_scheduled_tokens.keys())
