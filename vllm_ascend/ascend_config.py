@@ -932,15 +932,6 @@ class PDSeparationConfig:
         )
 
 
-# Model types allowed for edge-cloud prefix cache coordination.
-# "qwen3_5_text" is the text-only Qwen3.5 Dense deployment and also the text
-# backbone (hf_text_config) of the image-capable VL variant; "qwen3_5" is the
-# top-level HF config model_type of Qwen3_5ForConditionalGeneration, the Dense
-# VL variant whose image requests are enabled in the first phase. MoE variants
-# (qwen3_5_moe / qwen3_5_moe_text) stay rejected.
-_EDGE_CLOUD_COORDINATION_MODEL_TYPES = frozenset({"qwen3_5", "qwen3_5_text"})
-
-
 class EdgeCloudConfig:
     """Configuration for edge-cloud collaborative inference."""
 
@@ -1066,23 +1057,8 @@ class EdgeCloudConfig:
         ):
             self._validate_mm_hasher_digest_size()
         hf_config = getattr(model_config, "hf_config", None)
-        top_model_type = getattr(hf_config, "model_type", "")
-        hf_text_config = getattr(model_config, "hf_text_config", None)
-        text_model_type = getattr(hf_text_config, "model_type", "")
-        if (
-            top_model_type not in _EDGE_CLOUD_COORDINATION_MODEL_TYPES
-            or text_model_type not in _EDGE_CLOUD_COORDINATION_MODEL_TYPES
-        ):
-            raise ValueError(
-                "prefix cache coordination currently supports only "
-                "Qwen3.5-Dense (model_type='qwen3_5' or 'qwen3_5_text'), got "
-                f"model_type={top_model_type!r} (text backbone {text_model_type!r})"
-            )
         if self._vllm_config.lora_config is not None:
             raise ValueError("prefix cache coordination does not currently support LoRA")
-        speculative_config = self._vllm_config.speculative_config
-        if speculative_config is not None and getattr(speculative_config, "method", None) != "mtp":
-            raise ValueError("prefix cache coordination currently supports only MTP speculative decoding")
         cache_config = self._vllm_config.cache_config
         if not getattr(cache_config, "enable_prefix_caching", False):
             raise ValueError("prefix cache coordination requires enable_prefix_caching=True")
