@@ -136,17 +136,31 @@ class PPSchedulerZmqPublisher:
         self._thread.start()
 
     def publish(self, scheduler_output: SchedulerOutput) -> None:
-        """Queue a SchedulerOutput for publishing. Non-blocking: drops the
-        message if the bridge queue is full (back-pressure protection).
+        """Queue a SchedulerOutput for publishing.
+
+        This protocol has NO retransmission semantics: a silently dropped
+        SchedulerOutput leaves the peer waiting on a recv that can never
+        complete (observed: one edge's lane wedged mid-run while the other
+        edge kept running, with nothing logged beyond a single warning).
+        Back-pressure must therefore block the producer, and a persistently
+        full queue means the peer is dead — a fatal, loudly-reported error,
+        never a silent drop.
         """
         if not self._running:
             return
+        seq = self._seq
+        self._seq += 1
         try:
-            seq = self._seq
-            self._seq += 1
-            self._queue.put_nowait((seq, scheduler_output, None))
-        except queue.Full:
-            logger.warning("PP Scheduler ZMQ publish queue full, dropping message")
+            self._queue.put(
+                (seq, scheduler_output, None),
+                timeout=self.CONTROL_PUBLISH_TIMEOUT,
+            )
+        except queue.Full as exc:
+            raise RuntimeError(
+                "PP Scheduler ZMQ publish queue stayed full for "
+                f"{self.CONTROL_PUBLISH_TIMEOUT}s — the receiving engine "
+                "is wedged; refusing to drop a SchedulerOutput silently"
+            ) from exc
 
     def publish_control(self, scheduler_output: SchedulerOutput) -> None:
         """Publish lifecycle control state or raise if local delivery fails.
@@ -1313,10 +1327,26 @@ class PassiveEngineCoreProc:
                     physical_config_count=len(physical_configs),
                 )
                 scheduler_kv_config = generate_scheduler_kv_cache_config(physical_configs)
+                _num_edges = 1
+                try:
+                    from vllm_ascend.edge_cloud.role_registry import (
+                        get_role_registry,
+                        init_role_registry,
+                    )
+                    _rr = get_role_registry()
+                    if _rr is None and getattr(
+                            vllm_config.parallel_config, "role_registry", None):
+                        _rr = init_role_registry(
+                            vllm_config.parallel_config.role_registry)
+                    if _rr is not None:
+                        _num_edges = max(1, len(_rr.edge_ids))
+                except Exception:
+                    _num_edges = 1
                 cloud_kv_manager = CloudKVRequestManager(
                     kv_cache_config=scheduler_kv_config,
                     vllm_config=vllm_config,
                     instance_id=_coordination.instance_id,
+                    num_edges=_num_edges,
                 )
                 cloud_control_processor = CloudControlProcessor(
                     cloud_control_command_queue,

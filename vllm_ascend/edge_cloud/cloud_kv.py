@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from itertools import chain
+import os
 import time
 from typing import Any
 
@@ -65,6 +66,7 @@ class CloudKVRequestManager:
         kv_cache_config: KVCacheConfig,
         vllm_config: Any,
         instance_id: str,
+        num_edges: int = 1,
     ) -> None:
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         if scheduler_block_size != hash_block_size:
@@ -78,6 +80,22 @@ class CloudKVRequestManager:
             speculative_config is not None and getattr(speculative_config, "method", None) == "mtp"
         )
         self._num_speculative_tokens = speculative_config.num_speculative_tokens if self._mtp_enabled else 0
+        # Admission governance (KV-full fault model):
+        # - watermark: fresh (non-retry) admissions must leave this fraction
+        #   of the pool free, so released retries and in-flight growth are
+        #   not starved by new traffic (single-machine FCFS priority for
+        #   preempted work).  Retry admissions (pinned in _preempted) are
+        #   exempt — their capacity is already accounted for.
+        # - per-edge soft share: one edge may not hold more than
+        #   factor * (pool / num_edges) blocks while others compete
+        #   (bounded borrowing; retries exempt as well).
+        self._admission_watermark = float(
+            os.environ.get("EDGE_CLOUD_ADMISSION_WATERMARK", "0.9")
+        )
+        self._edge_share_factor = float(
+            os.environ.get("EDGE_CLOUD_EDGE_SHARE_FACTOR", "1.5")
+        )
+        self._num_edges = max(1, num_edges)
         self._kv = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
@@ -242,22 +260,126 @@ class CloudKVRequestManager:
             needed += -(-num_scheduled // self.block_size) + lookahead_blocks
         return needed
 
+    def _stale_epoch_members(self, scheduler_output: SchedulerOutput) -> set[str]:
+        """Members whose batch epoch is OLDER than the admitted
+        incarnation's epoch.
+
+        A batch from a previous incarnation that arrives after the request
+        was re-admitted finds a live state under the same request id;
+        without this check it would be treated as a live member and its
+        stale tokens/positions would be written into the NEW incarnation's
+        blocks — silent corruption.  Such members must void-run instead.
+        A batch epoch AHEAD of the state epoch is a protocol error: the
+        edge learns epochs only from cloud notices, so it can never
+        legitimately lead."""
+        epochs = scheduler_output.edge_cloud_epoch_by_req
+        if not epochs:
+            return set()
+        stale: set[str] = set()
+        for request_id, batch_epoch in epochs.items():
+            state = self._requests.get(request_id)
+            if state is None:
+                continue
+            if batch_epoch < state.epoch:
+                stale.add(request_id)
+            elif batch_epoch > state.epoch:
+                raise RuntimeError(
+                    f"edge epoch {batch_epoch} is ahead of the cloud "
+                    f"incarnation epoch {state.epoch} for {request_id!r}"
+                )
+        return stale
+
+    def _non_allocating_members(self, scheduler_output: SchedulerOutput) -> set[str]:
+        """Batch members that consume no new blocks in the rewrite:
+        void-incarnation members (removal record) plus stale-epoch members
+        (older incarnation than the live state)."""
+        members = set(scheduler_output.num_scheduled_tokens)
+        skip = {
+            rid for rid in members if self._is_void_incarnation(rid)
+        }
+        skip.update(self._stale_epoch_members(scheduler_output))
+        return skip
+
+    def _is_retry_admission(self, scheduler_output: SchedulerOutput) -> bool:
+        """True when any new request of this batch reclaims a pinned
+        preemption reservation — a retry whose capacity is already
+        accounted for, exempt from watermark/share admission governance."""
+        for data in scheduler_output.scheduled_new_reqs:
+            if data.edge_cloud_request_id is None:
+                continue
+            control_id = self._cloud_control_id(
+                data.req_id, data.edge_cloud_request_id
+            )
+            if control_id in self._preempted:
+                return True
+        return False
+
+    def _edge_pool_usage(self) -> dict[int, int]:
+        """Approximate per-edge block ownership: admitted request tables
+        plus pinned reservation blocks, keyed by wrapped-id edge prefix."""
+        usage: dict[int, int] = {}
+
+        def charge(req_id: str, blocks: int) -> None:
+            if blocks <= 0 or not is_wrapped_req_id(req_id):
+                return
+            edge_id = parse_req_edge_id(req_id)
+            usage[edge_id] = usage.get(edge_id, 0) + blocks
+
+        for req_id in self._requests:
+            block_ids = self._kv.get_block_ids(req_id)
+            charge(req_id, sum(len(ids) for ids in block_ids))
+        for table in (self._reservations, self._preempted):
+            for control_id, reservation in table.items():
+                charge(
+                    control_id,
+                    sum(len(ids) for ids in reservation.blocks.blocks),
+                )
+        return usage
+
     def can_admit(self, scheduler_output: SchedulerOutput) -> bool:
-        """Estimate whether this batch fits the free pool.  Void-run
-        members allocate nothing (projection pool), so they are excluded —
-        a fully void-run batch always fits and can drain as a comm shell
-        even while the pool is full."""
+        """Estimate whether this batch fits the free pool, applying the
+        admission governance for the KV-full fault model:
+
+        - void-run members allocate nothing (projection pool) — a fully
+          void batch always fits and can drain as a comm shell even while
+          the pool is full;
+        - retry admissions (pinned in _preempted) always fit — their
+          capacity is already reserved;
+        - fresh admissions must respect the watermark (leave a free
+          fraction for retries / in-flight growth) and the per-edge soft
+          share (bounded borrowing, so one edge cannot monopolize the
+          pool while the other starves).
+        """
         needed = self._estimate_required_blocks(
             scheduler_output,
-            skip_req_ids={
-                rid
-                for rid in scheduler_output.num_scheduled_tokens
-                if self._is_void_incarnation(rid)
-            },
+            skip_req_ids=self._non_allocating_members(scheduler_output),
         )
         if needed == 0:
             return True
-        return self._kv.block_pool.get_num_free_blocks() >= needed
+        free_blocks = self._kv.block_pool.get_num_free_blocks()
+        if free_blocks < needed:
+            return False
+        if self._is_retry_admission(scheduler_output):
+            return True
+        total_blocks = self._kv.block_pool.num_gpu_blocks
+        if free_blocks - needed < total_blocks * (
+            1.0 - self._admission_watermark
+        ):
+            return False
+        member_edges = {
+            parse_req_edge_id(rid)
+            for rid in scheduler_output.num_scheduled_tokens
+            if is_wrapped_req_id(rid)
+        }
+        if member_edges:
+            share_cap = (
+                total_blocks / self._num_edges
+            ) * self._edge_share_factor
+            usage = self._edge_pool_usage()
+            for edge_id in member_edges:
+                if usage.get(edge_id, 0) + needed > share_cap:
+                    return False
+        return True
 
     def preemption_candidates(self) -> list[str]:
         """Engine request ids, most-recently admitted first, excluding
@@ -421,15 +543,13 @@ class CloudKVRequestManager:
         # Atomicity precheck: raise before ANY admission/allocation so a
         # capacity failure never leaves partially admitted requests or
         # half-allocated block tables behind (a later relief retry can then
-        # safely reprocess the whole batch).  Void-incarnation members are
-        # excluded: they execute on the projection pool, not the free pool.
+        # safely reprocess the whole batch).  Void-incarnation and
+        # stale-epoch members are excluded: they execute on the projection
+        # pool, not the free pool.
+        non_allocating = self._non_allocating_members(scheduler_output)
         required = self._estimate_required_blocks(
             scheduler_output,
-            skip_req_ids={
-                rid
-                for rid in scheduler_output.num_scheduled_tokens
-                if self._is_void_incarnation(rid)
-            },
+            skip_req_ids=non_allocating,
         )
         if self._kv.block_pool.get_num_free_blocks() < required:
             log_event(
@@ -483,6 +603,23 @@ class CloudKVRequestManager:
                         request_id, scheduler_output),
                 )
                 raise RuntimeError(f"cloud has no KV request state for {request_id!r}")
+            if request_id in non_allocating:
+                # Stale epoch: a batch of the PREVIOUS incarnation arriving
+                # after re-admission.  Void-run it WITHOUT touching the new
+                # incarnation's state — its output is discarded by the edge
+                # and its tokens must never reach the new blocks.
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_kv_stale_epoch_void",
+                    engine_request_id=request_id,
+                    phase="allocate",
+                    state_epoch=state.epoch,
+                )
+                cached.num_computed_tokens[index] = 0
+                cached.new_block_ids[index] = self._void_block_ids
+                void_req_ids.append(request_id)
+                continue
             self._sync_output_length(
                 state.request,
                 cached.num_output_tokens[index],
@@ -642,6 +779,20 @@ class CloudKVRequestManager:
         if data.req_id in self._requests:
             self._release_reservation(reservation)
             raise RuntimeError(f"duplicate cloud request {data.req_id!r}")
+        batch_epochs = scheduler_output.edge_cloud_epoch_by_req or {}
+        if (
+            data.req_id in batch_epochs
+            and batch_epochs[data.req_id] != reservation.epoch
+        ):
+            # A new admission MUST carry exactly the reservation's epoch:
+            # older means a stale incarnation's prefill, newer is
+            # impossible (the edge learns epochs from cloud notices).
+            self._release_reservation(reservation)
+            raise RuntimeError(
+                f"admission epoch {batch_epochs[data.req_id]} does not "
+                f"match reservation epoch {reservation.epoch} for "
+                f"{control_request_id!r}"
+            )
         if not isinstance(data.sampling_params, SamplingParams):
             self._release_reservation(reservation)
             raise ValueError("cloud prefix coordination supports generation only")
@@ -738,6 +889,7 @@ class CloudKVRequestManager:
         duplicate the whole target batch once per speculative step.
         """
         self._record_mtp_acceptance(scheduler_output)
+        stale_members = self._stale_epoch_members(scheduler_output)
         rewritten = copy.copy(scheduler_output)
         void_req_ids: list[str] = []
         rewritten.scheduled_new_reqs = []
@@ -748,6 +900,25 @@ class CloudKVRequestManager:
                         data.req_id, phase="draft", scheduler_output=scheduler_output)
                 self._log_void_run(
                     data.req_id, phase="draft", scheduler_output=scheduler_output)
+                void_req_ids.append(data.req_id)
+                draft_data = copy.copy(data)
+                draft_data.prompt_token_ids = None if data.prompt_token_ids is None else [0] * len(data.prompt_token_ids)
+                if data.prefill_token_ids is not None:
+                    draft_data.prefill_token_ids = [0] * len(data.prefill_token_ids)
+                draft_data.num_computed_tokens = 0
+                draft_data.block_ids = self._void_block_ids
+                rewritten.scheduled_new_reqs.append(draft_data)
+                continue
+            if data.req_id in stale_members:
+                # Stale epoch: previous-incarnation draft after re-admission;
+                # void-run without touching the new incarnation's state.
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_kv_stale_epoch_void",
+                    engine_request_id=data.req_id,
+                    phase="draft",
+                )
                 void_req_ids.append(data.req_id)
                 draft_data = copy.copy(data)
                 draft_data.prompt_token_ids = None if data.prompt_token_ids is None else [0] * len(data.prompt_token_ids)
@@ -768,6 +939,18 @@ class CloudKVRequestManager:
         cached.new_block_ids = [None] * len(cached.req_ids)
         cached.num_computed_tokens = list(cached.num_computed_tokens)
         for index, request_id in enumerate(cached.req_ids):
+            if request_id in stale_members:
+                log_event(
+                    logger,
+                    "warning",
+                    "cloud_kv_stale_epoch_void",
+                    engine_request_id=request_id,
+                    phase="draft",
+                )
+                void_req_ids.append(request_id)
+                cached.num_computed_tokens[index] = 0
+                cached.new_block_ids[index] = self._void_block_ids
+                continue
             if request_id in self._requests:
                 continue
             if not self._is_void_incarnation(request_id):

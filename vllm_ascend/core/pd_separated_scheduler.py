@@ -3279,6 +3279,11 @@ class PDSeparatedScheduler(Scheduler):
                 to_remove.add(req)
                 # Clean up chunk-prefill-prior flight state.
                 self._cleanup_request_flight_state(req_id)
+                # The incarnation epoch is per-request lifecycle state:
+                # drop it once the request leaves for good (it must survive
+                # preemption holds — the retry re-stamps with it).
+                self._cloud_epoch_by_req.pop(req_id, None)
+                self._cloud_retry_attempts.pop(req_id, None)
 
         if to_remove:
             self.chunk_prefill_first = remove_all(self.chunk_prefill_first, to_remove)

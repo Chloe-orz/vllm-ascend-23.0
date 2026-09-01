@@ -511,6 +511,17 @@ def _make_cloud_safe_scheduler_output(
     }
     cloud_so.scheduled_encoder_inputs = {}
     cloud_so.free_encoder_mm_hashes = []
+    # Stamp per-request incarnation epochs (void-run drain protocol): the
+    # cloud rewrite void-runs any member whose batch epoch is older than
+    # its admitted incarnation, so a stale batch of a previous incarnation
+    # can never write into a re-admitted request's new blocks.  Requests
+    # never preempted simply stamp 0 via the default.
+    epoch_by_req = getattr(self.scheduler, "_cloud_epoch_by_req", None)
+    if epoch_by_req:
+        cloud_so.edge_cloud_epoch_by_req = {
+            req_id: epoch_by_req.get(req_id, 0)
+            for req_id in scheduler_output.num_scheduled_tokens
+        }
     log_event(
         logger,
         "debug",

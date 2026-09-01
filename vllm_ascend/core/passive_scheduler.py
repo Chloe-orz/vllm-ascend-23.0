@@ -734,6 +734,15 @@ class PassiveScheduler:
                     field,
                     {wrap_req_id(edge_id, rid): v for rid, v in value.items()},
                 )
+        # Per-request incarnation epochs are keyed by raw edge req_ids; the
+        # cloud rewrite validates them against its wrapped state, so the
+        # keys must enter the cloud namespace like every other req-keyed
+        # field (epoch validation, F8).
+        if getattr(so, "edge_cloud_epoch_by_req", None):
+            so.edge_cloud_epoch_by_req = {
+                wrap_req_id(edge_id, rid): epoch
+                for rid, epoch in so.edge_cloud_epoch_by_req.items()
+            }
 
     def _promote_multi_edge(self) -> None:
         """Move per-edge head segments from the global queue into the legacy
