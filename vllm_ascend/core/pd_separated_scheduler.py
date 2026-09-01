@@ -245,6 +245,9 @@ class PDSeparatedScheduler(Scheduler):
         # POST_OUT batch proves cloud-side work is completing (capacity
         # release signal), then requeued at the front of waiting.
         self._cloud_retry_hold: dict[str, Request] = {}
+        # First moment the hold became non-empty; drives the liveness floor
+        # (see _maybe_release_preempt_hold_liveness).
+        self._cloud_retry_hold_since: float | None = None
         self._cloud_retry_attempts: dict[str, int] = {}
         # Cloud lane-stall flag (EdgeCloudLaneStallNotice): while set, no
         # head batch (PF/DF/DRF) is dispatched toward the cloud, so the
@@ -601,7 +604,22 @@ class PDSeparatedScheduler(Scheduler):
         else:
             self._cloud_reported_draft_invalidations.update(task_ids)
 
+    def get_num_unfinished_requests(self) -> int:
+        # Held and drain-pending preempted requests ARE unfinished work:
+        # they are invisible to waiting/running, so without this override
+        # the EngineCore concludes "waiting for work" and SLEEPS — and then
+        # the liveness floor in schedule() never runs to release them
+        # (observed: edge idles mid-run with clients hanging).
+        return (
+            super().get_num_unfinished_requests()
+            + len(self._cloud_retry_hold)
+            + len(self._cloud_preempt_drain_pending)
+        )
+
     def schedule(self) -> SchedulerOutput:
+        # Liveness floor for held preempted retries: must run every round,
+        # independent of any peer message (see the method's docstring).
+        self._maybe_release_preempt_hold_liveness()
         scheduler_output = self._schedule_pd_separated()
         # Only FIRST-segment batches are published to the cloud over PRE_OUT
         # (the publish hook drops PL/DL/DRL tails), and only batches whose
@@ -2109,6 +2127,14 @@ class PDSeparatedScheduler(Scheduler):
             "stalled" if notice.stalled else "resumed",
             notice.reason,
         )
+        if not notice.stalled:
+            # A lane resume means the cloud drained its stalled batch —
+            # capacity progress by definition, and possibly the ONLY
+            # signal this edge will ever get: when every in-flight batch
+            # was preempted, no further POST_OUT can arrive, so waiting
+            # for one would deadlock the held retries (observed: edge
+            # stalls mid-run with running:0 waiting:0).
+            self.release_preempt_gates()
 
     def handle_cloud_preempt(self, notice) -> None:
         """Ingest a cloud PREEMPT notice: clean up the request locally and
@@ -2167,9 +2193,11 @@ class PDSeparatedScheduler(Scheduler):
     def release_preempt_gates(self) -> None:
         """Requeue held preempted requests at the front of waiting.
 
-        Called when any POST_OUT batch is drained from the cloud — proof
-        that cloud-side work is completing and freeing blocks, i.e. the
-        capacity-release signal that makes a retry worthwhile.
+        Called when any POST_OUT batch is drained from the cloud or a lane
+        resume arrives — proof that cloud-side work is completing and
+        freeing blocks, i.e. the capacity-release signal that makes a retry
+        worthwhile — or by the liveness floor when no such signal can ever
+        arrive (see _maybe_release_preempt_hold_liveness).
         """
         for req_id, request in self._cloud_retry_hold.items():
             request.status = RequestStatus.WAITING
@@ -2177,6 +2205,59 @@ class PDSeparatedScheduler(Scheduler):
             logger.info(
                 "[PD] request %s requeued after capacity release", req_id)
         self._cloud_retry_hold.clear()
+        self._cloud_retry_hold_since = None
+
+    # Grace period before the local liveness floor releases held retries.
+    _RETRY_HOLD_LIVENESS_GRACE_S = 2.0
+
+    def _edge_has_inflight_work(self) -> bool:
+        """Any work that can still produce a POST_OUT-driven release."""
+        if self.running or self.waiting:
+            return True
+        if (
+            self.prefill_inflight_count > 0
+            or self.decode_or_draft_inflight_count > 0
+            or self.draft_remote_pending_count > 0
+        ):
+            return True
+        if any(count > 0 for count in self._pd_active_flight_count.values()):
+            return True
+        for ready in (
+            self.prefills_last_ready,
+            self.decodes_last_ready,
+            self.drafts_first_ready,
+            self.drafts_last_ready,
+        ):
+            if ready:
+                return True
+        return False
+
+    def _maybe_release_preempt_hold_liveness(self) -> None:
+        """Liveness floor for held preempted retries.
+
+        The normal release signals are POST_OUT traffic and the lane-resume
+        notice — but when this edge has nothing in flight left (every batch
+        was preempted or drained) neither can ever arrive again, and the
+        hold would sleep forever while the engine reports running:0
+        waiting:0 (observed: edge stalls mid-run).  If the hold has been
+        non-empty for the grace period with zero in-flight work, release
+        locally: the cloud-side gates simply re-stall the retry if capacity
+        is still short, and the retry budget bounds the loop.
+        """
+        if not self._cloud_retry_hold or self._cloud_retry_hold_since is None:
+            return
+        if self._edge_has_inflight_work():
+            return
+        held_for = time.monotonic() - self._cloud_retry_hold_since
+        if held_for < self._RETRY_HOLD_LIVENESS_GRACE_S:
+            return
+        logger.warning(
+            "[PD] releasing %d held preempted retries via liveness floor "
+            "(no in-flight work, no release signal for %.1fs)",
+            len(self._cloud_retry_hold),
+            held_for,
+        )
+        self.release_preempt_gates()
 
     def _maybe_cleanup_drained_preempts(self) -> None:
         """Finish the deferred cleanup of preempted requests whose PD
@@ -2225,6 +2306,8 @@ class PDSeparatedScheduler(Scheduler):
             return
         self._cleanup_preempted_request(target)
         self._cloud_retry_hold[req_id] = target
+        if self._cloud_retry_hold_since is None:
+            self._cloud_retry_hold_since = time.monotonic()
         logger.info(
             "[PD] request %s preempted by cloud (reason=%s), held for "
             "retry (attempt %d)",
