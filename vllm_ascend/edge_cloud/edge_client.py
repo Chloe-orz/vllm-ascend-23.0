@@ -78,6 +78,16 @@ class EdgePrefixClient:
         self._control_url = control_url
         self._consumer_id = consumer_id
         self._connect_timeout = connect_timeout
+        # Hard bound for the probe phase only (POST until response headers).
+        # The usage stream on the same response stays open for the request's
+        # whole lifetime, so the session itself must remain total=None — but
+        # an unanswered probe (wedged cloud control plane) must fail the
+        # request visibly instead of hanging it pre-admission with the
+        # engine seeing nothing.
+        import os
+        self._probe_timeout = float(
+            os.environ.get("EDGE_CLOUD_PROBE_TIMEOUT_S", "60")
+        )
         # Self-reported identity only: the edge never sees the cloud-side
         # namespace prefix; the cloud wraps/unwraps request ids internally.
         self._edge_id = edge_id
@@ -188,10 +198,16 @@ class EdgePrefixClient:
         response: aiohttp.ClientResponse | None = None
         try:
             session = aiohttp.ClientSession(timeout=timeout)
-            response = await session.post(
-                self._control_url,
-                headers={**headers, "Accept": "text/event-stream"},
-                json=body,
+            # wait_for bounds ONLY the probe phase (post() resolves once
+            # response headers arrive); the usage stream then stays open on
+            # the same response without any total-timeout interference.
+            response = await asyncio.wait_for(
+                session.post(
+                    self._control_url,
+                    headers={**headers, "Accept": "text/event-stream"},
+                    json=body,
+                ),
+                timeout=self._probe_timeout,
             )
             if response.status != 200:
                 log_event(

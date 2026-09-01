@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import queue
 import threading
 import time
@@ -145,7 +146,33 @@ class CloudControlBridge:
         usage_future = self._loop.create_future()
         self._probe_futures[request_id] = probe_future
         self._usage_futures[request_id] = usage_future
-        self.command_queue.put({"type": "probe", "manifest": manifest})
+        # command_queue is a multiprocessing.Queue: a bare put() can block
+        # the whole asyncio event loop when the feeder pipe is stalled
+        # (observed: control-plane freeze with multi-minute usage delivery
+        # delay while the data plane stayed healthy).  Move the put off the
+        # event loop and bound it, so a wedged core fails probes fast
+        # instead of freezing every probe/usage delivery behind it.
+        try:
+            await asyncio.wait_for(
+                self._loop.run_in_executor(
+                    None,
+                    self.command_queue.put,
+                    {"type": "probe", "manifest": manifest},
+                ),
+                timeout=5.0,
+            )
+        except BaseException:
+            self._probe_futures.pop(request_id, None)
+            self._usage_futures.pop(request_id, None)
+            log_event(
+                logger,
+                "error",
+                "cloud_probe_enqueue_failed",
+                request_id=request_id,
+            )
+            raise RuntimeError(
+                "cloud control plane is congested; probe rejected"
+            )
         log_event(
             logger,
             "debug",
@@ -157,7 +184,16 @@ class CloudControlBridge:
             block_size=manifest.block_size,
         )
         try:
-            return await probe_future
+            # Bound the wait below the edge's own probe timeout so the
+            # futures are cleaned up before any client retry can arrive;
+            # otherwise a wedged core would leak the registration and every
+            # retry would be rejected as a duplicate.
+            return await asyncio.wait_for(
+                probe_future,
+                timeout=float(
+                    os.environ.get("EDGE_CLOUD_PROBE_TIMEOUT_S", "60")
+                ) - 5,
+            )
         except BaseException as exc:
             self._probe_futures.pop(request_id, None)
             self._usage_futures.pop(request_id, None)
