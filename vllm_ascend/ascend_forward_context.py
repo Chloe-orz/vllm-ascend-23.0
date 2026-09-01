@@ -54,6 +54,23 @@ def get_mrv2_in_profile_run() -> bool:
     return _MRV2_IN_PROFILE_RUN.get()
 
 
+def _disable_mmrs_fusion_for_a3_layerwise_prefill(vllm_config: VllmConfig) -> bool:
+    """Avoid the unsafe fused BF16 MMRS path on A3 layerwise P nodes."""
+    if get_ascend_device_type() != AscendDeviceType.A3:
+        return False
+
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is None:
+        return False
+
+    return (
+        getattr(kv_transfer_config, "kv_connector", None) == "MooncakeLayerwiseConnector"
+        and getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
+        and getattr(vllm_config.model_config, "dtype", None) == torch.bfloat16
+        and getattr(vllm_config, "quant_config", None) is None
+    )
+
+
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
@@ -132,6 +149,15 @@ def set_ascend_forward_context(
             flash_comm_v1_enabled = False
         else:
             flash_comm_v1_enabled = enable_sp(vllm_config) and num_tokens is not None and num_tokens > 1000
+
+        if flash_comm_v1_enabled and mmrs_fusion and _disable_mmrs_fusion_for_a3_layerwise_prefill(vllm_config):
+            mmrs_fusion = False
+            logger.info_once(
+                "[PD-TRACE] stage=p_worker event=mmrs_fusion_fallback "
+                "device=A3 connector=MooncakeLayerwiseConnector dtype=bfloat16 "
+                "fallback=matmul_reduce_scatter"
+            )
+
         forward_context.mmrs_fusion = mmrs_fusion
         forward_context.num_tokens = num_tokens
         forward_context.flash_comm_v1_enabled = flash_comm_v1_enabled
