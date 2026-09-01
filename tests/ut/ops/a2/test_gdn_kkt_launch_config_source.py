@@ -81,4 +81,3 @@ def test_kkt_multibuffering_stays_disabled_across_sequential_shapes() -> None:
         assert all(
             call["multibuffer"] is False for _, call in kernel.calls
         )
-
