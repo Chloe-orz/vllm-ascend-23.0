@@ -1581,28 +1581,57 @@ class NPUWorker(WorkerBase):
             scheduler_output,
             "c2e",
         )
-        fully_void = (
-            self._is_fully_void_cloud_batch(scheduler_output)
-            and send_tensor_meta is not None
-        )
+        fully_void = self._is_fully_void_cloud_batch(scheduler_output)
         if fully_void:
             # Comm shell for a fully void-run draft step: skip the draft
             # forward (and its position/correction bookkeeping) entirely,
-            # answer with zero tensors matching the negotiated wire schema,
-            # and reclaim the parent task's cached metadata immediately.
+            # answer with zero tensors matching the wire schema, and
+            # reclaim the parent task's cached metadata immediately.
+            # MUST NOT depend on send_tensor_meta: when the target batch
+            # was itself drained as a comm shell, no draft metadata was
+            # ever cached, so falling back to the normal segment here
+            # crashes on "DRAFT has no matching target positions"
+            # (observed with SP enabled, where the meta is always None).
             self.model_runner.drop_cloud_draft_task_metadata(
                 scheduler_output.draft_task_id
             )
             zero_tensors: dict[str, torch.Tensor] = {}
-            for _name, _meta in send_tensor_meta.metadata_list:
-                if (
-                    _name in send_tensor_meta.send_tensor_keys
-                    and _meta is not None
-                ):
-                    zero_tensors[_name] = torch.zeros(
-                        tuple(_meta.size),
-                        dtype=_meta.dtype,
-                        device=_meta.device,
+            if send_tensor_meta is not None:
+                for _name, _meta in send_tensor_meta.metadata_list:
+                    if (
+                        _name in send_tensor_meta.send_tensor_keys
+                        and _meta is not None
+                    ):
+                        zero_tensors[_name] = torch.zeros(
+                            tuple(_meta.size),
+                            dtype=_meta.dtype,
+                            device=_meta.device,
+                        )
+            else:
+                # Dynamic (meta-free) wire path, e.g. SP enabled: mirror
+                # the c2e schema by method — mtp sends hidden_states only,
+                # eagle3 adds the residual stream.
+                _method = self.model_runner.speculative_config.method
+                _draft_step_idx = int(scheduler_output.draft_step_idx or 0)
+                _num_tokens = (
+                    scheduler_output.total_num_scheduled_tokens
+                    if _draft_step_idx == 0
+                    else len(scheduler_output.num_scheduled_tokens)
+                )
+                _shape = (
+                    _num_tokens,
+                    self.model_runner.drafter.hidden_size,
+                )
+                zero_tensors["hidden_states"] = torch.zeros(
+                    _shape,
+                    dtype=self.model_runner.dtype,
+                    device=self.device,
+                )
+                if _method == "eagle3":
+                    zero_tensors["residual"] = torch.zeros(
+                        _shape,
+                        dtype=self.model_runner.dtype,
+                        device=self.device,
                     )
             output = IntermediateTensors(zero_tensors)
         else:
