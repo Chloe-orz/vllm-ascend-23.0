@@ -90,6 +90,9 @@ class CloudKVRequestManager:
         # Reservations of preempted requests, kept pinned so a retry sees
         # the same prefix hit and start position as the first admission.
         self._preempted: dict[str, _Reservation] = {}
+        # Bounded ledger of recent state removals, used to classify
+        # missing-state occurrences (preempted vs finished) in diagnostics.
+        self._recent_state_removals: dict[str, str] = {}
         self._requests: dict[str, _CloudRequest] = {}
         self._completed_hashes: set[bytes] = set()
         self._mtp_actual_computed_by_task: dict[str, dict[str, int]] = {}
@@ -237,6 +240,7 @@ class CloudKVRequestManager:
         )
         self._kv.free(state.request)
         self._requests.pop(request_id, None)
+        self._record_state_removal(request_id, "preempted")
         for task_id, corrections in list(self._mtp_actual_computed_by_task.items()):
             corrections.pop(request_id, None)
             if not corrections:
@@ -324,6 +328,8 @@ class CloudKVRequestManager:
                     "cloud_kv_request_state_missing",
                     engine_request_id=request_id,
                     phase="allocate",
+                    **self._missing_state_diagnostics(
+                        request_id, scheduler_output),
                 )
                 raise RuntimeError(f"cloud has no KV request state for {request_id!r}")
             self._sync_output_length(
@@ -566,7 +572,8 @@ class CloudKVRequestManager:
         rewritten = copy.copy(scheduler_output)
         rewritten.scheduled_new_reqs = []
         for data in scheduler_output.scheduled_new_reqs:
-            self._require_request_state(data.req_id, phase="draft")
+            self._require_request_state(
+                data.req_id, phase="draft", scheduler_output=scheduler_output)
             draft_data = copy.copy(data)
             draft_data.prompt_token_ids = None if data.prompt_token_ids is None else [0] * len(data.prompt_token_ids)
             if data.prefill_token_ids is not None:
@@ -576,7 +583,8 @@ class CloudKVRequestManager:
 
         cached = copy.copy(scheduler_output.scheduled_cached_reqs)
         for request_id in cached.req_ids:
-            self._require_request_state(request_id, phase="draft")
+            self._require_request_state(
+                request_id, phase="draft", scheduler_output=scheduler_output)
         cached.new_block_ids = [None] * len(cached.req_ids)
         cached.new_token_ids = [[0] * len(token_ids) for token_ids in cached.new_token_ids]
         cached.all_token_ids = {
@@ -737,11 +745,41 @@ class CloudKVRequestManager:
                 task_count=discarded,
             )
 
+    def _record_state_removal(self, request_id: str, reason: str) -> None:
+        self._recent_state_removals[request_id] = reason
+        # Bound the ledger: keep only the most recent 256 entries.
+        while len(self._recent_state_removals) > 256:
+            self._recent_state_removals.pop(
+                next(iter(self._recent_state_removals)))
+
+    def _missing_state_diagnostics(
+        self,
+        request_id: str,
+        scheduler_output: SchedulerOutput | None,
+    ) -> dict[str, Any]:
+        """Classify a missing-state occurrence for diagnostics:
+
+        - recent_removal_reason: "preempted" (P-A) / "finished" (P-B) /
+          None (state vanished by an unclassified path);
+        - batch composition: live members vs total, which tells whether
+          this was a mixed batch (P-C) the edge could not drop."""
+        info: dict[str, Any] = {
+            "recent_removal_reason": self._recent_state_removals.get(request_id)
+        }
+        if scheduler_output is not None:
+            members = list(scheduler_output.num_scheduled_tokens)
+            info["batch_total_members"] = len(members)
+            info["batch_live_members"] = sum(
+                1 for rid in members if rid in self._requests
+            )
+        return info
+
     def _require_request_state(
         self,
         request_id: str,
         *,
         phase: str,
+        scheduler_output: SchedulerOutput | None = None,
     ) -> _CloudRequest:
         state = self._requests.get(request_id)
         if state is None:
@@ -751,6 +789,7 @@ class CloudKVRequestManager:
                 "cloud_kv_request_state_missing",
                 engine_request_id=request_id,
                 phase=phase,
+                **self._missing_state_diagnostics(request_id, scheduler_output),
             )
             raise RuntimeError(f"cloud has no KV request state for {request_id!r}")
         return state
@@ -862,6 +901,7 @@ class CloudKVRequestManager:
                 )
             self._kv.free(request)
             self._requests.pop(request_id, None)
+            self._record_state_removal(request_id, "finished")
             self._mtp_cache_publish_suppressed_request_ids.discard(request_id)
             for task_id, request_ids in list(self._mtp_request_ids_by_task.items()):
                 request_ids.discard(request_id)

@@ -643,6 +643,14 @@ class PassiveEngineCoreProc:
                 continue
             self._publish_preempt_notice(control_request_id)
             return True
+        log_event(
+            logger,
+            "info",
+            "cloud_preempt_no_idle_victim",
+            failing_batch_members=len(scheduler_output.num_scheduled_tokens),
+            kv_blocks_free=(
+                self._cloud_kv_manager._kv.block_pool.get_num_free_blocks()),
+        )
         return False
 
     def _publish_preempt_notice(self, control_request_id: str) -> None:
@@ -651,6 +659,14 @@ class PassiveEngineCoreProc:
             EdgeCloudPreemptNotice,
         )
 
+        log_event(
+            logger,
+            "info",
+            "cloud_preempt_notice_dispatch",
+            control_request_id=control_request_id,
+            channel_present=self._pp_pd_channel is not None,
+            is_mux=isinstance(self._pp_pd_channel, MultiEdgeChannelMux),
+        )
         if self._pp_pd_channel is None:
             logger.error(
                 "[CLOUD-PREEMPT] no POST_OUT channel; notice for %r lost",

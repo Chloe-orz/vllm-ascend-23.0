@@ -2101,6 +2101,11 @@ class PDSeparatedScheduler(Scheduler):
             if is_wrapped_req_id(notice.request_id)
             else notice.request_id
         )
+        logger.info(
+            "[PD] preempt notice received: control_request_id=%s reason=%s",
+            control_id,
+            notice.reason,
+        )
         target = next(
             (
                 req
