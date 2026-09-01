@@ -637,8 +637,20 @@ class CloudKVRequestManager:
         rewritten = copy.copy(scheduler_output)
         rewritten.scheduled_new_reqs = []
         for data in scheduler_output.scheduled_new_reqs:
-            self._require_request_state(
-                data.req_id, phase="draft", scheduler_output=scheduler_output)
+            if data.req_id not in self._requests:
+                if not self._is_void_incarnation(data.req_id):
+                    self._require_request_state(
+                        data.req_id, phase="draft", scheduler_output=scheduler_output)
+                self._log_void_run(
+                    data.req_id, phase="draft", scheduler_output=scheduler_output)
+                draft_data = copy.copy(data)
+                draft_data.prompt_token_ids = None if data.prompt_token_ids is None else [0] * len(data.prompt_token_ids)
+                if data.prefill_token_ids is not None:
+                    draft_data.prefill_token_ids = [0] * len(data.prefill_token_ids)
+                draft_data.num_computed_tokens = 0
+                draft_data.block_ids = self._void_block_ids
+                rewritten.scheduled_new_reqs.append(draft_data)
+                continue
             draft_data = copy.copy(data)
             draft_data.prompt_token_ids = None if data.prompt_token_ids is None else [0] * len(data.prompt_token_ids)
             if data.prefill_token_ids is not None:
@@ -647,10 +659,18 @@ class CloudKVRequestManager:
             rewritten.scheduled_new_reqs.append(draft_data)
 
         cached = copy.copy(scheduler_output.scheduled_cached_reqs)
-        for request_id in cached.req_ids:
-            self._require_request_state(
-                request_id, phase="draft", scheduler_output=scheduler_output)
         cached.new_block_ids = [None] * len(cached.req_ids)
+        cached.num_computed_tokens = list(cached.num_computed_tokens)
+        for index, request_id in enumerate(cached.req_ids):
+            if request_id in self._requests:
+                continue
+            if not self._is_void_incarnation(request_id):
+                self._require_request_state(
+                    request_id, phase="draft", scheduler_output=scheduler_output)
+            self._log_void_run(
+                request_id, phase="draft", scheduler_output=scheduler_output)
+            cached.num_computed_tokens[index] = 0
+            cached.new_block_ids[index] = self._void_block_ids
         cached.new_token_ids = [[0] * len(token_ids) for token_ids in cached.new_token_ids]
         cached.all_token_ids = {
             request_id: np.zeros(len(token_ids), dtype=np.int32)
