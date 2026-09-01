@@ -557,20 +557,15 @@ class PassiveScheduler:
             # data-plane receive for it (hidden / draft payload), so
             # dropping it here would wedge that edge's decode channel FIFO
             # permanently (the cloud never sends, the edge never stops
-            # waiting).  Every member was just aborted and now carries an
-            # "aborted" removal record, so the rewrite void-runs the whole
-            # batch and it executes as a fully-void comm shell — the edge's
-            # recv completes and the channel unblocks.
+            # waiting).  Every member was just force-preempted (or aborted)
+            # and now carries a removal record, so the rewrite void-runs
+            # the whole batch and it executes as a fully-void comm shell —
+            # the edge's recv completes and the channel unblocks.  A
+            # rewrite failure here is a protocol error (a member with no
+            # state AND no removal record) and must propagate, never be
+            # dropped silently.
             if self.scheduler_output_handler is not None:
-                try:
-                    so = self.scheduler_output_handler(so)
-                except Exception:
-                    # Last resort: better to drop than crash the loop, but
-                    # this re-opens the channel wedge — log loudly.
-                    logger.exception(
-                        "[ME] escalated batch void-run rewrite failed; "
-                        "dropping it (edge channel may stall)")
-                    continue
+                so = self.scheduler_output_handler(so)
             self._me_route_to_ready_queue(so)
 
     def _me_resume_stalled(self) -> None:
@@ -623,6 +618,28 @@ class PassiveScheduler:
                 ids.update(so.num_scheduled_tokens)
         for parked in self._me_kv_stalled_by_edge.values():
             for so in parked:
+                ids.update(so.num_scheduled_tokens)
+        return ids
+
+    def worker_bound_request_ids(self) -> set[str]:
+        """Requests whose cloud block tables may already be in (or on their
+        way to) the worker: dispatched batches and the already-rewritten
+        ready queues.  Preempting one of these would free blocks the worker
+        can still write — unsafe.
+
+        Everything NOT in this set is a safe preemption victim even when it
+        is queued: batches still in ``_me_queue`` or the park list have not
+        been rewritten yet, so their later rewrite simply void-runs the
+        preempted member (the single-machine "preempt a running request and
+        recompute later" semantic, ported through the void-run drain)."""
+        ids = set(self._inflight_req_ids)
+        for ready in (
+            self.ready_prefills,
+            self.ready_decodes,
+            self.ready_drafts,
+            self.ready_pdmixes,
+        ):
+            for so in ready:
                 ids.update(so.num_scheduled_tokens)
         return ids
 

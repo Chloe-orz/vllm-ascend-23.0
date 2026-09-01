@@ -2153,10 +2153,12 @@ class PDSeparatedScheduler(Scheduler):
                 req_id,
             )
             return
-        if notice.reason in ("kv_park_timeout", "reservation_expired"):
-            # Park escalation / reservation TTL expiry: abort, do not retry
-            # (the cloud no longer holds a reservation for this request, so
-            # a retry could never be admitted).
+        if notice.reason in ("kv_park_abort", "reservation_expired"):
+            # Terminal: the cloud could not re-pin this request's prefix
+            # (partial eviction) or its reservation expired — a retry could
+            # never be admitted, so abort.  "kv_park_timeout" is NOT here:
+            # park escalation is a force-preempt for retry (the cloud kept
+            # the prefix pinned), so it falls through to the hold path.
             self._cleanup_preempted_request(target, free_kv=False)
             self.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
             return
@@ -2193,7 +2195,7 @@ class PDSeparatedScheduler(Scheduler):
                 "[PD] request %s tails drained; finishing preempt cleanup",
                 req_id,
             )
-            if reason in ("kv_park_timeout", "reservation_expired"):
+            if reason in ("kv_park_abort", "reservation_expired"):
                 self._cleanup_preempted_request(request, free_kv=False)
                 self.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
             else:

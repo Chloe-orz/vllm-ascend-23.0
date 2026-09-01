@@ -2386,28 +2386,16 @@ class NPUModelRunner(GPUModelRunner):
         result = super()._update_states(scheduler_output)
 
         # Void-run projected members must not participate in speculative
-        # correction accounting.  The cloud rewrite marks them explicitly
-        # in cloud_void_req_ids (a live cached request always has
-        # num_computed > 0, so nc==0 is kept as a defensive fallback for
-        # mixed-version traffic).  A void member's draft chain may never
-        # have produced corrections (its step-0 can be dropped by the
-        # park-timeout escalation), and its tiny projection block table
-        # cannot host a real corrected position anyway — its output is
-        # discarded by epoch rules.  Exclude void members from the
-        # previous-spec participation set so the missing-correction guard
-        # below only ever fires for live requests.
+        # correction accounting; the cloud rewrite marks them explicitly in
+        # cloud_void_req_ids.  A void member's draft chain may never have
+        # produced corrections (its step-0 can drain as a comm shell), and
+        # its tiny projection block table cannot host a real corrected
+        # position anyway — its output is discarded by epoch rules.
+        # Exclude marked members from the previous-spec participation set
+        # so the missing-correction guard below only ever fires for live
+        # requests.
         if previous_num_draft_tokens:
             _void_req_ids = set(scheduler_output.cloud_void_req_ids or ())
-            _cached_req_data = scheduler_output.scheduled_cached_reqs
-            if _cached_req_data is not None and _cached_req_data.req_ids:
-                _void_req_ids.update(
-                    req_id
-                    for req_id, nc in zip(
-                        _cached_req_data.req_ids,
-                        _cached_req_data.num_computed_tokens,
-                    )
-                    if int(nc) == 0
-                )
             if _void_req_ids:
                 previous_num_draft_tokens = {
                     req_id: num_draft
@@ -6489,27 +6477,19 @@ class NPUModelRunner(GPUModelRunner):
 
         base_positions = state.base_positions
         if base_positions is None:
-            # Step 0 never executed for this task.  Under the protocol that
-            # only happens when its parked DRAFT_FIRST was dropped by the
-            # park-timeout escalation after aborting every member — cache
-            # eviction and invalidation purge remove the whole state, and a
-            # live chain always executes step 0 first (per-channel FIFO).
-            # The follow-up steps still arrive and must run as a comm shell
-            # (shape/ack/FIFO preserved); their output is discarded by the
-            # edge.  Synthesize zero base positions so slot mapping stays
-            # inside the void-run projection pool.
-            logger.error(
-                "DRAFT follow-up step without step-0 execution; running "
-                "as void comm shell: step=%d, task_id=%s",
-                draft_step_idx,
-                task_id,
+            # Protocol error, not a recoverable state: step 0 always
+            # executes for every chain — either live (setting base_positions
+            # here) or as a fully-void comm shell after a park escalation
+            # (in which case every follow-up step is fully void too and is
+            # short-circuited in _execute_model_cloud_draft BEFORE reaching
+            # this function).  Cache eviction and invalidation purge remove
+            # the whole state instead.  Reaching this branch therefore
+            # means an undefined interleaving; fail loudly rather than
+            # fabricating positions.
+            raise RuntimeError(
+                "DRAFT follow-up step has no reconstructed base positions: "
+                f"step={draft_step_idx}, task_id={task_id}"
             )
-            base_positions = torch.zeros(
-                num_tokens,
-                dtype=torch.long,
-                device=state.target_positions.device,
-            )
-            state.base_positions = base_positions
         if base_positions.shape[-1] != num_tokens:
             raise RuntimeError(
                 "DRAFT follow-up position/token mismatch: "

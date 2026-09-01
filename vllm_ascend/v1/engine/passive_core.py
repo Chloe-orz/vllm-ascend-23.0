@@ -560,7 +560,7 @@ class PassiveEngineCoreProc:
             self.passive_scheduler.capacity_relief_handler = (
                 self._try_preempt_for_capacity)
             self.passive_scheduler.park_escalation_handler = (
-                self._abort_stalled_batch_members)
+                self._escalate_stalled_batch)
             self.passive_scheduler.lane_stall_handler = (
                 self._publish_lane_stall)
         # Optional POST_OUT (cloud → edge) channel. Only set on the cloud
@@ -667,39 +667,62 @@ class PassiveEngineCoreProc:
             "stalled" if stalled else "resumed", edge_id,
         )
 
-    def _abort_stalled_batch_members(
+    def _escalate_stalled_batch(
         self, edge_id: int, scheduler_output: SchedulerOutput
     ) -> None:
-        """Park escalation: abort every member of a stalled batch whose
-        recovery made no progress for the escalation window (liveness
-        floor — a defined protocol action, not a silent wait)."""
+        """Park escalation: force-preempt every member of the stalled batch
+        for retry — the single-machine preempt-recompute semantic, not a
+        client-visible abort.  Only members whose prefix can no longer be
+        re-pinned are aborted (a retry could never be admitted).
+
+        Liveness floor — a defined protocol action, not a silent wait.  The
+        scheduler then drains the stalled batch itself as a fully void comm
+        shell, so the edge's decode channel never wedges."""
         if self._cloud_kv_manager is None:
             return
+        retried = 0
+        aborted = 0
         for request_id in scheduler_output.num_scheduled_tokens:
-            # Publish the CONTROL request id (manifest), not the engine id:
-            # the edge matches notices against edge_cloud_request_id, which
-            # lacks the engine-side "-<uuid8>" suffix that
-            # input_processor.assign_request_id appends to request_id.
+            result = self._cloud_kv_manager.preempt_request(request_id)
+            if result is not None:
+                control_request_id, epoch = result
+                # Same retry semantics as a capacity preemption: the edge
+                # holds the request and re-admits it on the release gate.
+                self._publish_preempt_notice(
+                    control_request_id, epoch, reason="kv_park_timeout")
+                retried += 1
+                continue
+            # The prefix can no longer be re-pinned (partially evicted) —
+            # abort just this member; every other member still retries.
             control_request_id = self._cloud_kv_manager.release_for_abort(
                 request_id)
             if control_request_id is not None:
                 self._publish_preempt_notice(
-                    control_request_id, epoch=0, reason="kv_park_timeout")
+                    control_request_id, epoch=0, reason="kv_park_abort")
+                aborted += 1
         log_event(
             logger,
             "error",
             "cloud_kv_park_timeout_escalated",
             edge_id=edge_id,
-            aborted_members=len(scheduler_output.num_scheduled_tokens),
+            retried_members=retried,
+            aborted_members=aborted,
         )
 
     def _try_preempt_for_capacity(self, scheduler_output: SchedulerOutput) -> bool:
-        """Preempt one idle victim so the failing batch can allocate.
+        """Preempt one victim so the failing batch can allocate.
 
-        Victims are chosen most-recently-admitted first, excluding every
-        request that is unsafe to touch: members of the failing batch and
-        anything queued or dispatched (in-flight on the worker).
-        Returns True when a victim was freed (caller retries the rewrite).
+        Victims are chosen most-recently-admitted first.  The only unsafe
+        requests are the worker-bound ones (dispatched to the worker or
+        sitting in an already-rewritten ready queue — their cloud block
+        tables are baked in and freeing them would corrupt in-flight KV
+        writes) and members of the failing batch itself.  Everything else
+        is fair game even while queued: batches still in the ingress queue
+        or the park list have not been rewritten, so the preempted member
+        is void-run when its batch is later rewritten — the single-machine
+        "preempt a running request, recompute later" semantic through the
+        void-run drain.  Returns True when a victim was freed (caller
+        retries the rewrite).
         """
         if self._cloud_kv_manager is None:
             return False
@@ -707,7 +730,7 @@ class PassiveEngineCoreProc:
             # No way to notify the edge — never free a victim the edge
             # still believes is running.
             return False
-        ineligible = self.passive_scheduler.inflight_request_ids()
+        ineligible = self.passive_scheduler.worker_bound_request_ids()
         ineligible.update(scheduler_output.num_scheduled_tokens)
         for candidate in self._cloud_kv_manager.preemption_candidates():
             if candidate in ineligible:
