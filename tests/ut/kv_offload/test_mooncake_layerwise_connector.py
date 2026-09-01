@@ -761,14 +761,16 @@ class TestMooncakeLayerwiseConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(meta.requests["req1"].remote_block_ids, [[1, 2, 3]])
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
 
-    def test_update_state_after_alloc_hybrid_trims_remote_block_with_only_last_token(self):
+    def test_update_state_after_alloc_hybrid_keeps_block_aligned_external_block(self):
         self.scheduler.need_truncate = True
         request = MockRequest(
             "req1",
             prompt_token_ids=list(range(17)),
             kv_transfer_params={"do_remote_prefill": True, "metaserver": "http://meta"},
         )
-        blocks = _MockBlocks(unhashed=[], block_ids_tuple=([4, 5],))
+        # Async remote loading allocates slots only for the 16 external
+        # tokens. The single allocated block must be advertised to P.
+        blocks = _MockBlocks(unhashed=[], block_ids_tuple=([4],))
         self.scheduler.executor.submit = MagicMock()
 
         self.scheduler.update_state_after_alloc(request, blocks, num_external_tokens=16)

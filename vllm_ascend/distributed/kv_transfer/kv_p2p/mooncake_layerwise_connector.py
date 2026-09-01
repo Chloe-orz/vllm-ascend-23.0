@@ -966,18 +966,6 @@ class MooncakeLayerwiseConnectorScheduler:
         request.max_tokens = 1
         params["_p_side_truncated"] = True
 
-    def _trim_hybrid_remote_block_ids(self, block_ids: tuple[list[int], ...], prompt_len: int) -> tuple[list[int], ...]:
-        if not self.need_truncate or prompt_len <= 1:
-            return block_ids
-
-        trimmed_block_ids: list[list[int]] = []
-        for group_block_ids, block_size in zip(block_ids, self.block_size):
-            if prompt_len % block_size == 1:
-                trimmed_block_ids.append(list(group_block_ids[:-1]))
-            else:
-                trimmed_block_ids.append(list(group_block_ids))
-        return tuple(trimmed_block_ids)
-
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         """
         For remote prefill, pull all prompt blocks from remote
@@ -1042,7 +1030,11 @@ class MooncakeLayerwiseConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             do_virtual = params.get("do_virtual", False)
             local_block_ids = (blocks.get_block_ids()) if num_external_tokens > 0 else []
-            remote_block_ids = self._trim_hybrid_remote_block_ids(local_block_ids, len(request.prompt_token_ids))
+            # Async remote loading allocates slots for num_external_tokens only,
+            # so this is already the exact block table P must write into. Using
+            # the original prompt length to trim it again can drop a required
+            # block when the hybrid-prefill token count is block-aligned.
+            remote_block_ids = copy.deepcopy(local_block_ids)
             remote_cached_tokens = request.num_computed_tokens
             # Get unhashed blocks to pull from remote.
             self._reqs_need_recv[request.request_id] = (
