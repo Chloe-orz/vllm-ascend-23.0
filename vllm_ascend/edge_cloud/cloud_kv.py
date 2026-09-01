@@ -224,8 +224,18 @@ class CloudKVRequestManager:
         return needed
 
     def can_admit(self, scheduler_output: SchedulerOutput) -> bool:
-        """Estimate whether this batch fits the free pool."""
-        needed = self._estimate_required_blocks(scheduler_output)
+        """Estimate whether this batch fits the free pool.  Void-run
+        members allocate nothing (projection pool), so they are excluded —
+        a fully void-run batch always fits and can drain as a comm shell
+        even while the pool is full."""
+        needed = self._estimate_required_blocks(
+            scheduler_output,
+            skip_req_ids={
+                rid
+                for rid in scheduler_output.num_scheduled_tokens
+                if self._is_void_incarnation(rid)
+            },
+        )
         if needed == 0:
             return True
         return self._kv.block_pool.get_num_free_blocks() >= needed

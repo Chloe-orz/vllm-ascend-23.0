@@ -553,6 +553,25 @@ class PassiveScheduler:
             if not parked:
                 self._me_kv_stalled_by_edge.pop(edge_id, None)
                 self._notify_lane_stall(edge_id, False)
+            # Do NOT drop the escalated batch: the edge already aligned a
+            # data-plane receive for it (hidden / draft payload), so
+            # dropping it here would wedge that edge's decode channel FIFO
+            # permanently (the cloud never sends, the edge never stops
+            # waiting).  Every member was just aborted and now carries an
+            # "aborted" removal record, so the rewrite void-runs the whole
+            # batch and it executes as a fully-void comm shell — the edge's
+            # recv completes and the channel unblocks.
+            if self.scheduler_output_handler is not None:
+                try:
+                    so = self.scheduler_output_handler(so)
+                except Exception:
+                    # Last resort: better to drop than crash the loop, but
+                    # this re-opens the channel wedge — log loudly.
+                    logger.exception(
+                        "[ME] escalated batch void-run rewrite failed; "
+                        "dropping it (edge channel may stall)")
+                    continue
+            self._me_route_to_ready_queue(so)
 
     def _me_resume_stalled(self) -> None:
         """Retry parked decode heads; on success unblock that edge."""
