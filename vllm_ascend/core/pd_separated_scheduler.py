@@ -246,6 +246,11 @@ class PDSeparatedScheduler(Scheduler):
         # release signal), then requeued at the front of waiting.
         self._cloud_retry_hold: dict[str, Request] = {}
         self._cloud_retry_attempts: dict[str, int] = {}
+        # Cloud lane-stall flag (EdgeCloudLaneStallNotice): while set, no
+        # head batch (PF/DF/DRF) is dispatched toward the cloud, so the
+        # worker never posts an isend into a lane the cloud is not
+        # receiving on.  Tails (PL/DL/DRL) still flow.
+        self._cloud_lane_stalled: bool = False
         # Preempted requests whose PD flights are still in flight: cleanup
         # is deferred until their queued tails DRAIN (channel pairing must
         # not be broken by dropping a tail whose cloud-side send exists).
@@ -1114,7 +1119,8 @@ class PDSeparatedScheduler(Scheduler):
         # the useless call.
         effective_capacity = self.max_num_running_reqs - len(self.running)
         return (
-            self._has_prefill_work()
+            not self._cloud_lane_stalled
+            and self._has_prefill_work()
             and self.prefill_inflight_count < self.prefill_inflight_limit
             and self.hidden_channel_manager.has_free_prefill()
             and effective_capacity > 0
@@ -1122,7 +1128,8 @@ class PDSeparatedScheduler(Scheduler):
 
     def _can_schedule_decode_first(self) -> bool:
         return bool(
-            self.running
+            not self._cloud_lane_stalled
+            and self.running
             and self.decode_or_draft_inflight_count == 0
             and self.draft_remote_pending_count == 0
             and not self.drafts_first_ready
@@ -1143,7 +1150,7 @@ class PDSeparatedScheduler(Scheduler):
         )
 
     def _can_schedule_draft_first(self) -> bool:
-        if not self.drafts_first_ready:
+        if self._cloud_lane_stalled or not self.drafts_first_ready:
             return False
         next_output = self.drafts_first_ready[0]
         is_pregenerated = next_output.draft_task_id in self._pregenerated_draft_task_ids
@@ -2092,6 +2099,16 @@ class PDSeparatedScheduler(Scheduler):
     # Cloud preemption handling (KV-capacity fault model)                 #
     # ------------------------------------------------------------------ #
     _CLOUD_RETRY_ATTEMPT_LIMIT = 8
+
+    def handle_lane_stall(self, notice) -> None:
+        """Apply a cloud lane-stall frame: stop (or resume) dispatching
+        head batches toward the cloud."""
+        self._cloud_lane_stalled = bool(notice.stalled)
+        logger.info(
+            "[PD] cloud decode lane %s: reason=%s",
+            "stalled" if notice.stalled else "resumed",
+            notice.reason,
+        )
 
     def handle_cloud_preempt(self, notice) -> None:
         """Ingest a cloud PREEMPT notice: clean up the request locally and

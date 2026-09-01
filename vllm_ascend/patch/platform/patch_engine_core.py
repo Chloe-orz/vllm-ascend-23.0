@@ -246,8 +246,18 @@ def _drain_pd_channel_inbox(self) -> None:
         # KV-capacity control frames travel on the same POST_OUT channel,
         # next to SchedulerOutput batches.
         from vllm_ascend.edge_cloud.prefix_protocol import (
+            EdgeCloudLaneStallNotice,
             EdgeCloudPreemptNotice,
         )
+        if isinstance(so, EdgeCloudLaneStallNotice):
+            lane_handler = getattr(self.scheduler, "handle_lane_stall", None)
+            if lane_handler is not None:
+                lane_handler(so)
+            else:
+                logger.warning(
+                    "[PD] lane-stall notice dropped: scheduler has no "
+                    "handle_lane_stall")
+            continue
         if isinstance(so, EdgeCloudPreemptNotice):
             handler = getattr(self.scheduler, "handle_cloud_preempt", None)
             if handler is not None:

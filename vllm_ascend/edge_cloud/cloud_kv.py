@@ -200,7 +200,9 @@ class CloudKVRequestManager:
         )
 
     def _estimate_required_blocks(
-        self, scheduler_output: SchedulerOutput
+        self,
+        scheduler_output: SchedulerOutput,
+        skip_req_ids: set[str] | None = None,
     ) -> int:
         """Conservative upper bound of new blocks a batch will allocate.
 
@@ -215,7 +217,9 @@ class CloudKVRequestManager:
             else 0
         )
         needed = 0
-        for num_scheduled in scheduler_output.num_scheduled_tokens.values():
+        for request_id, num_scheduled in scheduler_output.num_scheduled_tokens.items():
+            if skip_req_ids and request_id in skip_req_ids:
+                continue
             needed += -(-num_scheduled // self.block_size) + lookahead_blocks
         return needed
 
@@ -388,8 +392,16 @@ class CloudKVRequestManager:
         # Atomicity precheck: raise before ANY admission/allocation so a
         # capacity failure never leaves partially admitted requests or
         # half-allocated block tables behind (a later relief retry can then
-        # safely reprocess the whole batch).
-        required = self._estimate_required_blocks(scheduler_output)
+        # safely reprocess the whole batch).  Void-incarnation members are
+        # excluded: they execute on the projection pool, not the free pool.
+        required = self._estimate_required_blocks(
+            scheduler_output,
+            skip_req_ids={
+                rid
+                for rid in scheduler_output.num_scheduled_tokens
+                if self._is_void_incarnation(rid)
+            },
+        )
         if self._kv.block_pool.get_num_free_blocks() < required:
             log_event(
                 logger,
@@ -574,6 +586,21 @@ class CloudKVRequestManager:
                     control_request_id=control_request_id,
                     engine_request_id=data.req_id,
                 )
+        if reservation is None and self._is_void_incarnation(data.req_id):
+            # Void-incarnation member (e.g. park-escalated): project onto
+            # the projection pool instead of admitting — shapes and acks
+            # drain, output discarded by epoch rules.
+            self._log_void_run(
+                data.req_id, phase="admission", scheduler_output=scheduler_output)
+            projected = copy.copy(data)
+            projected.prompt_token_ids = (
+                None if data.prompt_token_ids is None else [0] * len(data.prompt_token_ids)
+            )
+            if projected.prefill_token_ids is not None:
+                projected.prefill_token_ids = [0] * len(projected.prefill_token_ids)
+            projected.num_computed_tokens = 0
+            projected.block_ids = self._void_block_ids
+            return projected
         if reservation is None:
             log_event(
                 logger,

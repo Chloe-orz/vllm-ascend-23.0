@@ -55,6 +55,17 @@ class CloudAllocationFailed(Exception):
 
 
 @dataclass(frozen=True)
+class EdgeCloudLaneStallNotice:
+    """Cloud->edge control frame: this edge's decode lane / admissions
+    stalled (or resumed) on the cloud.  The edge scheduler stops (or
+    resumes) dispatching head batches (PF/DF/DRF) while stalled, so its
+    worker never posts an isend into a lane the cloud will not recv."""
+
+    stalled: bool
+    reason: str = "kv_stall"
+
+
+@dataclass(frozen=True)
 class EdgeCloudPreemptNotice:
     """Cloud->edge control frame: a request was preempted for KV capacity.
 

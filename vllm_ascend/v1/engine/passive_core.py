@@ -561,6 +561,8 @@ class PassiveEngineCoreProc:
                 self._try_preempt_for_capacity)
             self.passive_scheduler.park_escalation_handler = (
                 self._abort_stalled_batch_members)
+            self.passive_scheduler.lane_stall_handler = (
+                self._publish_lane_stall)
         # Optional POST_OUT (cloud → edge) channel. Only set on the cloud
         # side in PD-separation mode; left None for the legacy PP path.
         self._pp_pd_channel = pp_pd_channel
@@ -644,6 +646,26 @@ class PassiveEngineCoreProc:
             self._publish_preempt_notice(
                 control_request_id, epoch=0, reason="reservation_expired"
             )
+
+    def _publish_lane_stall(self, edge_id: int, stalled: bool) -> None:
+        """Tell one edge its decode lane / admissions are stalled (or
+        resumed), so it stops dispatching head batches into a lane the
+        cloud is not receiving on."""
+        from vllm_ascend.edge_cloud.prefix_protocol import (
+            EdgeCloudLaneStallNotice,
+        )
+
+        if self._pp_pd_channel is None:
+            return
+        notice = EdgeCloudLaneStallNotice(stalled=stalled)
+        if isinstance(self._pp_pd_channel, MultiEdgeChannelMux):
+            self._pp_pd_channel.publish_to_edge(edge_id, notice)
+        else:
+            self._pp_pd_channel.publish(notice)
+        logger.info(
+            "[CLOUD-LANE] %s edge %d decode lane",
+            "stalled" if stalled else "resumed", edge_id,
+        )
 
     def _abort_stalled_batch_members(
         self, edge_id: int, scheduler_output: SchedulerOutput
@@ -812,7 +834,12 @@ class PassiveEngineCoreProc:
                 if completed_output is not None:
                     self._cloud_kv_manager.complete_scheduler_output(completed_output)
                     self.passive_scheduler.mark_settled(completed_output)
-                    self.passive_scheduler.note_park_progress()
+                    _head_token = result.get("head_token")
+                    if _head_token:
+                        from vllm_ascend.edge_cloud.id_adapter import (
+                            parse_token_edge_id)
+                        self.passive_scheduler.note_park_progress(
+                            parse_token_edge_id(_head_token))
                     log_event(
                         logger,
                         "debug",

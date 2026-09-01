@@ -140,7 +140,13 @@ class PassiveScheduler:
         # (edge_id, stalled_head_so) when the oldest stalled batch shows no
         # capacity progress for the escalation window.
         self.park_escalation_handler = None
-        self._me_last_capacity_progress: float = 0.0
+        # Lane-stall notification hook (edge_id, stalled): lets the cloud
+        # tell an edge its decode lane / admissions are blocked, so the
+        # edge stops dispatching head batches into a lane nobody recvs.
+        self.lane_stall_handler = None
+        # Per-edge capacity-progress watermark: one edge's acks must not
+        # postpone another edge's park escalation.
+        self._me_last_capacity_progress: dict[int, float] = {}
         self._PARK_ESCALATION_SECONDS = 30.0
         # Requests dispatched to the worker but not yet acked — never
         # eligible as preemption victims (their blocks are being written).
@@ -503,6 +509,8 @@ class PassiveScheduler:
         shared and FIFO-paired, so no later decode-lane batch of this edge
         may overtake the parked one."""
         so._me_parked_at = time.monotonic()
+        if not self._me_kv_stalled_by_edge.get(edge_id):
+            self._notify_lane_stall(edge_id, True)
         self._me_kv_stalled_by_edge.setdefault(
             edge_id, deque()).append(so)
         logger.info(
@@ -511,10 +519,14 @@ class PassiveScheduler:
             edge_id, so.batch_type,
         )
 
-    def note_park_progress(self) -> None:
-        """Record forward capacity progress (acks, frees, resumes) —
-        postpones the park escalation window."""
-        self._me_last_capacity_progress = time.monotonic()
+    def note_park_progress(self, edge_id: int) -> None:
+        """Record forward capacity progress for one edge (acks, frees,
+        resumes) — postpones that edge's park escalation window only."""
+        self._me_last_capacity_progress[edge_id] = time.monotonic()
+
+    def _notify_lane_stall(self, edge_id: int, stalled: bool) -> None:
+        if self.lane_stall_handler is not None:
+            self.lane_stall_handler(edge_id, stalled)
 
     def _me_check_park_escalation(self) -> None:
         """Liveness floor: escalate the oldest stalled batch that has had
@@ -527,7 +539,8 @@ class PassiveScheduler:
                 continue
             so = parked[0]
             parked_at = getattr(so, "_me_parked_at", now)
-            last_progress = max(parked_at, self._me_last_capacity_progress)
+            last_progress = max(
+                parked_at, self._me_last_capacity_progress.get(edge_id, 0.0))
             if now - last_progress < self._PARK_ESCALATION_SECONDS:
                 continue
             logger.error(
@@ -539,6 +552,7 @@ class PassiveScheduler:
             parked.popleft()
             if not parked:
                 self._me_kv_stalled_by_edge.pop(edge_id, None)
+                self._notify_lane_stall(edge_id, False)
 
     def _me_resume_stalled(self) -> None:
         """Retry parked decode heads; on success unblock that edge."""
@@ -558,7 +572,8 @@ class PassiveScheduler:
                 self._me_route_to_ready_queue(so)
             if not parked:
                 self._me_kv_stalled_by_edge.pop(edge_id, None)
-                self.note_park_progress()
+                self._notify_lane_stall(edge_id, False)
+                self.note_park_progress(edge_id)
                 logger.info(
                     "[ME] decode batch resumed after KV free: edge=%d",
                     edge_id,
