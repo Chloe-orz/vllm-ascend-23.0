@@ -158,8 +158,27 @@ class CloudKVRequestManager:
         )
         if manifest.block_size != self.block_size:
             raise ValueError(f"edge/cloud KV block-size mismatch: edge={manifest.block_size}, cloud={self.block_size}")
-        if manifest.request_id in self._reservations:
-            raise ValueError(f"duplicate reservation {manifest.request_id!r}")
+        existing = self._reservations.get(manifest.request_id)
+        if existing is not None:
+            # Idempotent probe: the edge retries transparently after probe
+            # timeouts, and the first attempt may already have reserved.
+            # Re-answer from the existing reservation instead of erroring
+            # (a duplicate error would loop the retry forever).
+            log_event(
+                logger,
+                "info",
+                "cloud_kv_probe_replayed",
+                request_id=manifest.request_id,
+                instance_id=self.instance_id,
+                hit_tokens=existing.hit_tokens,
+            )
+            return ProbeResult(
+                request_id=manifest.request_id,
+                instance_id=self.instance_id,
+                block_size=self.block_size,
+                hit_blocks=existing.hit_tokens // self.block_size,
+                hit_tokens=existing.hit_tokens,
+            )
 
         completed_blocks = 0
         for digest in manifest.full_block_hashes:

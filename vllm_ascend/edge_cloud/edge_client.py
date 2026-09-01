@@ -194,85 +194,89 @@ class EdgePrefixClient:
             block_size=self.block_size,
         )
         timeout = aiohttp.ClientTimeout(total=None, connect=self._connect_timeout)
-        session: aiohttp.ClientSession | None = None
-        response: aiohttp.ClientResponse | None = None
-        try:
-            session = aiohttp.ClientSession(timeout=timeout)
-            # wait_for bounds ONLY the probe phase (post() resolves once
-            # response headers arrive); the usage stream then stays open on
-            # the same response without any total-timeout interference.
-            response = await asyncio.wait_for(
-                session.post(
-                    self._control_url,
-                    headers={**headers, "Accept": "text/event-stream"},
-                    json=body,
-                ),
-                timeout=self._probe_timeout,
-            )
-            if response.status != 200:
+        # Transient control-plane failures (wedged/congested cloud control
+        # server, timeouts, connection resets, non-200 backpressure) are
+        # retried transparently with capped backoff: a temporary cloud stall
+        # must not surface as a client-visible request failure.  Only
+        # protocol violations (id/block-size mismatch, impossible hit) fail
+        # the request immediately.
+        backoff = 1.0
+        attempt = 0
+        while True:
+            attempt += 1
+            session: aiohttp.ClientSession | None = None
+            response: aiohttp.ClientResponse | None = None
+            retryable = False
+            try:
+                session = aiohttp.ClientSession(timeout=timeout)
+                # wait_for bounds ONLY the probe phase (post() resolves once
+                # response headers arrive); the usage stream then stays open
+                # on the same response without any total-timeout interference.
+                response = await asyncio.wait_for(
+                    session.post(
+                        self._control_url,
+                        headers={**headers, "Accept": "text/event-stream"},
+                        json=body,
+                    ),
+                    timeout=self._probe_timeout,
+                )
+                if response.status != 200:
+                    retryable = True
+                    raise RuntimeError(f"edge-cloud prefix negotiation failed with HTTP {response.status}")
+                if media_items:
+                    probe = self._parse_mm_probe_response(request_id, response)
+                else:
+                    probe = ProbeResult.from_headers(response.headers)
+                if probe.request_id != request_id:
+                    raise RuntimeError("cloud returned a different request ID")
+                if probe.block_size != self.block_size:
+                    raise RuntimeError(
+                        f"edge/cloud KV block-size mismatch: edge={self.block_size}, cloud={probe.block_size}"
+                    )
+                if probe.hit_tokens > len(prompt_token_ids):
+                    raise RuntimeError("cloud prefix hit exceeds the prompt length")
+                break
+            except BaseException as exc:
+                retryable = retryable or isinstance(
+                    exc, (asyncio.TimeoutError, aiohttp.ClientError)
+                )
+                try:
+                    if response is not None:
+                        response.close()
+                except BaseException:
+                    logger.debug("probe response cleanup failed", exc_info=True)
+                try:
+                    if session is not None:
+                        await session.close()
+                except BaseException:
+                    logger.debug("probe session cleanup failed", exc_info=True)
+                if not retryable:
+                    logger.exception(
+                        "%s",
+                        format_event(
+                            "edge_probe_failed",
+                            request_id=request_id,
+                            error_type=type(exc).__name__,
+                        ),
+                    )
+                    self._request_ids_in_use.discard(request_id)
+                    raise
                 log_event(
                     logger,
                     "warning",
-                    "edge_probe_http_failed",
+                    "edge_probe_retry",
                     request_id=request_id,
-                    http_status=response.status,
-                )
-                raise RuntimeError(f"edge-cloud prefix negotiation failed with HTTP {response.status}")
-            if media_items:
-                probe = self._parse_mm_probe_response(request_id, response)
-            else:
-                probe = ProbeResult.from_headers(response.headers)
-            if probe.request_id != request_id:
-                raise RuntimeError("cloud returned a different request ID")
-            if probe.block_size != self.block_size:
-                raise RuntimeError(
-                    f"edge/cloud KV block-size mismatch: edge={self.block_size}, cloud={probe.block_size}"
-                )
-            if probe.hit_tokens > len(prompt_token_ids):
-                raise RuntimeError("cloud prefix hit exceeds the prompt length")
-
-            task = asyncio.create_task(
-                self._drain_stream(request_id, response, session),
-                name=f"edge-cloud-usage-{request_id}",
-            )
-        except BaseException as exc:
-            logger.exception(
-                "%s",
-                format_event(
-                    "edge_probe_failed",
-                    request_id=request_id,
+                    attempt=attempt,
+                    backoff_seconds=backoff,
                     error_type=type(exc).__name__,
-                ),
-            )
-            try:
-                if response is not None:
-                    response.close()
-            except BaseException as cleanup_exc:
-                logger.exception(
-                    "%s",
-                    format_event(
-                        "edge_probe_cleanup_failed",
-                        request_id=request_id,
-                        resource="response",
-                        error_type=type(cleanup_exc).__name__,
-                    ),
                 )
-            try:
-                if session is not None:
-                    await session.close()
-            except BaseException as cleanup_exc:
-                logger.exception(
-                    "%s",
-                    format_event(
-                        "edge_probe_cleanup_failed",
-                        request_id=request_id,
-                        resource="session",
-                        error_type=type(cleanup_exc).__name__,
-                    ),
-                )
-            finally:
-                self._request_ids_in_use.discard(request_id)
-            raise
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 10.0)
+
+        task = asyncio.create_task(
+            self._drain_stream(request_id, response, session),
+            name=f"edge-cloud-usage-{request_id}",
+        )
 
         log_event(
             logger,
