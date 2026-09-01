@@ -92,16 +92,53 @@ import heapq
 import ipaddress
 import json
 import os
-import sys
+import time
 import uuid
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+PD_TRACE_PREFIX = "[PD-TRACE]"
+
+
+def _block_counts(block_ids) -> list[int]:
+    """Return per-KV-group block counts without logging every block ID."""
+    return [len(group) for group in (block_ids or [])]
+
+
+def _kv_transfer_summary(kv_transfer_params: dict | None) -> dict:
+    """Build a compact, non-sensitive summary for PD lifecycle logs."""
+    params = kv_transfer_params or {}
+    return {
+        "do_remote_prefill": params.get("do_remote_prefill"),
+        "do_remote_decode": params.get("do_remote_decode"),
+        "remote_engine_id": params.get("remote_engine_id"),
+        "remote_host": params.get("remote_host"),
+        "remote_port": params.get("remote_port"),
+        "remote_block_counts": _block_counts(params.get("remote_block_ids")),
+        "remote_cached_tokens": params.get("remote_cached_tokens"),
+    }
+
+
+def _request_headers(request_id: str) -> dict[str, str]:
+    headers = {"X-Request-Id": request_id}
+    if api_key := os.environ.get("OPENAI_API_KEY"):
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+def _backend_url(client: httpx.AsyncClient, endpoint: str) -> str:
+    return f"{client.base_url}{endpoint.lstrip('/')}"
+
+
+def _http_error_fields(error: Exception) -> tuple[int | None, str | None]:
+    if not isinstance(error, httpx.HTTPStatusError):
+        return None, None
+    return error.response.status_code, error.response.text[:500]
 
 # Add uvloop for faster event loop if available
 try:
@@ -294,7 +331,13 @@ def parse_args():
 async def lifespan(app: FastAPI):
     global proxy_state
     proxy_state = ProxyState(global_args.prefiller_instances, global_args.decoder_instances)
-    print(f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients.")
+    logger.info(
+        "%s stage=proxy event=ready prefiller_instances=%s decoder_instances=%s metaserver=%s",
+        PD_TRACE_PREFIX,
+        global_args.prefiller_instances,
+        global_args.decoder_instances,
+        f"http://{global_args.host}:{global_args.port}/v1/metaserver",
+    )
     yield
     for p in proxy_state.prefillers:
         await p.client.aclose()
@@ -338,7 +381,7 @@ async def send_request_to_service(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    proxy_state.acquire_aborted_prefiller_requests(prefiller_id)
+    aborted_requests = proxy_state.acquire_aborted_prefiller_requests(prefiller_id)
     req_data = req_data.copy()
     req_data["stream"] = False
     req_data["max_tokens"] = 1
@@ -347,23 +390,82 @@ async def send_request_to_service(
         req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
-    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
+    headers = _request_headers(request_id)
+    backend_url = _backend_url(client, endpoint)
+    logger.info(
+        "%s request_id=%s stage=proxy_to_prefill event=dispatch "
+        "prefiller_id=%s backend=%s aborted_request_count=%d kv=%s",
+        PD_TRACE_PREFIX,
+        request_id,
+        prefiller_id,
+        backend_url,
+        len(aborted_requests),
+        _kv_transfer_summary(req_data.get("kv_transfer_params")),
+    )
     last_exc = None
     for attempt in range(1, max_retries + 1):
+        started_at = time.perf_counter()
         try:
+            logger.info(
+                "%s request_id=%s stage=proxy_to_prefill event=http_start "
+                "prefiller_id=%s backend=%s attempt=%d/%d",
+                PD_TRACE_PREFIX,
+                request_id,
+                prefiller_id,
+                backend_url,
+                attempt,
+                max_retries,
+            )
             response = await client.post(endpoint, json=req_data, headers=headers)
             response.raise_for_status()
             if request_id in proxy_state.req_id_future:
                 result_future = proxy_state.req_id_future[request_id]
-                result_future.set_result(response.json()["kv_transfer_params"])
+                response_params = response.json().get("kv_transfer_params")
+                if response_params is None:
+                    raise RuntimeError("Prefill response has no kv_transfer_params")
+                if not result_future.done():
+                    result_future.set_result(response_params)
+            logger.info(
+                "%s request_id=%s stage=proxy_to_prefill event=http_complete "
+                "prefiller_id=%s backend=%s status=%d elapsed_ms=%.3f",
+                PD_TRACE_PREFIX,
+                request_id,
+                prefiller_id,
+                backend_url,
+                response.status_code,
+                (time.perf_counter() - started_at) * 1000,
+            )
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
-            logger.warning("Attempt %s failed for %s: %s", attempt, endpoint, e)
+            status_code, response_text = _http_error_fields(e)
+            logger.warning(
+                "%s request_id=%s stage=proxy_to_prefill event=http_failed "
+                "prefiller_id=%s backend=%s attempt=%d/%d status=%s "
+                "elapsed_ms=%.3f response=%r error=%s",
+                PD_TRACE_PREFIX,
+                request_id,
+                prefiller_id,
+                backend_url,
+                attempt,
+                max_retries,
+                status_code,
+                (time.perf_counter() - started_at) * 1000,
+                response_text,
+                e,
+            )
             last_exc = e
             if attempt < max_retries:
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for %s.", max_retries, endpoint)
+                logger.error(
+                    "%s request_id=%s stage=proxy_to_prefill event=retries_exhausted "
+                    "prefiller_id=%s backend=%s attempts=%d",
+                    PD_TRACE_PREFIX,
+                    request_id,
+                    prefiller_id,
+                    backend_url,
+                    max_retries,
+                )
                 raise last_exc
 
 
@@ -375,34 +477,129 @@ async def stream_service_response_with_retry(
     max_retries: int = 3,
     base_delay: float = 0.2,
 ):
-    headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}", "X-Request-Id": request_id}
+    headers = _request_headers(request_id)
+    backend_url = _backend_url(client, endpoint)
     for attempt in range(1, max_retries + 1):
+        started_at = time.perf_counter()
+        chunk_count = 0
+        response_bytes = 0
+        first_chunk_sent = False
         try:
+            logger.info(
+                "%s request_id=%s stage=proxy_to_decode event=http_start "
+                "backend=%s attempt=%d/%d kv=%s",
+                PD_TRACE_PREFIX,
+                request_id,
+                backend_url,
+                attempt,
+                max_retries,
+                _kv_transfer_summary(req_data.get("kv_transfer_params")),
+            )
             async with client.stream("POST", endpoint, json=req_data, headers=headers) as response:
                 response.raise_for_status()
-                first_chunk_sent = False
+                logger.info(
+                    "%s request_id=%s stage=proxy_to_decode event=response_headers "
+                    "backend=%s status=%d elapsed_ms=%.3f",
+                    PD_TRACE_PREFIX,
+                    request_id,
+                    backend_url,
+                    response.status_code,
+                    (time.perf_counter() - started_at) * 1000,
+                )
                 async for chunk in response.aiter_bytes():
+                    if not first_chunk_sent:
+                        logger.info(
+                            "%s request_id=%s stage=decode event=first_output "
+                            "backend=%s elapsed_ms=%.3f",
+                            PD_TRACE_PREFIX,
+                            request_id,
+                            backend_url,
+                            (time.perf_counter() - started_at) * 1000,
+                        )
                     first_chunk_sent = True
+                    chunk_count += 1
+                    response_bytes += len(chunk)
                     yield chunk
+                logger.info(
+                    "%s request_id=%s stage=proxy_to_decode event=http_complete "
+                    "backend=%s status=%d chunks=%d bytes=%d elapsed_ms=%.3f",
+                    PD_TRACE_PREFIX,
+                    request_id,
+                    backend_url,
+                    response.status_code,
+                    chunk_count,
+                    response_bytes,
+                    (time.perf_counter() - started_at) * 1000,
+                )
                 return  # Success, exit after streaming
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            status_code, response_text = _http_error_fields(e)
             if attempt < max_retries:
-                logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
+                logger.warning(
+                    "%s request_id=%s stage=proxy_to_decode event=http_failed "
+                    "backend=%s attempt=%d/%d status=%s elapsed_ms=%.3f "
+                    "response=%r error=%s",
+                    PD_TRACE_PREFIX,
+                    request_id,
+                    backend_url,
+                    attempt,
+                    max_retries,
+                    status_code,
+                    (time.perf_counter() - started_at) * 1000,
+                    response_text,
+                    e,
+                )
                 await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
             else:
-                logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
+                logger.error(
+                    "%s request_id=%s stage=proxy_to_decode event=retries_exhausted "
+                    "backend=%s attempts=%d status=%s response=%r error=%s",
+                    PD_TRACE_PREFIX,
+                    request_id,
+                    backend_url,
+                    max_retries,
+                    status_code,
+                    response_text,
+                    e,
+                )
                 raise e
         except Exception as e:
             # If any chunk has been sent, do not retry, just log and drop
-            if "first_chunk_sent" in locals() and first_chunk_sent:
-                logger.error("Streaming to client interrupted after response started: %s", e)
+            if first_chunk_sent:
+                logger.exception(
+                    "%s request_id=%s stage=proxy_to_decode event=stream_interrupted "
+                    "backend=%s chunks=%d bytes=%d error=%s",
+                    PD_TRACE_PREFIX,
+                    request_id,
+                    backend_url,
+                    chunk_count,
+                    response_bytes,
+                    e,
+                )
                 return
             else:
                 if attempt < max_retries:
-                    logger.warning("Attempt %s failed for streaming %s: %s", attempt, endpoint, e)
+                    logger.warning(
+                        "%s request_id=%s stage=proxy_to_decode event=stream_failed "
+                        "backend=%s attempt=%d/%d error=%s",
+                        PD_TRACE_PREFIX,
+                        request_id,
+                        backend_url,
+                        attempt,
+                        max_retries,
+                        e,
+                    )
                     await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
                 else:
-                    logger.error("All %s attempts failed for streaming %s.", max_retries, endpoint)
+                    logger.exception(
+                        "%s request_id=%s stage=proxy_to_decode "
+                        "event=stream_retries_exhausted backend=%s attempts=%d error=%s",
+                        PD_TRACE_PREFIX,
+                        request_id,
+                        backend_url,
+                        max_retries,
+                        e,
+                    )
                     raise e
 
 
@@ -433,13 +630,31 @@ async def _handle_completions(api: str, request: Request):
             "do_remote_prefill": True,
             "metaserver": f"http://{global_args.host}:{global_args.port}/v1/metaserver",
         }
+        logger.info(
+            "%s request_id=%s stage=proxy event=request_received api=%s "
+            "client_request_id=%s body_bytes=%d stream=%s callback_request_id=%s",
+            PD_TRACE_PREFIX,
+            request_id,
+            api,
+            request.headers.get("X-Request-Id"),
+            request_length,
+            bool(req_data.get("stream", False)),
+            request_id_api,
+        )
         # Select decoder
         decoder_score = proxy_state.calculate_decode_scores(request_length)
-        logger.debug("Decoder score: %f", decoder_score)
         # Use the prefiller's kv_transfer_params to select decoder
         decoder_idx = proxy_state.select_decoder(decoder_score)
         decoder = proxy_state.decoders[decoder_idx]
-        # logger.debug("Using %s %s", prefiller.url, decoder.url)
+        logger.info(
+            "%s request_id=%s stage=proxy event=decoder_selected "
+            "decoder_id=%d backend=%s score=%.3f",
+            PD_TRACE_PREFIX,
+            request_id,
+            decoder_idx,
+            decoder.url,
+            decoder_score,
+        )
         # Stream response from decoder
         released_kv = False
 
@@ -460,6 +675,7 @@ async def _handle_completions(api: str, request: Request):
 
         async def generate_stream():
             nonlocal released_kv
+            started_at = time.perf_counter()
             generated_token = ""
             released_kv = False
             retry_count = 0
@@ -513,6 +729,15 @@ async def _handle_completions(api: str, request: Request):
                             else (completion_tokens + usage.get("completion_tokens"))
                         )
                         if stop_reason == "recomputed":
+                            logger.warning(
+                                "%s request_id=%s stage=decode event=recompute_requested "
+                                "decoder_id=%d completion_tokens=%d retry_count=%d",
+                                PD_TRACE_PREFIX,
+                                request_id,
+                                decoder_idx,
+                                completion_tokens,
+                                retry_count + 1,
+                            )
                             retry = True
                             retry_count += 1
                             if chat_flag:
@@ -529,28 +754,51 @@ async def _handle_completions(api: str, request: Request):
                             chunk = json.dumps(chunk_json).encode("utf-8")
                         yield chunk
             except Exception as e:
-                logger.error(
-                    "Error during streaming from decoder %s: %s the aborted request %s "
-                    "will be routing to the target prefiller when new request is ready to dispatch to it",
-                    decoder.url,
-                    e,
+                logger.exception(
+                    "%s request_id=%s stage=decode event=stream_failed "
+                    "decoder_id=%d backend=%s completion_tokens=%d retry_count=%d error=%s",
+                    PD_TRACE_PREFIX,
                     request_id,
+                    decoder_idx,
+                    decoder.url,
+                    completion_tokens,
+                    retry_count,
+                    e,
                 )
             finally:
                 # After streaming done, release tokens
                 proxy_state.release_decoder(decoder_idx, decoder_score)
+                logger.info(
+                    "%s request_id=%s stage=proxy event=request_complete "
+                    "decoder_id=%d completion_tokens=%d retry_count=%d elapsed_ms=%.3f",
+                    PD_TRACE_PREFIX,
+                    request_id,
+                    decoder_idx,
+                    completion_tokens,
+                    retry_count,
+                    (time.perf_counter() - started_at) * 1000,
+                )
 
         if stream_flag:
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            return StreamingResponse(
+                generate_stream(),
+                media_type="text/event-stream",
+                headers={"X-Request-Id": request_id},
+            )
         else:
-            return StreamingResponse(generate_stream(), media_type="application/json")
+            return StreamingResponse(
+                generate_stream(),
+                media_type="application/json",
+                headers={"X-Request-Id": request_id},
+            )
     except Exception as e:
-        import traceback
-
-        exc_info = sys.exc_info()
-        print(f"Error occurred in disagg prefill proxy server - {api} endpoint")
-        print(e)
-        print("".join(traceback.format_exception(*exc_info)))
+        logger.exception(
+            "%s request_id=%s stage=proxy event=request_failed api=%s error=%s",
+            PD_TRACE_PREFIX,
+            locals().get("request_id", "unassigned"),
+            api,
+            e,
+        )
         raise
 
 
@@ -599,21 +847,47 @@ async def reset_prefix_cache(request: Request):
 
 @app.post("/v1/metaserver")
 async def metaserver(request: Request):
+    prefiller_idx = None
+    prefiller_score = None
+    callback_request_id = "unassigned"
+    request_id = "unassigned"
+    dispatched = False
     try:
         kv_transfer_params = await request.json()
 
-        request_id = kv_transfer_params["request_id"]
-        assert request_id in proxy_state.req_data_dict
-        req_data, request_length, api = proxy_state.req_data_dict[request_id]
-        request_id = get_origin_request_id(api, request_id)
+        callback_request_id = kv_transfer_params["request_id"]
+        logger.info(
+            "%s request_id=%s stage=decoder_to_proxy event=metadata_received "
+            "client=%s kv=%s",
+            PD_TRACE_PREFIX,
+            callback_request_id,
+            request.client.host if request.client else None,
+            _kv_transfer_summary(kv_transfer_params),
+        )
+        if callback_request_id not in proxy_state.req_data_dict:
+            raise KeyError(
+                f"Unknown callback request_id={callback_request_id}; "
+                f"pending_request_count={len(proxy_state.req_data_dict)}"
+            )
+        req_data, request_length, api = proxy_state.req_data_dict[callback_request_id]
+        request_id = get_origin_request_id(api, callback_request_id)
         req_data["kv_transfer_params"] = kv_transfer_params
         prefiller_score = proxy_state.calculate_prefill_scores(request_length)
-        logger.debug("Request length: %s, Prefiller score: %s", request_length, prefiller_score)
 
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(prefiller_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
-        logger.debug("Using prefill prefiller.url=%r req_data=%r", prefiller.url, req_data)
+        logger.info(
+            "%s request_id=%s stage=proxy event=prefiller_selected "
+            "callback_request_id=%s prefiller_id=%d backend=%s score=%.3f kv=%s",
+            PD_TRACE_PREFIX,
+            request_id,
+            callback_request_id,
+            prefiller_idx,
+            prefiller.url,
+            prefiller_score,
+            _kv_transfer_summary(kv_transfer_params),
+        )
         # Send request to prefiller
         await send_request_to_service(
             prefiller.client,
@@ -624,12 +898,32 @@ async def metaserver(request: Request):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay,
         )
+        dispatched = True
+        logger.info(
+            "%s request_id=%s stage=proxy event=prefill_complete "
+            "callback_request_id=%s prefiller_id=%d",
+            PD_TRACE_PREFIX,
+            request_id,
+            callback_request_id,
+            prefiller_idx,
+        )
+        return {"status": "ok", "request_id": callback_request_id}
 
     except Exception as e:
-        logger.error("Post metaserver failed with: %s", e)
+        logger.exception(
+            "%s request_id=%s stage=decoder_to_proxy event=metadata_failed "
+            "callback_request_id=%s dispatched=%s error=%s",
+            PD_TRACE_PREFIX,
+            request_id,
+            callback_request_id,
+            dispatched,
+            e,
+        )
+        raise HTTPException(status_code=502, detail=f"PD metaserver failed for request {callback_request_id}") from e
     finally:
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+        if prefiller_idx is not None and prefiller_score is not None:
+            proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+            proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == "__main__":

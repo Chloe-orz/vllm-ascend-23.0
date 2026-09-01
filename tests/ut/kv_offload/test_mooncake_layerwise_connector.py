@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import importlib.util
 import os
 import sys
@@ -8,6 +9,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
 import torch
 import zmq
 
@@ -350,6 +352,51 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.thread._transfer_kv_cache(send_task)
 
         self.thread.callback_func.assert_called_once()
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p."
+        "mooncake_layerwise_connector.group_concurrent_contiguous",
+        side_effect=group_concurrent_contiguous,
+    )
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p."
+        "mooncake_layerwise_connector.torch.npu.synchronize"
+    )
+    def test_transfer_failure_marks_every_request_failed(self, _mock_sync, _mock_group):
+        self.engine.batch_transfer_sync_write.return_value = -1
+        requests = {}
+        for req_id in ("request-one-suffix", "request-two-suffix"):
+            req_meta = copy.deepcopy(self.req_meta_base)
+            req_meta.chunk_finish = True
+            req_meta.local_block_ids = [[5, 6]]
+            req_meta.remote_block_ids = [[10, 11]]
+            req_meta.remote_layer_metadata = {
+                "layer2": _make_layer_metadata(
+                    kv_caches_base_addr=[11000, 12000],
+                    block_len=[1024, 2048],
+                    block_size_scale=[1, 1],
+                )
+            }
+            requests[req_id] = req_meta
+
+        send_task = SendTask(
+            send_request=requests,
+            wait_event=MagicMock(),
+            k_cache=torch.zeros((1, 8), dtype=torch.float32),
+            v_cache=torch.zeros((1, 8), dtype=torch.float32),
+            layer_idx=2,
+            layer_name="layer2",
+            group_rearrange_block_ids=[[]],
+        )
+
+        self.thread._transfer_kv_cache(send_task)
+
+        failed_request_ids = {
+            call.args[0]
+            for call in self.thread.callback_func.call_args_list
+            if call.kwargs["trans_flag"] is False
+        }
+        self.assertEqual(failed_request_ids, set(requests))
 
 
 class TestKVCacheRecvingLayerThread(unittest.TestCase):
@@ -894,6 +941,20 @@ class TestMooncakeLayerwiseConnectorScheduler_More(unittest.TestCase):
         ok, params = self.scheduler.request_finished(MockRequest("req_fin"), [1, 2])
         self.assertFalse(ok)
         self.assertIsNone(params)
+
+    def test_access_metaserver_retries_http_errors(self):
+        request = httpx.Request("POST", "http://proxy/v1/metaserver")
+        response = httpx.Response(502, request=request, text="callback failed")
+        self.scheduler.metaserver_client = MagicMock()
+        self.scheduler.metaserver_client.post.return_value = response
+
+        with self.assertRaises(httpx.HTTPStatusError):
+            self.scheduler._access_metaserver(
+                "http://proxy/v1/metaserver",
+                {"request_id": "chatcmpl-test"},
+            )
+
+        self.assertEqual(self.scheduler.metaserver_client.post.call_count, 3)
 
 
 class TestHelperFunctions(unittest.TestCase):
