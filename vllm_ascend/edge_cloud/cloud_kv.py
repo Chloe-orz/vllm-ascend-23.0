@@ -43,6 +43,7 @@ class _Reservation:
     manifest: PrefixManifest
     blocks: KVCacheBlocks
     hit_tokens: int
+    epoch: int = 0
 
 
 @dataclass
@@ -50,6 +51,7 @@ class _CloudRequest:
     request: Request
     manifest: PrefixManifest
     cached_tokens: int
+    epoch: int = 0
 
 
 class CloudKVRequestManager:
@@ -99,6 +101,29 @@ class CloudKVRequestManager:
         self._mtp_request_ids_by_task: dict[str, set[str]] = {}
         self._mtp_cache_publish_suppressed_request_ids: set[str] = set()
         self._needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
+        # Void-run projection pool (protocol resource): members of a voided
+        # incarnation (epoch < current or marked) are rewritten to
+        # num_computed=0 + these blocks + zeroed tokens, keeping channel
+        # shapes and ack flow while their output is discarded by epoch
+        # rules.  Permanently allocated; never shared with live requests.
+        self._void_tokens = max(
+            self.block_size, 4 * (1 + self._num_speculative_tokens)
+        )
+        void_request = Request(
+            request_id="__edge_cloud_void_run__",
+            prompt_token_ids=[0] * self._void_tokens,
+            sampling_params=SamplingParams(),
+            pooling_params=None,
+        )
+        void_blocks = self._kv.allocate_slots(
+            void_request, num_new_tokens=self._void_tokens
+        )
+        if void_blocks is None:
+            raise RuntimeError(
+                "cloud KV pool too small for the void-run projection pool"
+            )
+        self._void_request = void_request
+        self._void_block_ids = void_blocks.get_block_ids(allow_none=True)
         log_event(
             logger,
             "info",
@@ -206,9 +231,11 @@ class CloudKVRequestManager:
             if request_id not in draft_referenced
         ]
 
-    def preempt_request(self, request_id: str) -> str | None:
+    def preempt_request(self, request_id: str) -> tuple[str, int] | None:
         """Free one admitted request for capacity and pin its prefix for
-        retry.  Returns the control request id for the preempt notice, or
+        retry.  The request's incarnation is voided (epoch incremented);
+        its in-flight batches drain via void-run on the projection pool.
+        Returns (control request id, new epoch) for the preempt notice, or
         None when the request cannot be preempted safely (its prefix can no
         longer be re-pinned at the original hit length)."""
         state = self._requests.get(request_id)
@@ -231,12 +258,14 @@ class CloudKVRequestManager:
             )
             return None
         control_request_id = state.manifest.request_id
+        new_epoch = state.epoch + 1
         blocks = self._kv.create_kv_cache_blocks(raw_blocks)
         self._kv.block_pool.touch(chain.from_iterable(blocks.blocks))
         self._preempted[control_request_id] = _Reservation(
             manifest=state.manifest,
             blocks=blocks,
             hit_tokens=hit_tokens,
+            epoch=new_epoch,
         )
         self._kv.free(state.request)
         self._requests.pop(request_id, None)
@@ -252,8 +281,28 @@ class CloudKVRequestManager:
             engine_request_id=request_id,
             control_request_id=control_request_id,
             repinned_hit_tokens=hit_tokens,
+            epoch=new_epoch,
         )
-        return control_request_id
+        return control_request_id, new_epoch
+
+    def release_for_abort(self, request_id: str) -> None:
+        """Free an admitted request without preserving anything (park
+        escalation / abort path — the request will not be retried)."""
+        state = self._requests.pop(request_id, None)
+        if state is None:
+            return
+        self._kv.free(state.request)
+        self._record_state_removal(request_id, "aborted")
+        for task_id, corrections in list(self._mtp_actual_computed_by_task.items()):
+            corrections.pop(request_id, None)
+            if not corrections:
+                self._mtp_actual_computed_by_task.pop(task_id, None)
+        log_event(
+            logger,
+            "warning",
+            "cloud_kv_request_aborted",
+            engine_request_id=request_id,
+        )
 
     def rewrite_scheduler_output(
         self, scheduler_output: SchedulerOutput
@@ -322,6 +371,15 @@ class CloudKVRequestManager:
         for index, request_id in enumerate(cached.req_ids):
             state = self._requests.get(request_id)
             if state is None:
+                if self._is_void_incarnation(request_id):
+                    self._log_void_run(
+                        request_id,
+                        phase="allocate",
+                        scheduler_output=scheduler_output,
+                    )
+                    cached.num_computed_tokens[index] = 0
+                    cached.new_block_ids[index] = self._void_block_ids
+                    continue
                 log_event(
                     logger,
                     "error",
@@ -536,6 +594,7 @@ class CloudKVRequestManager:
                 request=request,
                 manifest=reservation.manifest,
                 cached_tokens=common_hit_tokens,
+                epoch=reservation.epoch,
             )
         finally:
             self._release_reservation(reservation)
@@ -744,6 +803,28 @@ class CloudKVRequestManager:
                 "cloud_kv_mtp_tasks_invalidated",
                 task_count=discarded,
             )
+
+    def _log_void_run(
+        self,
+        request_id: str,
+        *,
+        phase: str,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        log_event(
+            logger,
+            "warning",
+            "cloud_kv_void_run_member",
+            engine_request_id=request_id,
+            phase=phase,
+            **self._missing_state_diagnostics(request_id, scheduler_output),
+        )
+
+    def _is_void_incarnation(self, request_id: str) -> bool:
+        """A member may be void-run only if its state was removed by a
+        defined transition (preempted / finished / aborted).  Anything
+        else is a protocol error, never void-run."""
+        return request_id in self._recent_state_removals
 
     def _record_state_removal(self, request_id: str, reason: str) -> None:
         self._recent_state_removals[request_id] = reason

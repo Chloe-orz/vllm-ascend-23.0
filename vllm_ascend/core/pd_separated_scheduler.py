@@ -249,7 +249,10 @@ class PDSeparatedScheduler(Scheduler):
         # Preempted requests whose PD flights are still in flight: cleanup
         # is deferred until their queued tails DRAIN (channel pairing must
         # not be broken by dropping a tail whose cloud-side send exists).
-        self._cloud_preempt_drain_pending: set[str] = set()
+        self._cloud_preempt_drain_pending: dict[str, str] = {}
+        # Incarnation epoch per request, aligned with the cloud on each
+        # preempt notice (void-run drain protocol).
+        self._cloud_epoch_by_req: dict[str, int] = {}
         additional_config = self.vllm_config.additional_config or {}
         edge_cloud_config = additional_config.get("edge_cloud_config", {})
         coordination = edge_cloud_config.get("prefix_cache_coordination", {})
@@ -2121,16 +2124,22 @@ class PDSeparatedScheduler(Scheduler):
             )
             return
         req_id = target.request_id
+        self._cloud_epoch_by_req[req_id] = getattr(notice, "epoch", 0)
         if self._pd_active_flight_count.get(req_id, 0) > 0:
             # The request still has PD flights (queued tails).  Dropping
             # those tails would orphan the cloud-side sends and block the
             # hidden channel — defer cleanup until they drain naturally.
-            self._cloud_preempt_drain_pending.add(req_id)
+            self._cloud_preempt_drain_pending[req_id] = notice.reason
             logger.info(
                 "[PD] request %s preempted by cloud; cleanup deferred "
                 "until in-flight tails drain",
                 req_id,
             )
+            return
+        if notice.reason == "kv_park_timeout":
+            # Park escalation: abort, do not retry.
+            self._cleanup_preempted_request(target, free_kv=False)
+            self.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
             return
         self._cleanup_and_hold_preempted(target, notice.reason)
 
@@ -2153,19 +2162,23 @@ class PDSeparatedScheduler(Scheduler):
         flights have all drained (see handle_cloud_preempt)."""
         if not self._cloud_preempt_drain_pending:
             return
-        for req_id in list(self._cloud_preempt_drain_pending):
+        for req_id, reason in list(self._cloud_preempt_drain_pending.items()):
             if self._pd_active_flight_count.get(req_id, 0) > 0:
                 continue
             request = self.requests.get(req_id)
             if request is None:
-                self._cloud_preempt_drain_pending.discard(req_id)
+                self._cloud_preempt_drain_pending.pop(req_id, None)
                 continue
-            self._cloud_preempt_drain_pending.discard(req_id)
+            self._cloud_preempt_drain_pending.pop(req_id, None)
             logger.info(
                 "[PD] request %s tails drained; finishing preempt cleanup",
                 req_id,
             )
-            self._cleanup_and_hold_preempted(request, "kv_growth")
+            if reason == "kv_park_timeout":
+                self._cleanup_preempted_request(request, free_kv=False)
+                self.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
+            else:
+                self._cleanup_and_hold_preempted(request, reason)
 
     def _cleanup_and_hold_preempted(
         self, target, reason: str = "kv_growth"

@@ -559,6 +559,8 @@ class PassiveEngineCoreProc:
                 cloud_kv_manager.can_admit)
             self.passive_scheduler.capacity_relief_handler = (
                 self._try_preempt_for_capacity)
+            self.passive_scheduler.park_escalation_handler = (
+                self._abort_stalled_batch_members)
         # Optional POST_OUT (cloud → edge) channel. Only set on the cloud
         # side in PD-separation mode; left None for the legacy PP path.
         self._pp_pd_channel = pp_pd_channel
@@ -619,6 +621,26 @@ class PassiveEngineCoreProc:
                 post_out_channel=pp_pd_channel is not None,
             )
 
+    def _abort_stalled_batch_members(
+        self, edge_id: int, scheduler_output: SchedulerOutput
+    ) -> None:
+        """Park escalation: abort every member of a stalled batch whose
+        recovery made no progress for the escalation window (liveness
+        floor — a defined protocol action, not a silent wait)."""
+        if self._cloud_kv_manager is None:
+            return
+        for request_id in scheduler_output.num_scheduled_tokens:
+            self._cloud_kv_manager.release_for_abort(request_id)
+            self._publish_preempt_notice(
+                request_id, epoch=0, reason="kv_park_timeout")
+        log_event(
+            logger,
+            "error",
+            "cloud_kv_park_timeout_escalated",
+            edge_id=edge_id,
+            aborted_members=len(scheduler_output.num_scheduled_tokens),
+        )
+
     def _try_preempt_for_capacity(self, scheduler_output: SchedulerOutput) -> bool:
         """Preempt one idle victim so the failing batch can allocate.
 
@@ -638,10 +660,11 @@ class PassiveEngineCoreProc:
         for candidate in self._cloud_kv_manager.preemption_candidates():
             if candidate in ineligible:
                 continue
-            control_request_id = self._cloud_kv_manager.preempt_request(candidate)
-            if control_request_id is None:
+            result = self._cloud_kv_manager.preempt_request(candidate)
+            if result is None:
                 continue
-            self._publish_preempt_notice(control_request_id)
+            control_request_id, epoch = result
+            self._publish_preempt_notice(control_request_id, epoch)
             return True
         log_event(
             logger,
@@ -653,7 +676,10 @@ class PassiveEngineCoreProc:
         )
         return False
 
-    def _publish_preempt_notice(self, control_request_id: str) -> None:
+    def _publish_preempt_notice(
+        self, control_request_id: str, epoch: int = 0,
+        reason: str = "kv_growth",
+    ) -> None:
         """Send the preempt notice to the victim request's source edge."""
         from vllm_ascend.edge_cloud.prefix_protocol import (
             EdgeCloudPreemptNotice,
@@ -672,7 +698,8 @@ class PassiveEngineCoreProc:
                 "[CLOUD-PREEMPT] no POST_OUT channel; notice for %r lost",
                 control_request_id)
             return
-        notice = EdgeCloudPreemptNotice(request_id=control_request_id)
+        notice = EdgeCloudPreemptNotice(
+            request_id=control_request_id, reason=reason, epoch=epoch)
         if isinstance(self._pp_pd_channel, MultiEdgeChannelMux):
             from vllm_ascend.edge_cloud.id_adapter import (
                 is_wrapped_req_id, parse_req_edge_id)
@@ -755,6 +782,7 @@ class PassiveEngineCoreProc:
                 if completed_output is not None:
                     self._cloud_kv_manager.complete_scheduler_output(completed_output)
                     self.passive_scheduler.mark_settled(completed_output)
+                    self.passive_scheduler.note_park_progress()
                     log_event(
                         logger,
                         "debug",

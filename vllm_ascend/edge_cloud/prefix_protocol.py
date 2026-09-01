@@ -65,6 +65,7 @@ class EdgeCloudPreemptNotice:
 
     request_id: str
     reason: str = "kv_growth"
+    epoch: int = 0
 
 # Modality encodings for the media-aware hash domains. Audio and video IDs
 # are reserved for future modalities. The mapping is immutable: protocol

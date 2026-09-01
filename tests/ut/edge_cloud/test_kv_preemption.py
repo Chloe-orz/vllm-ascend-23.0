@@ -153,9 +153,12 @@ def test_preempt_frees_blocks_and_retry_reclaims_reservation():
     _admit(manager, hasher, "internal-2", "control-2")
     free_before = manager._kv.block_pool.get_num_free_blocks()
 
-    # Preempt the most recent victim.
-    control_id = manager.preempt_request("internal-2")
+    # Preempt the most recent victim (epoch increments).
+    result = manager.preempt_request("internal-2")
+    assert result is not None
+    control_id, new_epoch = result
     assert control_id == "control-2"
+    assert new_epoch == 1
     assert "internal-2" not in manager._requests
     assert manager._kv.block_pool.get_num_free_blocks() > free_before
     # Reservation kept pinned for the retry.
