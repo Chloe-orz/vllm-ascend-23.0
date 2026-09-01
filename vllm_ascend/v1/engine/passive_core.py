@@ -630,9 +630,15 @@ class PassiveEngineCoreProc:
         if self._cloud_kv_manager is None:
             return
         for request_id in scheduler_output.num_scheduled_tokens:
-            self._cloud_kv_manager.release_for_abort(request_id)
-            self._publish_preempt_notice(
-                request_id, epoch=0, reason="kv_park_timeout")
+            # Publish the CONTROL request id (manifest), not the engine id:
+            # the edge matches notices against edge_cloud_request_id, which
+            # lacks the engine-side "-<uuid8>" suffix that
+            # input_processor.assign_request_id appends to request_id.
+            control_request_id = self._cloud_kv_manager.release_for_abort(
+                request_id)
+            if control_request_id is not None:
+                self._publish_preempt_notice(
+                    control_request_id, epoch=0, reason="kv_park_timeout")
         log_event(
             logger,
             "error",

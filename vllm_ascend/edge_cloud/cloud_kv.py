@@ -291,12 +291,15 @@ class CloudKVRequestManager:
         )
         return control_request_id, new_epoch
 
-    def release_for_abort(self, request_id: str) -> None:
+    def release_for_abort(self, request_id: str) -> str | None:
         """Free an admitted request without preserving anything (park
-        escalation / abort path — the request will not be retried)."""
+        escalation / abort path — the request will not be retried).
+        Returns the control request id for the abort notice, or None
+        when the request has no cloud state."""
         state = self._requests.pop(request_id, None)
         if state is None:
-            return
+            return None
+        control_request_id = state.manifest.request_id
         self._kv.free(state.request)
         self._record_state_removal(request_id, "aborted")
         for task_id, corrections in list(self._mtp_actual_computed_by_task.items()):
@@ -308,7 +311,9 @@ class CloudKVRequestManager:
             "warning",
             "cloud_kv_request_aborted",
             engine_request_id=request_id,
+            control_request_id=control_request_id,
         )
+        return control_request_id
 
     def rewrite_scheduler_output(
         self, scheduler_output: SchedulerOutput
