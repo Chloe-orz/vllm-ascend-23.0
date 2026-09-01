@@ -2385,6 +2385,38 @@ class NPUModelRunner(GPUModelRunner):
 
         result = super()._update_states(scheduler_output)
 
+        # Void-run projected members must not participate in speculative
+        # correction accounting.  The cloud rewrite projects a removed
+        # member (preempted / aborted / finished) to num_computed=0 + the
+        # void-run block pool, while a live cached request always has
+        # num_computed > 0 (it is past prefill).  A void member's draft
+        # chain may never have produced corrections (its step-0 can be
+        # dropped by the park-timeout escalation), and its tiny projection
+        # block table cannot host a real corrected position anyway — its
+        # output is discarded by epoch rules.  Exclude nc==0 members from
+        # the previous-spec participation set so the missing-correction
+        # guard below only ever fires for live requests.
+        if previous_num_draft_tokens:
+            _cached_req_data = scheduler_output.scheduled_cached_reqs
+            _void_req_ids = (
+                {
+                    req_id
+                    for req_id, nc in zip(
+                        _cached_req_data.req_ids,
+                        _cached_req_data.num_computed_tokens,
+                    )
+                    if int(nc) == 0
+                }
+                if _cached_req_data is not None and _cached_req_data.req_ids
+                else set()
+            )
+            if _void_req_ids:
+                previous_num_draft_tokens = {
+                    req_id: num_draft
+                    for req_id, num_draft in previous_num_draft_tokens.items()
+                    if req_id not in _void_req_ids
+                }
+
         has_previous_cloud_spec = any(
             num_draft > 0 and req_id in self.input_batch.req_id_to_index
             for req_id, num_draft in previous_num_draft_tokens.items()
