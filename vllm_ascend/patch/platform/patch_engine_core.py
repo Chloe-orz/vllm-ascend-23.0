@@ -553,6 +553,18 @@ def _merge_pending_worker_cleanup(self, scheduler_output: SchedulerOutput) -> No
         pending_mm_hashes.clear()
 
 
+def _empty_batch_requires_worker_poll(self) -> bool:
+    """Return whether an EMPTY batch must still be sent to the worker.
+
+    KV connector completions are collected by the model runner's
+    ``kv_connector_no_forward`` path. A decoder waiting exclusively for
+    remote KV therefore produces EMPTY batches that must reach the worker;
+    otherwise ``get_finished`` is never polled and the request remains in
+    ``WAITING_FOR_REMOTE_KVS`` indefinitely.
+    """
+    return getattr(self.vllm_config, "kv_transfer_config", None) is not None
+
+
 def _finish_empty_batch(self, scheduler_output: SchedulerOutput):
     """Complete an EMPTY SchedulerOutput without broadcasting to workers."""
     if not getattr(scheduler_output, "_pd_cleanup_stashed", False):
@@ -917,7 +929,10 @@ def _patched_step(self):
     # (edge → cloud) channel.
     self._maybe_publish_pre_out(scheduler_output)
 
-    if scheduler_output.batch_type == BatchType.EMPTY:
+    if (
+        scheduler_output.batch_type == BatchType.EMPTY
+        and not _empty_batch_requires_worker_poll(self)
+    ):
         return self._finish_empty_batch(scheduler_output)
 
     future = self.model_executor.execute_model(
@@ -1016,7 +1031,10 @@ def _patched_step_with_batch_queue(self):
         ):
             self._maybe_publish_pre_out(scheduler_output)
 
-        if scheduler_output.batch_type == BatchType.EMPTY:
+        if (
+            scheduler_output.batch_type == BatchType.EMPTY
+            and not _empty_batch_requires_worker_poll(self)
+        ):
             if batch_queue:
                 self._defer_empty_batch(scheduler_output)
                 break

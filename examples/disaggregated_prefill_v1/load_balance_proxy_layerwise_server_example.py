@@ -140,6 +140,7 @@ def _http_error_fields(error: Exception) -> tuple[int | None, str | None]:
         return None, None
     return error.response.status_code, error.response.text[:500]
 
+
 # Add uvloop for faster event loop if available
 try:
     import uvloop
@@ -407,8 +408,7 @@ async def send_request_to_service(
         started_at = time.perf_counter()
         try:
             logger.info(
-                "%s request_id=%s stage=proxy_to_prefill event=http_start "
-                "prefiller_id=%s backend=%s attempt=%d/%d",
+                "%s request_id=%s stage=proxy_to_prefill event=http_start prefiller_id=%s backend=%s attempt=%d/%d",
                 PD_TRACE_PREFIX,
                 request_id,
                 prefiller_id,
@@ -486,8 +486,7 @@ async def stream_service_response_with_retry(
         first_chunk_sent = False
         try:
             logger.info(
-                "%s request_id=%s stage=proxy_to_decode event=http_start "
-                "backend=%s attempt=%d/%d kv=%s",
+                "%s request_id=%s stage=proxy_to_decode event=http_start backend=%s attempt=%d/%d kv=%s",
                 PD_TRACE_PREFIX,
                 request_id,
                 backend_url,
@@ -509,8 +508,7 @@ async def stream_service_response_with_retry(
                 async for chunk in response.aiter_bytes():
                     if not first_chunk_sent:
                         logger.info(
-                            "%s request_id=%s stage=decode event=first_output "
-                            "backend=%s elapsed_ms=%.3f",
+                            "%s request_id=%s stage=decode event=first_output backend=%s elapsed_ms=%.3f",
                             PD_TRACE_PREFIX,
                             request_id,
                             backend_url,
@@ -580,8 +578,7 @@ async def stream_service_response_with_retry(
             else:
                 if attempt < max_retries:
                     logger.warning(
-                        "%s request_id=%s stage=proxy_to_decode event=stream_failed "
-                        "backend=%s attempt=%d/%d error=%s",
+                        "%s request_id=%s stage=proxy_to_decode event=stream_failed backend=%s attempt=%d/%d error=%s",
                         PD_TRACE_PREFIX,
                         request_id,
                         backend_url,
@@ -647,8 +644,7 @@ async def _handle_completions(api: str, request: Request):
         decoder_idx = proxy_state.select_decoder(decoder_score)
         decoder = proxy_state.decoders[decoder_idx]
         logger.info(
-            "%s request_id=%s stage=proxy event=decoder_selected "
-            "decoder_id=%d backend=%s score=%.3f",
+            "%s request_id=%s stage=proxy event=decoder_selected decoder_id=%d backend=%s score=%.3f",
             PD_TRACE_PREFIX,
             request_id,
             decoder_idx,
@@ -857,8 +853,7 @@ async def metaserver(request: Request):
 
         callback_request_id = kv_transfer_params["request_id"]
         logger.info(
-            "%s request_id=%s stage=decoder_to_proxy event=metadata_received "
-            "client=%s kv=%s",
+            "%s request_id=%s stage=decoder_to_proxy event=metadata_received client=%s kv=%s",
             PD_TRACE_PREFIX,
             callback_request_id,
             request.client.host if request.client else None,
@@ -900,8 +895,7 @@ async def metaserver(request: Request):
         )
         dispatched = True
         logger.info(
-            "%s request_id=%s stage=proxy event=prefill_complete "
-            "callback_request_id=%s prefiller_id=%d",
+            "%s request_id=%s stage=proxy event=prefill_complete callback_request_id=%s prefiller_id=%d",
             PD_TRACE_PREFIX,
             request_id,
             callback_request_id,

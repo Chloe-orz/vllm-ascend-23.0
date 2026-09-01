@@ -283,8 +283,7 @@ class KVCacheSendingLayerThread(threading.Thread):
             self._transfer_kv_cache(send_task)
         except Exception as e:
             logger.exception(
-                "%s request_ids=%s stage=p_to_d event=layer_transfer_exception "
-                "layer_idx=%s layer_name=%s error=%s",
+                "%s request_ids=%s stage=p_to_d event=layer_transfer_exception layer_idx=%s layer_name=%s error=%s",
                 PD_TRACE_PREFIX,
                 [get_external_request_id(req_id) for req_id in send_task.send_request],
                 send_task.layer_idx,
@@ -642,8 +641,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
                 self.task_tracker.pop(req_id)
                 self.done_requests.add(req_id)
                 logger.info(
-                    "%s request_id=%s stage=d_worker event=kv_ready "
-                    "engine_id=%s received_signals=%d",
+                    "%s request_id=%s stage=d_worker event=kv_ready engine_id=%s received_signals=%d",
                     PD_TRACE_PREFIX,
                     req_id,
                     self.local_engine_id,
@@ -655,8 +653,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
         handshake_port = self.side_channel_port + self.tp_rank
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info(
-            "%s stage=d_worker event=side_channel_listening engine_id=%s "
-            "address=%s tp_rank=%d tp_size=%d",
+            "%s stage=d_worker event=side_channel_listening engine_id=%s address=%s tp_rank=%d tp_size=%d",
             PD_TRACE_PREFIX,
             self.local_engine_id,
             path,
@@ -686,8 +683,7 @@ class KVCacheRecvingLayerThread(threading.Thread):
                     msg = decoder.decode(payload[0])
                     if msg[0] == GET_META_MSG:
                         logger.info(
-                            "%s request_id=%s stage=p_to_d event=worker_metadata_query "
-                            "engine_id=%s side_channel=%s",
+                            "%s request_id=%s stage=p_to_d event=worker_metadata_query engine_id=%s side_channel=%s",
                             PD_TRACE_PREFIX,
                             msg[1],
                             self.local_engine_id,
@@ -1099,8 +1095,7 @@ class MooncakeLayerwiseConnectorScheduler:
                 def handle_exception(future):
                     if future.exception():
                         logger.error(
-                            "%s request_id=%s stage=d_to_proxy event=metadata_callback_failed "
-                            "metaserver=%s error=%s",
+                            "%s request_id=%s stage=d_to_proxy event=metadata_callback_failed metaserver=%s error=%s",
                             PD_TRACE_PREFIX,
                             external_req_id,
                             params.get("metaserver"),
@@ -2251,8 +2246,7 @@ class MooncakeLayerwiseConnectorWorker:
                 )
                 if ret < 0:
                     logger.error(
-                        "%s request_id=%s stage=p_to_d event=session_create_failed "
-                        "engine_id=%s session_id=%s ret=%d",
+                        "%s request_id=%s stage=p_to_d event=session_create_failed engine_id=%s session_id=%s ret=%d",
                         PD_TRACE_PREFIX,
                         get_external_request_id(req_id),
                         self.engine_id,
@@ -2261,8 +2255,7 @@ class MooncakeLayerwiseConnectorWorker:
                     )
                 else:
                     logger.info(
-                        "%s request_id=%s stage=p_to_d event=session_created "
-                        "engine_id=%s session_id=%s",
+                        "%s request_id=%s stage=p_to_d event=session_created engine_id=%s session_id=%s",
                         PD_TRACE_PREFIX,
                         get_external_request_id(req_id),
                         self.engine_id,
