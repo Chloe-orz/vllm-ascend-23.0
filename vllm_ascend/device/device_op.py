@@ -1023,13 +1023,7 @@ class BaseDeviceAdaptor:
             num_core=num_core,
             num_warps=8,
             num_stages=3,
-            # KKT sees different compiled shapes across consecutive
-            # prefills. Triton multibuffering can leave the FIXP pipeline in
-            # an invalid state when the later shape is launched, which is
-            # reported asynchronously at the next op (often NonZero) as
-            # 507015. Keep this launch single-buffered for deterministic
-            # cross-request execution.
-            multibuffer=False,
+            multibuffer=True,
         )
 
         return A
@@ -1965,9 +1959,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             num_core=num_core,
             num_warps=8,
             num_stages=3,
-            # See BaseDeviceAdaptor.chunk_scaled_dot_kkt_fwd: this kernel
-            # must remain single-buffered across consecutive prefill shapes.
-            multibuffer=False,
+            multibuffer=True,
             disable_tightly_coupled_buffer_reuse=True,
         )
         return A
