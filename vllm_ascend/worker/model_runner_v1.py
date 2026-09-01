@@ -6444,10 +6444,27 @@ class NPUModelRunner(GPUModelRunner):
 
         base_positions = state.base_positions
         if base_positions is None:
-            raise RuntimeError(
-                "DRAFT follow-up step has no reconstructed base positions: "
-                f"step={draft_step_idx}, task_id={task_id}"
+            # Step 0 never executed for this task.  Under the protocol that
+            # only happens when its parked DRAFT_FIRST was dropped by the
+            # park-timeout escalation after aborting every member — cache
+            # eviction and invalidation purge remove the whole state, and a
+            # live chain always executes step 0 first (per-channel FIFO).
+            # The follow-up steps still arrive and must run as a comm shell
+            # (shape/ack/FIFO preserved); their output is discarded by the
+            # edge.  Synthesize zero base positions so slot mapping stays
+            # inside the void-run projection pool.
+            logger.error(
+                "DRAFT follow-up step without step-0 execution; running "
+                "as void comm shell: step=%d, task_id=%s",
+                draft_step_idx,
+                task_id,
             )
+            base_positions = torch.zeros(
+                num_tokens,
+                dtype=torch.long,
+                device=state.target_positions.device,
+            )
+            state.base_positions = base_positions
         if base_positions.shape[-1] != num_tokens:
             raise RuntimeError(
                 "DRAFT follow-up position/token mismatch: "
