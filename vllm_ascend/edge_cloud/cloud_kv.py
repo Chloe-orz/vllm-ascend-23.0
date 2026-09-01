@@ -115,8 +115,14 @@ class CloudKVRequestManager:
             sampling_params=SamplingParams(),
             pooling_params=None,
         )
+        # delay_cache_blocks=True: the void pool is a pure projection
+        # resource and must never enter the prefix cache (the synthetic
+        # request has no block hasher, so the caching path would also
+        # trip the cache_full_blocks assertion on empty block_hashes).
         void_blocks = self._kv.allocate_slots(
-            void_request, num_new_tokens=self._void_tokens
+            void_request,
+            num_new_tokens=self._void_tokens,
+            delay_cache_blocks=True,
         )
         if void_blocks is None:
             raise RuntimeError(
