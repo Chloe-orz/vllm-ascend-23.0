@@ -455,6 +455,11 @@ class PDSeparatedScheduler(Scheduler):
         # the EngineCore patch, which forwards them to the runner so the
         # orphaned context is reaped and the retention released.
         self._dropped_draft_task_ids_to_report: list[str] = []
+        # Dropped draft tasks whose chain still has a step in flight: the
+        # report (retained-block release + cloud invalidation + runner
+        # context clear) is deferred until their last queued DRAFT_LAST
+        # drains, because all three consumers are unsafe mid-flight.
+        self._deferred_dropped_draft_task_ids: set[str] = set()
         # Draft task ids whose cloud-side cached metadata will never be
         # (fully) consumed.  Stamped onto outgoing SchedulerOutputs so
         # the cloud model runner can purge the entries instead of
@@ -1963,6 +1968,30 @@ class PDSeparatedScheduler(Scheduler):
             # verify placeholder for a dead request.
             self._force_draft_last = False
             self._start_decode_or_draft_first_only_window()
+            # A deferred dropped-chain report fires once the chain's last
+            # queued DRAFT_LAST has been picked for drain (no heads or
+            # tails of this task remain anywhere): every mid-flight hazard
+            # (context clear, retained-block release, cloud invalidation)
+            # is gone by construction.
+            drained_task_id = scheduler_output.draft_task_id
+            if (
+                drained_task_id
+                and drained_task_id in self._deferred_dropped_draft_task_ids
+                and not any(
+                    o.draft_task_id == drained_task_id
+                    for o in self.drafts_last_ready
+                )
+                and not any(
+                    o.draft_task_id == drained_task_id
+                    for o in self.drafts_first_ready
+                )
+            ):
+                self._deferred_dropped_draft_task_ids.discard(drained_task_id)
+                self._dropped_draft_task_ids_to_report.append(drained_task_id)
+                logger.info(
+                    "[PD] chain drained; reporting dropped draft task_id=%s",
+                    drained_task_id,
+                )
             output_req_ids = getattr(
                 scheduler_output,
                 "draft_output_req_ids",
@@ -2626,6 +2655,20 @@ class PDSeparatedScheduler(Scheduler):
         # via take_dropped_draft_task_ids invalidation).
         # Dropped task ids are reported to the runner (which may still
         # hold the enqueued context) via take_dropped_draft_task_ids().
+        # EXCEPTION: a task whose chain still has a step in flight (its
+        # DRAFT_LAST is queued for drain below) must NOT be reported yet —
+        # all three report consumers are unsafe mid-flight: clearing the
+        # chain-shared pending context crashes the in-flight head ("DRAFT
+        # batch has no pending draft context", observed on cloud-preempted
+        # requests), releasing retained blocks frees KV the in-flight step
+        # still writes, and the cloud invalidation can race the in-flight
+        # step's execution.  Defer the report until the last queued
+        # DRAFT_LAST of the chain drains (see _pick_draft_last_batch).
+        inflight_draft_task_ids = {
+            output.draft_task_id
+            for output in self.drafts_last_ready
+            if output.draft_task_id is not None
+        }
         kept_first: deque[SchedulerOutput] = deque()
         for output in self.drafts_first_ready:
             if self._scheduler_output_intersects_req_ids(
@@ -2637,7 +2680,18 @@ class PDSeparatedScheduler(Scheduler):
                 if task_id is not None:
                     self._pregenerated_draft_task_ids.discard(task_id)
                     self._pregenerated_draft_req_ids.pop(task_id, None)
-                    self._dropped_draft_task_ids_to_report.append(task_id)
+                    if task_id in inflight_draft_task_ids:
+                        if task_id not in self._deferred_dropped_draft_task_ids:
+                            self._deferred_dropped_draft_task_ids.add(task_id)
+                            logger.info(
+                                "[PD] drop DRAFT_FIRST task_id=%s step=%s; "
+                                "report deferred until the in-flight step "
+                                "drains",
+                                task_id,
+                                output.draft_step_idx,
+                            )
+                    else:
+                        self._dropped_draft_task_ids_to_report.append(task_id)
                 if output is self._draft_first_cloud_publish_pending:
                     self._draft_first_cloud_publish_pending = None
                     self._draft_first_scalars_patched = False
