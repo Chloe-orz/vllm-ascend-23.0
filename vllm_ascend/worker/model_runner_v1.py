@@ -2386,30 +2386,28 @@ class NPUModelRunner(GPUModelRunner):
         result = super()._update_states(scheduler_output)
 
         # Void-run projected members must not participate in speculative
-        # correction accounting.  The cloud rewrite projects a removed
-        # member (preempted / aborted / finished) to num_computed=0 + the
-        # void-run block pool, while a live cached request always has
-        # num_computed > 0 (it is past prefill).  A void member's draft
-        # chain may never have produced corrections (its step-0 can be
-        # dropped by the park-timeout escalation), and its tiny projection
-        # block table cannot host a real corrected position anyway — its
-        # output is discarded by epoch rules.  Exclude nc==0 members from
-        # the previous-spec participation set so the missing-correction
-        # guard below only ever fires for live requests.
+        # correction accounting.  The cloud rewrite marks them explicitly
+        # in cloud_void_req_ids (a live cached request always has
+        # num_computed > 0, so nc==0 is kept as a defensive fallback for
+        # mixed-version traffic).  A void member's draft chain may never
+        # have produced corrections (its step-0 can be dropped by the
+        # park-timeout escalation), and its tiny projection block table
+        # cannot host a real corrected position anyway — its output is
+        # discarded by epoch rules.  Exclude void members from the
+        # previous-spec participation set so the missing-correction guard
+        # below only ever fires for live requests.
         if previous_num_draft_tokens:
+            _void_req_ids = set(scheduler_output.cloud_void_req_ids or ())
             _cached_req_data = scheduler_output.scheduled_cached_reqs
-            _void_req_ids = (
-                {
+            if _cached_req_data is not None and _cached_req_data.req_ids:
+                _void_req_ids.update(
                     req_id
                     for req_id, nc in zip(
                         _cached_req_data.req_ids,
                         _cached_req_data.num_computed_tokens,
                     )
                     if int(nc) == 0
-                }
-                if _cached_req_data is not None and _cached_req_data.req_ids
-                else set()
-            )
+                )
             if _void_req_ids:
                 previous_num_draft_tokens = {
                     req_id: num_draft
@@ -6389,6 +6387,21 @@ class NPUModelRunner(GPUModelRunner):
             )
         return cached
 
+    def drop_cloud_draft_task_metadata(self, task_id: str | None) -> None:
+        """Reclaim every per-task draft cache entry immediately.
+
+        Used by the fully-void comm-shell path, which skips the draft middle
+        segment (and therefore its last-step pops).  Idempotent; the normal
+        last-step pop and the invalidation purge tolerate missing entries.
+        """
+        if task_id is None:
+            return
+        self._cloud_spec_decode_metadata_by_task.pop(task_id, None)
+        self._cloud_scheduler_output_by_task.pop(task_id, None)
+        self._cloud_draft_position_state_by_task.pop(task_id, None)
+        self._cloud_target_generation_by_task.pop(task_id, None)
+        self._eagle3_cloud_aux_hidden_states_by_task.pop(task_id, None)
+
     def _reconstruct_cloud_draft_positions(
         self,
         scheduler_output: "SchedulerOutput",
@@ -6688,6 +6701,22 @@ class NPUModelRunner(GPUModelRunner):
                 pos_flat = positions if positions.dim() == 1 else positions[0]
                 pos_flat = pos_flat[:batch_size]
                 exceeds = pos_flat >= self.model_config.max_model_len
+                # Void-run members write nothing: their frozen target-time
+                # block table rows may point at blocks since freed and
+                # reallocated to live requests.  Pad their slots so the
+                # comm-shell pass touches no KV memory at all.
+                if scheduler_output is not None:
+                    _void_ids = set(
+                        scheduler_output.cloud_void_req_ids or ()
+                    )
+                    if _void_ids:
+                        for _i, _req_id in enumerate(
+                            list(scheduler_output.num_scheduled_tokens)[
+                                :batch_size
+                            ]
+                        ):
+                            if _req_id in _void_ids:
+                                exceeds[_i] = True
                 clamped = torch.where(exceeds, torch.zeros_like(pos_flat), pos_flat)
                 block_numbers = clamped // block_size
                 block_ids = block_table_tensor[:batch_size].gather(

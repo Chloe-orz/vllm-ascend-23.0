@@ -122,6 +122,10 @@ def unwrap_scheduler_output_ids(so) -> None:
             unwrap_req_id(rid): v
             for rid, v in so.structured_output_request_ids.items()
         }
+    # The void-run marker is a cloud-worker concern; it must not leak the
+    # wrapped namespace back to the edge.  Clear it on egress.
+    if getattr(so, "cloud_void_req_ids", None):
+        so.cloud_void_req_ids = None
     # draft_task_id lives in the wrapped (cloud) namespace after ingress
     # wrapping; strip it so the edge keeps seeing its own raw ids.  Guard on
     # the wrapped form for robustness against ids that never crossed ingress.

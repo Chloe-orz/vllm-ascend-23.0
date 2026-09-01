@@ -6,8 +6,9 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import chain
+import time
 from typing import Any
 
 import numpy as np
@@ -44,6 +45,7 @@ class _Reservation:
     blocks: KVCacheBlocks
     hit_tokens: int
     epoch: int = 0
+    created_at: float = field(default_factory=time.monotonic)
 
 
 @dataclass
@@ -291,6 +293,43 @@ class CloudKVRequestManager:
         )
         return control_request_id, new_epoch
 
+    def expire_stale_reservations(
+        self, ttl_seconds: float, now: float | None = None
+    ) -> list[str]:
+        """TTL janitor for reservations that will never be consumed.
+
+        A reservation leaks when the edge dies or wedges between probe and
+        admission (``_reservations``) or when a preempted request's edge
+        never retries (``_preempted``); its pinned blocks would otherwise
+        stay out of the pool forever.  Expiry frees the blocks and returns
+        the expired CONTROL request ids so the caller can notify the edge
+        (reason "reservation_expired") — the edge must abort the matching
+        local request, otherwise a late admission would hit a missing
+        reservation, which remains a protocol error.
+        """
+        now = time.monotonic() if now is None else now
+        expired: list[str] = []
+        for table, is_preempted in (
+            (self._reservations, False),
+            (self._preempted, True),
+        ):
+            for control_id, reservation in list(table.items()):
+                age = now - reservation.created_at
+                if age < ttl_seconds:
+                    continue
+                table.pop(control_id, None)
+                self._release_reservation(reservation)
+                expired.append(control_id)
+                log_event(
+                    logger,
+                    "error",
+                    "cloud_kv_reservation_expired",
+                    control_request_id=control_id,
+                    age_seconds=round(age, 3),
+                    preempted=is_preempted,
+                )
+        return expired
+
     def release_for_abort(self, request_id: str) -> str | None:
         """Free an admitted request without preserving anything (park
         escalation / abort path — the request will not be retried).
@@ -362,6 +401,7 @@ class CloudKVRequestManager:
             raise CloudAllocationFailed(
                 list(scheduler_output.num_scheduled_tokens))
         rewritten = copy.copy(scheduler_output)
+        void_req_ids: list[str] = []
         rewritten.scheduled_new_reqs = [
             self._admit_new_request(data, scheduler_output) for data in scheduler_output.scheduled_new_reqs
         ]
@@ -390,6 +430,7 @@ class CloudKVRequestManager:
                     )
                     cached.num_computed_tokens[index] = 0
                     cached.new_block_ids[index] = self._void_block_ids
+                    void_req_ids.append(request_id)
                     continue
                 log_event(
                     logger,
@@ -446,6 +487,8 @@ class CloudKVRequestManager:
             )
 
         rewritten.num_common_prefix_blocks = self._common_prefix_blocks(rewritten)
+        if void_req_ids:
+            rewritten.cloud_void_req_ids = void_req_ids
         rewritten.new_block_ids_to_zero = (
             self._kv.take_new_block_ids() or None if self._needs_kv_cache_zeroing else None
         )
@@ -640,6 +683,7 @@ class CloudKVRequestManager:
         """
         self._record_mtp_acceptance(scheduler_output)
         rewritten = copy.copy(scheduler_output)
+        void_req_ids: list[str] = []
         rewritten.scheduled_new_reqs = []
         for data in scheduler_output.scheduled_new_reqs:
             if data.req_id not in self._requests:
@@ -648,6 +692,7 @@ class CloudKVRequestManager:
                         data.req_id, phase="draft", scheduler_output=scheduler_output)
                 self._log_void_run(
                     data.req_id, phase="draft", scheduler_output=scheduler_output)
+                void_req_ids.append(data.req_id)
                 draft_data = copy.copy(data)
                 draft_data.prompt_token_ids = None if data.prompt_token_ids is None else [0] * len(data.prompt_token_ids)
                 if data.prefill_token_ids is not None:
@@ -674,6 +719,7 @@ class CloudKVRequestManager:
                     request_id, phase="draft", scheduler_output=scheduler_output)
             self._log_void_run(
                 request_id, phase="draft", scheduler_output=scheduler_output)
+            void_req_ids.append(request_id)
             cached.num_computed_tokens[index] = 0
             cached.new_block_ids[index] = self._void_block_ids
         cached.new_token_ids = [[0] * len(token_ids) for token_ids in cached.new_token_ids]
@@ -688,6 +734,8 @@ class CloudKVRequestManager:
         }
         rewritten.new_block_ids_to_zero = None
         rewritten.num_common_prefix_blocks = self._common_prefix_blocks(rewritten)
+        if void_req_ids:
+            rewritten.cloud_void_req_ids = void_req_ids
         log_event(
             logger,
             "debug",

@@ -2136,8 +2136,10 @@ class PDSeparatedScheduler(Scheduler):
                 req_id,
             )
             return
-        if notice.reason == "kv_park_timeout":
-            # Park escalation: abort, do not retry.
+        if notice.reason in ("kv_park_timeout", "reservation_expired"):
+            # Park escalation / reservation TTL expiry: abort, do not retry
+            # (the cloud no longer holds a reservation for this request, so
+            # a retry could never be admitted).
             self._cleanup_preempted_request(target, free_kv=False)
             self.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
             return
@@ -2174,7 +2176,7 @@ class PDSeparatedScheduler(Scheduler):
                 "[PD] request %s tails drained; finishing preempt cleanup",
                 req_id,
             )
-            if reason == "kv_park_timeout":
+            if reason in ("kv_park_timeout", "reservation_expired"):
                 self._cleanup_preempted_request(request, free_kv=False)
                 self.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
             else:
@@ -2967,7 +2969,50 @@ class PDSeparatedScheduler(Scheduler):
                 self.decode_or_draft_inflight_count,
                 self.decode_or_draft_inflight_limit,
             )
-        outputs = super().update_from_output(scheduler_output, model_runner_output)
+        # Edge-side tail discard: requests the cloud preempted/aborted (held
+        # for gated retry, or awaiting tail-drain cleanup) may still have
+        # stale decode/draft results in flight from their voided
+        # incarnation.  The base update path only skips finished/unknown
+        # requests, so without this filter those voided-incarnation tokens
+        # would be appended to a request that is about to restart from
+        # scratch — corrupting its output history.  Strip the marked
+        # requests from the copy the base update sees; all other accounting
+        # (flight counters above, draft enqueue below) is unaffected.
+        _stale_tail_req_ids = (
+            set(self._cloud_retry_hold) | set(self._cloud_preempt_drain_pending)
+        )
+        _so_for_base = scheduler_output
+        if _stale_tail_req_ids and any(
+            req_id in _stale_tail_req_ids
+            for req_id in scheduler_output.num_scheduled_tokens
+        ):
+            _so_for_base = replace(
+                scheduler_output,
+                num_scheduled_tokens={
+                    req_id: num
+                    for req_id, num in scheduler_output.num_scheduled_tokens.items()
+                    if req_id not in _stale_tail_req_ids
+                },
+                scheduled_spec_decode_tokens={
+                    req_id: token_ids
+                    for req_id, token_ids in scheduler_output.scheduled_spec_decode_tokens.items()
+                    if req_id not in _stale_tail_req_ids
+                },
+            )
+            _so_for_base.total_num_scheduled_tokens = sum(
+                _so_for_base.num_scheduled_tokens.values()
+            )
+            logger.info(
+                "[PD] discarding stale tail results for %d cloud-marked "
+                "request(s): batch_type=%s",
+                sum(
+                    1
+                    for req_id in scheduler_output.num_scheduled_tokens
+                    if req_id in _stale_tail_req_ids
+                ),
+                scheduler_output.batch_type,
+            )
+        outputs = super().update_from_output(_so_for_base, model_runner_output)
         if scheduler_output.batch_type in _PD_LAST_TO_FIRST:
             self._complete_pd_flight(scheduler_output)
         if self.finished_req_ids:

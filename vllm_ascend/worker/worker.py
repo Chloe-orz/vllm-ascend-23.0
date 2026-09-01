@@ -1416,10 +1416,36 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
-        output = self.model_runner.execute_model(
-            scheduler_output, intermediate_tensors,
-            layer_slice_info=layer_slice_info,
+        fully_void = (
+            forward_pass
+            and is_first_slice
+            and (layer_slice_info is None or layer_slice_info.is_last_slice)
+            and self._is_fully_void_cloud_batch(scheduler_output)
         )
+        if fully_void:
+            # Comm shell for a fully void-run batch: consume the inbound
+            # payload (channel FIFO), skip the forward entirely, and answer
+            # with zero intermediates that preserve the wire contract.  The
+            # edge discards the result by epoch rules.
+            if intermediate_tensors is not None:
+                intermediate_tensors.wait_for_comm()
+            logger.info(
+                "[CLOUD-VOID] skipping forward for fully void-run batch: "
+                "batch_type=%s members=%d tokens=%d",
+                scheduler_output.batch_type,
+                len(scheduler_output.num_scheduled_tokens),
+                scheduler_output.total_num_scheduled_tokens,
+            )
+            output = self.model_runner.model.make_empty_intermediate_tensors(
+                scheduler_output.total_num_scheduled_tokens,
+                self.model_runner.dtype,
+                self.device,
+            )
+        else:
+            output = self.model_runner.execute_model(
+                scheduler_output, intermediate_tensors,
+                layer_slice_info=layer_slice_info,
+            )
 
         is_last_slice = (
             layer_slice_info is None or layer_slice_info.is_last_slice
@@ -1502,6 +1528,21 @@ class NPUWorker(WorkerBase):
             dtype=self.model_runner.dtype,
         )
 
+    def _is_fully_void_cloud_batch(self, scheduler_output: "SchedulerOutput") -> bool:
+        """True when the cloud rewrite void-run projected EVERY member of
+        this batch (defined-removal members only).  Such a batch exists
+        purely as a comm shell: the edge discards its results by epoch
+        rules, so the worker may consume the inbound payload and answer
+        with zeros without running any forward."""
+        void_ids = getattr(scheduler_output, "cloud_void_req_ids", None)
+        if not void_ids:
+            return False
+        scheduled = scheduler_output.num_scheduled_tokens
+        if not scheduled:
+            return False
+        void_set = set(void_ids)
+        return all(req_id in void_set for req_id in scheduled)
+
     def _execute_model_cloud_draft(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput:
@@ -1536,9 +1577,38 @@ class NPUWorker(WorkerBase):
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None
-        output = self.model_runner._run_edge_cloud_draft_middle_segment(
-            scheduler_output, IntermediateTensors(tensor_dict)
+        send_tensor_meta = self._scheduled_draft_tensor_meta(
+            scheduler_output,
+            "c2e",
         )
+        fully_void = (
+            self._is_fully_void_cloud_batch(scheduler_output)
+            and send_tensor_meta is not None
+        )
+        if fully_void:
+            # Comm shell for a fully void-run draft step: skip the draft
+            # forward (and its position/correction bookkeeping) entirely,
+            # answer with zero tensors matching the negotiated wire schema,
+            # and reclaim the parent task's cached metadata immediately.
+            self.model_runner.drop_cloud_draft_task_metadata(
+                scheduler_output.draft_task_id
+            )
+            zero_tensors: dict[str, torch.Tensor] = {}
+            for _name, _meta in send_tensor_meta.metadata_list:
+                if (
+                    _name in send_tensor_meta.send_tensor_keys
+                    and _meta is not None
+                ):
+                    zero_tensors[_name] = torch.zeros(
+                        tuple(_meta.size),
+                        dtype=_meta.dtype,
+                        device=_meta.device,
+                    )
+            output = IntermediateTensors(zero_tensors)
+        else:
+            output = self.model_runner._run_edge_cloud_draft_middle_segment(
+                scheduler_output, IntermediateTensors(tensor_dict)
+            )
         if get_pp_group().world_size == 2:
             out_tensor_dict = {
                 key: value.contiguous()
@@ -1547,10 +1617,11 @@ class NPUWorker(WorkerBase):
                 for key, value in output.items()
             }
             # Async send only -- record, do NOT wait.  See method docstring.
-            send_tensor_meta = self._scheduled_draft_tensor_meta(
-                scheduler_output,
-                "c2e",
-            )
+            if send_tensor_meta is None:
+                send_tensor_meta = self._scheduled_draft_tensor_meta(
+                    scheduler_output,
+                    "c2e",
+                )
             with self._pair_scope(_pair_edge_id):
                 self._record_pp_send_work(
                     edge_cloud_send_tensor_dict_scheduled_draft(

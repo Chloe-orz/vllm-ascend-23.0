@@ -607,6 +607,14 @@ class PassiveEngineCoreProc:
             self._cher_enabled = False
             self._cher_hint_sent = set()
         self._idle_sleep_seconds = 0.001
+        # Reservation TTL janitor (see CloudKVRequestManager.
+        # expire_stale_reservations): sweeps at most once per step-second
+        # and notifies the affected edges so their matching local requests
+        # abort instead of crashing on a missing reservation later.
+        self._last_reservation_sweep = 0.0
+        self._cloud_reservation_ttl_s = float(
+            os.environ.get("EDGE_CLOUD_RESERVATION_TTL_S", "1800")
+        )
 
         self._prev_dispatch_req_ids: set[str] = set()
         self._pending_post_out_by_head_token: dict[str, SchedulerOutput] = {}
@@ -619,6 +627,22 @@ class PassiveEngineCoreProc:
                 "cloud_passive_core_initialized",
                 prefix_coordination=True,
                 post_out_channel=pp_pd_channel is not None,
+            )
+
+    def _maybe_expire_cloud_reservations(self) -> None:
+        """Run the reservation TTL janitor (throttled) and notify edges."""
+        if self._cloud_kv_manager is None:
+            return
+        now = time.monotonic()
+        if now - self._last_reservation_sweep < 1.0:
+            return
+        self._last_reservation_sweep = now
+        expired = self._cloud_kv_manager.expire_stale_reservations(
+            self._cloud_reservation_ttl_s, now
+        )
+        for control_request_id in expired:
+            self._publish_preempt_notice(
+                control_request_id, epoch=0, reason="reservation_expired"
             )
 
     def _abort_stalled_batch_members(
@@ -844,6 +868,7 @@ class PassiveEngineCoreProc:
         """
         if self._cloud_control_processor is not None:
             self._cloud_control_processor.poll(self._cloud_kv_manager)
+        self._maybe_expire_cloud_reservations()
 
         _t0 = time.monotonic()
         self._drain_worker_completion_acks()
