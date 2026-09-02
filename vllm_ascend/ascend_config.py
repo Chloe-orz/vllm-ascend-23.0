@@ -32,6 +32,11 @@ class AscendConfig:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        # Deployment-level safety gate. When enabled, the final graph mode is
+        # validated after all Ascend compatibility fallbacks have run.
+        self.require_aclgraph: bool = bool(
+            additional_config.get("require_aclgraph", False)
+        )
         self._check_mooncake_c8_kv_cache_quant(vllm_config)
 
         xlite_graph_config = additional_config.get("xlite_graph_config", {})
@@ -896,8 +901,12 @@ class PDSeparationConfig:
 
         additional_config = {
             "edge_cloud_config": {
+                "kv_engine_id": "shared-p-engine-session-id",
                 "pd_separation": {
                     "enabled": true,
+                    "pre_out_port": 5558,
+                    "post_out_port": 5559,
+                    "dispatch_policy": "expect_alternation",
                     "next_prefill_prior_enable": true,
                     "chunk_prefill_prior_enable": true,
                     "max_chunk_prefill_ahead": 1,
@@ -909,7 +918,25 @@ class PDSeparationConfig:
     def __init__(self, user_config: dict | None = None):
         if user_config is None:
             user_config = {}
+        from vllm_ascend import envs as ascend_envs
+
         self.enabled: bool = user_config.get("enabled", False)
+        self.pre_out_port: int = int(
+            user_config.get(
+                "pre_out_port", ascend_envs.VLLM_PP_PRE_OUT_ZMQ_PORT
+            )
+        )
+        self.post_out_port: int = int(
+            user_config.get(
+                "post_out_port", ascend_envs.VLLM_PP_POST_OUT_ZMQ_PORT
+            )
+        )
+        self.dispatch_policy: str = str(
+            user_config.get(
+                "dispatch_policy",
+                ascend_envs.VLLM_PP_PASSIVE_DISPATCH_POLICY,
+            )
+        )
         self.next_prefill_prior_enable: bool = user_config.get(
             "next_prefill_prior_enable", False
         )
@@ -919,6 +946,40 @@ class PDSeparationConfig:
         self.max_chunk_prefill_ahead: int = int(
             user_config.get("max_chunk_prefill_ahead", 1)
         )
+        self._validate()
+
+    def _validate(self) -> None:
+        for name, port in (
+            ("pre_out_port", self.pre_out_port),
+            ("post_out_port", self.post_out_port),
+        ):
+            if not 1 <= port <= 65535:
+                raise ValueError(
+                    f"edge_cloud_config.pd_separation.{name} must be in "
+                    f"[1, 65535], got {port}"
+                )
+        if self.pre_out_port == self.post_out_port:
+            raise ValueError(
+                "edge_cloud_config.pd_separation.pre_out_port and "
+                "post_out_port must be different"
+            )
+        valid_policies = {
+            "expect_alternation",
+            "prefill_first",
+            "decode_first",
+            "pdmix_first",
+        }
+        if self.dispatch_policy not in valid_policies:
+            raise ValueError(
+                "edge_cloud_config.pd_separation.dispatch_policy must be "
+                f"one of {sorted(valid_policies)}, got "
+                f"{self.dispatch_policy!r}"
+            )
+        if self.max_chunk_prefill_ahead < 0:
+            raise ValueError(
+                "edge_cloud_config.pd_separation.max_chunk_prefill_ahead "
+                "must be non-negative"
+            )
 
     @property
     def prefill_inflight_limit(self) -> int:
@@ -932,6 +993,9 @@ class PDSeparationConfig:
     def __repr__(self) -> str:
         return (
             f"PDSeparationConfig(enabled={self.enabled}, "
+            f"pre_out_port={self.pre_out_port}, "
+            f"post_out_port={self.post_out_port}, "
+            f"dispatch_policy={self.dispatch_policy!r}, "
             f"next_prefill_prior_enable={self.next_prefill_prior_enable}, "
             f"chunk_prefill_prior_enable={self.chunk_prefill_prior_enable}, "
             f"max_chunk_prefill_ahead={self.max_chunk_prefill_ahead})"
@@ -953,6 +1017,7 @@ class EdgeCloudConfig:
         self.transfer_config: dict = user_config.get("transfer_config", {})
         self.hidden_dtype: str = user_config.get("hidden_dtype", "bf16")
         self.cloud_enable_sp: bool = user_config.get("cloud_enable_sp", False)
+        self.kv_engine_id: str | None = user_config.get("kv_engine_id")
         self.pd_separation = PDSeparationConfig(
             user_config.get("pd_separation", {}) or {}
         )
@@ -984,6 +1049,12 @@ class EdgeCloudConfig:
                     self.edge_head_tail_layers,
                 )
                 self.edge_head_tail_layers = 0
+        if self.pd_separation.enabled and not self.kv_engine_id:
+            raise ValueError(
+                "edge_cloud_config.kv_engine_id must be a non-empty shared "
+                "identifier when pd_separation.enabled=true. P-edge and "
+                "P-cloud must use the same value."
+            )
         head_k, tail_k = self.head_tail_k
         if head_k < 0 or tail_k < 0:
             raise ValueError(
@@ -1044,6 +1115,7 @@ class EdgeCloudConfig:
             f"EdgeCloudConfig(enabled={self.enabled}, role={self.role}, "
             f"mode={self.mode}, edge_head_tail_layers={self.edge_head_tail_layers}, "
             f"enable_decode_graph={self.enable_decode_graph}, "
+            f"kv_engine_id={self.kv_engine_id!r}, "
             f"pd_separation={self.pd_separation})"
         )
 

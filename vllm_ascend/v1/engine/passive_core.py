@@ -1057,19 +1057,6 @@ class PassiveEngineCoreProc:
 
             passive_scheduler_module = _import_passive_scheduler_module()
             dispatch_policy_cls = passive_scheduler_module.DispatchPolicy
-            # Load PD-separation configuration from environment variables.
-            from vllm_ascend.pd_separation_config import PDSeparationConfig
-            pd_config = PDSeparationConfig.from_env()
-            try:
-                policy = dispatch_policy_cls(pd_config.dispatch_policy)
-            except ValueError:
-                logger.warning(
-                    "Unknown VLLM_PP_PASSIVE_DISPATCH_POLICY=%r; "
-                    "falling back to expect_alternation.",
-                    pd_config.dispatch_policy,
-                )
-                policy = dispatch_policy_cls.EXPECT_ALTERNATION
-
             scheduler_input = None
 
             # Set up edge-cloud PD-separation channel (cloud side). The
@@ -1083,11 +1070,21 @@ class PassiveEngineCoreProc:
             from vllm_ascend.ascend_config import init_ascend_config
             _ascend_config = init_ascend_config(vllm_config)
             _edge_cloud = getattr(_ascend_config, "edge_cloud_config", None)
+            pd_config = (
+                _edge_cloud.pd_separation
+                if _edge_cloud is not None
+                else None
+            )
             _pd_enabled = bool(
                 _edge_cloud is not None
                 and getattr(_edge_cloud, "enabled", False)
-                and getattr(_edge_cloud, "pd_separation", None) is not None
-                and _edge_cloud.pd_separation.enabled
+                and pd_config is not None
+                and pd_config.enabled
+            )
+            policy = (
+                dispatch_policy_cls(pd_config.dispatch_policy)
+                if pd_config is not None
+                else dispatch_policy_cls.EXPECT_ALTERNATION
             )
             if _pd_enabled:
                 master_addr = vllm_config.parallel_config.master_addr
@@ -1124,6 +1121,7 @@ class PassiveEngineCoreProc:
                 # PPSchedulerZmqChannel (per dp_rank=0). True
                 # multi-DP cloud support requires N channels inside
                 # PassiveEngineCoreProc.
+                assert pd_config is not None
                 _pre_out_port = pd_config.pre_out_port + _dp_rank * 2
                 _post_out_port = pd_config.post_out_port + _dp_rank * 2
                 post_out_bind = f"tcp://*:{_post_out_port}"

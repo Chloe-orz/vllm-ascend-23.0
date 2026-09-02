@@ -191,6 +191,40 @@ class ProxyState:
         heapq.heapify(self.decoder_heap)
         self.req_id_future = {}
         self.req_data_dict = {}
+        # Decoder metadata callbacks are retried. Serialize callbacks only per
+        # request (different requests remain concurrent), and retain a bounded
+        # success cache so a lost HTTP response cannot trigger duplicate
+        # prefill/KV transfer work.
+        self.metaserver_locks: dict[str, asyncio.Lock] = {}
+        self.completed_metaserver_callbacks: dict[str, dict[str, str]] = {}
+        self.metaserver_registry_lock = asyncio.Lock()
+        self.max_completed_metaserver_callbacks = 4096
+
+    async def get_metaserver_lock(self, request_id: str) -> asyncio.Lock:
+        async with self.metaserver_registry_lock:
+            return self.metaserver_locks.setdefault(
+                request_id, asyncio.Lock()
+            )
+
+    def get_completed_metaserver_callback(
+        self, request_id: str
+    ) -> dict[str, str] | None:
+        return self.completed_metaserver_callbacks.get(request_id)
+
+    def complete_metaserver_callback(
+        self, request_id: str, response: dict[str, str]
+    ) -> None:
+        self.req_data_dict.pop(request_id, None)
+        self.completed_metaserver_callbacks[request_id] = response
+        if (
+            len(self.completed_metaserver_callbacks)
+            > self.max_completed_metaserver_callbacks
+        ):
+            oldest_request_id = next(
+                iter(self.completed_metaserver_callbacks)
+            )
+            self.completed_metaserver_callbacks.pop(oldest_request_id, None)
+            self.metaserver_locks.pop(oldest_request_id, None)
 
     def _update_prefiller_priority(self, server_idx: int):
         """Update the priority of a prefiller server in the heap."""
@@ -859,49 +893,89 @@ async def metaserver(request: Request):
             request.client.host if request.client else None,
             _kv_transfer_summary(kv_transfer_params),
         )
-        if callback_request_id not in proxy_state.req_data_dict:
-            raise KeyError(
-                f"Unknown callback request_id={callback_request_id}; "
-                f"pending_request_count={len(proxy_state.req_data_dict)}"
+        callback_lock = await proxy_state.get_metaserver_lock(
+            callback_request_id
+        )
+        async with callback_lock:
+            completed_response = (
+                proxy_state.get_completed_metaserver_callback(
+                    callback_request_id
+                )
             )
-        req_data, request_length, api = proxy_state.req_data_dict[callback_request_id]
-        request_id = get_origin_request_id(api, callback_request_id)
-        req_data["kv_transfer_params"] = kv_transfer_params
-        prefiller_score = proxy_state.calculate_prefill_scores(request_length)
+            if completed_response is not None:
+                logger.info(
+                    "%s request_id=%s stage=decoder_to_proxy "
+                    "event=metadata_duplicate_accepted",
+                    PD_TRACE_PREFIX,
+                    callback_request_id,
+                )
+                return completed_response
 
-        # Select prefiller
-        prefiller_idx = proxy_state.select_prefiller(prefiller_score)
-        prefiller = proxy_state.prefillers[prefiller_idx]
-        logger.info(
-            "%s request_id=%s stage=proxy event=prefiller_selected "
-            "callback_request_id=%s prefiller_id=%d backend=%s score=%.3f kv=%s",
-            PD_TRACE_PREFIX,
-            request_id,
-            callback_request_id,
-            prefiller_idx,
-            prefiller.url,
-            prefiller_score,
-            _kv_transfer_summary(kv_transfer_params),
-        )
-        # Send request to prefiller
-        await send_request_to_service(
-            prefiller.client,
-            prefiller_idx,
-            api,
-            req_data,
-            request_id,
-            max_retries=global_args.max_retries,
-            base_delay=global_args.retry_delay,
-        )
-        dispatched = True
-        logger.info(
-            "%s request_id=%s stage=proxy event=prefill_complete callback_request_id=%s prefiller_id=%d",
-            PD_TRACE_PREFIX,
-            request_id,
-            callback_request_id,
-            prefiller_idx,
-        )
-        return {"status": "ok", "request_id": callback_request_id}
+            if callback_request_id not in proxy_state.req_data_dict:
+                raise KeyError(
+                    f"Unknown callback request_id={callback_request_id}; "
+                    "pending_request_count="
+                    f"{len(proxy_state.req_data_dict)}"
+                )
+            req_data, request_length, api = proxy_state.req_data_dict[
+                callback_request_id
+            ]
+            request_id = get_origin_request_id(api, callback_request_id)
+            req_data["kv_transfer_params"] = kv_transfer_params
+            prefiller_score = proxy_state.calculate_prefill_scores(
+                request_length
+            )
+
+            # Select prefiller
+            prefiller_idx = proxy_state.select_prefiller(prefiller_score)
+            prefiller = proxy_state.prefillers[prefiller_idx]
+            logger.info(
+                "%s request_id=%s stage=proxy event=prefiller_selected "
+                "callback_request_id=%s prefiller_id=%d backend=%s "
+                "score=%.3f kv=%s",
+                PD_TRACE_PREFIX,
+                request_id,
+                callback_request_id,
+                prefiller_idx,
+                prefiller.url,
+                prefiller_score,
+                _kv_transfer_summary(kv_transfer_params),
+            )
+            try:
+                await send_request_to_service(
+                    prefiller.client,
+                    prefiller_idx,
+                    api,
+                    req_data,
+                    request_id,
+                    max_retries=global_args.max_retries,
+                    base_delay=global_args.retry_delay,
+                )
+                dispatched = True
+                response = {
+                    "status": "ok",
+                    "request_id": callback_request_id,
+                }
+                proxy_state.complete_metaserver_callback(
+                    callback_request_id, response
+                )
+                logger.info(
+                    "%s request_id=%s stage=proxy event=prefill_complete "
+                    "callback_request_id=%s prefiller_id=%d",
+                    PD_TRACE_PREFIX,
+                    request_id,
+                    callback_request_id,
+                    prefiller_idx,
+                )
+                return response
+            finally:
+                if prefiller_idx is not None and prefiller_score is not None:
+                    proxy_state.release_prefiller(
+                        prefiller_idx, prefiller_score
+                    )
+                    proxy_state.release_prefiller_kv(
+                        prefiller_idx, prefiller_score
+                    )
 
     except Exception as e:
         logger.exception(
@@ -914,10 +988,6 @@ async def metaserver(request: Request):
             e,
         )
         raise HTTPException(status_code=502, detail=f"PD metaserver failed for request {callback_request_id}") from e
-    finally:
-        if prefiller_idx is not None and prefiller_score is not None:
-            proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-            proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == "__main__":

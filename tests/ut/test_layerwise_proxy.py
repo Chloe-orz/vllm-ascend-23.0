@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -29,6 +30,18 @@ class _ProxyState:
         ]
         self.released_prefillers = []
         self.released_kv = []
+        self.metaserver_locks = {}
+        self.completed_metaserver_callbacks = {}
+
+    async def get_metaserver_lock(self, request_id):
+        return self.metaserver_locks.setdefault(request_id, asyncio.Lock())
+
+    def get_completed_metaserver_callback(self, request_id):
+        return self.completed_metaserver_callbacks.get(request_id)
+
+    def complete_metaserver_callback(self, request_id, response):
+        self.req_data_dict.pop(request_id, None)
+        self.completed_metaserver_callbacks[request_id] = response
 
     def select_prefiller(self, _score):
         return 0
@@ -98,6 +111,41 @@ class TestLayerwiseProxyMetaserver(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_request.await_args.args[4], "trace-id")
         self.assertEqual(self.state.released_prefillers, [(0, 42.0)])
         self.assertEqual(self.state.released_kv, [(0, 42.0)])
+        self.assertNotIn(callback_request_id, self.state.req_data_dict)
+
+    async def test_duplicate_decoder_callback_dispatches_prefill_once(self):
+        callback_request_id = "chatcmpl-duplicate-id"
+        self.state.req_data_dict[callback_request_id] = (
+            {"model": "model", "messages": []},
+            20,
+            "/chat/completions",
+        )
+        callback = _Request(
+            {
+                "request_id": callback_request_id,
+                "do_remote_prefill": False,
+                "do_remote_decode": True,
+            }
+        )
+
+        async def yield_to_duplicate(*_args, **_kwargs):
+            await asyncio.sleep(0)
+
+        with patch.object(
+            proxy,
+            "send_request_to_service",
+            new=AsyncMock(side_effect=yield_to_duplicate),
+        ) as send_request:
+            first, second = await asyncio.gather(
+                proxy.metaserver(callback),
+                proxy.metaserver(callback),
+            )
+
+        self.assertEqual(first, second)
+        self.assertEqual(first["status"], "ok")
+        self.assertEqual(send_request.await_count, 1)
+        self.assertEqual(len(self.state.released_prefillers), 1)
+        self.assertEqual(len(self.state.released_kv), 1)
 
 
 if __name__ == "__main__":

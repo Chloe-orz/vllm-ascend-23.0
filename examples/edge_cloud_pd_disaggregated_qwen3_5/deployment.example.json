@@ -1,0 +1,35 @@
+{
+  "model": "Qwen/Qwen3.5-27B",
+  "served_model_name": "qwen3.5-27b",
+  "p_engine_id": "qwen35-p-20260901-01",
+  "weight_format": "bf16",
+  "p_edge_ip": "192.0.2.10",
+  "p_cloud_ip": "192.0.2.20",
+  "decode_ip": "192.0.2.30",
+  "proxy_ip": "192.0.2.40",
+  "devices": {
+    "p-edge": [0, 1],
+    "p-cloud": [0, 1],
+    "decode": [0, 1]
+  },
+  "network_interfaces": {
+    "p-edge": "eth0",
+    "p-cloud": "eth0",
+    "decode": "eth0"
+  },
+  "ports": {
+    "p_api": 8100,
+    "decode_api": 8200,
+    "proxy": 8000,
+    "p_master": 29500,
+    "pd_pre_out": 5558,
+    "pd_post_out": 5559,
+    "kv": 50001
+  },
+  "mtp_num_speculative_tokens": 3,
+  "max_model_len": 32768,
+  "max_num_batched_tokens": 8192,
+  "max_num_seqs": 64,
+  "gpu_memory_utilization": 0.9,
+  "trust_remote_code": false
+}

@@ -139,9 +139,10 @@ def _patched_engine_core_init(self, *args, **kwargs):
             pd_enabled,
         )
 
-    # Load PD-separation configuration from environment variables
-    from vllm_ascend.pd_separation_config import PDSeparationConfig
-    pd_config = PDSeparationConfig.from_env()
+    # The serialized VllmConfig is the source of truth on both sides. The
+    # sub-config itself retains deprecated environment-variable fallbacks for
+    # older launchers, while explicit additional_config values take priority.
+    pd_config = edge_cloud.pd_separation if edge_cloud is not None else None
 
     # Edge-cloud PD-separation bidirectional ZMQ channel (edge side).
     self._pp_pd_channel = None
@@ -171,6 +172,7 @@ def _patched_engine_core_init(self, *args, **kwargs):
         # dp_rank: dp_rank 0 → {pre_out, post_out}, dp_rank 1 →
         # {pre_out+2, post_out+2}, etc. The cloud side must mirror
         # this offsetting in its own PPSchedulerZmqChannel setup.
+        assert pd_config is not None
         pre_out_port = pd_config.pre_out_port + dp_rank * 2
         post_out_port = pd_config.post_out_port + dp_rank * 2
         pre_out = f"tcp://*:{pre_out_port}"

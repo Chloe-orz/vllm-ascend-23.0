@@ -392,6 +392,94 @@ class NPUPlatform(Platform):
             )
 
     @classmethod
+    def _validate_edge_cloud_pd_connector(
+        cls, vllm_config: VllmConfig, ascend_config
+    ) -> None:
+        """Validate the KV data plane required by edge-cloud PD separation."""
+        edge_cloud = getattr(ascend_config, "edge_cloud_config", None)
+        if (
+            edge_cloud is None
+            or getattr(edge_cloud, "enabled", False) is not True
+        ):
+            return
+        pd = getattr(edge_cloud, "pd_separation", None)
+        if pd is None or getattr(pd, "enabled", False) is not True:
+            return
+
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            kv_transfer_config is None
+            or kv_transfer_config.kv_connector
+            != "MooncakeLayerwiseConnector"
+            or kv_transfer_config.kv_role != "kv_producer"
+        ):
+            raise ValueError(
+                "Edge-cloud PD separation requires "
+                "MooncakeLayerwiseConnector with kv_role='kv_producer' on "
+                "both P-edge and P-cloud."
+            )
+
+    @staticmethod
+    def _patch_kv_transfer_engine_id(vllm_config: VllmConfig) -> None:
+        """Give both halves of one edge-cloud P engine a shared identity."""
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is None or getattr(
+            kv_transfer_config, "_engine_id_patched", False
+        ):
+            return
+
+        parallel_config = vllm_config.parallel_config
+        if getattr(parallel_config, "enable_edge_cloud", False):
+            additional_config = vllm_config.additional_config or {}
+            edge_cloud_config = additional_config.get(
+                "edge_cloud_config", {}
+            )
+            shared_engine_id = edge_cloud_config.get("kv_engine_id")
+            if not shared_engine_id:
+                raise ValueError(
+                    "Edge-cloud KV transfer requires "
+                    "edge_cloud_config.kv_engine_id to be shared by P-edge "
+                    "and P-cloud."
+                )
+            kv_transfer_config.engine_id = str(shared_engine_id)
+        else:
+            kv_transfer_config.engine_id = (
+                f"{kv_transfer_config.engine_id}-{uuid4().hex}"
+            )
+        kv_transfer_config._engine_id_patched = True
+
+    @classmethod
+    def _validate_required_aclgraph(
+        cls, vllm_config: VllmConfig, ascend_config
+    ) -> None:
+        """Fail startup if a graph-required deployment fell back to eager.
+
+        Ascend compatibility handling can legitimately downgrade an unsupported
+        graph request. Decode deployments that rely on ACLGraph should opt into
+        this guard so such a downgrade is visible during startup instead of
+        silently changing the serving mode.
+        """
+        if getattr(ascend_config, "require_aclgraph", False) is not True:
+            return
+
+        model_config = vllm_config.model_config
+        compilation_config = vllm_config.compilation_config
+        if getattr(model_config, "enforce_eager", False):
+            raise ValueError(
+                "additional_config.require_aclgraph=true is incompatible "
+                "with enforce_eager. Remove --enforce-eager from the decode "
+                "deployment."
+            )
+        if not compilation_config.cudagraph_mode.has_full_cudagraphs():
+            raise ValueError(
+                "additional_config.require_aclgraph=true requires a full "
+                "ACLGraph mode after platform validation. Configure "
+                '--compilation-config \'{"cudagraph_mode":'
+                '"FULL_DECODE_ONLY"}\' and resolve any logged graph fallback; '
+                f"final mode is {compilation_config.cudagraph_mode}."
+            )
+
+    @classmethod
     def _validate_parallel_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.data_parallel_size > 1 and parallel_config.prefill_context_parallel_size > 1:
@@ -534,6 +622,7 @@ class NPUPlatform(Platform):
 
         validate_pd_separation_scheduler_conflicts(vllm_config, ascend_config)
         cls._configure_pd_separation_scheduler(vllm_config, ascend_config)
+        cls._validate_edge_cloud_pd_connector(vllm_config, ascend_config)
 
         from vllm_ascend.logger import configure_ascend_file_logging
         from vllm_ascend.logger import configure_ascend_logging
@@ -543,9 +632,7 @@ class NPUPlatform(Platform):
 
         if vllm_config.kv_transfer_config is not None:
             check_kv_extra_config(vllm_config)
-            if not getattr(vllm_config.kv_transfer_config, "_engine_id_patched", False):
-                vllm_config.kv_transfer_config.engine_id = f"{vllm_config.kv_transfer_config.engine_id}-{uuid4().hex}"
-                vllm_config.kv_transfer_config._engine_id_patched = True
+            cls._patch_kv_transfer_engine_id(vllm_config)
         from vllm.config import CompilationMode  # noqa: E402
 
         compilation_config = vllm_config.compilation_config
@@ -692,6 +779,8 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
+
+        cls._validate_required_aclgraph(vllm_config, ascend_config)
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience

@@ -135,6 +135,18 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP": lambda: bool(
         int(os.getenv("VLLM_ASCEND_EDGE_CLOUD_CHANNEL_WARMUP", "1"))
     ),
+    # Deprecated compatibility fallbacks for edge-cloud PD scheduler channels.
+    # Prefer additional_config.edge_cloud_config.pd_separation so the edge and
+    # cloud processes receive the same values through VllmConfig serialization.
+    "VLLM_PP_PRE_OUT_ZMQ_PORT": lambda: int(
+        os.getenv("VLLM_PP_PRE_OUT_ZMQ_PORT", "5558")
+    ),
+    "VLLM_PP_POST_OUT_ZMQ_PORT": lambda: int(
+        os.getenv("VLLM_PP_POST_OUT_ZMQ_PORT", "5559")
+    ),
+    "VLLM_PP_PASSIVE_DISPATCH_POLICY": lambda: os.getenv(
+        "VLLM_PP_PASSIVE_DISPATCH_POLICY", "expect_alternation"
+    ),
 }
 
 # end-env-vars-definition

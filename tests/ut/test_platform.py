@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -55,6 +56,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.enable_mc2_hierarchy_comm = False
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_flashcomm1 = False
+        mock_ascend_config.require_aclgraph = False
         mock_ascend_config.SLO_limits_for_dynamic_batch = -1
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.update_compile_ranges_split_points = MagicMock()
@@ -224,6 +226,118 @@ class TestNPUPlatform(TestBase):
 
     def test_get_device_capability(self):
         self.assertIsNone(self.platform.get_device_capability(device_id=0))
+
+    def test_require_aclgraph_accepts_full_decode_only(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.compilation_config.cudagraph_mode = (
+            CUDAGraphMode.FULL_DECODE_ONLY
+        )
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.require_aclgraph = True
+
+        self.platform._validate_required_aclgraph(
+            vllm_config, ascend_config
+        )
+
+    def test_require_aclgraph_rejects_eager_mode(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.enforce_eager = True
+        vllm_config.compilation_config.cudagraph_mode = (
+            CUDAGraphMode.FULL_DECODE_ONLY
+        )
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.require_aclgraph = True
+
+        with pytest.raises(ValueError, match="incompatible with enforce_eager"):
+            self.platform._validate_required_aclgraph(
+                vllm_config, ascend_config
+            )
+
+    def test_require_aclgraph_rejects_graph_fallback(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        ascend_config.require_aclgraph = True
+
+        with pytest.raises(ValueError, match="requires a full ACLGraph mode"):
+            self.platform._validate_required_aclgraph(
+                vllm_config, ascend_config
+            )
+
+    def test_edge_cloud_pd_requires_layerwise_producer(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        ascend_config = SimpleNamespace(
+            edge_cloud_config=SimpleNamespace(
+                enabled=True,
+                pd_separation=SimpleNamespace(enabled=True),
+            )
+        )
+
+        for connector_config in (
+            None,
+            SimpleNamespace(
+                kv_connector="MooncakeConnector",
+                kv_role="kv_producer",
+            ),
+            SimpleNamespace(
+                kv_connector="MooncakeLayerwiseConnector",
+                kv_role="kv_consumer",
+            ),
+        ):
+            vllm_config.kv_transfer_config = connector_config
+            with self.subTest(connector_config=connector_config):
+                with pytest.raises(
+                    ValueError, match="MooncakeLayerwiseConnector"
+                ):
+                    self.platform._validate_edge_cloud_pd_connector(
+                        vllm_config, ascend_config
+                    )
+
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_connector="MooncakeLayerwiseConnector",
+            kv_role="kv_producer",
+        )
+        self.platform._validate_edge_cloud_pd_connector(
+            vllm_config, ascend_config
+        )
+
+    def test_edge_cloud_nodes_use_configured_shared_kv_engine_id(self):
+        engine_ids = []
+        for is_edge_node in (True, False):
+            kv_transfer_config = SimpleNamespace(
+                engine_id="independent-random-id"
+            )
+            vllm_config = SimpleNamespace(
+                kv_transfer_config=kv_transfer_config,
+                additional_config={
+                    "edge_cloud_config": {
+                        "kv_engine_id": "qwen35-p-session-1"
+                    }
+                },
+                parallel_config=SimpleNamespace(
+                    enable_edge_cloud=True,
+                    is_edge_node=is_edge_node,
+                    master_addr="192.0.2.10",
+                    master_port=29500,
+                ),
+            )
+            self.platform._patch_kv_transfer_engine_id(vllm_config)
+            engine_ids.append(kv_transfer_config.engine_id)
+
+        self.assertEqual(engine_ids[0], engine_ids[1])
+        self.assertEqual(engine_ids[0], "qwen35-p-session-1")
+
+    def test_edge_cloud_kv_engine_id_is_required(self):
+        vllm_config = SimpleNamespace(
+            kv_transfer_config=SimpleNamespace(engine_id="random"),
+            additional_config={"edge_cloud_config": {}},
+            parallel_config=SimpleNamespace(enable_edge_cloud=True),
+        )
+
+        with pytest.raises(ValueError, match="kv_engine_id"):
+            self.platform._patch_kv_transfer_engine_id(vllm_config)
 
     @patch("torch.npu.get_device_name")
     def test_get_device_name(self, mock_get_device_name):
