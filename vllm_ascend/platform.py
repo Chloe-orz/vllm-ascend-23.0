@@ -446,6 +446,13 @@ class NPUPlatform(Platform):
                 "both P-edge and P-cloud."
             )
 
+        if not getattr(vllm_config.model_config, "enforce_eager", False):
+            raise ValueError(
+                "Edge-cloud PD separation requires global --enforce-eager "
+                "on both P-edge and P-cloud. speculative_config.enforce_eager "
+                "only controls the MTP draft model and is not sufficient."
+            )
+
     @staticmethod
     def _edge_cloud_pd_disaggregation_requested(
         vllm_config: VllmConfig,

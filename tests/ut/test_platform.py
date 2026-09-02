@@ -308,9 +308,38 @@ class TestNPUPlatform(TestBase):
             kv_connector="MooncakeLayerwiseConnector",
             kv_role="kv_producer",
         )
+        vllm_config.model_config.enforce_eager = True
         self.platform._validate_edge_cloud_pd_connector(
             vllm_config, ascend_config
         )
+
+    def test_edge_cloud_pd_requires_global_eager_mode_on_prefill(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.enable_edge_cloud = True
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.additional_config = {
+            "edge_cloud_config": {
+                "enabled": True,
+                "kv_engine_id": "qwen35-p-session-1",
+                "pd_separation": {"enabled": True},
+            }
+        }
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_connector="MooncakeLayerwiseConnector",
+            kv_role="kv_producer",
+        )
+        ascend_config = SimpleNamespace(
+            edge_cloud_config=SimpleNamespace(
+                enabled=True,
+                kv_engine_id="qwen35-p-session-1",
+                pd_separation=SimpleNamespace(enabled=True),
+            )
+        )
+
+        with pytest.raises(ValueError, match="global --enforce-eager"):
+            self.platform._validate_edge_cloud_pd_connector(
+                vllm_config, ascend_config
+            )
 
     def test_legacy_edge_cloud_pd_mix_skips_kv_connector_validation(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()

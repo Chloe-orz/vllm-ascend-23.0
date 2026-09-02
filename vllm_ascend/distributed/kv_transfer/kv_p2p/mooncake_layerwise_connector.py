@@ -83,7 +83,6 @@ if TYPE_CHECKING:
 DONE_SENDING_MSG = b"done_sending_msg"
 FAILED_SENDING_MSG = b"failed_sending_msg"
 PD_TRACE_PREFIX = "[PD-TRACE]"
-PD_KV_DEBUG_PREFIX = "[DEBUG-PD-KV65]"
 
 
 def _block_counts(block_ids) -> list[int]:
@@ -269,13 +268,6 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.enable_c8_quant = enable_c8_quant
         self.ready_event = ready_event
         self.callback_func = callback_func
-        # Temporary transfer-pipeline observability for the edge-cloud P/D
-        # integration.  These fields are deliberately scalar: the producer
-        # has one FIFO sender per TP worker, so they expose the exact point at
-        # which that worker stopped without retaining request state.
-        self.active_layer = -1
-        self.active_stage = "idle"
-        self.last_completed_layer = -1
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -287,32 +279,9 @@ class KVCacheSendingLayerThread(threading.Thread):
             self._handle_request(send_task)
 
     def _handle_request(self, send_task: SendTask):
-        self.active_layer = send_task.layer_idx
-        self.active_stage = "dequeued"
-        logger.info(
-            "%s event=send_task_dequeued layer_idx=%d layer_name=%s "
-            "requests=%d chunk_finish=%s queue_remaining=%d",
-            PD_KV_DEBUG_PREFIX,
-            send_task.layer_idx,
-            send_task.layer_name,
-            len(send_task.send_request),
-            [meta.chunk_finish for meta in send_task.send_request.values()],
-            self.send_queue.qsize(),
-        )
         try:
             self._transfer_kv_cache(send_task)
-            self.last_completed_layer = send_task.layer_idx
-            self.active_stage = "idle"
-            logger.info(
-                "%s event=send_task_complete layer_idx=%d layer_name=%s "
-                "queue_remaining=%d",
-                PD_KV_DEBUG_PREFIX,
-                send_task.layer_idx,
-                send_task.layer_name,
-                self.send_queue.qsize(),
-            )
         except Exception as e:
-            self.active_stage = "failed"
             logger.exception(
                 "%s request_ids=%s stage=p_to_d event=layer_transfer_exception layer_idx=%s layer_name=%s error=%s",
                 PD_TRACE_PREFIX,
@@ -518,13 +487,6 @@ class KVCacheSendingLayerThread(threading.Thread):
             session_meta[session_id].length.extend(length_list)
             session_meta[session_id].req_ids.append(req_id)
 
-        self.active_stage = "event_wait"
-        logger.info(
-            "%s event=event_wait_start layer_idx=%d layer_name=%s",
-            PD_KV_DEBUG_PREFIX,
-            send_task.layer_idx,
-            send_task.layer_name,
-        )
         if send_task.k_quant_cache is not None:
             self.resharding_stream.synchronize()
         elif self.pd_head_ratio == 1:
@@ -537,28 +499,11 @@ class KVCacheSendingLayerThread(threading.Thread):
             send_task.wait_event.synchronize()  # type:ignore
         elif self.pd_head_ratio > 1:
             self.resharding_stream.synchronize()
-        logger.info(
-            "%s event=event_wait_complete layer_idx=%d layer_name=%s",
-            PD_KV_DEBUG_PREFIX,
-            send_task.layer_idx,
-            send_task.layer_name,
-        )
 
         for session_id, transfer_meta in session_meta.items():
             if len(transfer_meta.src) > 0:
                 req_start_time = time.perf_counter()
                 transfer_bytes = sum(transfer_meta.length)
-                self.active_stage = "sync_write"
-                logger.info(
-                    "%s event=sync_write_start layer_idx=%d layer_name=%s "
-                    "destination=%s operations=%d bytes=%d",
-                    PD_KV_DEBUG_PREFIX,
-                    send_task.layer_idx,
-                    send_task.layer_name,
-                    session_id,
-                    len(transfer_meta.src),
-                    transfer_bytes,
-                )
                 logger.debug(
                     "%s request_ids=%s stage=p_to_d event=layer_transfer_start "
                     "layer_idx=%d layer_name=%s destination=%s operations=%d bytes=%d",
@@ -572,15 +517,6 @@ class KVCacheSendingLayerThread(threading.Thread):
                 )
                 ret = self.engine.batch_transfer_sync_write(
                     session_id, transfer_meta.src, transfer_meta.dst, transfer_meta.length
-                )
-                logger.info(
-                    "%s event=sync_write_complete layer_idx=%d layer_name=%s "
-                    "destination=%s ret=%d",
-                    PD_KV_DEBUG_PREFIX,
-                    send_task.layer_idx,
-                    send_task.layer_name,
-                    session_id,
-                    ret,
                 )
                 if ret < 0:
                     logger.error(
@@ -922,28 +858,7 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
 
     def wait_for_save(self):
         """MooncakeLayerwiseConnector does not save explicitly."""
-        assert self.connector_worker is not None
-        worker = self.connector_worker
-        sender = worker.kv_send_layer_thread
-        logger.info(
-            "%s event=connector_finalize current_layer=%d total_layers=%d "
-            "metadata_requests=%d sender_alive=%s active_layer=%s "
-            "active_stage=%s last_completed_layer=%s queue_size=%s",
-            PD_KV_DEBUG_PREFIX,
-            worker.current_layer,
-            worker.total_layers,
-            len(self._connector_metadata.requests)
-            if isinstance(
-                self._connector_metadata,
-                MooncakeLayerwiseConnectorMetadata,
-            )
-            else 0,
-            sender.is_alive() if sender is not None else False,
-            sender.active_layer if sender is not None else None,
-            sender.active_stage if sender is not None else None,
-            sender.last_completed_layer if sender is not None else None,
-            sender.send_queue.qsize() if sender is not None else None,
-        )
+        pass
 
 
 class MooncakeLayerwiseConnectorScheduler:
@@ -1919,29 +1834,7 @@ class MooncakeLayerwiseConnectorWorker:
 
     def start_load_kv(self, metadata: MooncakeLayerwiseConnectorMetadata):
         """Start loading KV blocks from remote engine."""
-        previous_layer = self.current_layer
         self.current_layer = 0
-        if self.vllm_config.kv_transfer_config.is_kv_producer:
-            sender = self.kv_send_layer_thread
-            logger.info(
-                "%s event=producer_batch_start previous_layer=%d "
-                "current_layer=%d total_layers=%d requests=%s "
-                "sender_alive=%s active_layer=%s active_stage=%s "
-                "last_completed_layer=%s queue_size=%s",
-                PD_KV_DEBUG_PREFIX,
-                previous_layer,
-                self.current_layer,
-                self.total_layers,
-                [
-                    get_external_request_id(req_id)
-                    for req_id in metadata.requests
-                ],
-                sender.is_alive() if sender is not None else False,
-                sender.active_layer if sender is not None else None,
-                sender.active_stage if sender is not None else None,
-                sender.last_completed_layer if sender is not None else None,
-                sender.send_queue.qsize() if sender is not None else None,
-            )
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
             for req_id, meta in metadata.requests.items():
                 if meta.do_virtual:
@@ -2078,27 +1971,7 @@ class MooncakeLayerwiseConnectorWorker:
     ) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
-            logger.info(
-                "%s event=save_kv_enter current_layer=%d total_layers=%d "
-                "layer_name=%s requests=%s",
-                PD_KV_DEBUG_PREFIX,
-                self.current_layer,
-                self.total_layers,
-                layer_name,
-                [
-                    get_external_request_id(req_id)
-                    for req_id in connector_metadata.requests
-                ],
-            )
             if self.current_layer >= self.total_layers:
-                logger.info(
-                    "%s event=save_kv_skipped_past_end current_layer=%d "
-                    "total_layers=%d layer_name=%s",
-                    PD_KV_DEBUG_PREFIX,
-                    self.current_layer,
-                    self.total_layers,
-                    layer_name,
-                )
                 self.current_layer += 1
                 return
             # get reshape and cache event
@@ -2272,22 +2145,6 @@ class MooncakeLayerwiseConnectorWorker:
                 layer_send_task.send_request[req_id] = req_meta_update
 
             self.kv_send_layer_thread.send_queue.put(layer_send_task)
-            logger.info(
-                "%s event=save_kv_queued layer_idx=%d total_layers=%d "
-                "layer_name=%s cache_group=%d requests=%d "
-                "chunk_finish=%s queue_size=%d",
-                PD_KV_DEBUG_PREFIX,
-                self.current_layer,
-                self.total_layers,
-                layer_name,
-                layer_group_idx,
-                len(layer_send_task.send_request),
-                [
-                    meta.chunk_finish
-                    for meta in layer_send_task.send_request.values()
-                ],
-                self.kv_send_layer_thread.send_queue.qsize(),
-            )
             self.current_layer += 1
 
     # NOTE: Due to the FIA operator constraints, the expected kv cache is ND format, NZ shape,

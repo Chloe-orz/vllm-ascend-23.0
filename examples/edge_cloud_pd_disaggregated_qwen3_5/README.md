@@ -26,7 +26,7 @@ Layerwise Proxy
                                       +---------------------> D / TP=2
 ```
 
-P-edge 不分配模型 KV cache；调度器使用 P-cloud 汇报的完整 hybrid cache 规格。P-cloud 执行 Qwen3.5 的全部 Transformer/GDN 层并持有 P 侧 KV，在每层完成后通过 Mooncake 写入 D 已分配的 block。D 是普通的非边云 vLLM 实例，只作为 `kv_consumer`，因此不需要边云执行器，但必须使用 `FULL_DECODE_ONLY` ACLGraph。
+P-edge 不分配模型 KV cache；调度器使用 P-cloud 汇报的完整 hybrid cache 规格。P-cloud 执行 Qwen3.5 的全部 Transformer/GDN 层并持有 P 侧 KV，在每层完成后通过 Mooncake 写入 D 已分配的 block。P-edge 与 P-cloud 都必须使用全局 `--enforce-eager`；`speculative_config.enforce_eager` 只控制 MTP draft model，不能替代该参数。D 是普通的非边云 vLLM 实例，只作为 `kv_consumer`，因此不需要边云执行器，但必须使用 `FULL_DECODE_ONLY` ACLGraph。
 
 ## 前提
 
@@ -64,7 +64,7 @@ python examples/edge_cloud_pd_disaggregated_qwen3_5/launch.py proxy \
   --config deployment.json --dry-run
 ```
 
-Decode dry-run 必须同时满足：包含 `FULL_DECODE_ONLY`、`require_aclgraph:true`、`tensor-parallel-size 2` 和 `kv_consumer`；不包含 `--enforce-eager` 或 `--enable-edge-cloud`。
+P-edge/P-cloud dry-run 必须包含全局 `--enforce-eager`，且不包含 `--compilation-config`。Decode dry-run 必须同时满足：包含 `FULL_DECODE_ONLY`、`require_aclgraph:true`、`tensor-parallel-size 2` 和 `kv_consumer`；不包含 `--enforce-eager` 或 `--enable-edge-cloud`。
 
 ## 启动顺序
 
@@ -131,11 +131,12 @@ python examples/edge_cloud_pd_disaggregated_qwen3_5/smoke_test.py \
 - P-cloud：`p_worker kv_cache_registered` 显示 Qwen3.5 hybrid 的多个 cache group，并出现 `layerwise_write_started`。
 - D：收到对应 `kv_ready`，请求恢复 decode，最终 API 返回。
 
-建议在正式压测前完成三组硬件用例：单请求（覆盖首轮 graph capture）、4 个并发请求（覆盖 P/D 交错和 Proxy 幂等）、长 prompt + MTP（覆盖 GDN/attention 多 cache group 与 draft 通道）。再与同权重、同采样参数的非 PD TP=2 基线比较输出 token；性能测试需排除首次 ACLGraph capture 的预热请求。
+建议在正式压测前完成三组硬件用例：单请求（覆盖 D 首轮 graph capture）、4 个并发请求（覆盖 P/D 交错和 Proxy 幂等）、长 prompt + MTP（覆盖 GDN/attention 多 cache group 与 draft 通道）。再与同权重、同采样参数的非 PD TP=2 基线比较输出 token；性能测试需排除 D 首次 ACLGraph capture 的预热请求。
 
 ## 失败即停的约束
 
 - `pd_separation` 打开但 connector 不是 `MooncakeLayerwiseConnector/kv_producer` 时，P 启动失败。
+- P-edge 或 P-cloud 未配置全局 `--enforce-eager` 时启动失败；MTP 配置中的同名字段不能替代服务级 eager。
 - P-edge 与 P-cloud 从共享配置读取同一个 `p_engine_id`，确保调度器与实际持有 KV 的 cloud worker 属于同一逻辑 P engine；缺失该值会启动失败。
 - D 设置 `require_aclgraph:true`；若携带 `--enforce-eager`、图模式不是 full graph，或平台把图降级为 `NONE`，启动直接失败。
 - P/D 均禁用 prefix caching，避免当前适配范围外的跨实例 prefix 状态组合。

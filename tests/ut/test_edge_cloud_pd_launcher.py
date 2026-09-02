@@ -32,6 +32,8 @@ def test_example_config_builds_target_topology() -> None:
 
     for command in (edge, cloud):
         assert "--enable-edge-cloud" in command
+        assert "--enforce-eager" in command
+        assert "--compilation-config" not in command
         assert command[command.index("--edge-npu-count") + 1] == "2"
         assert command[command.index("--cloud-npu-count") + 1] == "2"
         kv_config = _json_option(command, "--kv-transfer-config")
@@ -72,6 +74,7 @@ def test_example_config_builds_target_topology() -> None:
     assert edge_mtp == decode_mtp == {
         "method": "qwen3_5_mtp",
         "num_speculative_tokens": 3,
+        "enforce_eager": True,
     }
     assert proxy[1].endswith(
         "load_balance_proxy_layerwise_server_example.py"

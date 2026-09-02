@@ -241,7 +241,9 @@ def _json_arg(value: dict[str, Any]) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
-def _common_vllm_args(config: dict[str, Any]) -> list[str]:
+def _common_vllm_args(
+    config: dict[str, Any], *, enforce_eager: bool
+) -> list[str]:
     args = [
         "vllm",
         "serve",
@@ -265,11 +267,19 @@ def _common_vllm_args(config: dict[str, Any]) -> list[str]:
                 "num_speculative_tokens": config[
                     "mtp_num_speculative_tokens"
                 ],
+                "enforce_eager": True,
             }
         ),
-        "--compilation-config",
-        _json_arg({"cudagraph_mode": "FULL_DECODE_ONLY"}),
     ]
+    if enforce_eager:
+        args.append("--enforce-eager")
+    else:
+        args.extend(
+            (
+                "--compilation-config",
+                _json_arg({"cudagraph_mode": "FULL_DECODE_ONLY"}),
+            )
+        )
     if config["weight_format"] == "ascend-w8a8":
         args.extend(("--quantization", "ascend"))
     if config.get("trust_remote_code", False):
@@ -339,7 +349,9 @@ def build_command(config: dict[str, Any], role: str) -> list[str]:
             str(ports["decode_api"]),
         ]
 
-    command = _common_vllm_args(config)
+    command = _common_vllm_args(
+        config, enforce_eager=role in ("p-edge", "p-cloud")
+    )
     if role in ("p-edge", "p-cloud"):
         edge_cloud_role = "edge" if role == "p-edge" else "cloud"
         command.extend(
