@@ -1417,6 +1417,10 @@ class MooncakeLayerwiseConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        # start_load_kv resets this to zero for each new model batch.  Keep an
+        # explicit pre-batch value so diagnostics and lifecycle checks are
+        # valid before the first request arrives.
+        self.current_layer = -1
         self.use_mla = self.vllm_config.model_config.use_mla
         self.request_map = dict[str, str]()
         self.use_attn_mamba_hybrid = False

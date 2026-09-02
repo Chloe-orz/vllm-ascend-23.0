@@ -1199,6 +1199,15 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+    def test_current_layer_is_initialized_before_first_batch(self):
+        worker = MooncakeLayerwiseConnectorWorker(
+            self.vllm_config,
+            self.kv_cache_config,
+            self.engine_id,
+        )
+
+        self.assertEqual(worker.current_layer, -1)
+
     def test_register_kv_caches_producer(self):
         self.vllm_config.kv_transfer_config.is_kv_producer = True
         self.vllm_config.kv_transfer_config.is_kv_consumer = False
