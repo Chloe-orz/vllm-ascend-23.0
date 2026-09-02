@@ -268,9 +268,18 @@ class TestNPUPlatform(TestBase):
 
     def test_edge_cloud_pd_requires_layerwise_producer(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.enable_edge_cloud = True
+        vllm_config.additional_config = {
+            "edge_cloud_config": {
+                "enabled": True,
+                "kv_engine_id": "qwen35-p-session-1",
+                "pd_separation": {"enabled": True},
+            }
+        }
         ascend_config = SimpleNamespace(
             edge_cloud_config=SimpleNamespace(
                 enabled=True,
+                kv_engine_id="qwen35-p-session-1",
                 pd_separation=SimpleNamespace(enabled=True),
             )
         )
@@ -303,6 +312,36 @@ class TestNPUPlatform(TestBase):
             vllm_config, ascend_config
         )
 
+    def test_legacy_edge_cloud_pd_mix_skips_kv_connector_validation(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.enable_edge_cloud = True
+        vllm_config.additional_config = {
+            "edge_cloud_config": {
+                "enabled": True,
+                "pd_separation": {"enabled": True},
+            }
+        }
+        ascend_config = SimpleNamespace(
+            edge_cloud_config=SimpleNamespace(
+                enabled=True,
+                kv_engine_id=None,
+                pd_separation=SimpleNamespace(enabled=True),
+            )
+        )
+
+        for connector_config in (
+            None,
+            SimpleNamespace(
+                kv_connector="MooncakeLayerwiseConnector",
+                kv_role="kv_both",
+            ),
+        ):
+            vllm_config.kv_transfer_config = connector_config
+            with self.subTest(connector_config=connector_config):
+                self.platform._validate_edge_cloud_pd_connector(
+                    vllm_config, ascend_config
+                )
+
     def test_edge_cloud_nodes_use_configured_shared_kv_engine_id(self):
         engine_ids = []
         for is_edge_node in (True, False):
@@ -313,7 +352,9 @@ class TestNPUPlatform(TestBase):
                 kv_transfer_config=kv_transfer_config,
                 additional_config={
                     "edge_cloud_config": {
-                        "kv_engine_id": "qwen35-p-session-1"
+                        "enabled": True,
+                        "kv_engine_id": "qwen35-p-session-1",
+                        "pd_separation": {"enabled": True},
                     }
                 },
                 parallel_config=SimpleNamespace(
@@ -331,13 +372,59 @@ class TestNPUPlatform(TestBase):
 
     def test_edge_cloud_kv_engine_id_is_required(self):
         vllm_config = SimpleNamespace(
-            kv_transfer_config=SimpleNamespace(engine_id="random"),
-            additional_config={"edge_cloud_config": {}},
+            kv_transfer_config=SimpleNamespace(
+                engine_id="random",
+                kv_role="kv_producer",
+            ),
+            additional_config={
+                "edge_cloud_config": {
+                    "enabled": True,
+                    "pd_separation": {"enabled": True},
+                }
+            },
             parallel_config=SimpleNamespace(enable_edge_cloud=True),
         )
 
         with pytest.raises(ValueError, match="kv_engine_id"):
             self.platform._patch_kv_transfer_engine_id(vllm_config)
+
+    def test_legacy_edge_cloud_pd_mix_keeps_unique_kv_engine_id(self):
+        kv_transfer_config = SimpleNamespace(
+            engine_id="legacy-mix",
+            kv_role="kv_both",
+        )
+        vllm_config = SimpleNamespace(
+            kv_transfer_config=kv_transfer_config,
+            additional_config={
+                "edge_cloud_config": {
+                    "enabled": True,
+                    "pd_separation": {"enabled": True},
+                }
+            },
+            parallel_config=SimpleNamespace(enable_edge_cloud=True),
+        )
+
+        self.platform._patch_kv_transfer_engine_id(vllm_config)
+
+        self.assertTrue(kv_transfer_config.engine_id.startswith("legacy-mix-"))
+
+    def test_non_edge_pd_keeps_unique_kv_engine_id(self):
+        kv_transfer_config = SimpleNamespace(
+            engine_id="ordinary-prefill",
+            kv_role="kv_producer",
+        )
+        vllm_config = SimpleNamespace(
+            kv_transfer_config=kv_transfer_config,
+            additional_config={},
+            parallel_config=SimpleNamespace(enable_edge_cloud=False),
+        )
+
+        self.platform._validate_edge_cloud_pd_connector(
+            vllm_config, SimpleNamespace()
+        )
+        self.platform._patch_kv_transfer_engine_id(vllm_config)
+
+        self.assertTrue(kv_transfer_config.engine_id.startswith("ordinary-prefill-"))
 
     @patch("torch.npu.get_device_name")
     def test_get_device_name(self, mock_get_device_name):

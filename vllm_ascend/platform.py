@@ -395,16 +395,43 @@ class NPUPlatform(Platform):
     def _validate_edge_cloud_pd_connector(
         cls, vllm_config: VllmConfig, ascend_config
     ) -> None:
-        """Validate the KV data plane required by edge-cloud PD separation."""
+        """Validate the KV data plane for an edge-cloud P instance.
+
+        ``pd_separation.enabled`` predates external P/D disaggregation: the
+        original edge-cloud PD-mixed topology also enables it for the passive
+        edge/cloud scheduler.  A shared engine id or an explicit
+        ``kv_producer`` role is therefore required to opt into the additional
+        Mooncake constraints.
+        """
+        if not cls._edge_cloud_pd_disaggregation_requested(vllm_config):
+            return
+
         edge_cloud = getattr(ascend_config, "edge_cloud_config", None)
         if (
             edge_cloud is None
             or getattr(edge_cloud, "enabled", False) is not True
         ):
-            return
+            raise ValueError(
+                "Edge-cloud PD disaggregation requires "
+                "edge_cloud_config.enabled=true."
+            )
         pd = getattr(edge_cloud, "pd_separation", None)
         if pd is None or getattr(pd, "enabled", False) is not True:
-            return
+            raise ValueError(
+                "Edge-cloud PD disaggregation requires "
+                "edge_cloud_config.pd_separation.enabled=true."
+            )
+
+        shared_engine_id = getattr(edge_cloud, "kv_engine_id", None)
+        if (
+            not isinstance(shared_engine_id, str)
+            or not shared_engine_id.strip()
+        ):
+            raise ValueError(
+                "edge_cloud_config.kv_engine_id must be a non-empty shared "
+                "identifier for edge-cloud PD disaggregation. P-edge and "
+                "P-cloud must use the same value."
+            )
 
         kv_transfer_config = vllm_config.kv_transfer_config
         if (
@@ -420,26 +447,48 @@ class NPUPlatform(Platform):
             )
 
     @staticmethod
-    def _patch_kv_transfer_engine_id(vllm_config: VllmConfig) -> None:
-        """Give both halves of one edge-cloud P engine a shared identity."""
+    def _edge_cloud_pd_disaggregation_requested(
+        vllm_config: VllmConfig,
+    ) -> bool:
+        """Whether config expresses an edge-cloud external P/D topology."""
+        parallel_config = vllm_config.parallel_config
+        if getattr(parallel_config, "enable_edge_cloud", False) is not True:
+            return False
+
+        additional_config = vllm_config.additional_config or {}
+        edge_cloud_config = additional_config.get("edge_cloud_config", {}) or {}
+        shared_engine_id = edge_cloud_config.get("kv_engine_id")
+        kv_transfer_config = vllm_config.kv_transfer_config
+        kv_role = getattr(kv_transfer_config, "kv_role", None)
+        return bool(shared_engine_id) or kv_role == "kv_producer"
+
+    @classmethod
+    def _patch_kv_transfer_engine_id(cls, vllm_config: VllmConfig) -> None:
+        """Set the connector identity without changing legacy topology."""
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config is None or getattr(
             kv_transfer_config, "_engine_id_patched", False
         ):
             return
 
-        parallel_config = vllm_config.parallel_config
-        if getattr(parallel_config, "enable_edge_cloud", False):
+        if cls._edge_cloud_pd_disaggregation_requested(vllm_config):
             additional_config = vllm_config.additional_config or {}
-            edge_cloud_config = additional_config.get(
-                "edge_cloud_config", {}
-            )
+            edge_cloud_config = additional_config.get("edge_cloud_config", {}) or {}
             shared_engine_id = edge_cloud_config.get("kv_engine_id")
-            if not shared_engine_id:
+            pd_config = edge_cloud_config.get("pd_separation", {}) or {}
+            if not pd_config.get("enabled", False):
                 raise ValueError(
-                    "Edge-cloud KV transfer requires "
-                    "edge_cloud_config.kv_engine_id to be shared by P-edge "
-                    "and P-cloud."
+                    "Edge-cloud PD disaggregation requires "
+                    "edge_cloud_config.pd_separation.enabled=true."
+                )
+            if (
+                not isinstance(shared_engine_id, str)
+                or not shared_engine_id.strip()
+            ):
+                raise ValueError(
+                    "edge_cloud_config.kv_engine_id must be a non-empty "
+                    "shared identifier for edge-cloud PD disaggregation. "
+                    "P-edge and P-cloud must use the same value."
                 )
             kv_transfer_config.engine_id = str(shared_engine_id)
         else:

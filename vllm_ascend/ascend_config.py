@@ -892,6 +892,10 @@ class EplbConfig:
 # grep and adjust if the channel pool grows in the future.
 _PD_PREFILL_INFLIGHT_WHEN_NEXT_PRIOR = 2  # 2P1D
 _PD_PREFILL_INFLIGHT_DEFAULT = 1          # 1P1D
+_PD_PRE_OUT_PORT_DEFAULT = 5558
+_PD_POST_OUT_PORT_DEFAULT = 5559
+_PD_DISPATCH_POLICY_DEFAULT = "expect_alternation"
+_PD_MAX_CHUNK_PREFILL_AHEAD_DEFAULT = 1
 
 
 class PDSeparationConfig:
@@ -918,9 +922,23 @@ class PDSeparationConfig:
     def __init__(self, user_config: dict | None = None):
         if user_config is None:
             user_config = {}
+        self.enabled: bool = user_config.get("enabled", False)
+
+        # This sub-config is instantiated for every Ascend deployment. Avoid
+        # touching deprecated edge-cloud environment variables unless the
+        # channel is actually enabled, so an unrelated PD or standard serving
+        # process cannot fail on stale edge-cloud settings.
+        if not self.enabled:
+            self.pre_out_port = _PD_PRE_OUT_PORT_DEFAULT
+            self.post_out_port = _PD_POST_OUT_PORT_DEFAULT
+            self.dispatch_policy = _PD_DISPATCH_POLICY_DEFAULT
+            self.next_prefill_prior_enable = False
+            self.chunk_prefill_prior_enable = False
+            self.max_chunk_prefill_ahead = _PD_MAX_CHUNK_PREFILL_AHEAD_DEFAULT
+            return
+
         from vllm_ascend import envs as ascend_envs
 
-        self.enabled: bool = user_config.get("enabled", False)
         self.pre_out_port: int = int(
             user_config.get(
                 "pre_out_port", ascend_envs.VLLM_PP_PRE_OUT_ZMQ_PORT
@@ -944,7 +962,10 @@ class PDSeparationConfig:
             "chunk_prefill_prior_enable", False
         )
         self.max_chunk_prefill_ahead: int = int(
-            user_config.get("max_chunk_prefill_ahead", 1)
+            user_config.get(
+                "max_chunk_prefill_ahead",
+                _PD_MAX_CHUNK_PREFILL_AHEAD_DEFAULT,
+            )
         )
         self._validate()
 
@@ -1049,12 +1070,6 @@ class EdgeCloudConfig:
                     self.edge_head_tail_layers,
                 )
                 self.edge_head_tail_layers = 0
-        if self.pd_separation.enabled and not self.kv_engine_id:
-            raise ValueError(
-                "edge_cloud_config.kv_engine_id must be a non-empty shared "
-                "identifier when pd_separation.enabled=true. P-edge and "
-                "P-cloud must use the same value."
-            )
         head_k, tail_k = self.head_tail_k
         if head_k < 0 or tail_k < 0:
             raise ValueError(
