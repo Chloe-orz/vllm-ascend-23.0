@@ -4224,11 +4224,21 @@ class NPUModelRunner(GPUModelRunner):
 
         ``force_drop_task_ids`` carries chains the scheduler cut from its
         ready queues (all requests finished): their contexts are dropped
-        unconditionally.  Dropping a context whose DRAFT_FIRST already
-        executed is safe — the matching DRAFT_LAST drains through the
-        context-is-None path in _run_edge_cloud_draft_last_segment, and
-        worker FIFO ordering guarantees an already-dispatched DRAFT_FIRST
-        ran before this RPC arrives.
+        unconditionally.  That is safe ONLY because the scheduler defers
+        the report until the chain has fully drained (no head or tail of
+        the task remains queued anywhere), and a picked-but-draining
+        DRAFT_LAST tolerates a missing context via its drain path.
+
+        Finished requests are only MARKED here — never popped, not even
+        when every request of the parent batch has finished.  The old
+        all-finished pop relied on "worker FIFO ordering guarantees an
+        already-dispatched DRAFT_FIRST ran before this RPC arrives"; that
+        assumption is false (the clear RPC overtakes enqueued but
+        unexecuted heads, observed as "DRAFT batch has no pending draft
+        context" on the in-flight step).  Contexts are reaped by exactly
+        two owners: natural chain completion (the last draft step pops
+        its context in _run_edge_cloud_draft_last_segment) or the
+        scheduler's dropped-task report above.
         """
         req_id_set = set(req_ids)
         for req_id in req_id_set:
@@ -4242,10 +4252,9 @@ class NPUModelRunner(GPUModelRunner):
             if hit:
                 finished = context.setdefault("finished_req_ids", set())
                 finished.update(hit)
-                if not all(req_id in finished for req_id in ctx_req_ids):
-                    # Partial finish: keep the draft alive.
-                    continue
-            elif task_id not in force_dropped:
+                # Mark only; never pop (see docstring).
+                continue
+            if task_id not in force_dropped:
                 continue
             self._pending_edge_cloud_draft_contexts.pop(task_id, None)
 
