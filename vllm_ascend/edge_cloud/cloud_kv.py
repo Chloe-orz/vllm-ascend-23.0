@@ -112,9 +112,17 @@ class CloudKVRequestManager:
         # Reservations of preempted requests, kept pinned so a retry sees
         # the same prefix hit and start position as the first admission.
         self._preempted: dict[str, _Reservation] = {}
-        # Bounded ledger of recent state removals, used to classify
-        # missing-state occurrences (preempted vs finished) in diagnostics.
-        self._recent_state_removals: dict[str, str] = {}
+        # Ledger of recent state removals (reason, monotonic timestamp),
+        # driving the void-run classification: a member with a live record
+        # drains as a void run; anything else is a protocol error.  Records
+        # are reaped on re-admission and by the drain TTL — never by size.
+        self._recent_state_removals: dict[str, tuple[str, float]] = {}
+        self._removal_record_ttl_s = float(
+            os.environ.get(
+                "EDGE_CLOUD_REMOVAL_RECORD_TTL_S",
+                str(self._REMOVAL_RECORD_TTL_DEFAULT_S),
+            )
+        )
         self._requests: dict[str, _CloudRequest] = {}
         self._completed_hashes: set[bytes] = set()
         self._mtp_actual_computed_by_task: dict[str, dict[str, int]] = {}
@@ -876,6 +884,10 @@ class CloudKVRequestManager:
                 cached_tokens=common_hit_tokens,
                 epoch=reservation.epoch,
             )
+            # New incarnation admitted: the old removal record's job is
+            # done — stale batches of the previous incarnation are now
+            # caught by epoch validation, so the record can be reaped.
+            self._recent_state_removals.pop(data.req_id, None)
         finally:
             self._release_reservation(reservation)
 
@@ -1159,16 +1171,38 @@ class CloudKVRequestManager:
 
     def _is_void_incarnation(self, request_id: str) -> bool:
         """A member may be void-run only if its state was removed by a
-        defined transition (preempted / finished / aborted).  Anything
-        else is a protocol error, never void-run."""
-        return request_id in self._recent_state_removals
+        defined transition (preempted / finished / aborted) and the record
+        has not aged past the drain TTL.  Anything else is a protocol
+        error, never void-run."""
+        entry = self._recent_state_removals.get(request_id)
+        if entry is None:
+            return False
+        _, removed_at = entry
+        if time.monotonic() - removed_at > self._removal_record_ttl_s:
+            # The drain window is long past; treat as unrecorded so a
+            # stale batch still fails as a protocol error rather than
+            # void-running against an incarnation nobody remembers.
+            self._recent_state_removals.pop(request_id, None)
+            return False
+        return True
+
+    # Upper bound for how long a removal record may legitimately be needed
+    # by late in-flight batches (park cycles are bounded by the 30s
+    # escalation; retry/drain chains complete in seconds to minutes).
+    _REMOVAL_RECORD_TTL_DEFAULT_S = 3600.0
 
     def _record_state_removal(self, request_id: str, reason: str) -> None:
-        self._recent_state_removals[request_id] = reason
-        # Bound the ledger: keep only the most recent 256 entries.
-        while len(self._recent_state_removals) > 256:
-            self._recent_state_removals.pop(
-                next(iter(self._recent_state_removals)))
+        self._recent_state_removals[request_id] = (reason, time.monotonic())
+        # Never DROP records to fit a bound: a removed record turns a
+        # legitimately dead member's late batch into a spurious protocol
+        # error (the "state missing" crash family).  Records are reaped by
+        # re-admission and the drain TTL; the size cap is only an
+        # abnormality alarm.
+        if len(self._recent_state_removals) > 4096:
+            logger.error(
+                "cloud KV removal-record ledger exceeds 4096 entries "
+                "(abnormal drain lag; records are NOT being dropped)"
+            )
 
     def _missing_state_diagnostics(
         self,
@@ -1182,7 +1216,11 @@ class CloudKVRequestManager:
         - batch composition: live members vs total, which tells whether
           this was a mixed batch (P-C) the edge could not drop."""
         info: dict[str, Any] = {
-            "recent_removal_reason": self._recent_state_removals.get(request_id)
+            "recent_removal_reason": (
+                entry[0]
+                if (entry := self._recent_state_removals.get(request_id))
+                else None
+            )
         }
         if scheduler_output is not None:
             members = list(scheduler_output.num_scheduled_tokens)
