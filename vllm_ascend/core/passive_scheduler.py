@@ -147,7 +147,14 @@ class PassiveScheduler:
         # Per-edge capacity-progress watermark: one edge's acks must not
         # postpone another edge's park escalation.
         self._me_last_capacity_progress: dict[int, float] = {}
-        self._PARK_ESCALATION_SECONDS = 30.0
+        # Park escalation window: a stalled batch with zero capacity
+        # progress for this long is force-drained (members retried, batch
+        # void-run as a comm shell).  During the window the edge's whole
+        # decode lane is frozen, so the value must stay well below any
+        # edge/client timeout — 30s proved too long in practice.
+        self._PARK_ESCALATION_SECONDS = float(
+            os.environ.get("EDGE_CLOUD_PARK_ESCALATION_S", "10")
+        )
         # Requests dispatched to the worker but not yet acked — never
         # eligible as preemption victims (their blocks are being written).
         self._inflight_req_ids: set[str] = set()
