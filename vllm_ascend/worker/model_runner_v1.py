@@ -4266,9 +4266,21 @@ class NPUModelRunner(GPUModelRunner):
             raise RuntimeError("DRAFT batch missing draft_task_id")
         context = self._pending_edge_cloud_draft_contexts.get(task_id)
         if context is None:
+            # Provenance for the recurring "no pending context" family:
+            # whether the parent tail has executed on this worker (stash
+            # happens at PREFILL_LAST/DECODE_LAST), the chain step, the
+            # batch composition, and how many contexts are live — so the
+            # producing path (parent tail not yet run / pre-gen duplicate /
+            # early reap) is identifiable from one log line.
             raise RuntimeError(
                 "DRAFT batch has no pending draft context: "
-                f"task_id={task_id}"
+                f"task_id={task_id}, "
+                f"step={scheduler_output.draft_step_idx}, "
+                f"parent_req_id={scheduler_output.parent_req_id}, "
+                f"head_token={scheduler_output.head_token}, "
+                f"batch_type={scheduler_output.batch_type}, "
+                f"members={list(scheduler_output.num_scheduled_tokens)}, "
+                f"live_contexts={len(self._pending_edge_cloud_draft_contexts)}"
             )
         return context
 
