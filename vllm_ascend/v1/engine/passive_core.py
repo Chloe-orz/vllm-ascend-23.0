@@ -726,17 +726,16 @@ class PassiveEngineCoreProc:
     def _try_preempt_for_capacity(self, scheduler_output: SchedulerOutput) -> bool:
         """Preempt one victim so the failing batch can allocate.
 
-        Victims are chosen most-recently-admitted first.  The only unsafe
-        requests are the worker-bound ones (dispatched to the worker or
-        sitting in an already-rewritten ready queue — their cloud block
-        tables are baked in and freeing them would corrupt in-flight KV
-        writes) and members of the failing batch itself.  Everything else
-        is fair game even while queued: batches still in the ingress queue
-        or the park list have not been rewritten, so the preempted member
-        is void-run when its batch is later rewritten — the single-machine
-        "preempt a running request, recompute later" semantic through the
-        void-run drain.  Returns True when a victim was freed (caller
-        retries the rewrite).
+        Victims are chosen most-recently-admitted first, but ONLY among
+        completely quiescent requests — nothing dispatched to the worker,
+        nothing in any ready queue, nothing in the ingress queue, nothing
+        parked.  This mirrors the edge-side PD-flight protection from
+        0a716d65 ("重计算"): a request with ANY in-flight or queued
+        transaction is never preempted, keeping the cross-party state
+        machine simple and provable.  The cost is that under saturation
+        relief relies on the park/escalation path instead — an accepted
+        trade-off.  Returns True when a victim was freed (caller retries
+        the rewrite).
         """
         if self._cloud_kv_manager is None:
             return False
@@ -744,7 +743,7 @@ class PassiveEngineCoreProc:
             # No way to notify the edge — never free a victim the edge
             # still believes is running.
             return False
-        ineligible = self.passive_scheduler.worker_bound_request_ids()
+        ineligible = self.passive_scheduler.inflight_request_ids()
         ineligible.update(scheduler_output.num_scheduled_tokens)
         for candidate in self._cloud_kv_manager.preemption_candidates():
             if candidate in ineligible:

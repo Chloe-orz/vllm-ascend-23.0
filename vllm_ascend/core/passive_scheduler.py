@@ -621,28 +621,6 @@ class PassiveScheduler:
                 ids.update(so.num_scheduled_tokens)
         return ids
 
-    def worker_bound_request_ids(self) -> set[str]:
-        """Requests whose cloud block tables may already be in (or on their
-        way to) the worker: dispatched batches and the already-rewritten
-        ready queues.  Preempting one of these would free blocks the worker
-        can still write — unsafe.
-
-        Everything NOT in this set is a safe preemption victim even when it
-        is queued: batches still in ``_me_queue`` or the park list have not
-        been rewritten yet, so their later rewrite simply void-runs the
-        preempted member (the single-machine "preempt a running request and
-        recompute later" semantic, ported through the void-run drain)."""
-        ids = set(self._inflight_req_ids)
-        for ready in (
-            self.ready_prefills,
-            self.ready_decodes,
-            self.ready_drafts,
-            self.ready_pdmixes,
-        ):
-            for so in ready:
-                ids.update(so.num_scheduled_tokens)
-        return ids
-
     def _wrap_segment(self, edge_id: int, so: SchedulerOutput) -> None:
         """Wrap all req_id/head_token fields with the edge prefix (F6).
 
