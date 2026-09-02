@@ -2385,8 +2385,37 @@ class NPUModelRunner(GPUModelRunner):
             if req_id in self.requests
         }
 
-        result = super()._update_states(scheduler_output)
-
+        try:
+            result = super()._update_states(scheduler_output)
+        except ValueError:
+            # A block-table row overflow surfaces as a bare numpy broadcast
+            # ValueError deep inside the batch update.  Re-raise with the
+            # batch provenance attached — per-new-request block counts, the
+            # worker's row widths, and the configured max_model_len — so
+            # the producing side (edge over-length vs accounting drift) is
+            # identifiable from the log.
+            _row_widths = [
+                t.block_table.np.shape[1]
+                for t in self.input_batch.block_table.block_tables
+            ]
+            _new_req_blocks = [
+                (
+                    d.req_id,
+                    [len(group) for group in d.block_ids],
+                    d.num_computed_tokens,
+                )
+                for d in scheduler_output.scheduled_new_reqs
+            ]
+            logger.error(
+                "worker _update_states block-table overflow: "
+                "batch_type=%s row_widths=%s max_model_len=%s "
+                "new_reqs(req_id, blocks_per_group, computed)=%s",
+                scheduler_output.batch_type,
+                _row_widths,
+                self.max_model_len,
+                _new_req_blocks,
+            )
+            raise
         # Void-run projected members must not participate in speculative
         # correction accounting; the cloud rewrite marks them explicitly in
         # cloud_void_req_ids.  A void member's draft chain may never have

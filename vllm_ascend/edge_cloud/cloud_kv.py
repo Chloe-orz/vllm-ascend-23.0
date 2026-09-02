@@ -776,6 +776,26 @@ class CloudKVRequestManager:
                 engine_request_id=data.req_id,
             )
             raise RuntimeError(f"cloud has no prefix reservation for {control_request_id!r}")
+        # max_model_len boundary contract: the edge must never send a
+        # request the cloud cannot host.  Allocate caps block counts at
+        # max_model_len, so an oversized request would only crash much
+        # later inside the worker's block table with an undiagnosable
+        # numpy broadcast error — reject it here, at the boundary, with
+        # full context instead.
+        cloud_max_model_len = self._kv.max_model_len
+        num_scheduled = scheduler_output.num_scheduled_tokens[data.req_id]
+        if (
+            reservation.manifest.prompt_tokens > cloud_max_model_len
+            or data.num_computed_tokens + num_scheduled > cloud_max_model_len
+        ):
+            self._release_reservation(reservation)
+            raise RuntimeError(
+                f"edge request {control_request_id!r} exceeds the cloud "
+                f"max_model_len: prompt={reservation.manifest.prompt_tokens}"
+                f" computed={data.num_computed_tokens}"
+                f" scheduled={num_scheduled}"
+                f" max_model_len={cloud_max_model_len}"
+            )
         if data.req_id in self._requests:
             self._release_reservation(reservation)
             raise RuntimeError(f"duplicate cloud request {data.req_id!r}")
@@ -828,7 +848,6 @@ class CloudKVRequestManager:
             self._release_reservation(reservation)
             raise RuntimeError("reserved cloud prefix changed before admission")
         common_blocks = self._kv.create_kv_cache_blocks(raw_common_blocks)
-        num_scheduled = scheduler_output.num_scheduled_tokens[data.req_id]
         try:
             new_blocks = self._kv.allocate_slots(
                 request,
