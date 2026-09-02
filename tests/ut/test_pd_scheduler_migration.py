@@ -2,6 +2,7 @@
 
 import importlib
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 
 def _make_vllm_config(async_scheduling: bool = False):
@@ -121,3 +122,36 @@ def test_install_passive_scheduler_shim_aliases_upstream_import():
     assert sys.modules["vllm.v1.core.sched.passive_scheduler"] is sys.modules[
         "vllm_ascend.core.passive_scheduler"
     ]
+
+
+def test_pd_empty_batch_builds_kv_connector_metadata():
+    from vllm_ascend.core.pd_separated_scheduler import PDSeparatedScheduler
+
+    scheduler = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+    scheduler.finished_req_ids = {"finished-request"}
+    scheduler.connector = object()
+    connector_metadata = object()
+    scheduler._build_kv_connector_meta = MagicMock(return_value=connector_metadata)
+
+    scheduler_output = scheduler._make_empty_batch()
+
+    assert scheduler_output.kv_connector_metadata is connector_metadata
+    assert scheduler_output.finished_req_ids == {"finished-request"}
+    assert scheduler.finished_req_ids == set()
+    scheduler._build_kv_connector_meta.assert_called_once_with(
+        scheduler.connector, scheduler_output
+    )
+
+
+def test_pd_empty_batch_without_connector_keeps_metadata_empty():
+    from vllm_ascend.core.pd_separated_scheduler import PDSeparatedScheduler
+
+    scheduler = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+    scheduler.finished_req_ids = set()
+    scheduler.connector = None
+    scheduler._build_kv_connector_meta = MagicMock()
+
+    scheduler_output = scheduler._make_empty_batch()
+
+    assert scheduler_output.kv_connector_metadata is None
+    scheduler._build_kv_connector_meta.assert_not_called()

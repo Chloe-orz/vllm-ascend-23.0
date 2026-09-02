@@ -793,6 +793,12 @@ class PDSeparatedScheduler(Scheduler):
         scheduler_output = SchedulerOutput.make_empty()
         scheduler_output.finished_req_ids = self.finished_req_ids
         self.finished_req_ids = set()
+        # EngineCore dispatches connector-backed empty batches so workers can
+        # poll asynchronous transfer completions. Match Scheduler.schedule().
+        if self.connector is not None:
+            scheduler_output.kv_connector_metadata = (
+                self._build_kv_connector_meta(self.connector, scheduler_output)
+            )
         return scheduler_output
 
     def _schedule_pd_separated(self) -> SchedulerOutput:
