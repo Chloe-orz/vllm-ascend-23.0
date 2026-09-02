@@ -626,6 +626,22 @@ class PDSeparatedScheduler(Scheduler):
         # independent of any peer message (see the method's docstring).
         self._maybe_release_preempt_hold_liveness()
         scheduler_output = self._schedule_pd_separated()
+        # Stamp per-request incarnation epochs AT SCHEDULE TIME (void-run
+        # drain protocol).  The stamp must capture the epoch of the
+        # incarnation the batch's content was produced for — deferred
+        # control publishing (pre-generated drafts, placeholders) can
+        # release a batch AFTER a preemption/re-admission moved the epoch
+        # forward, and stamping at publish time would mislabel the stale
+        # batch with the NEW epoch: the cloud would then run it against
+        # the new incarnation (missing metadata crash, or worse, stale
+        # tokens written into the new blocks).  The cloud rewrite
+        # void-runs any member whose batch epoch is older than its
+        # admitted incarnation.
+        if self._cloud_epoch_by_req:
+            scheduler_output.edge_cloud_epoch_by_req = {
+                req_id: self._cloud_epoch_by_req.get(req_id, 0)
+                for req_id in scheduler_output.num_scheduled_tokens
+            }
         # Only FIRST-segment batches are published to the cloud over PRE_OUT
         # (the publish hook drops PL/DL/DRL tails), and only batches whose
         # cloud-side execution runs the purge hook can deliver the

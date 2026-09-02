@@ -384,10 +384,7 @@ def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
                 originals = {}
                 self._edge_cloud_prefill_first_by_head_token = originals
             originals[head_token] = scheduler_output
-        cloud_so = _make_cloud_safe_scheduler_output(
-            cloud_so,
-            getattr(self.scheduler, "_cloud_epoch_by_req", None),
-        )
+        cloud_so = _make_cloud_safe_scheduler_output(cloud_so)
 
     published_invalidations = list(getattr(cloud_so, "cloud_draft_invalidate_task_ids", None) or ())
     try:
@@ -468,7 +465,6 @@ def _publish_to_cloud(self, scheduler_output: SchedulerOutput) -> None:
 
 def _make_cloud_safe_scheduler_output(
     scheduler_output: SchedulerOutput,
-    epoch_by_req: dict[str, int] | None = None,
 ) -> SchedulerOutput:
     """Project one SchedulerOutput into its cloud-facing privacy form.
 
@@ -515,16 +511,6 @@ def _make_cloud_safe_scheduler_output(
     }
     cloud_so.scheduled_encoder_inputs = {}
     cloud_so.free_encoder_mm_hashes = []
-    # Stamp per-request incarnation epochs (void-run drain protocol): the
-    # cloud rewrite void-runs any member whose batch epoch is older than
-    # its admitted incarnation, so a stale batch of a previous incarnation
-    # can never write into a re-admitted request's new blocks.  Requests
-    # never preempted simply stamp 0 via the default.
-    if epoch_by_req:
-        cloud_so.edge_cloud_epoch_by_req = {
-            req_id: epoch_by_req.get(req_id, 0)
-            for req_id in scheduler_output.num_scheduled_tokens
-        }
     log_event(
         logger,
         "debug",
