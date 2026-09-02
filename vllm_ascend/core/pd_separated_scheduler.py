@@ -955,8 +955,23 @@ class PDSeparatedScheduler(Scheduler):
         return True
 
     def _is_request_preemptible(self, request: Request) -> bool:
-        """Only idle RUNNING requests are safe preemption candidates."""
-        return request.status == RequestStatus.RUNNING and self._pd_active_flight_count.get(request.request_id, 0) == 0
+        """Only idle RUNNING requests are safe preemption candidates.
+
+        Cloud-admitted requests are NEVER locally preempted: local
+        preemption frees only edge KV and cannot release the request's
+        cloud-side middle KV + reservation, which would orphan that state
+        and crash the cloud on the retry (missing reservation / duplicate
+        admission).  With all cloud-admitted requests excluded, edge-KV
+        pressure degrades to the upstream no-candidate path — defer
+        scheduling and recover on natural completion, exactly the 1E1C
+        semantic from 0a716d65.  Cloud-pool pressure is handled by the
+        cloud-side preemption/escalation machinery instead.
+        """
+        return (
+            request.status == RequestStatus.RUNNING
+            and self._pd_active_flight_count.get(request.request_id, 0) == 0
+            and request.edge_cloud_request_id is None
+        )
 
     def _select_preemption_candidate(self) -> Request | None:
         """Select an idle request without touching active edge-cloud work."""
@@ -3318,6 +3333,17 @@ class PDSeparatedScheduler(Scheduler):
             if any(not self._is_request_preemptible(request) for request in self.chunk_prefill_first):
                 logger.warning(
                     "Cannot reset edge-cloud prefill requests because at least one request is not safely preemptible"
+                )
+                return False
+
+            if any(
+                not self._is_request_preemptible(request)
+                for request in self.running
+            ):
+                logger.warning(
+                    "Cannot reset running requests: at least one running "
+                    "request is not safely preemptible (cloud-admitted or "
+                    "in flight)"
                 )
                 return False
 
