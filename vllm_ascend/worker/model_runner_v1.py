@@ -6320,21 +6320,22 @@ class NPUModelRunner(GPUModelRunner):
             and len(task_cache)
             >= self._cloud_spec_decode_metadata_cache_max
         ):
-            stale_task_id = next(iter(task_cache))
-            task_cache.pop(stale_task_id)
-            self._cloud_scheduler_output_by_task.pop(stale_task_id, None)
-            self._cloud_draft_position_state_by_task.pop(
-                stale_task_id, None
-            )
-            self._cloud_target_generation_by_task.pop(stale_task_id, None)
-            self._eagle3_cloud_aux_hidden_states_by_task.pop(
-                stale_task_id, None
-            )
-            logger.warning(
-                "Cloud draft metadata cache exceeded bound (%d); evicting "
-                "unconsumed task_id=%s",
+            # Do NOT evict: every cached task is unconsumed by definition,
+            # and evicting one whose draft chain is still in flight crashes
+            # that DRAFT with "no matching target positions" (and wedges
+            # the edge's decode channel behind it) — the failure this
+            # branch used to cause under multi-edge load.  The real reapers
+            # are the chain lifecycle pops (last-step consume, invalidation
+            # purge, fully-void comm-shell drop), which bound the
+            # steady-state size; overflow here means chains are lagging
+            # unusually far behind their targets, so log loudly and let the
+            # cache exceed the watermark instead of killing a live chain.
+            logger.error(
+                "Cloud draft metadata cache exceeded bound (%d); keeping "
+                "all live chains and caching task_id=%s anyway "
+                "(draft chains lagging; investigate if recurring)",
                 self._cloud_spec_decode_metadata_cache_max,
-                stale_task_id,
+                task_id,
             )
         task_cache[task_id] = (frozen_metadata, num_reqs)
         # Freeze the verify step's scheduler_output alongside the metadata.
@@ -6441,9 +6442,16 @@ class NPUModelRunner(GPUModelRunner):
             raise RuntimeError("DRAFT batch missing draft_task_id")
         state = self._cloud_draft_position_state_by_task.get(task_id)
         if state is None:
+            # Attach provenance: whether the task was never cached (target
+            # drained as a comm shell / never executed here) or was reaped
+            # early, plus the batch composition, so the producing path is
+            # identifiable from one log line.
             raise RuntimeError(
                 "DRAFT has no matching target positions: "
-                f"task_id={task_id}"
+                f"task_id={task_id}, step={scheduler_output.draft_step_idx}, "
+                f"batch_members={len(scheduler_output.num_scheduled_tokens)}, "
+                f"void_marked={scheduler_output.cloud_void_req_ids}, "
+                f"cached_tasks={len(self._cloud_draft_position_state_by_task)}"
             )
 
         draft_step_idx = int(scheduler_output.draft_step_idx or 0)
