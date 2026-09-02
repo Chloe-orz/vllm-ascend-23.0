@@ -98,6 +98,12 @@ _DRAFT_LAST_TYPES = (
     BatchType.DECODE_DRAFT_LAST,
 )
 
+_DRAFT_FAILURE_STATUSES = (
+    RequestStatus.FINISHED_ABORTED,
+    RequestStatus.FINISHED_ERROR,
+    RequestStatus.FINISHED_IGNORED,
+)
+
 
 # Default cap on concurrent PF→PL round trips (2P pipelining).  This is a
 # pure scheduler-side counter: with key-tagged pre-posted irecvs the
@@ -2474,6 +2480,38 @@ class PDSeparatedScheduler(Scheduler):
                 # request's blocks without evicting the new entry.
                 self.kv_cache_manager.free(request)
 
+    def _registered_draft_requires_completion(
+        self, req_id: str, task_id: str | None = None
+    ) -> bool:
+        """Whether a registered draft must outlive its P-side request.
+
+        The layerwise proxy intentionally caps the P request after its first
+        sampled token. A normal STOP/LENGTH finish therefore does not mean
+        that the deferred MTP chain is stale: the chain must still populate
+        the final KV layer and signal the decoder. Abort/error paths cannot
+        produce useful draft output and continue to use dummy draining.
+        """
+        task_ids = self._edge_cloud_draft_req_tasks.get(req_id)
+        if not task_ids or (task_id is not None and task_id not in task_ids):
+            return False
+        request = self.requests.get(req_id)
+        return bool(
+            request is not None
+            and request.status not in _DRAFT_FAILURE_STATUSES
+        )
+
+    def filter_worker_finished_req_ids(
+        self, finished_req_ids: set[str]
+    ) -> set[str]:
+        """Keep successful P finishes from clearing active draft contexts."""
+        if not self._edge_cloud_draft_retention_enabled:
+            return finished_req_ids
+        return {
+            req_id
+            for req_id in finished_req_ids
+            if not self._registered_draft_requires_completion(req_id)
+        }
+
     def _scheduler_output_all_requests_finished(
         self, scheduler_output: SchedulerOutput
     ) -> bool:
@@ -2486,9 +2524,13 @@ class PDSeparatedScheduler(Scheduler):
             batch_req_ids = set(batch_req_ids)
         if scheduler_output.parent_req_id is not None:
             batch_req_ids.add(scheduler_output.parent_req_id)
+        task_id = scheduler_output.draft_task_id
         return bool(batch_req_ids) and all(
-            (request := self.requests.get(req_id)) is None
-            or request.is_finished()
+            not self._registered_draft_requires_completion(req_id, task_id)
+            and (
+                (request := self.requests.get(req_id)) is None
+                or request.is_finished()
+            )
             for req_id in batch_req_ids
         )
 
@@ -2585,12 +2627,14 @@ class PDSeparatedScheduler(Scheduler):
         if not req_ids:
             return
         # Aligned with the model runner's deferred-draft policy: a draft
-        # batch is dropped only when EVERY request it covers has finished.
-        # Partial finishes keep the draft — the cloud-side cached
+        # batch becomes dead only when EVERY request it covers is gone or
+        # ended unsuccessfully. Successful P finishes remain registered until
+        # their MTP KV warmup completes. Partial failures keep the draft — the
+        # cloud-side cached
         # attention metadata is whole-batch and cannot be re-sliced.
         # Dropped task ids are reported to the runner (which may still
         # hold the enqueued context) via take_dropped_draft_task_ids().
-        # Never drop queued DRAFT_FIRSTs of finished requests: their comm
+        # Never drop queued DRAFT_FIRSTs of failed requests: their comm
         # seqnos were reserved and their recvs pre-posted at parent publish
         # time, so a drop would leave holes on the channel and stall every
         # later chain.  Mark the chain dead instead — the worker drains
@@ -2706,11 +2750,12 @@ class PDSeparatedScheduler(Scheduler):
     def _is_stale_draft_output(
         self, scheduler_output: SchedulerOutput
     ) -> bool:
-        # A draft output is stale when EVERY backing request has finished.
+        # A draft output is stale when EVERY backing request is gone or ended
+        # unsuccessfully.
         # This drives the DRAFT_FIRST dead-chain marking in
         # _pick_draft_first_batch: once all owning requests are gone, the
         # edge can no longer produce a real payload (the draft context was
-        # cleared on finish/abort), so the remaining steps drain as dummies
+        # cleared on abort/error), so the remaining steps drain as dummies
         # (draft_chain_dead) -- they are never dropped, because their comm
         # seqnos were reserved and their recvs pre-posted at parent publish
         # time, and a drop would hole the channel.
@@ -2722,16 +2767,16 @@ class PDSeparatedScheduler(Scheduler):
         # DRAFT_LAST is always executed (drained) in _pick_draft_last_batch
         # to pair the cloud's response, so this check intentionally does NOT
         # exempt pre-generated dispatched chains the way it used to.
-        # NOTE: finished requests may still be present in self.requests
-        # while their KV blocks are retained for an in-flight draft chain,
-        # so liveness must go through is_finished() (via
-        # _scheduler_output_all_requests_finished), not dict membership.
+        # NOTE: successful P-side finishes may still be present in
+        # self.requests while their KV blocks and draft contexts are retained.
+        # They remain live for this purpose until their registered draft task
+        # finishes; abort/error/ignored statuses become stale immediately.
         return self._scheduler_output_all_requests_finished(scheduler_output)
 
     def _draft_output_reqs_live(
         self, scheduler_output: SchedulerOutput
     ) -> bool:
-        """True if any request backing this draft output is still active.
+        """True if any request still requires this draft output.
 
         Used both to decide whether a DRAFT_LAST may spawn a verify
         placeholder and (inverted) whether a DRAFT_FIRST is stale.

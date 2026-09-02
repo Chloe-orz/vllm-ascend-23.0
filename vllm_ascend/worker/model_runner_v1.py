@@ -7337,6 +7337,21 @@ class NPUModelRunner(GPUModelRunner):
                 recorded += 1
         return recorded
 
+    def _finalize_cloud_draft_kv_connector(
+        self, spec_step_idx: int
+    ) -> bool:
+        """Finalize target KV transfer after the last cloud MTP step.
+
+        The target-model forward on the headless cloud worker defers
+        connector finalization so the MTP attention layer can append the
+        final KV layer. Cloud sampling is a no-op, therefore the independently
+        scheduled final draft step owns the matching metadata clear.
+        """
+        if spec_step_idx + 1 < self.num_spec_tokens:
+            return False
+        self.finalize_kv_connector()
+        return True
+
     def _run_edge_cloud_draft_middle_segment(
         self,
         scheduler_output: "SchedulerOutput",
@@ -7457,9 +7472,13 @@ class NPUModelRunner(GPUModelRunner):
                 "Edge-cloud draft middle segment returned no intermediates"
             )
 
+        is_final_draft_step = self._finalize_cloud_draft_kv_connector(
+            spec_step_idx
+        )
+
         if (
             scheduler_output.draft_task_id is not None
-            and spec_step_idx + 1 >= self.num_spec_tokens
+            and is_final_draft_step
         ):
             self._cloud_spec_decode_metadata_by_task.pop(
                 scheduler_output.draft_task_id, None

@@ -767,6 +767,11 @@ def _clear_pending_edge_cloud_draft_for_finished_requests(self) -> None:
     finished_req_ids = set(
         getattr(self.scheduler, "finished_req_ids", set()) or ()
     )
+    filter_worker_finished = getattr(
+        self.scheduler, "filter_worker_finished_req_ids", None
+    )
+    if filter_worker_finished is not None:
+        finished_req_ids = filter_worker_finished(finished_req_ids)
     take_sched_dropped = getattr(
         self.scheduler, "take_dropped_draft_task_ids", None
     )

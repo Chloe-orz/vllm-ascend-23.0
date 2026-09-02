@@ -1,4 +1,4 @@
-﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 """Unit tests for the DRAFT_FIRST -> DRAFT_LAST alternation invariant and the
 drain path that pairs the cloud's DRAFT_LAST response when the owning request
 finishes or is aborted mid-chain.
@@ -29,14 +29,12 @@ Regression coverage for the edge-side MTP draft deadlock fixes:
 from collections import deque
 from unittest.mock import MagicMock
 
-import pytest
-
 from vllm.v1.core.sched.output import (
     BatchType,
     HiddenChannelType,
     SchedulerOutput,
 )
-
+from vllm.v1.request import RequestStatus
 
 # ------------------------------------------------------------------ #
 # Helpers                                                            #
@@ -434,6 +432,127 @@ class TestDraftReqsLiveAndStale:
         s._pregenerated_draft_task_ids.add(so.draft_task_id)
         s._draft_first_dispatched = True
         assert s._is_stale_draft_output(so) is True
+
+
+class TestFinishedPrefillDraftRetention:
+    """A successful P request finish must not cancel its MTP KV warmup."""
+
+    @staticmethod
+    def _setup(status: RequestStatus):
+        from vllm_ascend.core.pd_separated_scheduler import (
+            PDSeparatedScheduler,
+        )
+
+        scheduler = PDSeparatedScheduler.__new__(PDSeparatedScheduler)
+        scheduler._edge_cloud_draft_retention_enabled = True
+        scheduler._edge_cloud_draft_req_tasks = {}
+        scheduler._edge_cloud_draft_task_reqs = {}
+        scheduler.prefill_drafts_first_ready = deque()
+        scheduler.decode_drafts_first_ready = deque()
+        scheduler.prefill_drafts_last_ready = deque()
+        scheduler.decode_drafts_last_ready = deque()
+        scheduler.decodes_first_ready = deque()
+        scheduler._decode_first_placeholder_parent = None
+        scheduler._dead_draft_task_ids = set()
+        scheduler._dead_chain_publish_to_release = []
+        scheduler._draft_publish_pending = {}
+        scheduler._draft_publish_scalars_patched = set()
+        scheduler._draft_publish_dispatched = set()
+        request = MagicMock()
+        request.request_id = "req-0"
+        request.status = status
+        request.is_finished.return_value = True
+        scheduler.requests = {request.request_id: request}
+        scheduler.register_edge_cloud_draft_task("task-0", {"req-0"})
+        draft = _make_draft_first()
+        draft.draft_chain_dead = False
+        return scheduler, draft
+
+    def test_length_capped_prefill_keeps_registered_draft_live(self):
+        scheduler, draft = self._setup(RequestStatus.FINISHED_LENGTH_CAPPED)
+
+        assert scheduler._is_stale_draft_output(draft) is False
+        assert scheduler.filter_worker_finished_req_ids({"req-0"}) == set()
+
+    def test_stopped_prefill_keeps_registered_draft_live(self):
+        scheduler, draft = self._setup(RequestStatus.FINISHED_STOPPED)
+
+        assert scheduler._is_stale_draft_output(draft) is False
+        assert scheduler.filter_worker_finished_req_ids({"req-0"}) == set()
+
+    def test_aborted_prefill_drops_registered_draft(self):
+        scheduler, draft = self._setup(RequestStatus.FINISHED_ABORTED)
+
+        assert scheduler._is_stale_draft_output(draft) is True
+        assert scheduler.filter_worker_finished_req_ids({"req-0"}) == {"req-0"}
+
+    def test_natural_finish_does_not_mark_queued_chain_dead(self):
+        scheduler, draft = self._setup(
+            RequestStatus.FINISHED_LENGTH_CAPPED
+        )
+        scheduler.prefill_drafts_first_ready.append(draft)
+
+        scheduler._drop_stale_drafts_for_req_ids({"req-0"})
+
+        assert draft.draft_chain_dead is False
+        assert scheduler._dead_draft_task_ids == set()
+        assert scheduler._dead_chain_publish_to_release == []
+
+    def test_abort_marks_queued_chain_dead_for_dummy_drain(self):
+        scheduler, draft = self._setup(RequestStatus.FINISHED_ABORTED)
+        scheduler.prefill_drafts_first_ready.append(draft)
+
+        scheduler._drop_stale_drafts_for_req_ids({"req-0"})
+
+        assert draft.draft_chain_dead is True
+        assert scheduler._dead_draft_task_ids == {"task-0"}
+        assert scheduler._dead_chain_publish_to_release == ["task-0"]
+
+    def test_engine_keeps_retained_finish_out_of_worker_cleanup(self):
+        from vllm_ascend.patch.platform.patch_engine_core import (
+            _clear_pending_edge_cloud_draft_for_finished_requests,
+        )
+
+        engine = MagicMock()
+        engine.use_spec_decode = True
+        engine.scheduler.finished_req_ids = {"req-0"}
+        engine.scheduler.filter_worker_finished_req_ids.return_value = set()
+        engine.scheduler.take_dropped_draft_task_ids.return_value = []
+        engine.scheduler.take_dead_chain_publish_releases.return_value = []
+
+        _clear_pending_edge_cloud_draft_for_finished_requests(engine)
+
+        engine.scheduler.filter_worker_finished_req_ids.assert_called_once_with(
+            {"req-0"}
+        )
+        clear_worker_drafts = (
+            engine.model_executor.clear_pending_edge_cloud_draft_for_req_ids
+        )
+        clear_worker_drafts.assert_not_called()
+
+
+class TestCloudDraftConnectorFinalization:
+    """The headless P-cloud worker must close deferred KV metadata."""
+
+    @staticmethod
+    def _make_runner(num_spec_tokens: int = 3):
+        from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.num_spec_tokens = num_spec_tokens
+        runner.finalize_kv_connector = MagicMock()
+        return runner
+
+    def test_only_final_cloud_draft_step_finalizes_connector(self):
+        runner = self._make_runner()
+
+        results = [
+            runner._finalize_cloud_draft_kv_connector(step_idx)
+            for step_idx in range(runner.num_spec_tokens)
+        ]
+
+        assert results == [False, False, True]
+        runner.finalize_kv_connector.assert_called_once_with()
 
 
 # ------------------------------------------------------------------ #
