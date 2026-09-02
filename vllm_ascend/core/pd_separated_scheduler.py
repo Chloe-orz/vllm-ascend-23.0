@@ -1999,30 +1999,6 @@ class PDSeparatedScheduler(Scheduler):
             # verify placeholder for a dead request.
             self._force_draft_last = False
             self._start_decode_or_draft_first_only_window()
-            # A deferred dropped-chain report fires once the chain's last
-            # queued DRAFT_LAST has been picked for drain (no heads or
-            # tails of this task remain anywhere): every mid-flight hazard
-            # (context clear, retained-block release, cloud invalidation)
-            # is gone by construction.
-            drained_task_id = scheduler_output.draft_task_id
-            if (
-                drained_task_id
-                and drained_task_id in self._deferred_dropped_draft_task_ids
-                and not any(
-                    o.draft_task_id == drained_task_id
-                    for o in self.drafts_last_ready
-                )
-                and not any(
-                    o.draft_task_id == drained_task_id
-                    for o in self.drafts_first_ready
-                )
-            ):
-                self._deferred_dropped_draft_task_ids.discard(drained_task_id)
-                self._dropped_draft_task_ids_to_report.append(drained_task_id)
-                logger.info(
-                    "[PD] chain drained; reporting dropped draft task_id=%s",
-                    drained_task_id,
-                )
             output_req_ids = getattr(
                 scheduler_output,
                 "draft_output_req_ids",
@@ -3209,6 +3185,33 @@ class PDSeparatedScheduler(Scheduler):
             self._drop_stale_drafts_for_req_ids(self.finished_req_ids)
         if enqueue_next_draft:
             next_draft_ready = self._enqueue_next_draft_first(scheduler_output)
+            # A deferred dropped-chain report fires only NOW — when the
+            # chain's last DRAFT_LAST has fully SETTLED (its head and tail
+            # both executed on the worker).  Firing at tail PICK time was
+            # wrong: the clear RPC can overtake the not-yet-executed head
+            # in the worker queue and crash it with "no pending draft
+            # context".  After settle, no step of the chain exists anywhere
+            # by construction, so all three report consumers (context
+            # clear, retained-block release, cloud invalidation) are safe.
+            drained_task_id = scheduler_output.draft_task_id
+            if (
+                drained_task_id
+                and drained_task_id in self._deferred_dropped_draft_task_ids
+                and not any(
+                    o.draft_task_id == drained_task_id
+                    for o in self.drafts_last_ready
+                )
+                and not any(
+                    o.draft_task_id == drained_task_id
+                    for o in self.drafts_first_ready
+                )
+            ):
+                self._deferred_dropped_draft_task_ids.discard(drained_task_id)
+                self._dropped_draft_task_ids_to_report.append(drained_task_id)
+                logger.info(
+                    "[PD] chain drained; reporting dropped draft task_id=%s",
+                    drained_task_id,
+                )
             logger.info(
                 "[PD] update_from_output DRAFT_LAST done, draft_remote_pending: %d, next_draft_ready: %s",
                 self.draft_remote_pending_count,
