@@ -1458,6 +1458,39 @@ def edge_cloud_isend_tensor_dict(
     return handles
 
 
+def _wait_handles_watchdog(handles: list, desc: str) -> None:
+    """Wait for comm/collective handles; dump op states if the wait stalls.
+
+    Same rationale as NPUWorker._wait_handles_watchdog: at a hang, each
+    handle's is_completed() distinguishes "op never launched" from
+    "payload left the device but was never matched".  Observational only.
+    """
+    if not handles:
+        return
+    cancel = threading.Event()
+
+    def _watch() -> None:
+        while not cancel.wait(30.0):
+            states = []
+            for h in handles:
+                try:
+                    states.append(h.is_completed())
+                except Exception:
+                    states.append(None)
+            logger.error(
+                "[EC-COMM-STALL] %s: wait blocked; handle is_completed=%s",
+                desc, states)
+
+    watcher = threading.Thread(
+        target=_watch, daemon=True, name="ec-comm-watchdog")
+    watcher.start()
+    try:
+        for h in handles:
+            h.wait()
+    finally:
+        cancel.set()
+
+
 def _allocate_merged_recv_buffer(
     ec_meta: "EdgeCloudTensorMeta",
     num_tokens: int,
@@ -1864,8 +1897,7 @@ def _broadcast_nonmerge_tensors_inplace(
                 tensor, src=tp_group.ranks[0], group=group, async_op=True
             )
         )
-    for handle in handles:
-        handle.wait()
+    _wait_handles_watchdog(handles, "tp_broadcast_nonmerge")
 
 
 def edge_cloud_broadcast_recv(
@@ -1958,7 +1990,7 @@ def edge_cloud_broadcast_recv(
                     group=tp_dev_group,
                     async_op=True,
                 )
-                handle.wait()
+                _wait_handles_watchdog([handle], "tp_broadcast_merged_pp0")
                 # Re-split into the user-visible dict.  We update in place
                 # because callers may have captured the dict reference.
                 tensor_dict.update(
@@ -2002,8 +2034,7 @@ def edge_cloud_broadcast_recv(
                         tensor, src=tp_group.ranks[0], group=group, async_op=True
                     )
                 )
-            for handle in handles:
-                handle.wait()
+            _wait_handles_watchdog(handles, "tp_broadcast_pp0")
 
         comm_postprocess.append(broadcast_postprocess)
         if sp_chunk:
@@ -2058,7 +2089,7 @@ def edge_cloud_broadcast_recv(
                 group=tp_dev_group,
                 async_op=True,
             )
-            handle.wait()
+            _wait_handles_watchdog([handle], "tp_broadcast_merged_nonpp0")
             recv_tensor_dict.update(
                 _split_merged_buffer_into_dict(merged_buf, ec_meta)
             )
@@ -2103,8 +2134,7 @@ def edge_cloud_broadcast_recv(
                     tensor, src=tp_group.ranks[0], group=group, async_op=True
                 )
             )
-        for handle in handles:
-            handle.wait()
+        _wait_handles_watchdog(handles, "tp_broadcast_nonpp0")
 
     postprocess: list[Callable[[], None]] = [broadcast_postprocess]
     if sp_chunk:
@@ -2160,8 +2190,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
                         tensor, src=tp_group.ranks[0], group=group, async_op=True
                     )
                 )
-            for handle in handles:
-                handle.wait()
+            _wait_handles_watchdog(handles, "tp_broadcast_dyn")
 
         comm_postprocess.append(broadcast_postprocess)
         return tensor_dict, comm_handles, comm_postprocess
@@ -2189,8 +2218,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
                     tensor, src=tp_group.ranks[0], group=group, async_op=True
                 )
             )
-        for handle in handles:
-            handle.wait()
+        _wait_handles_watchdog(handles, "tp_broadcast_draft_recv_tail")
 
     return recv_tensor_dict, [], [broadcast_postprocess]
 
@@ -2303,8 +2331,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
                         async_op=True,
                     )
                 )
-            for handle in handles:
-                handle.wait()
+            _wait_handles_watchdog(handles, "tp_broadcast_draft")
 
         return recv_tensor_dict, comm_handles, [broadcast_postprocess]
 
@@ -2347,8 +2374,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
                         async_op=True,
                     )
                 )
-            for handle in handles:
-                handle.wait()
+            _wait_handles_watchdog(handles, "tp_broadcast_dyn")
 
         comm_postprocess.append(broadcast_postprocess)
         return tensor_dict, comm_handles, comm_postprocess
@@ -2379,8 +2405,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
                     async_op=True,
                 )
             )
-        for handle in handles:
-            handle.wait()
+        _wait_handles_watchdog(handles, "tp_broadcast_draft_recv_tail")
 
     return recv_tensor_dict, [], [broadcast_postprocess]
 
