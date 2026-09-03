@@ -901,6 +901,43 @@ class NPUWorker(WorkerBase):
         ds = getattr(scheduler_output, "draft_step_idx", None)
         return ec_comm_ctx(f"bt={scheduler_output.batch_type} ht={ht} ds={ds}")
 
+    def _wait_handles_watchdog(self, handles: list, desc: str) -> None:
+        """Wait for comm handles; if the wait stalls, dump op states.
+
+        A stalled P2P rendezvous is the 4E1C hang signature.  When a wait
+        blocks >30s, log each handle's is_completed(): for a SEND that is
+        True while the peer's recv never completes, the payload left this
+        device and was lost/misrouted in transport; False means the op
+        never actually launched on the device (stream/dependency stall).
+        Purely observational: the wait itself is unchanged.
+        """
+        if not handles:
+            return
+        cancel = threading.Event()
+
+        def _watch() -> None:
+            waited = 30.0
+            while not cancel.wait(waited):
+                states = []
+                for h in handles:
+                    try:
+                        states.append(h.is_completed())
+                    except Exception:
+                        states.append(None)
+                logger.error(
+                    "[EC-COMM-STALL] %s: P2P wait blocked; handle "
+                    "is_completed=%s (see EC-SEND-WAIT/EC-RECV-WAIT begin "
+                    "for channel/pair context)", desc, states)
+
+        watcher = threading.Thread(
+            target=_watch, daemon=True, name="ec-comm-watchdog")
+        watcher.start()
+        try:
+            for h in handles:
+                h.wait()
+        finally:
+            cancel.set()
+
     def _wait_pp_send_work(
         self, channel: HiddenChannelType | None = None,
         pair_edge_id: int | None = None,
@@ -924,8 +961,7 @@ class NPUWorker(WorkerBase):
         # exactly the blocking point that froze the worker.
         t0 = time.monotonic()
         logger.info("[EC-SEND-WAIT] begin %s n=%d", scope, len(all_handles))
-        for handle in all_handles:
-            handle.wait()
+        self._wait_handles_watchdog(all_handles, f"send_wait {scope}")
         _took_ms = (time.monotonic() - t0) * 1e3
         if _took_ms > 100:
             logger.info("[EC-SEND-WAIT] end %s took_ms=%.1f (slow)", scope,
@@ -1618,8 +1654,10 @@ class NPUWorker(WorkerBase):
                     "[EC-RECV-WAIT] begin kind=cloud_draft pair_edge_id=%s "
                     "n=%d ht=%s", _pair_edge_id, len(comm_handles),
                     getattr(scheduler_output, "head_token", None))
-                for handle in comm_handles:
-                    handle.wait()
+                self._wait_handles_watchdog(
+                    comm_handles,
+                    f"cloud_draft_recv pair={_pair_edge_id} "
+                    f"ht={getattr(scheduler_output, 'head_token', None)}")
                 _took_ms = (time.monotonic() - _t0) * 1e3
                 if _took_ms > 100:
                     logger.info(
@@ -1722,8 +1760,10 @@ class NPUWorker(WorkerBase):
                     "[EC-RECV-WAIT] begin kind=edge_draft_tail edge_id=%s "
                     "n=%d ht=%s", self._edge_instance_id(), len(comm_handles),
                     getattr(scheduler_output, "head_token", None))
-                for handle in comm_handles:
-                    handle.wait()
+                self._wait_handles_watchdog(
+                    comm_handles,
+                    f"edge_draft_tail_recv edge={self._edge_instance_id()} "
+                    f"ht={getattr(scheduler_output, 'head_token', None)}")
                 _took_ms = (time.monotonic() - _t0) * 1e3
                 if _took_ms > 100:
                     logger.info(
