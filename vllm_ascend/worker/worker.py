@@ -795,11 +795,26 @@ class NPUWorker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
+    @staticmethod
+    def _send_handles_completed(handles: list) -> str:
+        """Best-effort completion snapshot of send handles for diagnostics."""
+        try:
+            return str([h.is_completed() for h in handles])
+        except Exception:
+            return "unknown"
+
     def _record_pp_send_work(
         self, handles: list[Handle], channel: HiddenChannelType | None = None,
         pair_edge_id: int | None = None,
     ) -> None:
         if channel is None:
+            if self._pp_send_work:
+                logger.warning(
+                    "[EC-SEND-OVERWRITE] legacy slot: %d unreaped send "
+                    "handle(s) overwritten. old_completed=%s",
+                    len(self._pp_send_work),
+                    self._send_handles_completed(self._pp_send_work),
+                )
             self._pp_send_work = handles
         else:
             # Multi-instance (2E1C): key by (channel, source pair).  Each
@@ -809,6 +824,22 @@ class NPUWorker(WorkerBase):
             # cross-pair dependency and deadlocked the cloud (E0's unreaped
             # prefill_2 send blocking E1's prefill_2 batch).
             key = (channel.value, pair_edge_id)
+            prev = self._pp_send_work_by_channel.get(key)
+            if prev:
+                # Diagnostic for the 3E1C hang: the design invariant is "one
+                # outstanding send per (channel, pair)".  Overwriting unreaped
+                # handles breaks it: a STUCK old send (peer never posted the
+                # matching recv) silently blocks this pair's per-channel FIFO
+                # stream while its handle is lost forever (never waited, never
+                # reported).  If the hang reproduces, grep for this line and
+                # check old_completed=False.
+                logger.warning(
+                    "[EC-SEND-OVERWRITE] key=%s: %d unreaped send handle(s) "
+                    "overwritten by a new send on the same (channel, pair). "
+                    "old_completed=%s — if False, the overwritten send is "
+                    "still in flight (or stuck) and now invisible.",
+                    key, len(prev), self._send_handles_completed(prev),
+                )
             self._pp_send_work_by_channel[key] = handles
 
     # ------------------------------------------------------------------ #
@@ -865,21 +896,28 @@ class NPUWorker(WorkerBase):
         pair_edge_id: int | None = None,
     ) -> None:
         if channel is None:
-            for handle in self._pp_send_work:
-                handle.wait()
+            all_handles = list(self._pp_send_work)
             self._pp_send_work = []
             for handles in self._pp_send_work_by_channel.values():
-                for handle in handles:
-                    handle.wait()
+                all_handles.extend(handles)
             self._pp_send_work_by_channel.clear()
+            scope = "scope=ALL"
+        else:
+            # Multi-instance (2E1C): wait only on THIS pair's outstanding send —
+            # see _record_pp_send_work for why the key carries the pair.
+            key = (channel.value, pair_edge_id)
+            all_handles = self._pp_send_work_by_channel.pop(key, [])
+            scope = f"key={key}"
+        if not all_handles:
             return
-
-        # Multi-instance (2E1C): wait only on THIS pair's outstanding send —
-        # see _record_pp_send_work for why the key carries the pair.
-        key = (channel.value, pair_edge_id)
-        handles = self._pp_send_work_by_channel.pop(key, [])
-        for handle in handles:
+        # Diagnostic for the 3E1C hang: a "begin" with no matching "end" is
+        # exactly the blocking point that froze the worker.
+        t0 = time.monotonic()
+        logger.info("[EC-SEND-WAIT] begin %s n=%d", scope, len(all_handles))
+        for handle in all_handles:
             handle.wait()
+        logger.info("[EC-SEND-WAIT] end %s took_ms=%.1f", scope,
+                    (time.monotonic() - t0) * 1e3)
 
     # ------------------------------------------------------------------ #
     # [CHER/EHER] Cloud/edge hidden early-receive primitives             #
@@ -997,6 +1035,18 @@ class NPUWorker(WorkerBase):
                 if self._edge_bucket_of_token(key) == _bucket
             )
             if _same_bucket >= _max:
+                # Diagnostic for the 3E1C hang: this skip is SILENT in the
+                # original design.  If busy_loop is also blocked, this edge's
+                # recv is never posted -> the pair stalls.  Correlate with
+                # the absence of a later edge_cloud_irecv log for this
+                # head_token.
+                logger.warning(
+                    "[EC-EARLY-RECV-SKIP] head_token=%s channel=%s skipped: "
+                    "per-edge early-recv cache full (bucket=%s have=%d "
+                    "max=%d). busy_loop must post this recv itself; if it "
+                    "is blocked, this edge stalls.",
+                    ht, channel_str, _bucket, _same_bucket, _max,
+                )
                 return
             try:
                 entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
@@ -1030,6 +1080,15 @@ class NPUWorker(WorkerBase):
         with self._early_recv_lock:
             entry = self._early_recv_handles.pop(head_token, None)
             self._early_recv_consumed.add(head_token)
+            # Diagnostic: which source satisfied this recv.  A stall whose
+            # last line is "source=self_post" but no edge_cloud_irecv log
+            # follows means the post itself raised; "source=guard_cache"
+            # means the guard's irecv is the one being waited on.
+            logger.info(
+                "[EC-EARLY-RECV] head_token=%s channel=%s source=%s",
+                head_token, channel.value,
+                "guard_cache" if entry is not None else "self_post",
+            )
             if entry is not None:
                 return entry  # guard thread posted it, consumed
             # Not posted by guard: post our own.  Do NOT cache in
@@ -1531,8 +1590,19 @@ class NPUWorker(WorkerBase):
                     tensor_meta=recv_tensor_meta,
                 )
             )
-            for handle in comm_handles:
-                handle.wait()
+            # Diagnostic for the 3E1C hang: synchronous recv wait on the
+            # cloud worker — a "begin" with no "end" here means the edge
+            # never posted the matching draft send.
+            if comm_handles:
+                _t0 = time.monotonic()
+                logger.info(
+                    "[EC-RECV-WAIT] begin kind=cloud_draft pair_edge_id=%s "
+                    "n=%d", _pair_edge_id, len(comm_handles))
+                for handle in comm_handles:
+                    handle.wait()
+                logger.info(
+                    "[EC-RECV-WAIT] end kind=cloud_draft pair_edge_id=%s "
+                    "took_ms=%.1f", _pair_edge_id, (time.monotonic() - _t0) * 1e3)
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None
@@ -1619,8 +1689,19 @@ class NPUWorker(WorkerBase):
                     tensor_meta=recv_tensor_meta,
                 )
             )
-            for handle in comm_handles:
-                handle.wait()
+            # Diagnostic: edge-side synchronous draft recv wait — a "begin"
+            # with no "end" means the cloud's draft reply never arrived.
+            if comm_handles:
+                _t0 = time.monotonic()
+                logger.info(
+                    "[EC-RECV-WAIT] begin kind=edge_draft_tail edge_id=%s "
+                    "n=%d", self._edge_instance_id(), len(comm_handles))
+                for handle in comm_handles:
+                    handle.wait()
+                logger.info(
+                    "[EC-RECV-WAIT] end kind=edge_draft_tail edge_id=%s "
+                    "took_ms=%.1f", self._edge_instance_id(),
+                    (time.monotonic() - _t0) * 1e3)
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None
