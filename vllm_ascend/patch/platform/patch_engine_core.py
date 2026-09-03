@@ -812,6 +812,24 @@ def _clear_pending_edge_cloud_draft_for_finished_requests(self) -> None:
     finished_req_ids = set(getattr(self.scheduler, "finished_req_ids", set()) or ())
     take_sched_dropped = getattr(self.scheduler, "take_dropped_draft_task_ids", None)
     sched_dropped = take_sched_dropped() if take_sched_dropped is not None else []
+    # Diagnostic (3E1C hang): a dropped draft task that still has DEFERRED
+    # (unpublished) cloud controls may already have had its payload sent by
+    # the edge worker while the cloud will never post the matching recv —
+    # an orphan message that shifts the channel FIFO by one.  Log the exact
+    # state so a hang can be correlated with a specific dropped task.
+    if sched_dropped:
+        _deferred = getattr(self, "_pd_deferred_draft_pre_out", None) or {}
+        _opened = getattr(self, "_pd_draft_pre_out_open_tasks", None) or set()
+        for _task_id in sched_dropped:
+            logger.warning(
+                "[EC-DRAFT-DROP] task_id=%s unpublished_controls=%d "
+                "stream_opened=%s — if unpublished_controls>0 for a "
+                "dispatched step, its payload is on the channel with no "
+                "cloud recv ever coming (orphan).",
+                _task_id,
+                len(_deferred.get(_task_id) or ()),
+                _task_id in _opened,
+            )
     release = getattr(self.scheduler, "release_draft_retained_blocks", None)
     if release is not None:
         for task_id in sched_dropped:
