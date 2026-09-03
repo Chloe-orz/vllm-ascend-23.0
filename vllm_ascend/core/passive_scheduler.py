@@ -977,36 +977,23 @@ class PassiveScheduler:
             # Decode/Draft in arrival order (shared DECODE channel --
             # see _pick_decode_or_draft_by_arrival).
             if self.ready_drafts or self.ready_decodes:
-                # [INVERSION-HAZARD] 镜像插队告警(本次不改行为,只观测):
-                # 若 ready_prefills 队头的 prefill 比 decode/draft 更早到达,
-                # 此处派发 decode/draft 即构成插队——边侧 PL 随 PF 即刻投递,
-                # 被阻塞的 PL 会卡住 DF head,payload 发不出,cloud 的 decode
-                # recv 永远等不到 → 与 PREFILL 态死锁互为镜像。尚未在现网
-                # 观测到,触发本日志即说明该场景真实存在,届时再修。
+                # [INVERSION-HAZARD] fixed: an earlier-arrived prefill must
+                # NOT be overtaken by a decode/draft dispatch.  The edge
+                # posts the PL tail immediately after its PF head, and the
+                # PF payload is already on the wire; if the cloud runs the
+                # decode first, the prefill's recv is never posted, the
+                # edge's PL stalls its DF head, and the cloud's decode recv
+                # waits forever -- a cross-side circular wait, observed in
+                # production (4E1C).  Delegate to the same arrival-order
+                # scheduler the PREFILL-state mirror uses.
                 if self.ready_prefills:
-                    _pf_seq = self._arrival_seq(self.ready_prefills[0])
-                    _dc_seq = (
-                        self._arrival_seq(self.ready_decodes[0])
-                        if self.ready_decodes else None
+                    logger.info(
+                        "[PD-PASSIVE][INVERSION-FIX] prefill pending while "
+                        "in DECODE state; dispatching by arrival order "
+                        "(prefill_seq=%d)",
+                        self._arrival_seq(self.ready_prefills[0]) or -1,
                     )
-                    _dr_seq = (
-                        self._arrival_seq(self.ready_drafts[0])
-                        if self.ready_drafts else None
-                    )
-                    _ch_seq = _dc_seq
-                    if _dr_seq is not None and (
-                            _ch_seq is None or _dr_seq < _ch_seq):
-                        _ch_seq = _dr_seq
-                    if (_pf_seq is not None and _ch_seq is not None
-                            and _pf_seq < _ch_seq):
-                        logger.error(
-                            "[PD-PASSIVE][INVERSION-HAZARD] DECODE-state "
-                            "dispatch overtakes an earlier-arrived prefill: "
-                            "prefill_seq=%d, channel_seq=%d -- potential "
-                            "cross-side FIFO deadlock (mirror of the "
-                            "PREFILL-state inversion).",
-                            _pf_seq, _ch_seq,
-                        )
+                    return self._schedule_by_arrival()
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_PREFILL
                 )

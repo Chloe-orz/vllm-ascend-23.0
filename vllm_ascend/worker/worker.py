@@ -108,6 +108,17 @@ class SchedulerBatchType(Enum):
     PREFILL_DECODE_MIXED = "PREFILL_DECODE_MIXED"
 
 
+class _EcDeferredBatch:
+    """Sentinel returned by execute_model when an edge-cloud batch was
+    deferred instead of executed (its P2P payload had not arrived yet).
+    The busy loop must skip the ack; the worker re-executes the batch from
+    its deferred queue via ec_retry_deferred() once the payload lands."""
+    __ec_deferred__ = True
+
+
+EC_DEFERRED = _EcDeferredBatch()
+
+
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
@@ -229,6 +240,13 @@ class NPUWorker(WorkerBase):
         # one edge's unreaped send from gating another edge's channel reuse
         # in multi-instance (2E1C) mode.
         self._pp_send_work_by_channel: dict[tuple[str, int | None], list[Handle]] = {}
+        # Deferred cloud batches (multi-edge per-pair decoupling).  A batch
+        # whose P2P payload had not arrived at gate time is parked here
+        # instead of blocking the whole cloud worker; ec_retry_deferred()
+        # re-executes it once the payload lands.  Entries:
+        # {"so", "slice", "kind"("cloud"|"cloud_draft"), "pair",
+        #  "it" (cloud) | "recv" (cloud_draft)}.
+        self._ec_deferred: list[dict] = []
 
         # [CHER/EHER] Cloud-side hidden early-receive (and its edge-side
         # mirror) cache.  The guard thread posts irecv ahead of the batch's
@@ -938,6 +956,121 @@ class NPUWorker(WorkerBase):
         finally:
             cancel.set()
 
+    # ------------------------------------------------------------------ #
+    # Multi-edge per-pair execution decoupling (defer-and-retry)          #
+    # ------------------------------------------------------------------ #
+    # Motivation: the cloud worker is a single serial loop serving every
+    # (edge, cloud) pair.  A single stalled rendezvous on one pair used to
+    # freeze the loop — and with it every other pair (the 3E1C/4E1C hang).
+    # With deferral, a batch whose payload has not arrived is parked (its
+    # posted irecv stays outstanding, so the channel FIFO is untouched)
+    # and the loop moves on to other pairs; the batch resumes when its
+    # payload lands.  Per-pair FIFO order is preserved by construction.
+
+    def _ec_defer_ok(self) -> bool:
+        """Deferral applies only on the multi-edge cloud; single-pair and
+        legacy modes keep the blocking behavior."""
+        if not is_cloud_device():
+            return False
+        try:
+            from vllm_ascend.edge_cloud.role_registry import get_role_registry
+            reg = get_role_registry()
+        except Exception:
+            return False
+        return reg is not None and len(reg.edge_ids) > 1
+
+    def _ec_tp_decide(self, rank0_value):
+        """All TP ranks call; everyone returns TP rank0's value.
+
+        Only TP rank0 (the PP pair member) owns the P2P handles, so
+        defer/retry decisions are made there and broadcast over the
+        intra-node TP group to keep all cloud workers in lockstep.
+        """
+        tp = get_tp_group()
+        if tp.world_size == 1:
+            return rank0_value
+        return tp.broadcast_object(rank0_value, src=0)
+
+    def _ec_gate_or_defer(
+        self,
+        scheduler_output: "SchedulerOutput",
+        pair_edge_id,
+        comm_handles,
+        stash: dict,
+    ) -> bool:
+        """TP-unanimous gate: defer iff the payload is not ready yet (or an
+        earlier batch of the same pair is still deferred)."""
+        tp = get_tp_group()
+        decision = None
+        if tp.rank_in_group == 0:
+            backlog = any(e["pair"] == pair_edge_id for e in self._ec_deferred)
+            handles = list(comm_handles or [])
+            ready = all(h.is_completed() for h in handles)
+            # Short grace so a payload already on the wire does not force a
+            # defer/retry cycle.
+            t0 = time.monotonic()
+            while not ready and (time.monotonic() - t0) < 0.002:
+                ready = all(h.is_completed() for h in handles)
+            decision = backlog or not ready
+        decision = self._ec_tp_decide(decision)
+        if not decision:
+            return False
+        self._ec_deferred.append(stash)
+        logger.warning(
+            "[EC-DEFER] deferred pair=%s bt=%s ht=%s depth=%d",
+            pair_edge_id, scheduler_output.batch_type,
+            getattr(scheduler_output, "head_token", None),
+            len(self._ec_deferred),
+        )
+        return True
+
+    def ec_retry_deferred(self):
+        """Busy-loop hook: execute the first comm-ready deferred batch.
+
+        Returns the ack dict for the busy loop to report, or None.
+        TP-consistency: TP rank0 picks, everyone follows (broadcast).
+        Per-pair FIFO: an entry is eligible only when no earlier deferred
+        entry belongs to the same pair.
+        """
+        if not self._ec_deferred:
+            return None
+        tp = get_tp_group()
+        idx = None
+        if tp.rank_in_group == 0:
+            seen_pairs = set()
+            for i, entry in enumerate(self._ec_deferred):
+                p = entry["pair"]
+                if p in seen_pairs:
+                    continue  # an earlier entry of this pair is still pending
+                seen_pairs.add(p)
+                if entry["kind"] == "cloud":
+                    handles = entry["it"]._comm_handles
+                else:
+                    handles = entry["recv"][1]
+                if all(h.is_completed() for h in (handles or [])):
+                    idx = i
+                    break
+        idx = self._ec_tp_decide(idx)
+        if idx is None:
+            return None
+        entry = self._ec_deferred.pop(idx)
+        so = entry["so"]
+        logger.warning(
+            "[EC-DEFER] resume pair=%s bt=%s ht=%s remaining=%d",
+            entry["pair"], so.batch_type,
+            getattr(so, "head_token", None), len(self._ec_deferred),
+        )
+        if entry["kind"] == "cloud":
+            self._cloud_compute_and_respond(so, entry["it"], entry["slice"])
+        else:
+            self._cloud_draft_compute_and_respond(so, *entry["recv"])
+        return {
+            "__pp_scheduler_ack__": True,
+            "batch_type": so.batch_type,
+            "head_token": getattr(so, "head_token", None),
+            "hidden_channel": getattr(so, "hidden_channel", None),
+        }
+
     def _wait_pp_send_work(
         self, channel: HiddenChannelType | None = None,
         pair_edge_id: int | None = None,
@@ -1525,6 +1658,38 @@ class NPUWorker(WorkerBase):
                     comm_handles=comm_handles,
                     comm_postprocess=comm_postprocess,
                 )
+        # Per-pair execution decoupling (multi-edge): if this batch's hidden
+        # payload has not arrived yet, park the batch instead of blocking
+        # the whole cloud worker loop on its recv.  The posted irecv stays
+        # outstanding, so the channel FIFO is untouched and the peer's send
+        # completes whenever it arrives; ec_retry_deferred() resumes the
+        # batch while other pairs keep executing.  Sliced prefill chains are
+        # excluded: their slices must run back-to-back.  ALL TP ranks must
+        # enter the gate (TP1-3 carry no P2P handles) so the defer decision
+        # — broadcast from TP rank0 — is taken by everyone in lockstep.
+        if (is_first_slice and layer_slice_info is None
+                and isinstance(intermediate_tensors, AsyncIntermediateTensors)
+                and intermediate_tensors._comm_handles is not None
+                and self._ec_defer_ok()):
+            if self._ec_gate_or_defer(
+                    scheduler_output, _pair_edge_id,
+                    intermediate_tensors._comm_handles,
+                    {"so": scheduler_output, "slice": layer_slice_info,
+                     "kind": "cloud", "pair": _pair_edge_id,
+                     "it": intermediate_tensors}):
+                return EC_DEFERRED
+        return self._cloud_compute_and_respond(
+            scheduler_output, intermediate_tensors, layer_slice_info)
+
+    def _cloud_compute_and_respond(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors,
+        layer_slice_info: Any,
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        """Second half of _execute_model_cloud: run the middle segment once
+        the payload is in, then send the result back to the edge."""
+        _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
         if self.profiler is not None:
             self.profiler.step()
 
@@ -1645,26 +1810,50 @@ class NPUWorker(WorkerBase):
                     tensor_meta=recv_tensor_meta,
                 )
             )
-            # Diagnostic for the 3E1C hang: synchronous recv wait on the
-            # cloud worker — a "begin" with no "end" here means the edge
-            # never posted the matching draft send.
-            if comm_handles:
-                _t0 = time.monotonic()
+        # Per-pair decoupling gate (same as _execute_model_cloud): park the
+        # draft batch instead of blocking the loop on a recv whose payload
+        # has not arrived.  ALL TP ranks enter (handles are [] on TP1-3) so
+        # the broadcast decision is taken in lockstep.
+        if comm_handles is not None and self._ec_defer_ok():
+            if self._ec_gate_or_defer(
+                    scheduler_output, _pair_edge_id, comm_handles,
+                    {"so": scheduler_output, "slice": None,
+                     "kind": "cloud_draft", "pair": _pair_edge_id,
+                     "recv": (tensor_dict, comm_handles, comm_postprocess)}):
+                return EC_DEFERRED
+        return self._cloud_draft_compute_and_respond(
+            scheduler_output, tensor_dict, comm_handles, comm_postprocess)
+
+    def _cloud_draft_compute_and_respond(
+        self,
+        scheduler_output: "SchedulerOutput",
+        tensor_dict,
+        comm_handles,
+        comm_postprocess,
+    ) -> ModelRunnerOutput:
+        """Second half of _execute_model_cloud_draft: wait the payload, run
+        the draft middle segment, send the result back to the edge."""
+        _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
+        # Diagnostic for the 3E1C hang: synchronous recv wait on the
+        # cloud worker — a "begin" with no "end" here means the edge
+        # never posted the matching draft send.
+        if comm_handles:
+            _t0 = time.monotonic()
+            logger.info(
+                "[EC-RECV-WAIT] begin kind=cloud_draft pair_edge_id=%s "
+                "n=%d ht=%s", _pair_edge_id, len(comm_handles),
+                getattr(scheduler_output, "head_token", None))
+            self._wait_handles_watchdog(
+                comm_handles,
+                f"cloud_draft_recv pair={_pair_edge_id} "
+                f"ht={getattr(scheduler_output, 'head_token', None)}")
+            _took_ms = (time.monotonic() - _t0) * 1e3
+            if _took_ms > 100:
                 logger.info(
-                    "[EC-RECV-WAIT] begin kind=cloud_draft pair_edge_id=%s "
-                    "n=%d ht=%s", _pair_edge_id, len(comm_handles),
-                    getattr(scheduler_output, "head_token", None))
-                self._wait_handles_watchdog(
-                    comm_handles,
-                    f"cloud_draft_recv pair={_pair_edge_id} "
-                    f"ht={getattr(scheduler_output, 'head_token', None)}")
-                _took_ms = (time.monotonic() - _t0) * 1e3
-                if _took_ms > 100:
-                    logger.info(
-                        "[EC-RECV-WAIT] end kind=cloud_draft pair_edge_id=%s "
-                        "took_ms=%.1f (slow)", _pair_edge_id, _took_ms)
-            for postprocess in comm_postprocess:
-                postprocess()
+                    "[EC-RECV-WAIT] end kind=cloud_draft pair_edge_id=%s "
+                    "took_ms=%.1f (slow)", _pair_edge_id, _took_ms)
+        for postprocess in comm_postprocess:
+            postprocess()
         assert tensor_dict is not None
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
