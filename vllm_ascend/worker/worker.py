@@ -901,6 +901,26 @@ class NPUWorker(WorkerBase):
         ds = getattr(scheduler_output, "draft_step_idx", None)
         return ec_comm_ctx(f"bt={scheduler_output.batch_type} ht={ht} ds={ds}")
 
+    def _sync_send_and_wait(
+        self, handles: list, kind: str, pair_edge_id, scheduler_output
+    ) -> None:
+        """EXPERIMENT (3E1C hang): synchronously wait for edge-cloud sends.
+
+        The async record-and-defer design lets sends pile up on a channel
+        while the worker switches pairs; a posted send that never actually
+        starts on the device leaves the peer's recv waiting forever and
+        deadlocks the whole system.  Waiting inline removes any in-flight
+        buildup.  A "begin" with no "end" localizes a stuck send exactly.
+        """
+        t0 = time.monotonic()
+        ht = getattr(scheduler_output, "head_token", None)
+        logger.info("[EC-SYNC-SEND] begin kind=%s pair=%s n=%d ht=%s",
+                    kind, pair_edge_id, len(handles), ht)
+        for h in handles:
+            h.wait()
+        logger.info("[EC-SYNC-SEND] end kind=%s pair=%s took_ms=%.1f ht=%s",
+                    kind, pair_edge_id, (time.monotonic() - t0) * 1e3, ht)
+
     def _wait_pp_send_work(
         self, channel: HiddenChannelType | None = None,
         pair_edge_id: int | None = None,
@@ -1319,12 +1339,14 @@ class NPUWorker(WorkerBase):
             channel = self._hidden_channel_for(scheduler_output)
             with self._pair_scope(self._edge_instance_id()), \
                     self._ec_tagged_comm(scheduler_output):
-                self._record_pp_send_work(
-                    edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                    num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
-                    channel=channel,
-                    pair_edge_id=self._edge_instance_id(),
-                )
+                _handles = edge_cloud_send_tensor_dict(
+                    _gathered, channel=channel,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    include_mrope=include_mrope)
+            # EXPERIMENT (3E1C hang): synchronous send, see _sync_send_and_wait.
+            self._sync_send_and_wait(_handles, "edge_head",
+                                     self._edge_instance_id(),
+                                     scheduler_output)
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
         # because sampling happens in the tail segment (PL/DL).
@@ -1531,13 +1553,13 @@ class NPUWorker(WorkerBase):
             _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
             with self._pair_scope(_pair_edge_id), \
                     self._ec_tagged_comm(scheduler_output):
-                self._record_pp_send_work(
-                    edge_cloud_send_tensor_dict(_gathered, channel=channel,
-                                                num_tokens=scheduler_output.total_num_scheduled_tokens,
-                                                dst=_send_dst),
-                    channel=channel,
-                    pair_edge_id=_pair_edge_id,
-                )
+                _handles = edge_cloud_send_tensor_dict(
+                    _gathered, channel=channel,
+                    num_tokens=scheduler_output.total_num_scheduled_tokens,
+                    dst=_send_dst)
+            # EXPERIMENT (3E1C hang): synchronous send, see _sync_send_and_wait.
+            self._sync_send_and_wait(_handles, "cloud_reply",
+                                     _pair_edge_id, scheduler_output)
         return output
 
     def _scheduled_draft_tensor_meta(
@@ -1647,30 +1669,13 @@ class NPUWorker(WorkerBase):
             )
             with self._pair_scope(_pair_edge_id), \
                     self._ec_tagged_comm(scheduler_output):
-                _draft_send_handles = edge_cloud_send_tensor_dict_scheduled_draft(
+                _handles = edge_cloud_send_tensor_dict_scheduled_draft(
                     out_tensor_dict,
                     tensor_meta=send_tensor_meta,
                 )
-            # EXPERIMENT (3E1C hang): make the cloud draft reply synchronous
-            # (isend + immediate wait) instead of record-and-defer.  The
-            # async version lets multiple sends pile up on decode_1 while
-            # the cloud worker switches pairs; if a posted send never
-            # actually starts on the device, the peer's recv waits forever
-            # and the whole system deadlocks.  If 3E1C stops hanging with
-            # this change, the root cause is confirmed as the async-reply
-            # / pair-switching interaction on the shared decode channel.
-            _t0 = time.monotonic()
-            logger.info(
-                "[EC-DRAFT-SYNC-SEND] begin pair_edge_id=%s n=%d ht=%s",
-                _pair_edge_id, len(_draft_send_handles),
-                getattr(scheduler_output, "head_token", None))
-            for _h in _draft_send_handles:
-                _h.wait()
-            _took_ms = (time.monotonic() - _t0) * 1e3
-            logger.info(
-                "[EC-DRAFT-SYNC-SEND] end pair_edge_id=%s took_ms=%.1f ht=%s",
-                _pair_edge_id, _took_ms,
-                getattr(scheduler_output, "head_token", None))
+            # EXPERIMENT (3E1C hang): synchronous send, see _sync_send_and_wait.
+            self._sync_send_and_wait(_handles, "cloud_draft",
+                                     _pair_edge_id, scheduler_output)
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
             req_ids=req_ids,
@@ -1701,14 +1706,14 @@ class NPUWorker(WorkerBase):
             # has no hidden channels in multi-edge mode (IndexError).
             with self._pair_scope(self._edge_instance_id()), \
                     self._ec_tagged_comm(scheduler_output):
-                self._record_pp_send_work(
-                    edge_cloud_send_tensor_dict_scheduled_draft(
-                        tensor_dict,
-                        tensor_meta=send_tensor_meta,
-                    ),
-                    channel=HiddenChannelType.DECODE,
-                    pair_edge_id=self._edge_instance_id(),
+                _handles = edge_cloud_send_tensor_dict_scheduled_draft(
+                    tensor_dict,
+                    tensor_meta=send_tensor_meta,
                 )
+            # EXPERIMENT (3E1C hang): synchronous send, see _sync_send_and_wait.
+            self._sync_send_and_wait(_handles, "edge_draft_head",
+                                     self._edge_instance_id(),
+                                     scheduler_output)
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
             req_ids=req_ids,
