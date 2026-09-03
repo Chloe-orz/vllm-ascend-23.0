@@ -1,6 +1,7 @@
 from typing import Any, Callable
 from dataclasses import dataclass
 import contextlib
+import itertools
 import threading
 
 import torch
@@ -23,6 +24,11 @@ from vllm.distributed.parallel_state import (
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_dsa_cp_with_layer_shard, enable_sp, flashcomm2_enable
 from vllm.logger import logger
+
+# Monotonic sequence id for edge-cloud P2P ops (isend/irecv).  When a
+# rendezvous never completes, each side's LAST logged seq/channel/pair
+# identifies exactly which op is stuck and on which comm group.
+_EC_COMM_SEQ = itertools.count()
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
@@ -1273,9 +1279,12 @@ def edge_cloud_isend_tensor_dict(
     )
 
     logger.info(
-        "[PD] edge_cloud_isend: channel=%s dst=%s num_tokens=%s tensor_keys=%s",
+        "[PD] edge_cloud_isend: seq=%d channel=%s active_pair=%s "
+        "pp_ranks=%s dst_idx=%s dst_global=%s num_tokens=%s tensor_keys=%s",
+        next(_EC_COMM_SEQ),
         channel.value if channel else "default",
-        dst, num_tokens,
+        _current_active_pair(),
+        pp_group.ranks, dst, pp_group.ranks[dst], num_tokens,
         [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor) and v.numel() > 0],
     )
 
@@ -1542,6 +1551,15 @@ def edge_cloud_irecv_tensor_dict(
         pp_group, channel=channel, use_alt_group=use_alt_group
     )
 
+    logger.info(
+        "[PD] edge_cloud_irecv: seq=%d channel=%s active_pair=%s "
+        "pp_ranks=%s src_idx=%s src_global=%s num_tokens=%s",
+        next(_EC_COMM_SEQ),
+        channel.value if channel else "default",
+        _current_active_pair(),
+        pp_group.ranks, src, pp_group.ranks[src], num_tokens,
+    )
+
     tensor_dict: dict[str, Any] = {}
     handles: list[Handle] = []
     postprocess: list[Callable[[], None]] = []
@@ -1726,6 +1744,13 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
 
         metadata_by_key = dict(tensor_meta.metadata_list)
         handles: list[Handle] = []
+        logger.info(
+            "[PD] edge_cloud_isend_draft: seq=%d channel=%s active_pair=%s "
+            "pp_ranks=%s dst_global=%s keys=%s",
+            next(_EC_COMM_SEQ), channel.value, _current_active_pair(),
+            pp_group.ranks, pp_group.ranks[dst],
+            list(tensor_meta.send_tensor_keys),
+        )
         for key in tensor_meta.send_tensor_keys:
             tensor = tensor_dict[key]
             expected = metadata_by_key[key]
@@ -1866,9 +1891,10 @@ def edge_cloud_broadcast_recv(
 
     logger.info(
         "[PD] edge_cloud_broadcast_recv: channel=%s num_tokens=%s src=%s "
-        "pp_world=%d is_pp_npu0=%s",
+        "pp_world=%d is_pp_npu0=%s active_pair=%s pp_ranks=%s",
         channel.value, num_tokens, src,
         pp_group.world_size, is_pp_npu0,
+        _current_active_pair(), pp_group.ranks,
     )
 
     if is_pp_npu0:
@@ -2437,6 +2463,20 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
         len(_PAIR_PP_GROUPS),
         sorted(_PAIR_PP_GROUPS.keys()),
     )
+    # Topology self-check: dump this rank's DEFAULT (upstream) PP group vs
+    # its pair groups.  The upstream _PP is built from overlapping
+    # (edge, cloud) pair rank sets and GroupCoordinator keeps the LAST
+    # matching entry, so on the cloud NPU0 the default group is the last
+    # pair's — NOT necessarily this thread's active pair.  If a later
+    # [EC-PAIR-SCOPE-ESCAPE] warning fires, this line tells you which edge
+    # the escaped op was actually aimed at.
+    default_pp = get_pp_group()
+    logger.info(
+        "[edge-cloud][EC-TOPO] rank=%d default_pp_ranks=%s pair_groups=%s",
+        torch.distributed.get_rank(),
+        default_pp.ranks,
+        {k: v.ranks for k, v in sorted(_PAIR_PP_GROUPS.items())},
+    )
 
 
 def _effective_pp_group() -> GroupCoordinator:
@@ -2448,11 +2488,34 @@ def _effective_pp_group() -> GroupCoordinator:
     singleton PP group so TP-internal broadcast logic is unchanged).
     Legacy mode: the global PP group.
     """
-    if _current_active_pair() is not None:
-        pair = _PAIR_PP_GROUPS.get(_current_active_pair())
+    pair_key = _current_active_pair()
+    if pair_key is not None:
+        pair = _PAIR_PP_GROUPS.get(pair_key)
         if pair is not None:
             return pair
-    return get_pp_group()
+        logger.error(
+            "[EC-PAIR-MISSING] active_pair=%s has no registered pair group "
+            "(known pairs: %s); falling back to the default PP group. "
+            "A send/recv here can rendezvous with the wrong edge.",
+            pair_key, sorted(_PAIR_PP_GROUPS.keys()),
+        )
+    default = get_pp_group()
+    if _PAIR_PP_GROUPS and default.world_size > 1:
+        # Pair-member rank (edge NPU0 / cloud NPU0) doing edge-cloud comm
+        # WITHOUT an active pair scope.  In multi-instance mode the default
+        # PP group is the LAST registered pair (upstream GroupCoordinator
+        # keeps the last matching group_ranks entry), so an op resolved
+        # here silently targets the wrong edge -> cross-pair rendezvous
+        # mismatch -> the exact 3E1C/4E1C hang signature.
+        logger.warning(
+            "[EC-PAIR-SCOPE-ESCAPE] _effective_pp_group() fell back to the "
+            "default PP group ranks=%s (no active pair scope on this "
+            "thread). In multi-edge mode the default group belongs to the "
+            "LAST registered pair; any send/recv resolved here can "
+            "rendezvous with the wrong edge and deadlock.",
+            default.ranks,
+        )
+    return default
 
 
 def warmup_edge_cloud_pair_channels() -> None:
