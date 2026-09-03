@@ -30,6 +30,27 @@ from vllm.logger import logger
 # identifies exactly which op is stuck and on which comm group.
 _EC_COMM_SEQ = itertools.count()
 
+# Thread-local batch context (batch_type/head_token) attached to every
+# edge-cloud comm log line.  Set by the worker around each send/recv so
+# that the per-(channel, pair) message sequence can be reconstructed from
+# the logs and the exact divergence point identified.
+_EC_COMM_CTX_TLS = threading.local()
+
+
+@contextlib.contextmanager
+def ec_comm_ctx(tag: str):
+    """Tag edge-cloud comm log lines on this thread with batch context."""
+    prev = getattr(_EC_COMM_CTX_TLS, "value", None)
+    _EC_COMM_CTX_TLS.value = tag
+    try:
+        yield
+    finally:
+        _EC_COMM_CTX_TLS.value = prev
+
+
+def _ec_comm_ctx() -> str:
+    return getattr(_EC_COMM_CTX_TLS, "value", None) or "-"
+
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
 
@@ -1280,11 +1301,13 @@ def edge_cloud_isend_tensor_dict(
 
     logger.info(
         "[PD] edge_cloud_isend: seq=%d channel=%s active_pair=%s "
-        "pp_ranks=%s dst_idx=%s dst_global=%s num_tokens=%s tensor_keys=%s",
+        "pp_ranks=%s dst_idx=%s dst_global=%s num_tokens=%s ctx=%s "
+        "tensor_keys=%s",
         next(_EC_COMM_SEQ),
         channel.value if channel else "default",
         _current_active_pair(),
         pp_group.ranks, dst, pp_group.ranks[dst], num_tokens,
+        _ec_comm_ctx(),
         [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor) and v.numel() > 0],
     )
 
@@ -1553,11 +1576,12 @@ def edge_cloud_irecv_tensor_dict(
 
     logger.info(
         "[PD] edge_cloud_irecv: seq=%d channel=%s active_pair=%s "
-        "pp_ranks=%s src_idx=%s src_global=%s num_tokens=%s",
+        "pp_ranks=%s src_idx=%s src_global=%s num_tokens=%s ctx=%s",
         next(_EC_COMM_SEQ),
         channel.value if channel else "default",
         _current_active_pair(),
         pp_group.ranks, src, pp_group.ranks[src], num_tokens,
+        _ec_comm_ctx(),
     )
 
     tensor_dict: dict[str, Any] = {}
@@ -1746,9 +1770,9 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
         handles: list[Handle] = []
         logger.info(
             "[PD] edge_cloud_isend_draft: seq=%d channel=%s active_pair=%s "
-            "pp_ranks=%s dst_global=%s keys=%s",
+            "pp_ranks=%s dst_global=%s ctx=%s keys=%s",
             next(_EC_COMM_SEQ), channel.value, _current_active_pair(),
-            pp_group.ranks, pp_group.ranks[dst],
+            pp_group.ranks, pp_group.ranks[dst], _ec_comm_ctx(),
             list(tensor_meta.send_tensor_keys),
         )
         for key in tensor_meta.send_tensor_keys:
@@ -1891,10 +1915,10 @@ def edge_cloud_broadcast_recv(
 
     logger.info(
         "[PD] edge_cloud_broadcast_recv: channel=%s num_tokens=%s src=%s "
-        "pp_world=%d is_pp_npu0=%s active_pair=%s pp_ranks=%s",
+        "pp_world=%d is_pp_npu0=%s active_pair=%s pp_ranks=%s ctx=%s",
         channel.value, num_tokens, src,
         pp_group.world_size, is_pp_npu0,
-        _current_active_pair(), pp_group.ranks,
+        _current_active_pair(), pp_group.ranks, _ec_comm_ctx(),
     )
 
     if is_pp_npu0:

@@ -891,6 +891,15 @@ class NPUWorker(WorkerBase):
             return contextlib.nullcontext()
         return active_pair(edge_id, cloud_id)
 
+    @staticmethod
+    def _ec_tagged_comm(scheduler_output):
+        """Tag this thread's edge-cloud comm log lines with the batch identity
+        (batch_type + head_token) so the per-(channel, pair) message sequence
+        can be reconstructed from the logs to find protocol divergence."""
+        from vllm_ascend.distributed.parallel_state import ec_comm_ctx
+        ht = getattr(scheduler_output, "head_token", None)
+        return ec_comm_ctx(f"bt={scheduler_output.batch_type} ht={ht}")
+
     def _wait_pp_send_work(
         self, channel: HiddenChannelType | None = None,
         pair_edge_id: int | None = None,
@@ -916,8 +925,10 @@ class NPUWorker(WorkerBase):
         logger.info("[EC-SEND-WAIT] begin %s n=%d", scope, len(all_handles))
         for handle in all_handles:
             handle.wait()
-        logger.info("[EC-SEND-WAIT] end %s took_ms=%.1f", scope,
-                    (time.monotonic() - t0) * 1e3)
+        _took_ms = (time.monotonic() - t0) * 1e3
+        if _took_ms > 100:
+            logger.info("[EC-SEND-WAIT] end %s took_ms=%.1f (slow)", scope,
+                        _took_ms)
 
     # ------------------------------------------------------------------ #
     # [CHER/EHER] Cloud/edge hidden early-receive primitives             #
@@ -962,7 +973,9 @@ class NPUWorker(WorkerBase):
         # edge id ("{edge_id}:{token}") — post the irecv on that pair's
         # group.  Legacy mode: unwrapped token, no scope (default PP group).
         _pair_edge_id = self._edge_bucket_of_token(ht)
-        with self._pair_scope(_pair_edge_id):
+        from vllm_ascend.distributed.parallel_state import ec_comm_ctx
+        with self._pair_scope(_pair_edge_id), ec_comm_ctx(
+                f"early_recv ht={ht} ch={channel.value}"):
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=num_tokens,
                 channel=channel,
@@ -1080,15 +1093,6 @@ class NPUWorker(WorkerBase):
         with self._early_recv_lock:
             entry = self._early_recv_handles.pop(head_token, None)
             self._early_recv_consumed.add(head_token)
-            # Diagnostic: which source satisfied this recv.  A stall whose
-            # last line is "source=self_post" but no edge_cloud_irecv log
-            # follows means the post itself raised; "source=guard_cache"
-            # means the guard's irecv is the one being waited on.
-            logger.info(
-                "[EC-EARLY-RECV] head_token=%s channel=%s source=%s",
-                head_token, channel.value,
-                "guard_cache" if entry is not None else "self_post",
-            )
             if entry is not None:
                 return entry  # guard thread posted it, consumed
             # Not posted by guard: post our own.  Do NOT cache in
@@ -1303,7 +1307,8 @@ class NPUWorker(WorkerBase):
             )
         if get_pp_group().world_size == 2:
             channel = self._hidden_channel_for(scheduler_output)
-            with self._pair_scope(self._edge_instance_id()):
+            with self._pair_scope(self._edge_instance_id()), \
+                    self._ec_tagged_comm(scheduler_output):
                 self._record_pp_send_work(
                     edge_cloud_send_tensor_dict(_gathered, channel=channel,
                     num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
@@ -1336,7 +1341,8 @@ class NPUWorker(WorkerBase):
         # never sends and deadlock on the channel.
         tensor_dict, comm_handles, comm_postprocess = None, None, None
         # Multi-instance (2E1C): scope the recv to this edge's pair group.
-        with self._pair_scope(self._edge_instance_id()):
+        with self._pair_scope(self._edge_instance_id()), \
+                self._ec_tagged_comm(scheduler_output):
             tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                 num_tokens=scheduler_output.total_num_scheduled_tokens,
                 channel=channel,
@@ -1458,7 +1464,8 @@ class NPUWorker(WorkerBase):
                 # standard (non-shared-model) topology src=None suffices: it
                 # resolves to the implicit "previous PP rank" which IS the edge.
                 _recv_src = 0 if self.parallel_config.is_shared_model_edge else None
-                with self._pair_scope(_pair_edge_id):
+                with self._pair_scope(_pair_edge_id), \
+                        self._ec_tagged_comm(scheduler_output):
                     tensor_dict, comm_handles, comm_postprocess = edge_cloud_broadcast_recv(
                         num_tokens=scheduler_output.total_num_scheduled_tokens,
                         channel=channel,
@@ -1512,7 +1519,8 @@ class NPUWorker(WorkerBase):
         if get_pp_group().world_size > 1:
             channel = self._hidden_channel_for(scheduler_output)
             _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
-            with self._pair_scope(_pair_edge_id):
+            with self._pair_scope(_pair_edge_id), \
+                    self._ec_tagged_comm(scheduler_output):
                 self._record_pp_send_work(
                     edge_cloud_send_tensor_dict(_gathered, channel=channel,
                                                 num_tokens=scheduler_output.total_num_scheduled_tokens,
@@ -1584,7 +1592,8 @@ class NPUWorker(WorkerBase):
         # pair) and, more importantly, never received hidden-channel groups
         # in multi-edge mode, so _hidden_channel_groups() raises IndexError.
         _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
-        with self._pair_scope(_pair_edge_id):
+        with self._pair_scope(_pair_edge_id), \
+                self._ec_tagged_comm(scheduler_output):
             tensor_dict, comm_handles, comm_postprocess = (
                 edge_cloud_broadcast_recv_scheduled_draft(
                     tensor_meta=recv_tensor_meta,
@@ -1600,9 +1609,11 @@ class NPUWorker(WorkerBase):
                     "n=%d", _pair_edge_id, len(comm_handles))
                 for handle in comm_handles:
                     handle.wait()
-                logger.info(
-                    "[EC-RECV-WAIT] end kind=cloud_draft pair_edge_id=%s "
-                    "took_ms=%.1f", _pair_edge_id, (time.monotonic() - _t0) * 1e3)
+                _took_ms = (time.monotonic() - _t0) * 1e3
+                if _took_ms > 100:
+                    logger.info(
+                        "[EC-RECV-WAIT] end kind=cloud_draft pair_edge_id=%s "
+                        "took_ms=%.1f (slow)", _pair_edge_id, _took_ms)
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None
@@ -1621,7 +1632,8 @@ class NPUWorker(WorkerBase):
                 scheduler_output,
                 "c2e",
             )
-            with self._pair_scope(_pair_edge_id):
+            with self._pair_scope(_pair_edge_id), \
+                    self._ec_tagged_comm(scheduler_output):
                 self._record_pp_send_work(
                     edge_cloud_send_tensor_dict_scheduled_draft(
                         out_tensor_dict,
@@ -1658,7 +1670,8 @@ class NPUWorker(WorkerBase):
             )
             # 2E1C: resolve the pair group explicitly — the default PP group
             # has no hidden channels in multi-edge mode (IndexError).
-            with self._pair_scope(self._edge_instance_id()):
+            with self._pair_scope(self._edge_instance_id()), \
+                    self._ec_tagged_comm(scheduler_output):
                 self._record_pp_send_work(
                     edge_cloud_send_tensor_dict_scheduled_draft(
                         tensor_dict,
@@ -1683,7 +1696,8 @@ class NPUWorker(WorkerBase):
         )
         # 2E1C: pair scope is required for hidden-channel resolution — the
         # default PP group has no channel groups in multi-edge mode.
-        with self._pair_scope(self._edge_instance_id()):
+        with self._pair_scope(self._edge_instance_id()), \
+                self._ec_tagged_comm(scheduler_output):
             tensor_dict, comm_handles, comm_postprocess = (
                 edge_cloud_broadcast_recv_scheduled_draft(
                     tensor_meta=recv_tensor_meta,
@@ -1698,10 +1712,12 @@ class NPUWorker(WorkerBase):
                     "n=%d", self._edge_instance_id(), len(comm_handles))
                 for handle in comm_handles:
                     handle.wait()
-                logger.info(
-                    "[EC-RECV-WAIT] end kind=edge_draft_tail edge_id=%s "
-                    "took_ms=%.1f", self._edge_instance_id(),
-                    (time.monotonic() - _t0) * 1e3)
+                _took_ms = (time.monotonic() - _t0) * 1e3
+                if _took_ms > 100:
+                    logger.info(
+                        "[EC-RECV-WAIT] end kind=edge_draft_tail edge_id=%s "
+                        "took_ms=%.1f (slow)", self._edge_instance_id(),
+                        _took_ms)
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None
