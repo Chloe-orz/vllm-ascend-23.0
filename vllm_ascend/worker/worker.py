@@ -801,6 +801,12 @@ class NPUWorker(WorkerBase):
     ) -> None:
         if channel is None:
             self._pp_send_work = handles
+            if handles:
+                logger.info(
+                    "[4e1c-debug] SEND RECORD legacy: handles=%d "
+                    "(recorded, not waited)",
+                    len(handles),
+                )
         else:
             # Multi-instance (2E1C): key by (channel, source pair).  Each
             # (edge, cloud) pair owns independent HCCL channel communicators,
@@ -810,6 +816,11 @@ class NPUWorker(WorkerBase):
             # prefill_2 send blocking E1's prefill_2 batch).
             key = (channel.value, pair_edge_id)
             self._pp_send_work_by_channel[key] = handles
+            logger.info(
+                "[4e1c-debug] SEND RECORD channel=%s pair_edge=%s "
+                "handles=%d (recorded, not waited)",
+                channel.value, pair_edge_id, len(handles),
+            )
 
     # ------------------------------------------------------------------ #
     # Multi-instance (2E1C) pair resolution helpers
@@ -865,6 +876,17 @@ class NPUWorker(WorkerBase):
         pair_edge_id: int | None = None,
     ) -> None:
         if channel is None:
+            _n_legacy = len(self._pp_send_work)
+            _n_keyed = sum(
+                len(v) for v in self._pp_send_work_by_channel.values()
+            )
+            if _n_legacy or _n_keyed:
+                logger.info(
+                    "[4e1c-debug] SEND WAIT-ALL begin: legacy=%d keyed=%d "
+                    "-- blocking until all outstanding sends complete; if "
+                    "the run hangs here a peer recv is stuck",
+                    _n_legacy, _n_keyed,
+                )
             for handle in self._pp_send_work:
                 handle.wait()
             self._pp_send_work = []
@@ -872,14 +894,30 @@ class NPUWorker(WorkerBase):
                 for handle in handles:
                     handle.wait()
             self._pp_send_work_by_channel.clear()
+            if _n_legacy or _n_keyed:
+                logger.info("[4e1c-debug] SEND WAIT-ALL done")
             return
 
         # Multi-instance (2E1C): wait only on THIS pair's outstanding send —
         # see _record_pp_send_work for why the key carries the pair.
         key = (channel.value, pair_edge_id)
         handles = self._pp_send_work_by_channel.pop(key, [])
+        if handles:
+            # [4e1c-debug] 可疑点 #3: 通道复用前必须收尾上一批 send。
+            # 若对端 recv 未 post / 未完成，这里会阻塞 —— 挂死时最后一条
+            # 未配对的 "SEND WAIT begin" 就是卡点。
+            logger.info(
+                "[4e1c-debug] SEND WAIT begin: channel=%s pair_edge=%s "
+                "handles=%d (reaping before channel reuse)",
+                channel.value, pair_edge_id, len(handles),
+            )
         for handle in handles:
             handle.wait()
+        if handles:
+            logger.info(
+                "[4e1c-debug] SEND WAIT done: channel=%s pair_edge=%s",
+                channel.value, pair_edge_id,
+            )
 
     # ------------------------------------------------------------------ #
     # [CHER/EHER] Cloud/edge hidden early-receive primitives             #
@@ -1131,6 +1169,17 @@ class NPUWorker(WorkerBase):
         # Edge-cloud PD-separation: dispatch by batch_type and role.
         if self.model_runner._edge_cloud_enabled:
             bt = scheduler_output.batch_type
+            logger.info(
+                "[4e1c-debug] SEGMENT-ENTER role=%s batch_type=%s "
+                "channel=%s pair_edge=%s num_tokens=%d head_token=%s",
+                "cloud" if is_cloud_device() else "edge",
+                bt,
+                self._hidden_channel_for(scheduler_output),
+                (self._edge_instance_id() if is_edge_device()
+                 else self._resolve_segment_edge_id(scheduler_output)),
+                scheduler_output.total_num_scheduled_tokens,
+                getattr(scheduler_output, "head_token", None),
+            )
             if is_cloud_device():
                 if bt == BatchType.DRAFT_FIRST:
                     return self._execute_model_cloud_draft(scheduler_output)
@@ -1326,6 +1375,15 @@ class NPUWorker(WorkerBase):
         # Multi-instance (2E1C): resolve the source pair once for both the
         # recv path (fallback sync recv below) and the c2e send path.
         _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
+        logger.info(
+            "[4e1c-debug] CLOUD-SEGMENT enter: batch_type=%s pair_edge=%s "
+            "first_slice=%s last_slice=%s num_tokens=%d",
+            scheduler_output.batch_type,
+            _pair_edge_id,
+            is_first_slice,
+            layer_slice_info is None or layer_slice_info.is_last_slice,
+            scheduler_output.total_num_scheduled_tokens,
+        )
         # Always run _update_states for the first slice (or unsliced batch),
         # even when total_num_scheduled_tokens==0.  Some requests may not
         # contribute tokens to this slice but their state must still be
@@ -1371,7 +1429,12 @@ class NPUWorker(WorkerBase):
                     include_mrope=_cloud_include_mrope,
                 )
             if entry is not None:
-                logger.debug("[CHER] consume early-recv head_token=%s", _ht)
+                logger.info(
+                    "[4e1c-debug] E2C RECV via CHER early-recv: "
+                    "head_token=%s channel=%s pair_edge=%s (lazy wait on "
+                    "first tensor access inside execute_model)",
+                    _ht, _channel, _pair_edge_id,
+                )
                 intermediate_tensors = entry
                 # wait_for_comm() runs implicitly on first .tensors access
                 # inside execute_model (AsyncIntermediateTensors.__getattr__),
@@ -1407,6 +1470,18 @@ class NPUWorker(WorkerBase):
                         src=_recv_src,
                         include_mrope=_cloud_include_mrope,
                     )
+                logger.info(
+                    "[4e1c-debug] E2C RECV posted (fallback sync path): "
+                    "channel=%s pair_edge=%s num_tokens=%d handles=%d "
+                    "(lazy wait inside execute_model; if the run hangs in "
+                    "model forward, the edge payload for this recv was "
+                    "never published -- check edge [4e1c-debug] PUBLISH "
+                    "logs)",
+                    channel,
+                    _pair_edge_id,
+                    scheduler_output.total_num_scheduled_tokens,
+                    len(comm_handles),
+                )
 
                 intermediate_tensors = AsyncIntermediateTensors(
                     tensor_dict,
@@ -1419,6 +1494,12 @@ class NPUWorker(WorkerBase):
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
+        )
+        logger.info(
+            "[4e1c-debug] CLOUD-SEGMENT forward done: batch_type=%s "
+            "pair_edge=%s",
+            scheduler_output.batch_type,
+            _pair_edge_id,
         )
 
         is_last_slice = (
@@ -1525,19 +1606,40 @@ class NPUWorker(WorkerBase):
         # pair) and, more importantly, never received hidden-channel groups
         # in multi-edge mode, so _hidden_channel_groups() raises IndexError.
         _pair_edge_id = self._resolve_segment_edge_id(scheduler_output)
+        logger.info(
+            "[4e1c-debug] CLOUD-DRAFT enter: pair_edge=%s num_tokens=%d "
+            "(posting e2c draft recv)",
+            _pair_edge_id,
+            scheduler_output.total_num_scheduled_tokens,
+        )
         with self._pair_scope(_pair_edge_id):
             tensor_dict, comm_handles, comm_postprocess = (
                 edge_cloud_broadcast_recv_scheduled_draft(
                     tensor_meta=recv_tensor_meta,
                 )
             )
+            logger.info(
+                "[4e1c-debug] DRAFT E2C RECV posted: pair_edge=%s "
+                "handles=%d -- waiting on edge draft payload",
+                _pair_edge_id, len(comm_handles),
+            )
             for handle in comm_handles:
                 handle.wait()
+            logger.info(
+                "[4e1c-debug] DRAFT E2C RECV complete: pair_edge=%s "
+                "(0902 hang point -- if absent while the run is stuck, "
+                "the edge draft payload never arrived)",
+                _pair_edge_id,
+            )
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
+        )
+        logger.info(
+            "[4e1c-debug] DRAFT middle segment done: pair_edge=%s",
+            _pair_edge_id,
         )
         if get_pp_group().world_size == 2:
             out_tensor_dict = {
@@ -1559,6 +1661,12 @@ class NPUWorker(WorkerBase):
                     ),
                     channel=HiddenChannelType.DECODE,
                     pair_edge_id=_pair_edge_id,
+                )
+                logger.info(
+                    "[4e1c-debug] DRAFT C2E SEND recorded (async, not "
+                    "waited): pair_edge=%s -- edge must self-post "
+                    "DRAFT_LAST to consume it",
+                    _pair_edge_id,
                 )
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
@@ -1619,8 +1727,17 @@ class NPUWorker(WorkerBase):
                     tensor_meta=recv_tensor_meta,
                 )
             )
+            logger.info(
+                "[4e1c-debug] EDGE DRAFT C2E RECV posted: pair_edge=%s "
+                "handles=%d -- waiting on cloud draft result",
+                self._edge_instance_id(), len(comm_handles),
+            )
             for handle in comm_handles:
                 handle.wait()
+            logger.info(
+                "[4e1c-debug] EDGE DRAFT C2E RECV complete: pair_edge=%s",
+                self._edge_instance_id(),
+            )
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None

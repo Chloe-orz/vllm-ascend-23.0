@@ -420,6 +420,14 @@ class PassiveScheduler:
                 so = self.scheduler_output_handler(so)
             self._me_queue.append((edge_id, self._me_seq, so))
             self._me_edge_head.setdefault(edge_id, self._me_seq)
+            logger.info(
+                "[4e1c-debug] ARRIVE edge=%d seq=%d batch_type=%s "
+                "me_queue_len=%d",
+                edge_id,
+                self._me_seq,
+                getattr(so.batch_type, "value", so.batch_type),
+                len(self._me_queue),
+            )
 
     def _wrap_segment(self, edge_id: int, so: SchedulerOutput) -> None:
         """Wrap all req_id/head_token fields with the edge prefix (F6).
@@ -529,6 +537,14 @@ class PassiveScheduler:
                 self._me_edge_head[edge_id] = nxt[1]
             else:
                 self._me_edge_head.pop(edge_id, None)
+            logger.info(
+                "[4e1c-debug] PROMOTE edge=%d seq=%d batch_type=%s -> "
+                "ready queue (me_queue_len=%d)",
+                edge_id,
+                seq,
+                getattr(so.batch_type, "value", so.batch_type),
+                len(self._me_queue),
+            )
             self._me_route_to_ready_queue(so)
 
     def _me_route_to_ready_queue(self, so: SchedulerOutput) -> None:
@@ -785,7 +801,11 @@ class PassiveScheduler:
             # order), then run the legacy state machine unchanged.
             self._promote_multi_edge()
         if self.dispatch_policy == DispatchPolicy.EXPECT_ALTERNATION:
-            return self._schedule_expect_alternation()
+            batch = self._schedule_expect_alternation()
+            if not batch.is_empty():
+                # a real dispatch happened -- re-arm the empty-warn latch
+                self._me_empty_warned = False
+            return batch
 
         for queue_name in self._POLICY_ORDER[self.dispatch_policy]:
             batch = self._schedule_from_queue(queue_name)
@@ -915,20 +935,27 @@ class PassiveScheduler:
         ):
             channel_seq = draft_seq
         if prefill_seq is None or channel_seq is None:
+            logger.info(
+                "[4e1c-debug] ARRIVAL prefill dispatched (seq missing): "
+                "prefill_seq=%s decode_seq=%s draft_seq=%s",
+                prefill_seq,
+                decode_seq,
+                draft_seq,
+            )
             self.cloud_scheduling_state = CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT
             self._start_prefill_middle_throttle()
             return self._build_batch(self.ready_prefills.popleft())
         if channel_seq < prefill_seq:
             logger.info(
-                "[PD-PASSIVE] Decode/draft arrived before prefill: "
-                "channel_seq=%d, prefill_seq=%d",
+                "[4e1c-debug][PD-PASSIVE] Decode/draft arrived before "
+                "prefill: channel_seq=%d, prefill_seq=%d",
                 channel_seq,
                 prefill_seq,
             )
             self._clear_prefill_middle_throttle()
             return self._pick_decode_or_draft_by_arrival()
         logger.info(
-            "[PD-PASSIVE] Prefill arrived before decode/draft: "
+            "[4e1c-debug][PD-PASSIVE] Prefill arrived before decode/draft: "
             "prefill_seq=%d, channel_seq=%d",
             prefill_seq,
             channel_seq,
@@ -941,6 +968,43 @@ class PassiveScheduler:
         state = self.cloud_scheduling_state
         if state == CloudSchedulingState.EXPECT_EXECUTE_PREFILL:
             if self._active_prefill_slices:
+                # [4e1c-debug] 可疑点 #1: active slices 直接派 prefill，
+                # 不检查 ready_decodes/ready_drafts 的到达序（与
+                # _schedule_by_arrival 的保护不一致）。若此处插队了更早
+                # 到达的 decode/draft，边侧 PL/DL tail 会卡住 PF/DF head
+                # 的发布流水线，形成双向循环等待 —— 4E1C 挂死重点排查项。
+                if self.ready_decodes or self.ready_drafts:
+                    _pf_seq = self._arrival_seq(
+                        self._active_prefill_slices[0].scheduler_output
+                    )
+                    _dc_seq = (
+                        self._arrival_seq(self.ready_decodes[0])
+                        if self.ready_decodes else None
+                    )
+                    _dr_seq = (
+                        self._arrival_seq(self.ready_drafts[0])
+                        if self.ready_drafts else None
+                    )
+                    _ch_seq = _dc_seq
+                    if _dr_seq is not None and (
+                            _ch_seq is None or _dr_seq < _ch_seq):
+                        _ch_seq = _dr_seq
+                    if (_pf_seq is not None and _ch_seq is not None
+                            and _ch_seq < _pf_seq):
+                        logger.warning(
+                            "[4e1c-debug][INVERSION] EEP active-slices "
+                            "prefill dispatched AHEAD of earlier-arrived "
+                            "decode/draft: prefill_seq=%s channel_seq=%s "
+                            "-- potential cross-side FIFO deadlock, this "
+                            "is suspect #1.",
+                            _pf_seq, _ch_seq,
+                        )
+                    else:
+                        logger.info(
+                            "[4e1c-debug] EEP active-slices dispatch: "
+                            "prefill_seq=%s channel_seq=%s",
+                            _pf_seq, _ch_seq,
+                        )
                 self.cloud_scheduling_state = (
                     CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT
                 )
@@ -972,6 +1036,12 @@ class PassiveScheduler:
             # mandatory here (shared DECODE channel), not a preference.
             if self.ready_drafts or self.ready_decodes:
                 self._clear_prefill_middle_throttle()
+                logger.info(
+                    "[4e1c-debug] EEP no-prefill: dispatch decode/draft "
+                    "(decodes=%d drafts=%d)",
+                    len(self.ready_decodes),
+                    len(self.ready_drafts),
+                )
                 return self._pick_decode_or_draft_by_arrival()
         else:  # EXPECT_EXECUTE_DECODE_OR_DRAFT
             # Decode/Draft in arrival order (shared DECODE channel --
@@ -1000,11 +1070,12 @@ class PassiveScheduler:
                     if (_pf_seq is not None and _ch_seq is not None
                             and _pf_seq < _ch_seq):
                         logger.error(
-                            "[PD-PASSIVE][INVERSION-HAZARD] DECODE-state "
-                            "dispatch overtakes an earlier-arrived prefill: "
-                            "prefill_seq=%d, channel_seq=%d -- potential "
-                            "cross-side FIFO deadlock (mirror of the "
-                            "PREFILL-state inversion).",
+                            "[4e1c-debug][PD-PASSIVE][INVERSION-HAZARD] "
+                            "DECODE-state dispatch overtakes an "
+                            "earlier-arrived prefill: prefill_seq=%d, "
+                            "channel_seq=%d -- potential cross-side FIFO "
+                            "deadlock (mirror of the PREFILL-state "
+                            "inversion).",
                             _pf_seq, _ch_seq,
                         )
                 self.cloud_scheduling_state = (
@@ -1017,6 +1088,12 @@ class PassiveScheduler:
             # again at its earliest opportunity.
             if self._can_fallback_to_prefill_in_decode_state():
                 if self._active_prefill_slices:
+                    logger.info(
+                        "[4e1c-debug] EED fallback -> prefill "
+                        "(active_slices=%d, throttle wait finished or "
+                        "slicing not suggested)",
+                        len(self._active_prefill_slices),
+                    )
                     self._start_prefill_middle_throttle()
                     return self._pick_prefill_batch()
                 if self.ready_prefills:
@@ -1025,8 +1102,19 @@ class PassiveScheduler:
                         "cloud_suggest_slicing", False
                     ):
                         self._start_prefill_middle_throttle()
+                    logger.info(
+                        "[4e1c-debug] EED fallback -> prefill "
+                        "(prefills=%d, decodes=%d, drafts=%d)",
+                        len(self.ready_prefills),
+                        len(self.ready_decodes),
+                        len(self.ready_drafts),
+                    )
                     return self._pick_prefill_batch()
             else:
+                # [4e1c-debug] 可疑点 #2: throttle 等待 decode/draft 到达，
+                # 但 decode/draft 可能永远不会来（边侧发布流水线被更早的
+                # tail 堵住时）。持续空转 = 云侧饿死信号。
+                self._4e1c_warn_empty_once("EED fallback denied")
                 return ScheduledBatch.empty()
 
         if self.ready_pdmixes:
@@ -1034,6 +1122,7 @@ class PassiveScheduler:
                 state == CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT
                 and not self._can_fallback_to_prefill_in_decode_state()
             ):
+                self._4e1c_warn_empty_once("EED pdmix fallback denied")
                 return ScheduledBatch.empty()
             if state == CloudSchedulingState.EXPECT_EXECUTE_DECODE_OR_DRAFT:
                 self._start_prefill_middle_throttle()
@@ -1099,21 +1188,62 @@ class PassiveScheduler:
         self._log_picked_batch(batch)
         return batch
 
+    def _4e1c_warn_empty_once(self, where: str) -> None:
+        """[4e1c-debug] Warn once per consecutive empty-dispatch stretch.
+
+        The engine core busy-loops schedule(); logging every empty return
+        would flood the log, so latch the warning until a real dispatch
+        happens (latch is re-armed in schedule()).
+        """
+        if getattr(self, "_me_empty_warned", False):
+            return
+        self._me_empty_warned = True
+        logger.warning(
+            "[4e1c-debug] EMPTY dispatch at %s: pending=(prefills=%d, "
+            "active_slices=%d, pdmixes=%d, drafts=%d, decodes=%d) "
+            "state=%s -- schedule() keeps returning empty; if the run "
+            "hangs here the cloud scheduler is starving (compare with "
+            "[4e1c-debug] PUBLISH logs on the edge side).",
+            where,
+            len(self.ready_prefills),
+            len(self._active_prefill_slices),
+            len(self.ready_pdmixes),
+            len(self.ready_drafts),
+            len(self.ready_decodes),
+            getattr(self.cloud_scheduling_state, "name",
+                    self.cloud_scheduling_state),
+        )
+
+    @staticmethod
+    def _debug_edge_id(so: SchedulerOutput) -> str:
+        """Best-effort source-edge extraction for [4e1c-debug] logs."""
+        try:
+            from vllm_ascend.edge_cloud.id_adapter import (
+                parse_req_edge_id, parse_token_edge_id)
+            ht = getattr(so, "head_token", None)
+            if ht:
+                return f"e{parse_token_edge_id(ht)}"
+            for rid in getattr(so, "num_scheduled_tokens", None) or {}:
+                return f"e{parse_req_edge_id(rid)}"
+        except Exception:
+            pass
+        return "e?"
+
     def _log_picked_batch(self, batch: ScheduledBatch) -> None:
         so = batch.scheduler_output
-        logger.debug(
-            "PassiveScheduler.schedule[%s] picked batch_type=%s slices=%d; "
-            "pending=(prefills=%d, active_prefill_slices=%d, "
-            "pdmixes=%d, drafts=%d, decodes=%d) seq=%s",
-            self.dispatch_policy.value,
+        logger.info(
+            "[4e1c-debug] DISPATCH edge=%s batch_type=%s seq=%s slices=%d "
+            "pending=(prefills=%d, active_slices=%d, pdmixes=%d, "
+            "drafts=%d, decodes=%d)",
+            self._debug_edge_id(so),
             so.batch_type.value if so.batch_type is not None else "<none>",
+            self._arrival_seq(so),
             len(batch.slices),
             len(self.ready_prefills),
             len(self._active_prefill_slices),
             len(self.ready_pdmixes),
             len(self.ready_drafts),
             len(self.ready_decodes),
-            self._arrival_seq(so),
         )
 
     # ------------------------------------------------------------------ #

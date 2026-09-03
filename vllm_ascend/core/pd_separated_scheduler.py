@@ -585,6 +585,56 @@ class PDSeparatedScheduler(Scheduler):
 
     def schedule(self) -> SchedulerOutput:
         scheduler_output = self._schedule_pd_separated()
+        # [4e1c-debug] 边侧发布序观测：schedule() 的返回值经 PRE_OUT 单线程
+        # 串行发布到云侧，PL/DL tail 与 PF/DF head 成对即刻投递。挂死时与
+        # 云侧 [4e1c-debug] DISPATCH / RECV 日志对齐，可还原两侧互相等待
+        # 对方载荷的循环等待链。
+        if scheduler_output.batch_type is not BatchType.EMPTY:
+            setattr(self, "_e1c4_publish_empty_warned", False)
+            logger.info(
+                "[4e1c-debug] PUBLISH batch_type=%s channel=%s "
+                "head_token=%s num_tokens=%d pending=(pf=%d pl=%d df=%d "
+                "dl=%d df_publish_pending=%s decode_inflight=%d "
+                "draft_remote=%d)",
+                scheduler_output.batch_type,
+                scheduler_output.hidden_channel,
+                scheduler_output.head_token,
+                sum(scheduler_output.num_scheduled_tokens.values())
+                if scheduler_output.num_scheduled_tokens else 0,
+                len(self.chunk_prefill_first),
+                len(self.prefill_last_pending),
+                len(self.drafts_first_ready),
+                len(self.decodes_last_ready),
+                self._draft_first_cloud_publish_pending is not None,
+                self.decode_or_draft_inflight_count,
+                self.draft_remote_pending_count,
+            )
+        else:
+            _pending_tails = (
+                len(self.prefill_last_pending)
+                + len(self.decodes_last_ready)
+                + len(self.drafts_last_ready)
+            )
+            if (_pending_tails or self.decodes_first_ready
+                    or self._draft_first_cloud_publish_pending is not None):
+                if not getattr(self, "_e1c4_publish_empty_warned", False):
+                    setattr(self, "_e1c4_publish_empty_warned", True)
+                    logger.warning(
+                        "[4e1c-debug] EDGE EMPTY publish while work "
+                        "pending: pf=%d pl=%d df=%d dl=%d "
+                        "df_publish_pending=%s decode_inflight=%d "
+                        "draft_remote=%d -- repeated EMPTY publish while "
+                        "this persists means the edge scheduler is gated; "
+                        "check cloud [4e1c-debug] DISPATCH logs for the "
+                        "matching response.",
+                        len(self.chunk_prefill_first),
+                        len(self.prefill_last_pending),
+                        len(self.drafts_first_ready),
+                        len(self.decodes_last_ready),
+                        self._draft_first_cloud_publish_pending is not None,
+                        self.decode_or_draft_inflight_count,
+                        self.draft_remote_pending_count,
+                    )
         # Only FIRST-segment batches are published to the cloud over PRE_OUT
         # (the publish hook drops PL/DL/DRL tails), and only batches whose
         # cloud-side execution runs the purge hook can deliver the

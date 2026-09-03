@@ -1273,7 +1273,7 @@ def edge_cloud_isend_tensor_dict(
     )
 
     logger.info(
-        "[PD] edge_cloud_isend: channel=%s dst=%s num_tokens=%s tensor_keys=%s",
+        "[4e1c-debug][PD] edge_cloud_isend: channel=%s dst=%s num_tokens=%s tensor_keys=%s",
         channel.value if channel else "default",
         dst, num_tokens,
         [k for k, v in tensor_dict.items() if isinstance(v, torch.Tensor) and v.numel() > 0],
@@ -1640,6 +1640,16 @@ def edge_cloud_irecv_tensor_dict(
                 full_tensor.zero_()
         tensor_dict[key] = full_tensor
 
+    logger.info(
+        "[4e1c-debug] EC-IRECV POST: channel=%s src=%s num_tokens=%d "
+        "handles=%d merge_payload=%s (rendezvous completes only when the "
+        "peer's matching isend payload arrives)",
+        channel.value if channel else "default",
+        src,
+        num_tokens,
+        len(handles),
+        ec_meta.merge_payload,
+    )
     return tensor_dict, handles, postprocess
 
 
