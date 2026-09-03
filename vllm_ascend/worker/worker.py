@@ -1587,9 +1587,12 @@ class NPUWorker(WorkerBase):
         Owns the cross-PP edge-cloud communication, mirroring
         ``_execute_model_cloud``: recv the edge->cloud draft payload, run
         the cloud target/C segment forward (in the model_runner), then send
-        the cloud->edge result. The send is recorded (not waited); the edge
-        self-posts DRAFT_LAST when it schedules DRAFT_FIRST, so its matching
-        receive can be posted without a worker-ack/POST_OUT round trip.
+        the cloud->edge result.
+
+        EXPERIMENT (3E1C hang): the c2e reply is sent SYNCHRONOUSLY
+        (isend + wait) instead of the original async record-and-defer, to
+        test whether async sends piling up on the shared decode channel
+        cause the multi-edge rendezvous deadlock.
         """
         recv_tensor_meta = self._scheduled_draft_tensor_meta(
             scheduler_output,
@@ -1638,21 +1641,36 @@ class NPUWorker(WorkerBase):
                 else value
                 for key, value in output.items()
             }
-            # Async send only -- record, do NOT wait.  See method docstring.
             send_tensor_meta = self._scheduled_draft_tensor_meta(
                 scheduler_output,
                 "c2e",
             )
             with self._pair_scope(_pair_edge_id), \
                     self._ec_tagged_comm(scheduler_output):
-                self._record_pp_send_work(
-                    edge_cloud_send_tensor_dict_scheduled_draft(
-                        out_tensor_dict,
-                        tensor_meta=send_tensor_meta,
-                    ),
-                    channel=HiddenChannelType.DECODE,
-                    pair_edge_id=_pair_edge_id,
+                _draft_send_handles = edge_cloud_send_tensor_dict_scheduled_draft(
+                    out_tensor_dict,
+                    tensor_meta=send_tensor_meta,
                 )
+            # EXPERIMENT (3E1C hang): make the cloud draft reply synchronous
+            # (isend + immediate wait) instead of record-and-defer.  The
+            # async version lets multiple sends pile up on decode_1 while
+            # the cloud worker switches pairs; if a posted send never
+            # actually starts on the device, the peer's recv waits forever
+            # and the whole system deadlocks.  If 3E1C stops hanging with
+            # this change, the root cause is confirmed as the async-reply
+            # / pair-switching interaction on the shared decode channel.
+            _t0 = time.monotonic()
+            logger.info(
+                "[EC-DRAFT-SYNC-SEND] begin pair_edge_id=%s n=%d ht=%s",
+                _pair_edge_id, len(_draft_send_handles),
+                getattr(scheduler_output, "head_token", None))
+            for _h in _draft_send_handles:
+                _h.wait()
+            _took_ms = (time.monotonic() - _t0) * 1e3
+            logger.info(
+                "[EC-DRAFT-SYNC-SEND] end pair_edge_id=%s took_ms=%.1f ht=%s",
+                _pair_edge_id, _took_ms,
+                getattr(scheduler_output, "head_token", None))
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
             req_ids=req_ids,
