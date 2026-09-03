@@ -43,6 +43,11 @@ RE_IRECV = re.compile(
     r"edge_cloud_irecv: seq=(\d+) channel=(\S+) active_pair=\((\d+),\s*(\d+)\) "
     r"pp_ranks=\[(\d+), (\d+)\] src_idx=\d+ src_global=(\d+) num_tokens=(\d+) "
     r"ctx=bt=(\S+) ht=(\S+) ds=(\S+)")
+# Guard-thread early-recv variant: ctx=early_recv ht=... ch=...
+RE_IRECV_EARLY = re.compile(
+    r"edge_cloud_irecv: seq=(\d+) channel=(\S+) active_pair=\((\d+),\s*(\d+)\) "
+    r"pp_ranks=\[(\d+), (\d+)\] src_idx=\d+ src_global=(\d+) num_tokens=(\d+) "
+    r"ctx=early_recv ht=(\S+) ch=(\S+)")
 RE_IRECV_DRAFT = re.compile(
     r"edge_cloud_irecv_draft: seq=(\d+) channel=(\S+) "
     r"active_pair=(?:\((\d+),\s*(\d+)\)|(None)) "
@@ -103,6 +108,13 @@ def parse_file(path, sends, recvs):
                     Msg(seq, "recv", ch, (int(e), int(c)), ht, ds, bt,
                         f"({ntok},...)"))
                 continue
+            m = RE_IRECV_EARLY.search(line)
+            if m:
+                seq, ch, e, c, _r0, _r1, _src, ntok, ht, _ch2 = m.groups()
+                recvs[(int(e), int(c), ch)].append(
+                    Msg(seq, "recv", ch, (int(e), int(c)), ht, "-",
+                        "EARLY_RECV", f"({ntok},...)"))
+                continue
             m = RE_IRECV_DRAFT.search(line)
             if m:
                 (seq, ch, e_s, c_s, none_s, ranks, is_npu0, bt, ht, ds,
@@ -118,13 +130,20 @@ def parse_file(path, sends, recvs):
                 continue
 
 
+def _ds_mismatch(a: str, b: str) -> bool:
+    """Compare draft step idx; '-'/'None' are unknown placeholders."""
+    if a in ("-", "None") or b in ("-", "None"):
+        return False
+    return a != b
+
+
 def reconcile(tag, send_seq, recv_seq, tail=5):
     """Align two ordered sequences; print the first divergence with context."""
     n = min(len(send_seq), len(recv_seq))
     diverged = None
     for i in range(n):
         s, r = send_seq[i], recv_seq[i]
-        if s.ht != r.ht or s.ds != r.ds:
+        if s.ht != r.ht or _ds_mismatch(s.ds, r.ds):
             diverged = i
             break
     print(f"\n=== {tag}: sends={len(send_seq)} recvs={len(recv_seq)} "
