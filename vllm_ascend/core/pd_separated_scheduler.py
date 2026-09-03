@@ -396,7 +396,16 @@ class PDSeparatedScheduler(Scheduler):
         self._draft_first_dispatched: bool = False
         self._pregenerated_draft_task_ids: set[str] = set()
         self._pregenerated_draft_req_ids: dict[str, set[str]] = {}
-        self._draft_remote_pending_limit: int = 2
+        # EXPERIMENT (3E1C hang): hard-cap remote-pending drafts at 1 so at
+        # most ONE draft/decode message is in flight per pair on the shared
+        # decode channel.  The original value 2 enables draft pipelining
+        # (next DRAFT_FIRST dispatched while the previous DRAFT_LAST is
+        # still remote), which is when every reproduced hang showed
+        # decode_or_draft_inflight 2/1.  If 3E1C stops hanging with this
+        # cap, the overlapping-draft-chain + unilateral-drop interaction is
+        # confirmed as the desync source.  Revert to 2 after the protocol
+        # fix lands.
+        self._draft_remote_pending_limit: int = 1
         self._decode_first_placeholder_parent: SchedulerOutput | None = None
         # Count of DECODE_LAST tails dispatched but not yet settled through
         # update_from_output.  A DECODE_FIRST created while this is nonzero
