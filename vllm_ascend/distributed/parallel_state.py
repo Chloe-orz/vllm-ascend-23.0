@@ -1411,9 +1411,12 @@ def edge_cloud_isend_tensor_dict(
         with _hidden_channel_stream_ctx(
             channel, direction="send", pp_group=pp_group, wait_for_default=True
         ):
-            handle = torch.distributed.isend(
-                merged, dst=pp_group.ranks[dst], group=group
-            )
+            with _post_watchdog(
+                    f"isend(merged) channel={channel.value if channel else 'default'} "
+                    f"pair={_current_active_pair()} dst_global={pp_group.ranks[dst]}"):
+                handle = torch.distributed.isend(
+                    merged, dst=pp_group.ranks[dst], group=group
+                )
             if merged.is_cuda:
                 merged.record_stream(torch.cuda.current_stream(merged.device))
             elif merged.device.type == "npu":
@@ -1446,9 +1449,12 @@ def edge_cloud_isend_tensor_dict(
         with _hidden_channel_stream_ctx(
             channel, direction="send", pp_group=pp_group, wait_for_default=True
         ):
-            handle = torch.distributed.isend(
-                value, dst=pp_group.ranks[dst], group=group
-            )
+            with _post_watchdog(
+                    f"isend(key={key}) channel={channel.value if channel else 'default'} "
+                    f"pair={_current_active_pair()} dst_global={pp_group.ranks[dst]}"):
+                handle = torch.distributed.isend(
+                    value, dst=pp_group.ranks[dst], group=group
+                )
             if value.is_cuda:
                 value.record_stream(torch.cuda.current_stream(value.device))
             elif value.device.type == "npu":
@@ -1456,6 +1462,33 @@ def edge_cloud_isend_tensor_dict(
         handles.append(handle)
 
     return handles
+
+
+@contextlib.contextmanager
+def _post_watchdog(desc: str):
+    """Detect a stall INSIDE the P2P post call (isend/irecv).
+
+    The comm log line is emitted BEFORE the post; if the post itself
+    blocks (e.g. HCCL communicator/link resources exhausted), the run
+    dies silently with no EC-COMM-STALL from any wait-side watchdog.
+    This fires after 30s inside the post to close that blind spot.
+    """
+    cancel = threading.Event()
+
+    def _watch() -> None:
+        while not cancel.wait(30.0):
+            logger.error(
+                "[EC-COMM-STALL] %s: P2P POST call itself blocked >30s "
+                "(stuck inside isend/irecv — HCCL-level resource/queue "
+                "exhaustion suspected)", desc)
+
+    watcher = threading.Thread(
+        target=_watch, daemon=True, name="ec-post-watchdog")
+    watcher.start()
+    try:
+        yield
+    finally:
+        cancel.set()
 
 
 def _wait_handles_watchdog(handles: list, desc: str) -> None:
@@ -1644,9 +1677,12 @@ def edge_cloud_irecv_tensor_dict(
             # When SP is on, `merged` is padded up to a TP multiple; the
             # sender transmits only the actual num_tokens rows.
             recv_view = merged[:num_tokens]
-            handle = torch.distributed.irecv(
-                recv_view, src=pp_group.ranks[src], group=group
-            )
+            with _post_watchdog(
+                    f"irecv(merged) channel={channel.value if channel else 'default'} "
+                    f"pair={_current_active_pair()} src_global={pp_group.ranks[src]}"):
+                handle = torch.distributed.irecv(
+                    recv_view, src=pp_group.ranks[src], group=group
+                )
             if recv_view.device.type == "npu":
                 recv_view.record_stream(torch.npu.current_stream(recv_view.device))
         handles.append(handle)
@@ -1697,9 +1733,12 @@ def edge_cloud_irecv_tensor_dict(
                 )
                 if full_tensor.numel() > 0:
                     recv_view = full_tensor[:num_tokens]
-                    handle = torch.distributed.irecv(
-                        recv_view, src=pp_group.ranks[src], group=group
-                    )
+                    with _post_watchdog(
+                            f"irecv(key={key}) channel={channel.value if channel else 'default'} "
+                            f"pair={_current_active_pair()} src_global={pp_group.ranks[src]}"):
+                        handle = torch.distributed.irecv(
+                            recv_view, src=pp_group.ranks[src], group=group
+                        )
                     if recv_view.device.type == "npu":
                         recv_view.record_stream(
                             torch.npu.current_stream(recv_view.device)
@@ -1829,11 +1868,14 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
             with _hidden_channel_stream_ctx(
                 channel, direction="send", pp_group=pp_group, wait_for_default=True
             ):
-                handle = torch.distributed.isend(
-                    tensor,
-                    dst=pp_group.ranks[dst],
-                    group=group,
-                )
+                with _post_watchdog(
+                        f"isend_draft channel={channel.value} "
+                        f"pair={_current_active_pair()} dst_global={pp_group.ranks[dst]}"):
+                    handle = torch.distributed.isend(
+                        tensor,
+                        dst=pp_group.ranks[dst],
+                        group=group,
+                    )
                 if tensor.is_cuda:
                     tensor.record_stream(
                         torch.cuda.current_stream(tensor.device)
@@ -2287,11 +2329,14 @@ def edge_cloud_broadcast_recv_scheduled_draft(
                         device=value.device,
                     )
                     if tensor.numel() > 0:
-                        handle = torch.distributed.irecv(
-                            tensor,
-                            src=pp_group.ranks[src],
-                            group=group,
-                        )
+                        with _post_watchdog(
+                                f"irecv_draft channel={channel.value} "
+                                f"pair={_current_active_pair()} src_global={pp_group.ranks[src]}"):
+                            handle = torch.distributed.irecv(
+                                tensor,
+                                src=pp_group.ranks[src],
+                                group=group,
+                            )
                         if tensor.is_cuda:
                             tensor.record_stream(
                                 torch.cuda.current_stream(tensor.device)
