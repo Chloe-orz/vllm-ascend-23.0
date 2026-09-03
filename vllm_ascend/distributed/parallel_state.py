@@ -2213,6 +2213,24 @@ def edge_cloud_broadcast_recv_scheduled_draft(
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
 
+    # Diagnostic for the 3E1C hang: the scheduled-draft recv side was
+    # previously invisible in the logs.  Recording the locally-expected wire
+    # schema (ctx carries bt/ht/ds from the worker) lets us detect a
+    # desync where the two peers disagree on the next draft message's shape.
+    logger.info(
+        "[PD] edge_cloud_irecv_draft: seq=%d channel=%s active_pair=%s "
+        "pp_ranks=%s is_pp_npu0=%s ctx=%s expect=%s",
+        next(_EC_COMM_SEQ), channel.value, _current_active_pair(),
+        pp_group.ranks, is_pp_npu0, _ec_comm_ctx(),
+        (
+            [
+                (k, tuple(v.size) if isinstance(v, TensorMetadata) else v)
+                for k, v in tensor_meta.metadata_list
+            ]
+            if tensor_meta is not None else "dynamic"
+        ),
+    )
+
     if tensor_meta is not None:
         recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
         comm_handles: list[Handle] = []

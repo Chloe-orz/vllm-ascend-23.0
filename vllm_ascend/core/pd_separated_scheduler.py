@@ -1850,6 +1850,11 @@ class PDSeparatedScheduler(Scheduler):
         if not req_ids or any(req_id not in self.requests for req_id in req_ids):
             if draft_task_id:
                 self._dropped_draft_task_ids_to_report.append(draft_task_id)
+                logger.warning(
+                    "[PD] drop DRAFT chain task_id=%s: source request(s) "
+                    "%s gone before draft prefill; the peer may still "
+                    "expect this chain's messages on the channel",
+                    draft_task_id, req_ids)
             return False
 
         draft_first = replace(
@@ -2351,6 +2356,11 @@ class PDSeparatedScheduler(Scheduler):
                     self._pregenerated_draft_task_ids.discard(task_id)
                     self._pregenerated_draft_req_ids.pop(task_id, None)
                     self._dropped_draft_task_ids_to_report.append(task_id)
+                    logger.warning(
+                        "[PD] drop stale DRAFT task_id=%s (all requests "
+                        "finished); if the cloud already expects this "
+                        "chain's payload, the channel sequence desyncs",
+                        task_id)
                 if output is self._draft_first_cloud_publish_pending:
                     self._draft_first_cloud_publish_pending = None
                     self._draft_first_scalars_patched = False

@@ -898,7 +898,8 @@ class NPUWorker(WorkerBase):
         can be reconstructed from the logs to find protocol divergence."""
         from vllm_ascend.distributed.parallel_state import ec_comm_ctx
         ht = getattr(scheduler_output, "head_token", None)
-        return ec_comm_ctx(f"bt={scheduler_output.batch_type} ht={ht}")
+        ds = getattr(scheduler_output, "draft_step_idx", None)
+        return ec_comm_ctx(f"bt={scheduler_output.batch_type} ht={ht} ds={ds}")
 
     def _wait_pp_send_work(
         self, channel: HiddenChannelType | None = None,
@@ -1112,8 +1113,17 @@ class NPUWorker(WorkerBase):
     def cleanup_early_recv(self, head_token: str) -> None:
         """Drop a leaked early-recv entry (e.g. request aborted mid-prefill)."""
         with self._early_recv_lock:
-            self._early_recv_handles.pop(head_token, None)
+            removed = self._early_recv_handles.pop(head_token, None)
             self._early_recv_consumed.discard(head_token)
+        if removed is not None:
+            # Diagnostic: dropping a POSTED early-recv means an irecv was
+            # already issued on the channel; if the peer's matching send
+            # arrives later it pairs with the NEXT posted recv instead,
+            # shifting the whole message sequence (a 3E1C-hang suspect).
+            logger.warning(
+                "[EC-EARLY-RECV-CLEANUP] head_token=%s dropped a POSTED "
+                "early-recv entry (request aborted?) — its irecv may still "
+                "be outstanding on the channel.", head_token)
 
     def _all_gather_tensor_dict(
         self,
@@ -1606,7 +1616,8 @@ class NPUWorker(WorkerBase):
                 _t0 = time.monotonic()
                 logger.info(
                     "[EC-RECV-WAIT] begin kind=cloud_draft pair_edge_id=%s "
-                    "n=%d", _pair_edge_id, len(comm_handles))
+                    "n=%d ht=%s", _pair_edge_id, len(comm_handles),
+                    getattr(scheduler_output, "head_token", None))
                 for handle in comm_handles:
                     handle.wait()
                 _took_ms = (time.monotonic() - _t0) * 1e3
@@ -1709,7 +1720,8 @@ class NPUWorker(WorkerBase):
                 _t0 = time.monotonic()
                 logger.info(
                     "[EC-RECV-WAIT] begin kind=edge_draft_tail edge_id=%s "
-                    "n=%d", self._edge_instance_id(), len(comm_handles))
+                    "n=%d ht=%s", self._edge_instance_id(), len(comm_handles),
+                    getattr(scheduler_output, "head_token", None))
                 for handle in comm_handles:
                     handle.wait()
                 _took_ms = (time.monotonic() - _t0) * 1e3
