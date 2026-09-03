@@ -239,6 +239,13 @@ class PPSchedulerZmqSubscriber:
             name="pp-scheduler-zmq-sub",
         )
         self._thread.start()
+        # Last received wire seq for gap detection.  The publisher stamps a
+        # per-channel monotonically increasing seq on every message — and
+        # consumes one even for messages dropped on a full bridge queue or
+        # lost to a send timeout — so any gap here means a SchedulerOutput
+        # was lost while its HCCL payload may already be on the wire (the
+        # 3E1C/4E1C orphan-payload hang mechanism).
+        self._last_recv_seq: int | None = None
 
     def _subscriber_thread(self) -> None:
         while self._running:
@@ -248,6 +255,16 @@ class PPSchedulerZmqSubscriber:
                 seq_bytes, data = self._pull.recv_multipart()
                 seq = int.from_bytes(seq_bytes, "big")
                 scheduler_output = pickle.loads(data)
+                if self._last_recv_seq is not None and seq != self._last_recv_seq + 1:
+                    logger.error(
+                        "[EC-SEQ-GAP] %s: SchedulerOutput seq jumped %d -> %d "
+                        "(%d message(s) LOST on this channel). The peer's "
+                        "HCCL payload for the lost batch may already be in "
+                        "flight — channel sequences are now unsafe.",
+                        self._endpoint, self._last_recv_seq, seq,
+                        seq - self._last_recv_seq - 1,
+                    )
+                self._last_recv_seq = seq
                 with self._lock:
                     self._received_outputs.append((seq, scheduler_output))
                 # logger.info(
