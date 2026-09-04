@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import contextlib
 import itertools
 import threading
+import time
 
 import torch
 import vllm_ascend.envs as envs
@@ -1496,11 +1497,15 @@ def _wait_handles_watchdog(handles: list, desc: str) -> None:
 
     Same rationale as NPUWorker._wait_handles_watchdog: at a hang, each
     handle's is_completed() distinguishes "op never launched" from
-    "payload left the device but was never matched".  Observational only.
+    "payload left the device but was never matched".  Also emits paired
+    begin/done logs so every TP collective closes the loop with its post.
+    Observational only.
     """
     if not handles:
         return
     cancel = threading.Event()
+    t0 = time.monotonic()
+    logger.info("[PD] %s begin n=%d", desc, len(handles))
 
     def _watch() -> None:
         while not cancel.wait(30.0):
@@ -1522,6 +1527,8 @@ def _wait_handles_watchdog(handles: list, desc: str) -> None:
             h.wait()
     finally:
         cancel.set()
+    logger.info("[PD] %s done took_ms=%.1f", desc,
+                (time.monotonic() - t0) * 1e3)
 
 
 def _allocate_merged_recv_buffer(

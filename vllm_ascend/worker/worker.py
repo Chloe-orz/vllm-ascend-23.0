@@ -796,7 +796,7 @@ class NPUWorker(WorkerBase):
 
     def _record_pp_send_work(
         self, handles: list[Handle], channel: HiddenChannelType | None = None,
-        pair_edge_id: int | None = None,
+        pair_edge_id: int | None = None, tag: str | None = None,
     ) -> None:
         if channel is None:
             if self._pp_send_work:
@@ -829,9 +829,11 @@ class NPUWorker(WorkerBase):
                     "overwritten by a new send on the same (channel, pair). "
                     "old_completed=%s — if False, the overwritten send is "
                     "still in flight (or stuck) and now invisible.",
-                    key, len(prev), self._send_handles_completed(prev),
+                    key, len(prev[0]), self._send_handles_completed(prev[0]),
                 )
-            self._pp_send_work_by_channel[key] = handles
+            # Store the batch tag alongside the handles so the reap log
+            # (edge_cloud_isend_done) pairs with the post log via ht.
+            self._pp_send_work_by_channel[key] = (handles, tag)
 
     # ------------------------------------------------------------------ #
     # Multi-instance (2E1C) pair resolution helpers
@@ -936,15 +938,20 @@ class NPUWorker(WorkerBase):
         if channel is None:
             all_handles = list(self._pp_send_work)
             self._pp_send_work = []
-            for handles in self._pp_send_work_by_channel.values():
-                all_handles.extend(handles)
+            tags: list[str] = []
+            for entry in self._pp_send_work_by_channel.values():
+                all_handles.extend(entry[0])
+                if entry[1]:
+                    tags.append(entry[1])
             self._pp_send_work_by_channel.clear()
             scope = "scope=ALL"
+            tag = ",".join(tags) or None
         else:
             # Multi-instance (2E1C): wait only on THIS pair's outstanding send —
             # see _record_pp_send_work for why the key carries the pair.
             key = (channel.value, pair_edge_id)
-            all_handles = self._pp_send_work_by_channel.pop(key, [])
+            entry = self._pp_send_work_by_channel.pop(key, ([], None))
+            all_handles, tag = entry
             scope = f"key={key}"
         if not all_handles:
             return
@@ -954,6 +961,10 @@ class NPUWorker(WorkerBase):
         logger.info("[EC-SEND-WAIT] begin %s n=%d", scope, len(all_handles))
         self._wait_handles_watchdog(all_handles, f"send_wait {scope}")
         _took_ms = (time.monotonic() - t0) * 1e3
+        # Pair with the post log (edge_cloud_isend*) via the ht tag: every
+        # actual send completion closes the loop.
+        logger.info("[PD] edge_cloud_isend_done: %s tag=%s took_ms=%.1f",
+                    scope, tag or "-", _took_ms)
         if _took_ms > 100:
             logger.info("[EC-SEND-WAIT] end %s took_ms=%.1f (slow)", scope,
                         _took_ms)
@@ -1017,6 +1028,8 @@ class NPUWorker(WorkerBase):
             comm_handles=comm_handles,
             comm_postprocess=comm_postprocess,
         )
+        # Tag for the wait_for_comm completion log (edge_cloud_irecv_done).
+        entry._ec_comm_tag = f"early_recv ht={ht} ch={channel.value}"
         return entry
 
     def start_early_irecv(self, hint: dict) -> None:
@@ -1364,6 +1377,7 @@ class NPUWorker(WorkerBase):
                     num_tokens=scheduler_output.total_num_scheduled_tokens, include_mrope=include_mrope),
                     channel=channel,
                     pair_edge_id=self._edge_instance_id(),
+                    tag=f"ht={getattr(scheduler_output, 'head_token', None)}",
                 )
         # Return a placeholder output that carries the request IDs so the
         # scheduler can correlate the batch, but contains no sampled tokens
@@ -1405,6 +1419,10 @@ class NPUWorker(WorkerBase):
             comm_handles=comm_handles,
             comm_postprocess=comm_postprocess,
         )
+        # Tag for the wait_for_comm completion log (edge_cloud_irecv_done).
+        intermediate_tensors._ec_comm_tag = (
+            f"bt={scheduler_output.batch_type} "
+            f"ht={getattr(scheduler_output, 'head_token', None)}")
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
@@ -1529,6 +1547,10 @@ class NPUWorker(WorkerBase):
                     comm_handles=comm_handles,
                     comm_postprocess=comm_postprocess,
                 )
+                # Tag for the wait_for_comm completion log.
+                intermediate_tensors._ec_comm_tag = (
+                    f"bt={scheduler_output.batch_type} "
+                    f"ht={getattr(scheduler_output, 'head_token', None)}")
         if self.profiler is not None:
             self.profiler.step()
 
@@ -1577,6 +1599,7 @@ class NPUWorker(WorkerBase):
                                                 dst=_send_dst),
                     channel=channel,
                     pair_edge_id=_pair_edge_id,
+                    tag=f"ht={getattr(scheduler_output, 'head_token', None)}",
                 )
         return output
 
@@ -1663,10 +1686,13 @@ class NPUWorker(WorkerBase):
                     f"cloud_draft_recv pair={_pair_edge_id} "
                     f"ht={getattr(scheduler_output, 'head_token', None)}")
                 _took_ms = (time.monotonic() - _t0) * 1e3
-                if _took_ms > 100:
-                    logger.info(
-                        "[EC-RECV-WAIT] end kind=cloud_draft pair_edge_id=%s "
-                        "took_ms=%.1f (slow)", _pair_edge_id, _took_ms)
+                # Pair with edge_cloud_irecv_draft via ht: every actual recv
+                # completion closes the loop.
+                logger.info(
+                    "[PD] edge_cloud_irecv_done: kind=cloud_draft "
+                    "pair_edge_id=%s ht=%s took_ms=%.1f",
+                    _pair_edge_id,
+                    getattr(scheduler_output, "head_token", None), _took_ms)
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None
@@ -1694,6 +1720,7 @@ class NPUWorker(WorkerBase):
                     ),
                     channel=HiddenChannelType.DECODE,
                     pair_edge_id=_pair_edge_id,
+                    tag=f"ht={getattr(scheduler_output, 'head_token', None)}",
                 )
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
@@ -1732,6 +1759,7 @@ class NPUWorker(WorkerBase):
                     ),
                     channel=HiddenChannelType.DECODE,
                     pair_edge_id=self._edge_instance_id(),
+                    tag=f"ht={getattr(scheduler_output, 'head_token', None)}",
                 )
         req_ids = list(scheduler_output.num_scheduled_tokens)
         return ModelRunnerOutput(
@@ -1769,11 +1797,12 @@ class NPUWorker(WorkerBase):
                     f"edge_draft_tail_recv edge={self._edge_instance_id()} "
                     f"ht={getattr(scheduler_output, 'head_token', None)}")
                 _took_ms = (time.monotonic() - _t0) * 1e3
-                if _took_ms > 100:
-                    logger.info(
-                        "[EC-RECV-WAIT] end kind=edge_draft_tail edge_id=%s "
-                        "took_ms=%.1f (slow)", self._edge_instance_id(),
-                        _took_ms)
+                # Pair with edge_cloud_irecv_draft via ht.
+                logger.info(
+                    "[PD] edge_cloud_irecv_done: kind=edge_draft_tail "
+                    "edge_id=%s ht=%s took_ms=%.1f",
+                    self._edge_instance_id(),
+                    getattr(scheduler_output, "head_token", None), _took_ms)
             for postprocess in comm_postprocess:
                 postprocess()
         assert tensor_dict is not None
