@@ -396,7 +396,7 @@ class PDSeparatedScheduler(Scheduler):
         self._draft_first_dispatched: bool = False
         self._pregenerated_draft_task_ids: set[str] = set()
         self._pregenerated_draft_req_ids: dict[str, set[str]] = {}
-        self._draft_remote_pending_limit: int = 2
+        self._draft_remote_pending_limit: int = 1
         self._decode_first_placeholder_parent: SchedulerOutput | None = None
         # Count of DECODE_LAST tails dispatched but not yet settled through
         # update_from_output.  A DECODE_FIRST created while this is nonzero
