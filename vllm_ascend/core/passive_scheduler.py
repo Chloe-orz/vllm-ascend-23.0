@@ -689,6 +689,10 @@ class PassiveScheduler:
     def _slice_for(
         self, so: SchedulerOutput
     ) -> list["LayerSliceInfo | None"]:
+        # VLLM_ASCEND_EC_PD_INTERLEAVE=0 disables cloud-side prefill slicing
+        # (the cloud half of PD interleaving), for multi-edge hang isolation.
+        if os.environ.get("VLLM_ASCEND_EC_PD_INTERLEAVE", "1") == "0":
+            return [None]
         # Decode-like and empty batches are never sliced. DECODE_FIRST is the
         # edge-cloud head segment of a decode step — same per-token shape as
         # PURE_DECODE, so it follows the same no-slice rule.

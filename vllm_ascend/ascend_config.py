@@ -917,6 +917,16 @@ class PDSeparationConfig:
         self.next_prefill_prior_enable: bool = user_config.get("next_prefill_prior_enable", False)
         self.chunk_prefill_prior_enable: bool = user_config.get("chunk_prefill_prior_enable", False)
         self.max_chunk_prefill_ahead: int = int(user_config.get("max_chunk_prefill_ahead", 1))
+        # VLLM_ASCEND_EC_PD_INTERLEAVE=0 disables PD interleaving wholesale
+        # (chunked-prefill priority + 2P in-flight prefill), for isolating
+        # the multi-edge hang.  The cloud-side prefill slicing is gated by
+        # the same env var (see PassiveScheduler._slice_for).
+        if os.environ.get("VLLM_ASCEND_EC_PD_INTERLEAVE", "1") == "0":
+            self.next_prefill_prior_enable = False
+            self.chunk_prefill_prior_enable = False
+            logger.info(
+                "VLLM_ASCEND_EC_PD_INTERLEAVE=0: PD interleaving disabled "
+                "(chunk_prefill_prior/next_prefill_prior forced off)")
 
     @property
     def prefill_inflight_limit(self) -> int:
