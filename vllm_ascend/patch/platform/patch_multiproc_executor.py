@@ -166,6 +166,11 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             self.parallel_config.enable_edge_cloud
             and not self.parallel_config.is_edge_node
             and _cloud_pd_enabled(self.vllm_config)
+            # VLLM_ASCEND_EC_CHER=0 must kill the whole CHER pipeline: with
+            # the MQ present, the guard thread starts and keeps posting
+            # orphan irecvs that eat payloads meant for the synchronous
+            # fallback recv.
+            and os.environ.get("VLLM_ASCEND_EC_CHER", "1") != "0"
         ):
             # Small ring buffer: at most prefill_inflight_limit (<=2) P-middle
             # batches are in flight on the cloud at once, so at most that many

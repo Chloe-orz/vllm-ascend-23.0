@@ -608,6 +608,12 @@ class PassiveEngineCoreProc:
                 getattr(_pc, "enable_edge_cloud", False)
                 and not getattr(_pc, "is_edge_node", True)
                 and _pd.get("enabled", False)
+                # VLLM_ASCEND_EC_CHER=0 must disable the ENTIRE CHER
+                # pipeline (hints + guard + early irecv), not just the
+                # busy_loop consume path — otherwise the guard keeps
+                # posting orphan irecvs that eat payloads meant for the
+                # synchronous fallback recv (guaranteed hang).
+                and os.environ.get("VLLM_ASCEND_EC_CHER", "1") != "0"
             )
             # Track which head_tokens we have already sent a hint for, so
             # layer-slicing's multiple first-slice steps fire it only once.
