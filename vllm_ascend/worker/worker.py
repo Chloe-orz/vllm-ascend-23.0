@@ -1218,6 +1218,16 @@ class NPUWorker(WorkerBase):
         batch_type = scheduler_output.batch_type
         use_alt_group = (batch_type == SchedulerBatchType.ALL_DECODE)
 
+        # Stage log (multi-edge hang triage): the cloud pipeline after
+        # CLOUD-ENQUEUE is dequeue → exec_begin → recv → exec_model_done →
+        # reply send → reap → ack; this is the exec_begin marker.
+        if self.model_runner._edge_cloud_enabled and is_cloud_device():
+            logger.info(
+                "[PD] cloud_exec_begin: bt=%s ht=%s pair=%s",
+                batch_type, getattr(scheduler_output, "head_token", None),
+                self._resolve_segment_edge_id(scheduler_output),
+            )
+
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
 
@@ -1557,6 +1567,12 @@ class NPUWorker(WorkerBase):
         output = self.model_runner.execute_model(
             scheduler_output, intermediate_tensors,
             layer_slice_info=layer_slice_info,
+        )
+        # Stage log (multi-edge hang triage): model middle segment finished.
+        logger.info(
+            "[PD] cloud_exec_model_done: bt=%s ht=%s",
+            scheduler_output.batch_type,
+            getattr(scheduler_output, "head_token", None),
         )
 
         is_last_slice = (

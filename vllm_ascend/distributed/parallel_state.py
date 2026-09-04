@@ -52,6 +52,91 @@ def ec_comm_ctx(tag: str):
 def _ec_comm_ctx() -> str:
     return getattr(_EC_COMM_CTX_TLS, "value", None) or "-"
 
+
+# ---------------------------------------------------------------------------
+# Per-(channel, pair) wire sequence numbers + mismatch alarm.
+#
+# Motivation: the hidden channels are anonymous FIFOs — a send pairs with
+# whatever recv was posted first, with no way to detect that the two peers'
+# message sequences have drifted apart (the multi-edge hang).  Every payload
+# transfer now carries a tiny [magic, seq] int64 header on the same channel,
+# posted before the payload; the receiver validates it after the wait and
+# raises [EC-SEQ-MISMATCH] at the FIRST drifted message instead of hanging
+# thousands of messages later.
+# ---------------------------------------------------------------------------
+_EC_MSG_MAGIC = 0xEC5E0001
+_EC_MSG_SEQ_SEND: dict[Any, int] = {}
+_EC_MSG_SEQ_RECV: dict[Any, int] = {}
+
+
+def _ec_msg_key(channel: Any, pair: Any) -> Any:
+    return (channel.value if channel is not None else "default", pair)
+
+
+def _ec_next_seq(table: dict, key: Any) -> int:
+    seq = table.get(key, 0) + 1
+    table[key] = seq
+    return seq
+
+
+def _ec_post_seq_header_send(pp_group, group, channel, dst):
+    """Post the [magic, seq] wire header ahead of a payload transfer.
+
+    Posted on the same channel stream immediately before the payload(s), so
+    the receiver reads header-then-payload in FIFO order.  Returns the
+    handle (must be reaped with the payload handles).  None on legacy
+    channel-less paths (both peers skip headers there).
+    """
+    if channel is None:
+        return None
+    pair = _current_active_pair()
+    key = _ec_msg_key(channel, pair)
+    seq = _ec_next_seq(_EC_MSG_SEQ_SEND, key)
+    hdr = torch.tensor([_EC_MSG_MAGIC, seq], dtype=torch.int64, device="npu")
+    with _hidden_channel_stream_ctx(
+            channel, direction="send", pp_group=pp_group, wait_for_default=True):
+        with _post_watchdog(
+                f"isend(hdr) channel={channel.value} pair={pair}"):
+            h = torch.distributed.isend(hdr, dst=pp_group.ranks[dst], group=group)
+        hdr.record_stream(torch.npu.current_stream(hdr.device))
+    return h
+
+
+def _ec_post_seq_header_recv(pp_group, group, channel, src, handles,
+                             postprocess) -> None:
+    """Post the recv for the [magic, seq] header and register validation.
+
+    The validation runs as the FIRST comm postprocess (after all handles are
+    waited): a wrong magic/seq means the two peers' message sequences on this
+    channel have drifted — alarm at the first drifted message instead of
+    hanging thousands of messages later.
+    """
+    if channel is None:
+        return
+    pair = _current_active_pair()
+    key = _ec_msg_key(channel, pair)
+    expected = _ec_next_seq(_EC_MSG_SEQ_RECV, key)
+    with _hidden_channel_stream_ctx(
+            channel, direction="recv", pp_group=pp_group, wait_for_default=False):
+        hdr = torch.empty(2, dtype=torch.int64, device="npu")
+        with _post_watchdog(
+                f"irecv(hdr) channel={channel.value} pair={pair}"):
+            h = torch.distributed.irecv(hdr, src=pp_group.ranks[src], group=group)
+        hdr.record_stream(torch.npu.current_stream(hdr.device))
+    handles.insert(0, h)
+
+    def _validate_seq(hdr=hdr, expected=expected, key=key):
+        magic = int(hdr[0].item())
+        got = int(hdr[1].item())
+        if magic != _EC_MSG_MAGIC or got != expected:
+            logger.error(
+                "[EC-SEQ-MISMATCH] channel=%s pair=%s: expected seq=%d, got "
+                "(magic=%#x, seq=%d) — the hidden channel's message sequence "
+                "has drifted. The first such line is the desync origin.",
+                key[0], key[1], expected, magic, got)
+
+    postprocess.insert(0, _validate_seq)
+
 # Currently, mc2 op need their own group coordinator.
 _MC2: GroupCoordinator | None = None
 
@@ -1365,6 +1450,11 @@ def edge_cloud_isend_tensor_dict(
                 break
 
     handles: list[Handle] = []
+    # Wire sequence header first: it precedes the payload(s) on the channel
+    # stream so the receiver reads header-then-payload in FIFO order.
+    hdr_handle = _ec_post_seq_header_send(pp_group, group, channel, dst)
+    if hdr_handle is not None:
+        handles.append(hdr_handle)
 
     if ec_meta.merge_payload:
         # Fast path: concatenate the homogeneous subset (merge_keys, e.g.
@@ -1660,6 +1750,9 @@ def edge_cloud_irecv_tensor_dict(
     tensor_dict: dict[str, Any] = {}
     handles: list[Handle] = []
     postprocess: list[Callable[[], None]] = []
+    # Wire sequence header first (see _ec_post_seq_header_recv).
+    _ec_post_seq_header_recv(pp_group, group, channel, src, handles,
+                             postprocess)
 
     # Non-tensor metadata entries are passed through unchanged (mirrors the
     # original non-merge branch).
@@ -1854,6 +1947,9 @@ def edge_cloud_send_tensor_dict_scheduled_draft(
             pp_group.ranks, pp_group.ranks[dst], _ec_comm_ctx(),
             list(tensor_meta.send_tensor_keys),
         )
+        hdr_handle = _ec_post_seq_header_send(pp_group, group, channel, dst)
+        if hdr_handle is not None:
+            handles.append(hdr_handle)
         for key in tensor_meta.send_tensor_keys:
             tensor = tensor_dict[key]
             expected = metadata_by_key[key]
@@ -2311,12 +2407,16 @@ def edge_cloud_broadcast_recv_scheduled_draft(
     if tensor_meta is not None:
         recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
         comm_handles: list[Handle] = []
+        comm_postprocess: list[Callable[[], None]] = []
         if is_pp_npu0:
             src = (pp_group.rank_in_group - 1) % pp_group.world_size
             group = _get_edge_cloud_hidden_channel_device_group(
                 pp_group,
                 channel=channel,
             )
+            # Wire sequence header first (see _ec_post_seq_header_recv).
+            _ec_post_seq_header_recv(pp_group, group, channel, src,
+                                     comm_handles, comm_postprocess)
 
         send_keys = set(tensor_meta.send_tensor_keys)
         for key, value in tensor_meta.metadata_list:
@@ -2385,7 +2485,8 @@ def edge_cloud_broadcast_recv_scheduled_draft(
                 )
             _wait_handles_watchdog(handles, "tp_broadcast_draft")
 
-        return recv_tensor_dict, comm_handles, [broadcast_postprocess]
+        comm_postprocess.append(broadcast_postprocess)
+        return recv_tensor_dict, comm_handles, comm_postprocess
 
     if is_pp_npu0:
         if hasattr(pp_group, "irecv_tensor_dict_on_hidden_channel"):
