@@ -332,6 +332,11 @@ class PDSeparatedScheduler(Scheduler):
         # Enabled via pd_separation.chunk_prefill_prior_enable.
         self.chunk_prefill_prior_enable: bool = getattr(self.scheduler_config, "pd_chunk_prefill_prior_enable", False)
         self.max_chunk_prefill_ahead: int = getattr(self.scheduler_config, "pd_max_chunk_prefill_ahead", 1)
+        # Enabled via pd_separation.interleave_enable (default True).
+        # False: PREFILL and DECODE/DRAFT never overlap — a prefill runs
+        # head→tail with no decode work dispatched in between, and vice
+        # versa.  Isolation switch for the multi-edge hang investigation.
+        self.pd_interleave_enable: bool = getattr(self.scheduler_config, "pd_interleave_enable", True)
 
         # Per-chunk flight tracking: head_token → PrefillChunkFlight.
         # Populated on PF, consumed on PL.
@@ -1094,6 +1099,24 @@ class PDSeparatedScheduler(Scheduler):
     def _has_prefill_work(self) -> bool:
         return bool(self.chunk_prefill_first or self.waiting)
 
+    def _pd_no_interleave_block_prefill(self) -> bool:
+        """interleave_enable=False: no PREFILL_FIRST while any decode/draft
+        work is pending or in flight."""
+        return (not self.pd_interleave_enable) and bool(
+            self.decode_or_draft_inflight_count > 0
+            or self.draft_remote_pending_count > 0
+            or self.drafts_first_ready or self.drafts_last_ready
+            or self.decodes_first_ready or self.decodes_last_ready)
+
+    def _pd_no_interleave_block_channel_work(self) -> bool:
+        """interleave_enable=False: no DECODE_FIRST/DRAFT_FIRST while any
+        prefill is in flight or pending."""
+        return (not self.pd_interleave_enable) and bool(
+            self.prefill_inflight_count > 0
+            or self.prefill_last_pending
+            or self.prefills_last_ready
+            or self.chunk_prefill_first)
+
     def _can_schedule_prefill_first(self) -> bool:
         # When running decode requests already fill max_num_running_reqs,
         # super().schedule() inside _pick_prefill_first_batch will return an
@@ -1105,9 +1128,12 @@ class PDSeparatedScheduler(Scheduler):
             and self.prefill_inflight_count < self.prefill_inflight_limit
             and self.hidden_channel_manager.has_free_prefill()
             and effective_capacity > 0
+            and not self._pd_no_interleave_block_prefill()
         )
 
     def _can_schedule_decode_first(self) -> bool:
+        if self._pd_no_interleave_block_channel_work():
+            return False
         return bool(
             self.running
             and self.decode_or_draft_inflight_count == 0
@@ -1131,6 +1157,8 @@ class PDSeparatedScheduler(Scheduler):
 
     def _can_schedule_draft_first(self) -> bool:
         if not self.drafts_first_ready:
+            return False
+        if self._pd_no_interleave_block_channel_work():
             return False
         next_output = self.drafts_first_ready[0]
         is_pregenerated = next_output.draft_task_id in self._pregenerated_draft_task_ids
