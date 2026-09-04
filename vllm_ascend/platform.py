@@ -381,9 +381,6 @@ class NPUPlatform(Platform):
         scheduler_config.pd_max_chunk_prefill_ahead = (
             pd.max_chunk_prefill_ahead
         )
-        # P/D interleave master switch (False: prefill and decode never
-        # overlap on either side).
-        scheduler_config.pd_interleave_enable = pd.interleave_enable
 
         if getattr(scheduler_config, "async_scheduling", False):
             scheduler_config.scheduler_cls = (

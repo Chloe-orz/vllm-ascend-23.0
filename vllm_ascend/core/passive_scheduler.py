@@ -205,7 +205,6 @@ class PassiveScheduler:
             additional_config = getattr(
                 vllm_config, "additional_config", None
             )
-            self._pd_interleave_enable = True
             if isinstance(additional_config, dict):
                 ec_cfg = additional_config.get("edge_cloud_config", {})
                 htl = ec_cfg.get("edge_head_tail_layers", 1)
@@ -214,10 +213,6 @@ class PassiveScheduler:
                 elif isinstance(htl, (list, tuple)) and len(htl) >= 2:
                     head_k = int(htl[0])
                     tail_k = int(htl[1])
-                _pd = ec_cfg.get("pd_separation", {})
-                if isinstance(_pd, dict):
-                    self._pd_interleave_enable = bool(
-                        _pd.get("interleave_enable", True))
             self._num_local_layers = max(
                 0, num_hidden_layers - head_k - tail_k
             )
@@ -694,9 +689,9 @@ class PassiveScheduler:
     def _slice_for(
         self, so: SchedulerOutput
     ) -> list["LayerSliceInfo | None"]:
-        # pd_separation.interleave_enable=False: never slice prefills (the
-        # cloud half of P/D interleaving is disabled).
-        if not getattr(self, "_pd_interleave_enable", True):
+        # VLLM_ASCEND_EC_PD_INTERLEAVE=0: never slice prefills (the cloud
+        # half of P/D interleaving is disabled).
+        if os.environ.get("VLLM_ASCEND_EC_PD_INTERLEAVE", "1") == "0":
             return [None]
         # Decode-like and empty batches are never sliced. DECODE_FIRST is the
         # edge-cloud head segment of a decode step — same per-token shape as

@@ -917,11 +917,6 @@ class PDSeparationConfig:
         self.next_prefill_prior_enable: bool = user_config.get("next_prefill_prior_enable", False)
         self.chunk_prefill_prior_enable: bool = user_config.get("chunk_prefill_prior_enable", False)
         self.max_chunk_prefill_ahead: int = int(user_config.get("max_chunk_prefill_ahead", 1))
-        # False: never interleave PREFILL and DECODE on either side — a
-        # prefill runs head→tail with no decode/draft dispatched in between,
-        # and decode/draft runs with no prefill pending.  Isolation switch
-        # for the multi-edge hang investigation.
-        self.interleave_enable: bool = user_config.get("interleave_enable", True)
 
     @property
     def prefill_inflight_limit(self) -> int:

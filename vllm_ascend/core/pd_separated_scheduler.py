@@ -332,11 +332,13 @@ class PDSeparatedScheduler(Scheduler):
         # Enabled via pd_separation.chunk_prefill_prior_enable.
         self.chunk_prefill_prior_enable: bool = getattr(self.scheduler_config, "pd_chunk_prefill_prior_enable", False)
         self.max_chunk_prefill_ahead: int = getattr(self.scheduler_config, "pd_max_chunk_prefill_ahead", 1)
-        # Enabled via pd_separation.interleave_enable (default True).
-        # False: PREFILL and DECODE/DRAFT never overlap — a prefill runs
-        # head→tail with no decode work dispatched in between, and vice
-        # versa.  Isolation switch for the multi-edge hang investigation.
-        self.pd_interleave_enable: bool = getattr(self.scheduler_config, "pd_interleave_enable", True)
+        # VLLM_ASCEND_EC_PD_INTERLEAVE=0: PREFILL and DECODE/DRAFT never
+        # overlap — a prefill runs head→tail with no decode work dispatched
+        # in between, and vice versa.  Isolation switch for the multi-edge
+        # hang investigation.  Read from env directly (no config plumbing)
+        # so it can be toggled without touching startup configs.
+        self.pd_interleave_enable: bool = os.environ.get(
+            "VLLM_ASCEND_EC_PD_INTERLEAVE", "1") != "0"
 
         # Per-chunk flight tracking: head_token → PrefillChunkFlight.
         # Populated on PF, consumed on PL.
