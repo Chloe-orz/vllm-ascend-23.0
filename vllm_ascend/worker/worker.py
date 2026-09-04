@@ -149,6 +149,13 @@ def _use_materialized_residual_boundary(model_config) -> bool:
     return supports_materialized_boundary_for_config(model_config)
 
 
+# Sentinel stored in NPUWorker._early_recv_handles while the guard thread is
+# posting the irecv OUTSIDE _early_recv_lock (buffer alloc + HCCL post can be
+# slow).  A racing busy_loop waits on the matching event instead of
+# double-posting.
+_RECV_POSTING = object()
+
+
 class NPUWorker(WorkerBase):
     def __init__(
         self,
@@ -244,6 +251,12 @@ class NPUWorker(WorkerBase):
         # Prevents the guard thread from posting a duplicate (orphan) irecv
         # when its hint arrives after busy_loop already posted its own.
         self._early_recv_consumed: set[str] = set()
+        # Per-head_token events for in-flight guard posts: the HCCL post now
+        # runs OUTSIDE _early_recv_lock (a slow post used to deadlock
+        # busy_loop behind the guard); a _RECV_POSTING sentinel in
+        # _early_recv_handles plus an event here lets a racing busy_loop wait
+        # for the guard's entry instead of double-posting.
+        self._early_recv_posting_events: dict[str, threading.Event] = {}
         # Whether cloud-side hidden early-receive (CHER) is active on this
         # worker.  CHER is a built-in part of PD-separation masking, so on a
         # PD-separated cloud worker (local_rank==0) this is always True; False
@@ -671,32 +684,10 @@ class NPUWorker(WorkerBase):
                 and os.environ.get("VLLM_ASCEND_EC_CHER", "1") != "0"
             )
             # Max in-flight prefill batches on the cloud = prefill_inflight_limit
-            # (2 when next_prefill_prior_enable, else 1).  At most that many
-            # early-recv entries PER EDGE are ever useful, so the guard thread
-            # caps the cache at this size per source edge (see
-            # start_early_irecv): it posts ahead-of-time for the P-middle
-            # batches that will actually run, and skips the rest (busy_loop
-            # posts those itself).  The per-edge cap is load-bearing in
-            # multi-instance mode: it is what keeps the same-channel
-            # rendezvous cycle broken for EVERY pair, not just whichever
-            # edge grabbed a global slot first.  This keeps the cache bounded
-            # (no unbounded growth / OOM) and the guard draining fast
-            # (skipped hints cost no NPU alloc), so the small hint ring never
-            # fills.
-            if self._cloud_hidden_early_recv_enabled:
-                # CHER early-recv cache cap (per edge).  Empirically (see
-                # logs) the guard thread posts one entry at a time: each
-                # chunk's POST is followed by a busy_loop HIT before the next
-                # POST, so the cache never holds more than 1 entry per edge
-                # even when next_prefill_prior_enable (2P) is on.  Capping at
-                # 1 keeps exactly one recv buffer (~80MB at 8192 tokens)
-                # resident per edge instead of two, reducing
-                # caching-allocator fragmentation in the "64k then 4k"
-                # workload (different-sized buffers in the free list could
-                # not be reused).
-                self._early_recv_max_inflight = 1
-            else:
-                self._early_recv_max_inflight = 0
+            # (2 when next_prefill_prior_enable, else 1), which also bounds the
+            # early-recv cache per edge: hints are never dropped (a lost hint
+            # deadlocks the pair when busy_loop is blocked in an inline recv),
+            # and the guard posts every hint it receives.
             if self._cloud_hidden_early_recv_enabled:
                 logger.info(
                     "[CHER] cloud hidden early-receive enabled on worker "
@@ -993,15 +984,17 @@ class NPUWorker(WorkerBase):
             pass
         return None
 
-    def _post_early_irecv_locked(
+    def _post_early_irecv(
         self, ht: str, channel: "HiddenChannelType", num_tokens: int,
         include_mrope: bool = True,
     ) -> AsyncIntermediateTensors:
-        """Post an irecv and return the entry.  Caller MUST hold
-        ``_early_recv_lock``.  Does NOT cache in ``_early_recv_handles`` --
-        the caller decides whether to cache (guard thread) or consume
-        immediately (busy_loop).  This prevents the memory leak where
-        busy_loop's self-posted entries were left in the dict forever.
+        """Post an irecv and return the entry.  Runs WITHOUT
+        ``_early_recv_lock`` (buffer alloc + HCCL post can be slow; callers
+        reserve the head_token with the _RECV_POSTING sentinel under the
+        lock first).  Does NOT cache in ``_early_recv_handles`` -- the caller
+        decides whether to cache (guard thread) or consume immediately
+        (busy_loop).  This prevents the memory leak where busy_loop's
+        self-posted entries were left in the dict forever.
         """
         do_sp_chunk = enable_sp() and (
             self.model_runner.edge_cloud_cfg.mode != "embedding_only"
@@ -1058,55 +1051,42 @@ class NPUWorker(WorkerBase):
             return
         with self._early_recv_lock:
             if ht in self._early_recv_handles:
-                return  # idempotent: another thread already posted
+                return  # idempotent: posted already, or being posted
             if ht in self._early_recv_consumed:
                 return  # busy_loop already consumed (posted its own); skip
-            # Cap the cache PER EDGE (multi-instance): only
-            # prefill_inflight_limit P-middle batches are in flight per edge
-            # at once, so only that many early-recv entries per edge are ever
-            # useful.  The per-edge cap is what actually breaks the 2E1C
-            # same-channel rendezvous deadlock: the cloud's busy_loop can be
-            # blocked on a c2e result isend to edge X while edge X's next
-            # prefill isend arrives — the early irecv posted by the guard is
-            # the ONLY thing that lets edge X proceed to its PL and recv the
-            # result.  With a single GLOBAL slot, edge Y's cached entry
-            # crowds out edge X's next prefill (its hint is skipped here and
-            # never re-queued; busy_loop cannot post it while blocked), and
-            # the classic 2P cross-direction cycle re-forms under dual-edge
-            # concurrency (single-edge load never trips it).  Per-edge slots
-            # restore the 1-1 cycle-breaking property for every pair; extra
-            # hints within the same edge are still skipped (busy_loop posts
-            # those via get_or_post_early_recv when they run), keeping the
-            # cache bounded and the guard draining fast.
-            _max = getattr(self, "_early_recv_max_inflight", 2)
-            _bucket = self._edge_bucket_of_token(ht)
-            _same_bucket = sum(
-                1 for key in self._early_recv_handles
-                if self._edge_bucket_of_token(key) == _bucket
+            # Hints are never dropped: a skipped hint meant the prefill's
+            # payload isend had no matching irecv, and a busy_loop blocked in
+            # an inline recv could never reach that batch to self-post —
+            # a self-sufficient deadlock ring within one pair.  The cache is
+            # naturally bounded by the scheduler's per-edge prefill
+            # in-flight limit, so no cap is needed here.  Reserve the slot
+            # with a sentinel and post OUTSIDE the lock: buffer allocation +
+            # HCCL post can be slow, and holding _early_recv_lock across them
+            # deadlocks busy_loop behind a slow guard.
+            ev = threading.Event()
+            self._early_recv_handles[ht] = _RECV_POSTING
+            self._early_recv_posting_events[ht] = ev
+        try:
+            entry = self._post_early_irecv(ht, channel, num_tokens, include_mrope=has_mrope)
+        except Exception:
+            logger.exception(
+                "[CHER] start_early_irecv failed head_token=%s channel=%s",
+                ht, channel_str,
             )
-            if _same_bucket >= _max:
-                # Diagnostic for the 3E1C hang: this skip is SILENT in the
-                # original design.  If busy_loop is also blocked, this edge's
-                # recv is never posted -> the pair stalls.  Correlate with
-                # the absence of a later edge_cloud_irecv log for this
-                # head_token.
-                logger.warning(
-                    "[EC-EARLY-RECV-SKIP] head_token=%s channel=%s skipped: "
-                    "per-edge early-recv cache full (bucket=%s have=%d "
-                    "max=%d). busy_loop must post this recv itself; if it "
-                    "is blocked, this edge stalls.",
-                    ht, channel_str, _bucket, _same_bucket, _max,
-                )
-                return
-            try:
-                entry = self._post_early_irecv_locked(ht, channel, num_tokens, include_mrope=has_mrope)
-                self._early_recv_handles[ht] = entry  # cache for busy_loop
-            except Exception:
-                logger.exception(
-                    "[CHER] start_early_irecv failed head_token=%s channel=%s",
-                    ht, channel_str,
-                )
-                return
+            with self._early_recv_lock:
+                if self._early_recv_handles.get(ht) is _RECV_POSTING:
+                    self._early_recv_handles.pop(ht)
+                self._early_recv_posting_events.pop(ht, None)
+                ev.set()
+            return
+        with self._early_recv_lock:
+            # Always publish: either the sentinel is still ours (busy_loop
+            # hasn't come by — it will pop the entry later), or busy_loop
+            # already popped the sentinel and is waiting on ev — it pops the
+            # entry right after ev.set().
+            self._early_recv_handles[ht] = entry
+            self._early_recv_posting_events.pop(ht, None)
+            ev.set()
 
     def get_or_post_early_recv(
         self, head_token: str | None, channel: "HiddenChannelType",
@@ -1127,30 +1107,54 @@ class NPUWorker(WorkerBase):
         """
         if not head_token:
             return None
+        ev = None
         with self._early_recv_lock:
             entry = self._early_recv_handles.pop(head_token, None)
             self._early_recv_consumed.add(head_token)
-            if entry is not None:
+            if entry is _RECV_POSTING:
+                # The guard thread is mid-post (buffer alloc + HCCL post run
+                # outside the lock now); wait for it to publish the entry.
+                # Double-posting is impossible: we already popped the slot
+                # and marked the token consumed.
+                ev = self._early_recv_posting_events.get(head_token)
+            elif entry is not None:
                 return entry  # guard thread posted it, consumed
-            # Not posted by guard: post our own.  Do NOT cache in
-            # _early_recv_handles -- we consume it immediately.  Marking
-            # _early_recv_consumed above prevents the guard from posting a
-            # duplicate (orphan irecv) when its hint arrives later.
-            try:
-                return self._post_early_irecv_locked(
-                    head_token, channel, num_tokens, include_mrope=include_mrope)
-            except Exception:
-                logger.exception(
-                    "[CHER] get_or_post_early_recv failed head_token=%s",
-                    head_token,
-                )
-                return None
+        if ev is not None:
+            ev.wait()
+            with self._early_recv_lock:
+                entry = self._early_recv_handles.pop(head_token, None)
+            if entry is not None and entry is not _RECV_POSTING:
+                return entry
+            # Guard post failed — fall through and self-post.
+        # Not posted by guard (or its post failed): post our own, OUTSIDE
+        # the lock.  The _early_recv_consumed mark above already bars a late
+        # guard hint from posting a duplicate, so no sentinel is needed here.
+        try:
+            return self._post_early_irecv(
+                head_token, channel, num_tokens, include_mrope=include_mrope)
+        except Exception:
+            logger.exception(
+                "[CHER] get_or_post_early_recv failed head_token=%s",
+                head_token,
+            )
+            return None
 
     def cleanup_early_recv(self, head_token: str) -> None:
         """Drop a leaked early-recv entry (e.g. request aborted mid-prefill)."""
         with self._early_recv_lock:
             removed = self._early_recv_handles.pop(head_token, None)
             self._early_recv_consumed.discard(head_token)
+            ev = None
+            if removed is _RECV_POSTING:
+                # Guard is mid-post; wait briefly so its entry can be
+                # dropped too instead of leaking a live irecv into the cache.
+                ev = self._early_recv_posting_events.get(head_token)
+        if ev is not None:
+            ev.wait(timeout=5.0)
+            with self._early_recv_lock:
+                removed = self._early_recv_handles.pop(head_token, None)
+            if removed is _RECV_POSTING:
+                removed = None
         if removed is not None:
             # Diagnostic: dropping a POSTED early-recv means an irecv was
             # already issued on the channel; if the peer's matching send
