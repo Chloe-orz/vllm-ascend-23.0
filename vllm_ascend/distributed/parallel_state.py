@@ -67,6 +67,11 @@ def _ec_comm_ctx() -> str:
 _EC_MSG_MAGIC = 0xEC5E0001
 _EC_MSG_SEQ_SEND: dict[Any, int] = {}
 _EC_MSG_SEQ_RECV: dict[Any, int] = {}
+# Serializes (counter increment + header post): the guard thread and the
+# busy_loop can both post recvs on the same (channel, pair); without this
+# lock the counter order could diverge from the wire order and produce
+# false EC-SEQ-MISMATCH alarms.
+_EC_SEQ_LOCK = threading.Lock()
 
 
 def _ec_msg_key(channel: Any, pair: Any) -> Any:
@@ -115,14 +120,15 @@ def _ec_post_seq_header_recv(pp_group, group, channel, src, handles,
         return
     pair = _current_active_pair()
     key = _ec_msg_key(channel, pair)
-    expected = _ec_next_seq(_EC_MSG_SEQ_RECV, key)
-    with _hidden_channel_stream_ctx(
-            channel, direction="recv", pp_group=pp_group, wait_for_default=False):
-        hdr = torch.empty(2, dtype=torch.int64, device="npu")
-        with _post_watchdog(
-                f"irecv(hdr) channel={channel.value} pair={pair}"):
-            h = torch.distributed.irecv(hdr, src=pp_group.ranks[src], group=group)
-        hdr.record_stream(torch.npu.current_stream(hdr.device))
+    with _EC_SEQ_LOCK:
+        expected = _ec_next_seq(_EC_MSG_SEQ_RECV, key)
+        with _hidden_channel_stream_ctx(
+                channel, direction="recv", pp_group=pp_group, wait_for_default=False):
+            hdr = torch.empty(2, dtype=torch.int64, device="npu")
+            with _post_watchdog(
+                    f"irecv(hdr) channel={channel.value} pair={pair}"):
+                h = torch.distributed.irecv(hdr, src=pp_group.ranks[src], group=group)
+            hdr.record_stream(torch.npu.current_stream(hdr.device))
     handles.insert(0, h)
 
     def _validate_seq(hdr=hdr, expected=expected, key=key):
