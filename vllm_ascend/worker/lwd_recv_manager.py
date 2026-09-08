@@ -42,10 +42,9 @@ from vllm_ascend.distributed.lwd_comm.future import LwdCommFuture
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 from vllm_ascend.worker.lwd_down_packet import (
-    LwdDownPacket,
-    lwd_down_wire_num_elements,
+    LwdDownBatchPacket,
     lwd_request_fingerprint,
-    unpack_lwd_down_packet,
+    unpack_lwd_down_batch_packet,
 )
 
 
@@ -404,89 +403,117 @@ class LwdCloudUpRecvManager(_LwdDuplexRecvManagerBase):
 
 
 class LwdEdgeDownRecvManager(_LwdDuplexRecvManagerBase):
-    """Edge side, DOWN channel, STREAMING mode (v2.5/v2.6).
+    """Edge side, DOWN channel, per-STEP batch packets (v3).
 
-    The cloud sends one fixed-size packet per request per step (after
-    prefill and after every decode step); there is NO FIN packet —
-    request termination is control-plane-driven.  **Negotiation lives in
-    the ZMQ control plane (owned by another module): before every cloud
-    send, the control plane notifies the edge, which calls
-    ``expect_packet`` to pre-post the recv.**  This manager therefore
-    has NO ring/demux machinery — it is purely notification-driven:
+    The cloud sends ONE packet per step carrying the rows of ALL live
+    LWD requests of that step's batch (see ``lwd_down_packet``).
+    **Negotiation lives in the ZMQ control plane (owned by another
+    module): before every cloud send, the control plane notifies the
+    edge with ``(seqno, num_elements)``, and the edge calls
+    ``expect_packet`` to pre-post the recv.**  This manager is purely
+    notification-driven:
 
-      * every wire packet has the same fixed size
-        (``lwd_down_wire_num_elements(H, R_max)``), so the
-        notification only needs ``(req_id, seqno)``;
+      * the wire size VARIES per step (request count and accepted
+        counts vary), so the notification MUST carry the exact
+        ``num_elements`` (HCCL P2P requires matching numel);
       * per-packet seqno comes from the control plane (channel-global,
-        dense per direction; abort holes are skipped via ``drop``);
-      * ``wait_packet`` = readiness gate + parse + full validation
-        (fingerprint verified against req_id);
+        assigned by the cloud at send time — DENSE by construction, so
+        an aborted request punches NO hole: its rows ride inside shared
+        step packets and are filtered at demux via ``drop``);
+      * ``wait_packet`` = readiness gate + parse + full validation, and
+        demux is the consumer's job: match each entry's fingerprint
+        against the edge's live requests (``lwd_request_fingerprint``);
       * request termination is control-plane-driven: ``close()`` for
-        normal finish, ``drop()`` for abort (no FIN packet on the wire).
+        normal finish, ``drop()`` for abort.
 
     TP>1: only TP rank 0 posts the wire recv; the payload is then
-    broadcast inside the TP group (all ranks call ``wait_packet`` in the
-    same order — same scheduler outputs).
+    broadcast inside the TP group (all ranks get the same notifications
+    and call ``wait_packet`` in the same order).
     """
 
     _CHANNEL = LwdChannelType.DOWN
 
-    def __init__(self, hidden_size: int, max_rows: int = 1) -> None:
+    def __init__(self, hidden_size: int) -> None:
         super().__init__(hidden_size)
-        self._max_rows = max_rows
-        self._wire_num_elements = lwd_down_wire_num_elements(
-            hidden_size, max_rows
-        )
-        # Per-request internal packet counter: each expect_packet gets the
-        # next slot, so multiple outstanding packets per request are
-        # supported (the control plane may notify ahead of consumption).
-        self._next_pkt_idx: dict[str, int] = {}
+        # Step queue: pkt_idx -> posted recv.  Consumption is in posting
+        # (= wire) order via min().
+        self._packets: dict[int, _Entry] = {}
+        self._next_pkt_idx = 0
+        # Aborted requests' fingerprints (bounded LRU): their in-flight
+        # rows are stripped from unpacked packets at demux.
+        self._aborted_fps: OrderedDict[int, None] = OrderedDict()
 
-    def expect_packet(self, req_id: str, seqno: int) -> None:
+    def expect_packet(self, seqno: int, num_elements: int) -> None:
         """Called on the control-plane notification preceding every
-        cloud send.  Idempotent per (req_id, seqno) at the
-        channel level; the wire size is fixed and config-derived."""
+        cloud send: ``(seqno, num_elements)``."""
         with self._lock:
-            pkt_idx = self._next_pkt_idx.get(req_id, 0)
-            self._next_pkt_idx[req_id] = pkt_idx + 1
-        self._post_recv(
-            req_id,
-            seqno,
-            self._max_rows,  # bookkeeping only
-            pkt_idx,
-            2**31,  # unbounded internal chunk space (per-packet slots)
-            num_elements=self._wire_num_elements,
-        )
+            pkt_idx = self._next_pkt_idx
+            self._next_pkt_idx += 1
+            future = None
+            if self._is_tp_endpoint:
+                future = get_lwd_comm_service().submit_recv(
+                    LwdCommRequest(
+                        channel=self._CHANNEL,
+                        op="recv",
+                        num_elements=num_elements,
+                        seqno=seqno,
+                    )
+                )
+            self._packets[pkt_idx] = _Entry(
+                future, num_elements, seqno, 0
+            )
 
-    def wait_packet(self, req_id: str) -> LwdDownPacket:
-        """Readiness gate + parse + validate.  Stream end is
-        control-plane-driven (``close``/``drop``), not wire-driven."""
+    def wait_packet(self) -> LwdDownBatchPacket:
+        """Readiness gate + parse + validate the NEXT step packet (in
+        wire order), with aborted requests' entries stripped."""
         deadline = time.monotonic() + envs.VLLM_ASCEND_LWD_EMBEDS_TIMEOUT_S
         with self._lock:
-            req = self._reqs.get(req_id)
-        if req is None or not req.chunks:
-            raise KeyError(f"lwd_down: no posted recv for {req_id!r}")
-        pkt_idx = min(req.chunks)  # consume in posting (wire) order
-        buf = self._wait_chunk(req, pkt_idx, deadline, consume=True)
-        packet = unpack_lwd_down_packet(
-            buf,
-            expected_fingerprint=lwd_request_fingerprint(req_id),
-            max_rows=self._max_rows,
-            hidden_size=self._hidden_size,
+            if not self._packets:
+                raise KeyError("lwd_down: no posted recv")
+            pkt_idx = min(self._packets)
+            entry = self._packets[pkt_idx]
+        group = self._tp_group
+        if group is None:
+            buf = self._wait_wire(entry, deadline)
+        else:
+            if self._is_tp_endpoint:
+                buf = self._wait_wire(entry, deadline)
+            else:
+                buf = torch.empty(
+                    entry.num_elements, dtype=torch.bfloat16, device="npu"
+                )
+            group.broadcast(buf, src=0)
+        with self._lock:
+            self._packets.pop(pkt_idx, None)
+            aborted = set(self._aborted_fps)
+        packet = unpack_lwd_down_batch_packet(
+            buf, hidden_size=self._hidden_size
         )
+        if aborted:
+            packet.entries = [
+                e for e in packet.entries if e.fingerprint not in aborted
+            ]
         return packet
 
-    def close(self, req_id: str) -> None:
-        # Normal finish (control plane calls this): drop all bookkeeping
-        # for the request.  Distinguished from drop() (abort): close does
-        # NOT skip seqnos -- every notified packet was sent.
+    def drop(self, req_id: str) -> None:
+        """Abort: the request's in-flight rows ride inside shared step
+        packets and cannot be un-sent — filter them at demux.  NO seqno
+        skipping (DOWN seqnos are dense by construction)."""
         with self._lock:
-            self._reqs.pop(req_id, None)
-            self._next_pkt_idx.pop(req_id, None)
+            fp = lwd_request_fingerprint(req_id)
+            self._aborted_fps[fp] = None
+            self._aborted_fps.move_to_end(fp)
+            while len(self._aborted_fps) > _DROPPED_REQ_IDS_CAP:
+                self._aborted_fps.popitem(last=False)
 
-    def has_pending(self, req_id: str) -> bool:
+    def close(self, req_id: str) -> None:
+        """Normal finish (control plane calls this).  Bookkeeping is
+        per-step, so there is nothing per-request to release."""
+        return
+
+    def has_pending(self) -> bool:
         with self._lock:
-            return req_id in self._reqs
+            return bool(self._packets)
 
 
 _UP_MANAGER: LwdCloudUpRecvManager | None = None
@@ -494,24 +521,16 @@ _DOWN_MANAGER: LwdEdgeDownRecvManager | None = None
 _MANAGER_LOCK = threading.Lock()
 
 
-def init_lwd_recv_managers(
-    hidden_size: int,
-    max_rows: int = 1,
-) -> None:
+def init_lwd_recv_managers(hidden_size: int) -> None:
     """Create both managers (idempotent).  Each process uses only the
-    one matching its role, but creating both keeps init trivial.
-    ``max_rows`` = num_speculative_tokens + 1 (1 when spec is off) —
-    the fixed DOWN wire size basis."""
+    one matching its role, but creating both keeps init trivial."""
     global _UP_MANAGER, _DOWN_MANAGER
     with _MANAGER_LOCK:
         if _UP_MANAGER is None:
             _UP_MANAGER = LwdCloudUpRecvManager(hidden_size)
-            _DOWN_MANAGER = LwdEdgeDownRecvManager(
-                hidden_size, max_rows=max_rows
-            )
+            _DOWN_MANAGER = LwdEdgeDownRecvManager(hidden_size)
             logger.info(
-                "[lwd-recv] managers initialized (H=%d, R_max=%d)",
-                hidden_size, max_rows,
+                "[lwd-recv] managers initialized (H=%d)", hidden_size,
             )
 
 

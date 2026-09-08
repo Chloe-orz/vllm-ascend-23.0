@@ -344,16 +344,10 @@ class NPUModelRunner(GPUModelRunner):
                 LwdCloudSampleCollector,
             )
 
-            max_rows = 1
-            if self.speculative_config is not None:
-                max_rows = self.speculative_config.num_speculative_tokens + 1
             # Only TP rank 0 talks to the wire; skip collector creation on
             # the other ranks (their packets would never be sent).
             if get_tp_group().is_first_rank:
-                self.lwd_cloud_collector = LwdCloudSampleCollector(
-                    hidden_size=self.model_config.get_hidden_size(),
-                    max_rows=max_rows,
-                )
+                self.lwd_cloud_collector = LwdCloudSampleCollector()
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
@@ -2645,22 +2639,21 @@ class NPUModelRunner(GPUModelRunner):
         sampler_output,
     ) -> None:
         """Streaming collect+send (cloud): after prefill and after EVERY
-        decode step, pack this step's data per request and isend each
-        packet DOWN immediately.
+        decode step, pack this step's data for ALL live LWD requests of
+        the batch into ONE batch packet and isend it DOWN.
 
-        Packet content per row (v2 rank-replay): the position's pre-
-        lm_head hidden + the GLOBAL RANK of the sampled token in the
-        step's logits + num_accepted.  The token id itself is never on
-        the wire — the edge replays it via hidden -> local lm_head ->
-        pick the rank-th largest.
+        Packet rows (v3 rank-replay): each position's pre-lm_head hidden
+        + the GLOBAL RANK of the sampled token in the step's logits; the
+        request table carries per-request row counts and num_accepted.
+        The token id itself is never on the wire — the edge replays it
+        via hidden -> local lm_head -> pick the rank-th largest.
 
-        Non-spec: one row per request (R=1, accepted=0).
-        Spec/MTP verify steps: R = accepted+1 rows per request — the
-        accepted rows are a PREFIX of the request's verify segment
-        (accepted draft positions + bonus row are contiguous), segments
-        delimited by cu_num_sampled_tokens; each row's rank is computed
-        against that row's target logits (the distribution the
-        rejection sampler verified against).
+        Non-spec: one row per request.  Spec/MTP verify steps:
+        accepted+1 rows per request — the accepted rows are a PREFIX of
+        the request's verify segment (accepted draft positions + bonus
+        row are contiguous), segments delimited by cu_num_sampled_tokens;
+        each row's rank is computed against that row's target logits
+        (the distribution the rejection sampler verified against).
         """
         collector = self.lwd_cloud_collector
         # Fast path: no remote-embeds request in flight -> zero per-step
@@ -2675,7 +2668,7 @@ class NPUModelRunner(GPUModelRunner):
             LwdCommRequest,
         )
 
-        def _send(req_id: str, packet) -> None:
+        def _send(packet) -> None:
             if packet is None:
                 return
             get_lwd_comm_service().submit_send(
@@ -2689,12 +2682,14 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         if spec_decode_metadata is None:
-            self._lwd_collect_nonspec(
-                collector, sample_hidden_states, logits, sampler_output, _send)
-            return
-        self._lwd_collect_spec(
-            collector, sample_hidden_states, logits,
-            spec_decode_metadata, sampler_output, _send)
+            entries = self._lwd_collect_nonspec(
+                collector, sample_hidden_states, logits, sampler_output)
+        else:
+            entries = self._lwd_collect_spec(
+                collector, sample_hidden_states, logits,
+                spec_decode_metadata, sampler_output)
+        if entries:
+            _send(collector.build_batch_packet(entries))
 
     def _lwd_sampled_valid_mask(self, num_reqs: int):
         """Per-row mask: whether the request's last token was scheduled
@@ -2717,12 +2712,13 @@ class NPUModelRunner(GPUModelRunner):
         return (lg > thresh).sum(dim=1).to(torch.int32)
 
     def _lwd_collect_nonspec(self, collector, sample_hidden_states, logits,
-                             sampler_output, send) -> None:
+                             sampler_output) -> list:
+        """Non-spec step -> one entry per live LWD request (R=1)."""
         if logits is None:
             logger.warning_once(
                 "[lwd] step without logits; skipping c2e stream"
             )
-            return
+            return []
         if lmhead_tp_enable():
             # With lmhead TP the logits here are vocab SHARDS — a global
             # rank needs a cross-rank reduction (not implemented).  Skip
@@ -2731,34 +2727,31 @@ class NPUModelRunner(GPUModelRunner):
                 "[lwd] rank collection is not supported with lmhead TP "
                 "(logits are vocab shards); skipping c2e stream"
             )
-            return
+            return []
         sampled = sampler_output.sampled_token_ids  # [B, 1]
         batch_req_ids = self.input_batch.req_ids
         valid = self._lwd_sampled_valid_mask(len(batch_req_ids))
         idx = [i for i, r in enumerate(batch_req_ids)
                if collector.has_slot(r) and valid[i]]
         if not idx:
-            return
-        req_ids = [batch_req_ids[i] for i in idx]
+            return []
         ranks = self._lwd_global_ranks(logits[idx], sampled[idx][:, 0])
-        packets = collector.build_step_packets(
-            req_ids,
-            hidden_rows=sample_hidden_states[idx],
-            ranks=ranks,
-            num_accepted=None,
-        )
-        for req_id in req_ids:
-            send(req_id, packets.get(req_id))
+        return [
+            (batch_req_ids[i], sample_hidden_states[i : i + 1], ranks[j : j + 1], 0)
+            for j, i in enumerate(idx)
+        ]
 
     def _lwd_collect_spec(
         self, collector, sample_hidden_states, logits,
-        spec_decode_metadata, sampler_output, send,
-    ) -> None:
+        spec_decode_metadata, sampler_output,
+    ) -> list:
+        """Spec verify step -> one entry per live LWD request
+        (R = accepted+1 rows)."""
         if logits is None:
             logger.warning_once(
                 "[lwd] spec step without logits; skipping c2e stream"
             )
-            return
+            return []
         tp = get_tp_group()
         if tp.world_size > 1:
             # The ranks here would be computed over THIS rank's vocab
@@ -2768,14 +2761,14 @@ class NPUModelRunner(GPUModelRunner):
                 "[lwd] spec collection is not supported with lmhead TP>1 "
                 "(ranks would be shard-local); skipping c2e stream"
             )
-            return
+            return []
         sampled = sampler_output.sampled_token_ids  # [B, max_spec_len+1], -1 = invalid
         if sampled is None or sampled.dim() != 2:
             logger.warning_once(
                 "[lwd] unexpected sampled_token_ids shape in spec step; "
                 "skipping c2e stream"
             )
-            return
+            return []
         batch_req_ids = self.input_batch.req_ids
         assert sampled.shape[0] == len(batch_req_ids), (
             sampled.shape, len(batch_req_ids))
@@ -2785,6 +2778,7 @@ class NPUModelRunner(GPUModelRunner):
         counts = (sampled != -1).sum(dim=1)
         counts_cpu = counts.tolist()
         cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
+        entries = []
         seg_start = 0
         for i, req_id in enumerate(batch_req_ids):
             seg_end = cu[i]
@@ -2798,14 +2792,16 @@ class NPUModelRunner(GPUModelRunner):
             seg_hidden = sample_hidden_states[seg_start: seg_start + rows]
             seg_logits = logits[seg_start: seg_start + rows]
             seg_sampled = sampled[i, :rows]
-            packet = collector.build_step_packet(
-                req_id,
-                hidden=seg_hidden,
-                ranks=self._lwd_global_ranks(seg_logits, seg_sampled),
-                num_accepted=rows - 1,
+            entries.append(
+                (
+                    req_id,
+                    seg_hidden,
+                    self._lwd_global_ranks(seg_logits, seg_sampled),
+                    rows - 1,
+                )
             )
-            send(req_id, packet)
             seg_start = seg_end
+        return entries
 
     def lwd_edge_resample(self, pkt) -> None:
         """Edge-side interface reservation (NOT implemented this period).

@@ -543,15 +543,7 @@ class NPUWorker(WorkerBase):
             from vllm_ascend.worker.lwd_recv_manager import init_lwd_recv_managers
 
             lwd_wire.init_lwd_duplex_channels()
-            max_rows = 1
-            if self.vllm_config.speculative_config is not None:
-                max_rows = (
-                    self.vllm_config.speculative_config.num_speculative_tokens + 1
-                )
-            init_lwd_recv_managers(
-                self.model_config.get_hidden_size(),
-                max_rows=max_rows,
-            )
+            init_lwd_recv_managers(self.model_config.get_hidden_size())
             if self._lwd_cfg.is_cloud_node:
                 # Wire the draft proposer's first-pass prompt-embeds
                 # provider (task: organize draft first-pass inputs from
@@ -677,16 +669,19 @@ class NPUWorker(WorkerBase):
         """prefill_only control-plane abort hook (streaming semantics).
 
         MUST be driven on BOTH peers for the same request:
-          * edge: drop the DOWN recv side (skips the recv seqnos of any
-            posted-but-unfilled packets) and clear the per-request send
-            bookkeeping (unsent embed chunks are simply never
-            dispatched);
+          * edge: mark the request aborted on the DOWN recv side (its
+            in-flight rows ride inside shared per-step batch packets and
+            are filtered at demux — DOWN seqnos are dense by
+            construction, so there is NO seqno to skip) and clear the
+            per-request send bookkeeping (unsent embed chunks are simply
+            never dispatched);
           * cloud: drop the UP recv side (skips the recv seqnos of
             chunks the edge will never send) and destroy the collector
-            bookkeeping — the DOWN stream just stops (per-step packets
-            are built from live registrations only, and the DOWN seqno
-            is assigned at send time from a channel-global counter, so
-            an aborted request leaves NO hole in the send sequence).
+            bookkeeping — the request's rows simply stop appearing in
+            the per-step batch packets (they are built from live
+            registrations only, and the DOWN seqno is assigned at send
+            time from a channel-global counter, so an aborted request
+            leaves NO hole in the send sequence).
 
         A send already posted to HCCL cannot be un-posted — the control
         plane must abort before dispatching the request's tail.
