@@ -2025,6 +2025,7 @@ def _broadcast_nonmerge_tensors_inplace(
     tensor_dict: dict[str, Any],
     ec_meta: "EdgeCloudTensorMeta",
     tp_group: Any,
+    src_idx: int = 0,
 ) -> None:
     """Broadcast/recv the non-merge-group tensors across the local TP group.
 
@@ -2034,6 +2035,9 @@ def _broadcast_nonmerge_tensors_inplace(
     irecv'd by PP NPU0 only and still need an intra-node broadcast so the
     other TP ranks see them. This mirrors the non-merge path's per-tensor
     broadcast, scoped to the non-merge keys.
+
+    src_idx: TP index of the P2P-receiving rank (0 on legacy layouts; the
+    pair-mapped cloud rank in multi-edge per-rank mapping).
     """
     merge_key_set = set(ec_meta.merge_keys) if ec_meta.merge_payload else set()
     handles = []
@@ -2045,7 +2049,7 @@ def _broadcast_nonmerge_tensors_inplace(
         group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
         handles.append(
             torch.distributed.broadcast(
-                tensor, src=tp_group.ranks[0], group=group, async_op=True
+                tensor, src=tp_group.ranks[src_idx], group=group, async_op=True
             )
         )
     _wait_handles_watchdog(handles, "tp_broadcast_nonmerge")
@@ -2095,6 +2099,11 @@ def edge_cloud_broadcast_recv(
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size > 1
     ec_meta = _select_edge_cloud_meta_for_recv()
+    # TP-broadcast source: the rank that did the P2P recv for the active
+    # pair (TP rank0 in legacy layouts; the pair-mapped cloud rank under
+    # per-edge cloud-rank mapping).  Computed now because the postprocess
+    # closures run later, outside the pair scope.
+    tp_src_idx = _tp_p2p_src_index(tp_group)
 
     logger.info(
         "[PD] edge_cloud_broadcast_recv: channel=%s num_tokens=%s src=%s "
@@ -2137,7 +2146,7 @@ def edge_cloud_broadcast_recv(
                 tp_dev_group = tp_group.device_group
                 handle = torch.distributed.broadcast(
                     merged_buf,
-                    src=tp_group.ranks[0],
+                    src=tp_group.ranks[tp_src_idx],
                     group=tp_dev_group,
                     async_op=True,
                 )
@@ -2151,7 +2160,7 @@ def edge_cloud_broadcast_recv(
                 # tensor_dict above but are NOT inside merged_buf, so the
                 # merged broadcast did not deliver them to the other TP ranks.
                 # Broadcast them individually here (intra-node, cheap).
-                _broadcast_nonmerge_tensors_inplace(tensor_dict, ec_meta, tp_group)
+                _broadcast_nonmerge_tensors_inplace(tensor_dict, ec_meta, tp_group, tp_src_idx)
 
             comm_postprocess.append(broadcast_postprocess)
             # On the merge path the per-key tensors are materialized lazily
@@ -2182,7 +2191,7 @@ def edge_cloud_broadcast_recv(
                 group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
                 handles.append(
                     torch.distributed.broadcast(
-                        tensor, src=tp_group.ranks[0], group=group, async_op=True
+                        tensor, src=tp_group.ranks[tp_src_idx], group=group, async_op=True
                     )
                 )
             _wait_handles_watchdog(handles, "tp_broadcast_pp0")
@@ -2236,7 +2245,7 @@ def edge_cloud_broadcast_recv(
             tp_dev_group = tp_group.device_group
             handle = torch.distributed.broadcast(
                 merged_buf,
-                src=tp_group.ranks[0],
+                src=tp_group.ranks[tp_src_idx],
                 group=tp_dev_group,
                 async_op=True,
             )
@@ -2245,7 +2254,7 @@ def edge_cloud_broadcast_recv(
                 _split_merged_buffer_into_dict(merged_buf, ec_meta)
             )
             # Broadcast-recv the non-merge keys (mirrors PP NPU0's broadcast).
-            _broadcast_nonmerge_tensors_inplace(recv_tensor_dict, ec_meta, tp_group)
+            _broadcast_nonmerge_tensors_inplace(recv_tensor_dict, ec_meta, tp_group, tp_src_idx)
 
         postprocess: list[Callable[[], None]] = [broadcast_postprocess]
         if sp_chunk:
@@ -2282,7 +2291,7 @@ def edge_cloud_broadcast_recv(
             group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
             handles.append(
                 torch.distributed.broadcast(
-                    tensor, src=tp_group.ranks[0], group=group, async_op=True
+                    tensor, src=tp_group.ranks[tp_src_idx], group=group, async_op=True
                 )
             )
         _wait_handles_watchdog(handles, "tp_broadcast_nonpp0")
@@ -2318,6 +2327,9 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
     pp_group = _effective_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
+    # TP-broadcast source: the rank that did the P2P recv for the active
+    # pair (TP rank0 in legacy layouts; pair-mapped cloud rank otherwise).
+    tp_src_idx = _tp_p2p_src_index(tp_group)
 
     if is_pp_npu0:
         tensor_dict, comm_handles, comm_postprocess = pp_group.irecv_tensor_dict()
@@ -2327,7 +2339,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
         )
 
         metadata_list, _ = _split_tensor_dict(tensor_dict)
-        tp_group.broadcast_object(metadata_list, src=0)
+        _tp_broadcast_object(metadata_list, tp_group, tp_src_idx)
 
         def broadcast_postprocess():
             _, tensor_list = _split_tensor_dict(tensor_dict) if tensor_dict else (None, [])
@@ -2338,7 +2350,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
                 group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
                 handles.append(
                     torch.distributed.broadcast(
-                        tensor, src=tp_group.ranks[0], group=group, async_op=True
+                        tensor, src=tp_group.ranks[tp_src_idx], group=group, async_op=True
                     )
                 )
             _wait_handles_watchdog(handles, "tp_broadcast_dyn")
@@ -2346,7 +2358,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
         comm_postprocess.append(broadcast_postprocess)
         return tensor_dict, comm_handles, comm_postprocess
 
-    metadata_list = tp_group.broadcast_object(None, src=0)
+    metadata_list = _tp_broadcast_object(None, tp_group, tp_src_idx)
     if metadata_list is None:
         metadata_list = []
     recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
@@ -2366,7 +2378,7 @@ def edge_cloud_broadcast_recv_draft() -> tuple[
             group = tp_group.cpu_group if tensor.is_cpu else tp_group.device_group
             handles.append(
                 torch.distributed.broadcast(
-                    tensor, src=tp_group.ranks[0], group=group, async_op=True
+                    tensor, src=tp_group.ranks[tp_src_idx], group=group, async_op=True
                 )
             )
         _wait_handles_watchdog(handles, "tp_broadcast_draft_recv_tail")
@@ -2391,7 +2403,9 @@ def edge_cloud_broadcast_recv_scheduled_draft(
     pp_group = _effective_pp_group()
     tp_group = get_tp_group()
     is_pp_npu0 = pp_group.world_size == 2
-
+    # TP-broadcast source: the rank that did the P2P recv for the active
+    # pair (TP rank0 in legacy layouts; pair-mapped cloud rank otherwise).
+    tp_src_idx = _tp_p2p_src_index(tp_group)
     # Diagnostic for the 3E1C hang: the scheduled-draft recv side was
     # previously invisible in the logs.  Recording the locally-expected wire
     # schema (ctx carries bt/ht/ds from the worker) lets us detect a
@@ -2484,7 +2498,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
                 handles.append(
                     torch.distributed.broadcast(
                         tensor,
-                        src=tp_group.ranks[0],
+                        src=tp_group.ranks[tp_src_idx],
                         group=group,
                         async_op=True,
                     )
@@ -2512,7 +2526,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
         )
 
         metadata_list, _ = _split_tensor_dict(tensor_dict)
-        tp_group.broadcast_object(metadata_list, src=0)
+        _tp_broadcast_object(metadata_list, tp_group, tp_src_idx)
 
         def broadcast_postprocess():
             _, tensor_list = _split_tensor_dict(tensor_dict)
@@ -2528,7 +2542,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
                 handles.append(
                     torch.distributed.broadcast(
                         tensor,
-                        src=tp_group.ranks[0],
+                        src=tp_group.ranks[tp_src_idx],
                         group=group,
                         async_op=True,
                     )
@@ -2538,7 +2552,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
         comm_postprocess.append(broadcast_postprocess)
         return tensor_dict, comm_handles, comm_postprocess
 
-    metadata_list = tp_group.broadcast_object(None, src=0) or []
+    metadata_list = _tp_broadcast_object(None, tp_group, tp_src_idx) or []
     recv_tensor_dict: dict[str, torch.Tensor | Any] = {}
     for key, value in metadata_list:
         if isinstance(value, TensorMetadata):
@@ -2559,7 +2573,7 @@ def edge_cloud_broadcast_recv_scheduled_draft(
             handles.append(
                 torch.distributed.broadcast(
                     tensor,
-                    src=tp_group.ranks[0],
+                    src=tp_group.ranks[tp_src_idx],
                     group=group,
                     async_op=True,
                 )
@@ -2581,10 +2595,18 @@ def edge_cloud_broadcast_recv_scheduled_draft(
 # role registry is configured.
 # ---------------------------------------------------------------------------
 
-# (edge_id, cloud_id) -> pair PP group (2-rank: edge NPU0, cloud NPU0)
+# (edge_id, cloud_id) -> pair PP group (2-rank: edge NPU0, cloud rank
+# mapped by edge_id % cloud_npu_count)
 _PAIR_PP_GROUPS: dict[tuple[int, int], GroupCoordinator] = {}
-# (edge_id, cloud_id) -> {channel -> device_group}
-_PAIR_CHANNEL_GROUPS: dict[tuple[int, int], Any] = {}
+# (edge_id, cloud_id) -> [edge_rank0_global, cloud_rank_global], stored on
+# EVERY rank (plain metadata, not a group) so any rank can compute the
+# TP-broadcast source index for a pair.
+_PAIR_RANKS: dict[tuple[int, int], list[int]] = {}
+# This rank's singleton PP group, captured during pair creation — returned
+# by _effective_pp_group when this rank is not a member of the active pair
+# (multi-edge per-rank mapping), so recv paths take the TP-broadcast branch
+# instead of touching another pair's group.
+_SELF_SINGLETON_GROUP: "GroupCoordinator | None" = None
 # The pair this THREAD is currently executing against.  Workers set it
 # around each segment execution via ``active_pair``.  Thread-local, NOT
 # process-global: the CHER guard thread and the busy_loop thread enter
@@ -2629,12 +2651,15 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
     rank (member or not) participates in every creation call.
 
     Pair layout per (edge, cloud) pair: ``[edge_npu0_global_rank,
-    cloud_npu0_global_rank]`` — mirroring the legacy PP pair where NPU0 of
-    each side forms the PP pair and other TP ranks receive via intra-TP
-    broadcast.  Channel groups per pair follow the legacy convention:
+    cloud_rank_{eid % cloud_npu}]`` — edge e pairs with a DIFFERENT cloud
+    rank per edge, spreading the P2P communicators across cloud cards
+    instead of pinning every pair on cloud rank0 (per-card communicator
+    limit / head-of-line blocking suspect in the multi-edge hang).
+    Channel groups per pair follow the legacy convention:
     PREFILL_1 (default device group), PREFILL_2 (first extra hidden channel),
     DECODE (alternate group).
     """
+    global _SELF_SINGLETON_GROUP
     from vllm_ascend.edge_cloud.role_registry import (
         get_role_registry, init_role_registry)
     registry = get_role_registry()
@@ -2651,13 +2676,18 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
     for edge_id in registry.edge_ids:
         for cloud_id in registry.cloud_ids:
             edge_rank0 = registry.edge(edge_id).ranks[0]
-            cloud_rank0 = registry.cloud(cloud_id).ranks[0]
+            cloud_ranks = registry.cloud(cloud_id).ranks
+            cloud_rank = cloud_ranks[edge_id % len(cloud_ranks)]
+            # Record the mapping on EVERY rank (plain metadata): the TP
+            # broadcast source index for a pair must be computable by
+            # non-member ranks too.
+            _PAIR_RANKS[(edge_id, cloud_id)] = [edge_rank0, cloud_rank]
             # init_model_parallel_group requires every rank covered exactly
             # once per call: pair + singletons for all other ranks.
             world_size = torch.distributed.get_world_size()
-            group_ranks: list[list[int]] = [[edge_rank0, cloud_rank0]]
+            group_ranks: list[list[int]] = [[edge_rank0, cloud_rank]]
             for r in range(world_size):
-                if r != edge_rank0 and r != cloud_rank0:
+                if r != edge_rank0 and r != cloud_rank:
                     group_ranks.append([r])
             pair = init_model_parallel_group(
                 group_ranks,
@@ -2681,8 +2711,14 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
             # returns a real (singleton) group to non-member ranks because we
             # cover every rank in each call — storing those would make
             # non-members believe they are pair members.
-            if torch.distributed.get_rank() in (edge_rank0, cloud_rank0):
+            if torch.distributed.get_rank() in (edge_rank0, cloud_rank):
                 _PAIR_PP_GROUPS[(edge_id, cloud_id)] = pair
+            elif _SELF_SINGLETON_GROUP is None:
+                # Non-member creations hand this rank its own singleton
+                # group; keep one for the "not a member of the active pair"
+                # fallback in _effective_pp_group (multi-edge per-rank
+                # mapping).
+                _SELF_SINGLETON_GROUP = pair
 
     logger.info(
         "[edge-cloud] multi-instance pair groups created: %d pairs (%s)",
@@ -2690,12 +2726,9 @@ def create_edge_cloud_pair_groups(parallel_config) -> None:
         sorted(_PAIR_PP_GROUPS.keys()),
     )
     # Topology self-check: dump this rank's DEFAULT (upstream) PP group vs
-    # its pair groups.  The upstream _PP is built from overlapping
-    # (edge, cloud) pair rank sets and GroupCoordinator keeps the LAST
-    # matching entry, so on the cloud NPU0 the default group is the last
-    # pair's — NOT necessarily this thread's active pair.  If a later
-    # [EC-PAIR-SCOPE-ESCAPE] warning fires, this line tells you which edge
-    # the escaped op was actually aimed at.
+    # its pair groups.  With per-edge cloud-rank mapping each cloud rank
+    # belongs to exactly one pair, so the default group should be this
+    # rank's own pair — if it is not, something upstream regressed.
     default_pp = get_pp_group()
     logger.info(
         "[edge-cloud][EC-TOPO] rank=%d default_pp_ranks=%s pair_groups=%s",
@@ -2710,8 +2743,10 @@ def _effective_pp_group() -> GroupCoordinator:
 
     Multi-instance mode: the active pair group (set by the worker around
     each segment execution) — but only when this rank is actually a member
-    (non-members, e.g. cloud TP non-first ranks, keep their default
-    singleton PP group so TP-internal broadcast logic is unchanged).
+    of that pair.  With per-edge cloud-rank mapping (plan B), a cloud rank
+    processing another pair's batch must NOT fall back to its own pair
+    group (that would rendezvous with the wrong edge); it gets the
+    singleton group so recv paths take the TP-broadcast branch.
     Legacy mode: the global PP group.
     """
     pair_key = _current_active_pair()
@@ -2719,29 +2754,69 @@ def _effective_pp_group() -> GroupCoordinator:
         pair = _PAIR_PP_GROUPS.get(pair_key)
         if pair is not None:
             return pair
+        # Active pair set but this rank is not a member → no P2P
+        # participation.  Return the singleton group (NOT the default, which
+        # under per-rank mapping is this rank's OWN pair — that would be a
+        # cross-pair rendezvous bug).
+        if _SELF_SINGLETON_GROUP is not None:
+            return _SELF_SINGLETON_GROUP
         logger.error(
             "[EC-PAIR-MISSING] active_pair=%s has no registered pair group "
-            "(known pairs: %s); falling back to the default PP group. "
-            "A send/recv here can rendezvous with the wrong edge.",
+            "and no singleton fallback (known pairs: %s); falling back to "
+            "the default PP group. A send/recv here can rendezvous with "
+            "the wrong edge.",
             pair_key, sorted(_PAIR_PP_GROUPS.keys()),
         )
     default = get_pp_group()
-    if _PAIR_PP_GROUPS and default.world_size > 1:
-        # Pair-member rank (edge NPU0 / cloud NPU0) doing edge-cloud comm
-        # WITHOUT an active pair scope.  In multi-instance mode the default
-        # PP group is the LAST registered pair (upstream GroupCoordinator
-        # keeps the last matching group_ranks entry), so an op resolved
-        # here silently targets the wrong edge -> cross-pair rendezvous
-        # mismatch -> the exact 3E1C/4E1C hang signature.
+    if _PAIR_PP_GROUPS and default.world_size > 1 and _current_active_pair() is None:
+        # Pair-member rank doing edge-cloud comm WITHOUT an active pair
+        # scope.  The op resolved here can target the wrong edge ->
+        # cross-pair rendezvous mismatch -> the 3E1C/4E1C hang signature.
         logger.warning(
             "[EC-PAIR-SCOPE-ESCAPE] _effective_pp_group() fell back to the "
             "default PP group ranks=%s (no active pair scope on this "
-            "thread). In multi-edge mode the default group belongs to the "
-            "LAST registered pair; any send/recv resolved here can "
-            "rendezvous with the wrong edge and deadlock.",
+            "thread). In multi-edge mode the default group may belong to "
+            "another pair; any send/recv resolved here can rendezvous with "
+            "the wrong edge and deadlock.",
             default.ranks,
         )
     return default
+
+
+def _tp_p2p_src_index(tp_group) -> int:
+    """TP-group index of the rank that performed the P2P recv for the
+    active pair — the correct ``src`` for the intra-TP broadcast that
+    follows.  Works on every rank (member or not) via the _PAIR_RANKS
+    metadata recorded at pair-creation time.  0 in legacy/single-pair
+    layouts (member is always TP rank0 there).
+    """
+    pair_key = _current_active_pair()
+    if pair_key is None:
+        return 0
+    pair_ranks = _PAIR_RANKS.get(pair_key)
+    if not pair_ranks:
+        return 0
+    for r in pair_ranks:
+        if r in tp_group.ranks:
+            return tp_group.ranks.index(r)
+    return 0
+
+
+def _tp_broadcast_object(obj, tp_group, src_idx: int):
+    """broadcast_object with an arbitrary TP-local source rank.
+
+    GroupCoordinator.broadcast_object asserts src == 0 when the TP group
+    was built with an mq_broadcaster (which it is here), so a non-zero
+    source (multi-edge per-rank pair mapping) must go through the raw
+    broadcast_object_list on the cpu group.
+    """
+    if tp_group.world_size == 1:
+        return obj
+    is_src = tp_group.rank_in_group == src_idx
+    buf = [obj] if is_src else [None]
+    torch.distributed.broadcast_object_list(
+        buf, src=tp_group.ranks[src_idx], group=tp_group.cpu_group)
+    return buf[0]
 
 
 def warmup_edge_cloud_pair_channels() -> None:

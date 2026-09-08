@@ -869,20 +869,43 @@ class NPUWorker(WorkerBase):
         cloud side: ``active_pair(edge_id, cloud_id=self.cloud_id)``.
         No-op unless multi-instance pair groups actually exist — legacy and
         registry-absent modes must never touch the pair table.
+
+        NOTE: the scope is entered even on ranks that are NOT members of the
+        pair (multi-edge per-rank mapping): _effective_pp_group() then
+        resolves to the singleton group so the rank takes the TP-broadcast
+        branch instead of accidentally using its own pair's group.
         """
         import contextlib
         if edge_id is None:
             return contextlib.nullcontext()
         from vllm_ascend.distributed.parallel_state import (
-            _PAIR_PP_GROUPS, active_pair)
+            _PAIR_RANKS, active_pair)
         from vllm_ascend.edge_cloud.role_registry import get_role_registry
         registry = get_role_registry()
         if registry is None:
             return contextlib.nullcontext()
         cloud_id = registry.cloud_ids[0]
-        if (edge_id, cloud_id) not in _PAIR_PP_GROUPS:
+        if (edge_id, cloud_id) not in _PAIR_RANKS:
             return contextlib.nullcontext()
         return active_pair(edge_id, cloud_id)
+
+    def _is_pair_member_for_batch(self, pair_edge_id) -> bool:
+        """Whether THIS rank performs the P2P for this batch's pair.
+
+        Legacy/single-pair mode: default PP-group semantics (world_size > 1).
+        Multi-edge per-rank mapping: only the pair's mapped ranks (pair
+        groups are stored only on member ranks).
+        """
+        from vllm_ascend.distributed.parallel_state import _PAIR_PP_GROUPS
+        if not _PAIR_PP_GROUPS:
+            return get_pp_group().world_size > 1
+        if pair_edge_id is None:
+            return False
+        from vllm_ascend.edge_cloud.role_registry import get_role_registry
+        registry = get_role_registry()
+        if registry is None:
+            return False
+        return (pair_edge_id, registry.cloud_ids[0]) in _PAIR_PP_GROUPS
 
     @staticmethod
     def _ec_tagged_comm(scheduler_output):
@@ -1061,6 +1084,15 @@ class NPUWorker(WorkerBase):
                 "[CHER] start_early_irecv: bad channel %r, skipping.",
                 channel_str,
             )
+            return
+        # Multi-edge per-rank mapping: only the pair's mapped cloud rank may
+        # post the P2P recv for it.  The hint MQ currently lives on cloud
+        # worker local_rank==0 only, so hints for other pairs must be skipped
+        # here (their busy_loop self-posts on the member rank at execution
+        # time — correctness unaffected, only the early-post overlap is lost).
+        _hint_edge_id = self._edge_bucket_of_token(ht)
+        if _hint_edge_id is not None and not self._is_pair_member_for_batch(
+                _hint_edge_id):
             return
         with self._early_recv_lock:
             if ht in self._early_recv_handles:
@@ -1600,11 +1632,12 @@ class NPUWorker(WorkerBase):
         # Send intermediate tensors to edge.  In the shared-model topology the
         # edge sits at in-group rank 0, so dst=0 is needed.  Otherwise dst=None
         # resolves to the implicit "next PP rank" which IS the edge.
-        # only ranks in a real PP pair ever send (legacy guard).  In 2E1C the
-        # cloud's PP-active rank has world_size==2 (its default PP group IS
-        # the pair group), and pair scoping only selects WHICH pair group the
-        # send goes on — never whether to send.
-        if get_pp_group().world_size > 1:
+        # only ranks in a real PP pair ever send.  Multi-edge per-rank
+        # mapping: only the pair's mapped cloud rank sends (its default PP
+        # group is its own pair with world_size 2, so a bare world_size check
+        # would wrongly send for OTHER pairs' batches too — membership must
+        # be checked against THIS batch's pair).
+        if self._is_pair_member_for_batch(_pair_edge_id):
             channel = self._hidden_channel_for(scheduler_output)
             _send_dst = 0 if self.parallel_config.is_shared_model_edge else None
             with self._pair_scope(_pair_edge_id), \
@@ -1715,7 +1748,11 @@ class NPUWorker(WorkerBase):
         output = self.model_runner._run_edge_cloud_draft_middle_segment(
             scheduler_output, IntermediateTensors(tensor_dict)
         )
-        if get_pp_group().world_size == 2:
+        # Multi-edge per-rank mapping: only the pair's mapped cloud rank
+        # sends the draft reply (a bare world_size==2 check would fire on
+        # every cloud rank since each rank's default PP group is its own
+        # pair).
+        if self._is_pair_member_for_batch(_pair_edge_id):
             out_tensor_dict = {
                 key: value.contiguous()
                 if isinstance(value, torch.Tensor)
