@@ -56,6 +56,8 @@ from vllm.v1.worker.workspace import init_workspace_manager
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
+from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
@@ -523,6 +525,131 @@ class NPUWorker(WorkerBase):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
+        # prefill_only LWD data plane: bring up the duplex channels
+        # and the recv managers once the device + distributed groups exist.
+        self._lwd_cfg = get_ascend_config().lwd_config
+        self._lwd_edge_sent_embeds: dict[str, int] = {}  # req_id -> chunks sent
+        if self._lwd_cfg.is_prefill_only and self.use_v2_model_runner:
+            # The LWD hooks live on the V1 model runner; the V2 runner
+            # (separate class) lacks them entirely — fail fast at bring-up
+            # instead of AttributeError at first request.
+            raise RuntimeError(
+                "prefill_only (LWD) data plane requires the V1 model runner; "
+                "use_v2_model_runner is not supported"
+            )
+        if self._lwd_cfg.is_prefill_only:
+            from vllm_ascend.distributed import lwd_wire
+            from vllm_ascend.worker.lwd_recv_manager import init_lwd_recv_managers
+
+            lwd_wire.init_lwd_duplex_channels()
+            init_lwd_recv_managers(
+                self.model_config.get_hidden_size(),
+                self._lwd_cfg.topk_k,
+            )
+
+    # ------------------------------------------------------------------ #
+    # prefill_only LWD data plane                                  #
+    # ------------------------------------------------------------------ #
+
+    def _lwd_edge_execute_embed(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ):
+        """EDGE_EMBED batch: embed one prompt chunk and isend it UP.
+
+        A request is split into ``num_chunks`` chunks, sent one per batch
+        (loop-send).  Guards (fail-fast, not trusting the dispatcher):
+        chunks of a request must arrive strictly in chunk_idx order and
+        each exactly once — a duplicate or out-of-order chunk would
+        silently corrupt the tag-less HCCL pairing.
+        """
+        assert self._lwd_cfg.is_edge_node, (
+            "EDGE_EMBED batches must only reach the edge worker"
+        )
+        # With edge TP>1 the embedding (VocabParallelEmbedding) produces
+        # the full hidden on every rank; only TP rank 0 may talk to the
+        # wire — others compute (or skip) but never send.
+        is_wire_endpoint = get_tp_group().is_first_rank
+        for chunk in scheduler_output.lwd_edge_embed_chunks or ():
+            sent_so_far = self._lwd_edge_sent_embeds.get(chunk.request_id, 0)
+            if chunk.chunk_idx != sent_so_far:
+                raise RuntimeError(
+                    f"[lwd] EDGE_EMBED chunk order violation for "
+                    f"{chunk.request_id!r}: got chunk_idx="
+                    f"{chunk.chunk_idx}, expected {sent_so_far} "
+                    f"(chunks of one request must be sent in order, "
+                    f"exactly once each)"
+                )
+            hidden = self.model_runner.lwd_edge_embed_forward(
+                chunk.token_ids
+            )  # [n_chunk, H] bf16 on device
+            if is_wire_endpoint:
+                get_lwd_comm_service().submit_send(
+                    LwdCommRequest(
+                        channel=LwdChannelType.UP,
+                        op="send",
+                        num_elements=hidden.numel(),
+                        tensor=hidden,
+                        seqno=chunk.seqno,
+                    )
+                )
+            sent_so_far += 1
+            if sent_so_far >= chunk.num_chunks:
+                # request fully sent; free the bookkeeping entry
+                del self._lwd_edge_sent_embeds[chunk.request_id]
+            else:
+                self._lwd_edge_sent_embeds[chunk.request_id] = sent_so_far
+            logger.debug(
+                "[lwd] sent UP embeds req=%s chunk=%d/%d tokens=%d seqno=%d",
+                chunk.request_id, chunk.chunk_idx, chunk.num_chunks,
+                chunk.num_tokens, chunk.seqno,
+            )
+        # Engine contract (worker_base.execute_model): returning None would
+        # force sample_tokens to produce a ModelRunnerOutput, which never
+        # ran for an EDGE_EMBED batch -> update_from_output(None) crashes.
+        # Return the shared empty output instead.
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+    def _lwd_cloud_flush_finished(self, finished_req_ids) -> None:
+        """Cloud side: one-shot DOWN send of each finished request's
+        collected last-step packet.  Only TP rank 0 talks to the wire;
+        other TP ranks just drop their collector slots."""
+        collector = self.model_runner.lwd_cloud_collector
+        if collector is None:
+            return
+        is_wire_endpoint = get_tp_group().is_first_rank
+        for req_id in finished_req_ids:
+            seqno = self.model_runner.pop_lwd_request_seqno(req_id)
+            if not is_wire_endpoint:
+                collector.drop(req_id)
+                continue
+            packed = collector.finalize(req_id)
+            if packed is None:
+                # Never collected (abort / sidecar missing): clean up the
+                # slot and the seqno entry as well, otherwise they leak
+                # with request churn.
+                collector.drop(req_id)
+                continue
+            if seqno is None:
+                # The request never opened a collector slot through the
+                # admission path — nothing was ever sent/expected.
+                collector.drop(req_id)
+                continue
+            get_lwd_comm_service().submit_send(
+                LwdCommRequest(
+                    channel=LwdChannelType.DOWN,
+                    op="send",
+                    num_elements=packed.numel(),
+                    tensor=packed,
+                    seqno=seqno,
+                )
+            )
+            collector.drop(req_id)  # slot destroyed with the send
+            logger.debug(
+                "[lwd] sent DOWN packet req=%s elements=%d seqno=%d",
+                req_id, packed.numel(), seqno,
+            )
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -600,6 +727,25 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        # prefill_only LWD data plane: whole-prompt embed batches on
+        # the edge are handled entirely here (embed -> one UP send), and
+        # never reach the model runner's regular path.
+        if (self._lwd_cfg.is_prefill_only
+                and scheduler_output.lwd_edge_embed_chunks is not None):
+            return self._lwd_edge_execute_embed(scheduler_output)
+
+        # prefill_only cloud: finished requests trigger the one-shot DOWN
+        # send of their collected last-step packet (finish is only known
+        # to the engine after sampling; the worker learns it via
+        # finished_req_ids of the NEXT scheduled step, or a flush-only
+        # empty batch when the queue drains).
+        if (self._lwd_cfg.is_cloud_node
+                and scheduler_output.finished_req_ids):
+            self._lwd_cloud_flush_finished(scheduler_output.finished_req_ids)
+
+        if self._lwd_cfg.is_prefill_only:
+            get_lwd_comm_service().poll_completions()  # lazy keepalive reap
+
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
             dp.step()

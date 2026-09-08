@@ -110,6 +110,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # prefill_only LWD data plane: timeout (seconds) of the recv
+    # readiness gate on both UP (cloud waits embeds) and DOWN (edge waits
+    # the c2e packet) directions.  A raise on timeout is intentional: it
+    # fails the request instead of wedging the channel.
+    "VLLM_ASCEND_LWD_EMBEDS_TIMEOUT_S": lambda: float(os.getenv("VLLM_ASCEND_LWD_EMBEDS_TIMEOUT_S", "30")),
 }
 
 # end-env-vars-definition

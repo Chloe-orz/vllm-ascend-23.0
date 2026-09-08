@@ -130,6 +130,12 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         super().__init__(**kwargs)
         self.apply_top_k_top_p = apply_top_k_top_p
         self.top_k = None
+        # prefill_only edge-cloud c2e packet: sidecar exposing the last
+        # step's topk candidates (references only, zero-copy).  Read and
+        # consumed by the runner's collection point; None when the last
+        # call did not produce candidates.
+        self._lwd_last_cand_ids: torch.Tensor | None = None
+        self._lwd_last_cand_logits: torch.Tensor | None = None
 
     def set_q_event(self, q, event):
         # Pass in async exponential results.
@@ -152,6 +158,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 "[sample/sampler] BATCH_INVARIANT mode enabled, "
                 "falling back to vLLM native top-k/top-p implementation.",
             )
+            # Clear the sidecar so a stale candidate set from a previous
+            # reduce-sample step is never collected.
+            self._lwd_last_cand_ids = None
+            self._lwd_last_cand_logits = None
             return super().forward_native(logits, generators, k, p)
 
         if get_ascend_config().enable_reduce_sample:
@@ -160,6 +170,8 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 "top-k/top-p with TP all-gather for distributed sampling.",
             )
             cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
+            self._lwd_last_cand_ids = cand_idx
+            self._lwd_last_cand_logits = cand_logits
             logits_to_return = None
             if self.logprobs_mode == "processed_logits":
                 logits_to_return = cand_logits
@@ -173,6 +185,10 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             return next_token, logits_to_return
         else:
             logits = self.apply_top_k_top_p(logits, k, p)
+            # The fallback path computes no candidate set; clear the
+            # sidecar so a stale one is never collected.
+            self._lwd_last_cand_ids = None
+            self._lwd_last_cand_logits = None
             logits_to_return = None
             if self.logprobs_mode == "processed_logits":
                 logits_to_return = logits

@@ -54,6 +54,10 @@ class AscendConfig:
 
         profiling_chunk_config = additional_config.get("profiling_chunk_config", {})
         self.profiling_chunk_config = ProfilingChunkConfig(profiling_chunk_config)
+
+        lwd_config = additional_config.get("lwd_config", {})
+        self.lwd_config = LwdConfig(lwd_config)
+
         if self.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens
             if max_batched < self.profiling_chunk_config.min_chunk:
@@ -873,6 +877,79 @@ class EplbConfig:
 
         logger.info("Dynamic EPLB is %s", self.config["dynamic_eplb"])
         logger.info("The number of redundant experts is %s", self.config["num_redundant_experts"])
+
+
+class LwdConfig:
+    """Edge-cloud data-plane configuration (prefill_only v2).
+
+    Parsed from ``additional_config["lwd_config"]``::
+
+        {"lwd_config": {"enabled": true, "mode": "prefill_only",
+                               "role": "edge"}}
+
+    Only the data-plane surface lives here (mode/role validation, channel
+    gating).  The control plane (ZMQ endpoints etc.) is owned elsewhere.
+    """
+
+    _defaults = {
+        "enabled": False,
+        # prefill_only: edge embeds the prompt and sends hidden states UP;
+        # the cloud runs the full model and returns the combined c2e packet.
+        "mode": None,
+        # "edge" / "cloud"; required when enabled.
+        "role": None,
+        # Explicit global-rank endpoints of the duplex HCCL channels
+        # (deployment-owned; control-plane topology).  When both are None
+        # the wire layer falls back to the 2-rank PP-group convention.
+        "edge_global_rank": None,
+        "cloud_global_rank": None,
+        # topk width of the cloud->edge combined packet (wire contract,
+        # fixed per deployment so the per-row stride H+3K is constant).
+        "topk_k": 20,
+    }
+
+    def __init__(self, user_config: dict | None = None):
+        if user_config is None:
+            user_config = {}
+        self.config = self._defaults.copy()
+        if user_config and isinstance(user_config, dict):
+            for key, value in user_config.items():
+                if key in self.config:
+                    self.config[key] = value
+                else:
+                    raise ValueError(f"LwdConfig has no attribute '{key}'")
+        self._validate()
+
+    def __getattr__(self, key):
+        if key in self.config:
+            return self.config[key]
+        raise AttributeError(f"LwdConfig has no attribute '{key}'")
+
+    @property
+    def is_prefill_only(self) -> bool:
+        """Single source of truth for the prefill_only gate."""
+        return bool(self.enabled) and self.mode == "prefill_only"
+
+    @property
+    def is_edge_node(self) -> bool:
+        return self.is_prefill_only and self.role == "edge"
+
+    @property
+    def is_cloud_node(self) -> bool:
+        return self.is_prefill_only and self.role == "cloud"
+
+    def _validate(self):
+        if not self.enabled:
+            return
+        if self.mode not in ("prefill_only",):
+            raise ValueError(
+                f"lwd_config.mode must be 'prefill_only'; got {self.mode!r}")
+        if self.role not in ("edge", "cloud"):
+            raise ValueError(
+                f"lwd_config.role must be 'edge' or 'cloud'; got {self.role!r}")
+        if not isinstance(self.topk_k, int) or self.topk_k <= 0:
+            raise ValueError(
+                f"lwd_config.topk_k must be a positive int; got {self.topk_k!r}")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None
