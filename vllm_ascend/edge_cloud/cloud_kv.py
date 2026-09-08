@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Sequence
 from dataclasses import dataclass
 from itertools import chain
 from typing import Any
@@ -62,9 +63,45 @@ class CloudKVRequestManager:
         instance_id: str,
     ) -> None:
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
-        if scheduler_block_size != hash_block_size:
-            raise ValueError("edge-cloud prefix coordination currently requires equal scheduler and hash block sizes")
-        self.block_size = hash_block_size
+        # The edge hashes one manifest digest per edge-side KV block (its own
+        # engine ``cache_config.block_size``) and reports that granularity in
+        # ``manifest.block_size``; the cloud KVCacheManager/coordinator hashes
+        # at ``hash_block_size`` (equal to ``cache_config.block_size`` for
+        # single-group caches; the gcd of the group block sizes for hybrid
+        # caches such as DeepSeek V4 MLA + SWA, where it is smaller). The two
+        # need not be equal across deployments --- e.g. a cloud at
+        # ``cache_config.block_size=128`` accepts edge manifests at granularity
+        # 8 --- so coordination is sized to each manifest's granularity (see
+        # ``probe``): accepted granularities must tile the cloud hash domain
+        # (each manifest digest is then replicated ``manifest.block_size //
+        # hash_block_size`` times when materializing the cloud hash-domain
+        # request chain, see ``_coordination_block_hashes``) and must tile the
+        # scheduler granularity so hybrid cache-hit lengths land on manifest
+        # boundaries.
+        self.block_size = vllm_config.cache_config.block_size
+        self._scheduler_block_size = scheduler_block_size
+        self._hash_block_size = hash_block_size
+        if vllm_config.cache_config.enable_prefix_caching:
+            if self.block_size % hash_block_size != 0:
+                raise ValueError(
+                    "edge-cloud prefix coordination requires cache_config."
+                    "block_size to be an integer multiple of the cloud hash "
+                    "block size so manifest digests can be expanded into the "
+                    "cloud hash domain; got scheduler_block_size="
+                    f"{scheduler_block_size}, hash_block_size={hash_block_size}, "
+                    f"cache_config.block_size={self.block_size}. "
+                    "This happens when hybrid KV cache group block sizes have "
+                    "a gcd that does not divide the configured --block-size."
+                )
+            if scheduler_block_size % self.block_size != 0:
+                raise ValueError(
+                    "edge-cloud prefix coordination requires the scheduler "
+                    "block size to be a multiple of cache_config.block_size "
+                    "so hybrid cache-hit lengths land on edge manifest "
+                    "boundaries; got scheduler_block_size="
+                    f"{scheduler_block_size}, hash_block_size={hash_block_size}, "
+                    f"cache_config.block_size={self.block_size}."
+                )
         self.instance_id = instance_id
         scheduler_config = vllm_config.scheduler_config
         parallel_config = vllm_config.parallel_config
@@ -98,12 +135,47 @@ class CloudKVRequestManager:
             "cloud_kv_initialized",
             instance_id=instance_id,
             block_size=self.block_size,
+            hash_block_size=self._hash_block_size,
+            scheduler_block_size=scheduler_block_size,
             kv_cache_groups=self._kv.num_kv_cache_groups,
             kv_blocks_total=kv_cache_config.num_blocks,
             kv_blocks_free=self._kv.block_pool.get_num_free_blocks(),
             mtp_enabled=self._mtp_enabled,
             num_speculative_tokens=self._num_speculative_tokens,
         )
+
+    def _coordination_block_hashes(
+        self,
+        digests: Sequence[bytes],
+        coordination_block_size: int | None = None,
+    ) -> list[BlockHash]:
+        """Expand manifest-domain block hashes into the cloud hash domain.
+
+        Edge prefix manifests hash one digest per edge-side KV block (the
+        edge engine's ``cache_config.block_size``), while the cloud
+        ``KVCacheManager``/coordinator expect ``Request.block_hashes`` at
+        ``hash_block_size`` granularity (equal for single-group caches; the
+        gcd of the group sizes for hybrid caches such as DeepSeek V4 MLA +
+        SWA, where it is smaller). Coordination is sized to the manifest
+        granularity passed in (``manifest.block_size``; falls back to
+        ``cache_config.block_size`` for callers without a manifest). When it
+        exceeds the hash granularity, each manifest digest is replicated
+        ``coordination_block_size // hash_block_size`` times so the cloud
+        hash-domain chain is byte-identical between the cache write path and
+        every lookup. Hybrid cache hits are always an integer multiple of the
+        coordinator LCM (itself a multiple of ``coordination_block_size``),
+        so tiling whole digests never straddles a manifest boundary and the
+        expansion does not change hit sensitivity.
+        """
+        block_size = self.block_size if coordination_block_size is None else coordination_block_size
+        ratio = block_size // self._hash_block_size
+        if ratio <= 1:
+            return [BlockHash(digest) for digest in digests]
+        hashes: list[BlockHash] = []
+        extend = hashes.extend
+        for digest in digests:
+            extend([BlockHash(digest)] * ratio)
+        return hashes
 
     def probe(self, manifest: PrefixManifest) -> ProbeResult:
         """Find and pin the longest completed prefix for one HTTP request."""
@@ -116,8 +188,31 @@ class CloudKVRequestManager:
             full_blocks=manifest.full_block_count,
             block_size=manifest.block_size,
         )
-        if manifest.block_size != self.block_size:
-            raise ValueError(f"edge/cloud KV block-size mismatch: edge={manifest.block_size}, cloud={self.block_size}")
+        manifest_block_size = manifest.block_size
+        # The coordination granularity is the edge manifest granularity (the
+        # edge engine's KV block size), not the cloud cache_config.block_size:
+        # hybrid deployments routinely run the edge at a smaller block size
+        # (e.g. 8) than the cloud (e.g. 128). It only has to tile the cloud's
+        # hash granule so every digest can be materialized in the cloud hash
+        # domain, and tile the scheduler granule so hit lengths stay on
+        # manifest boundaries.
+        if manifest_block_size <= 0 or manifest_block_size % self._hash_block_size != 0:
+            raise ValueError(
+                "edge/cloud KV granularity mismatch: the edge manifest "
+                f"granularity ({manifest_block_size}) must be a positive "
+                f"integer multiple of the cloud hash block size "
+                f"({self._hash_block_size}) so every edge digest can be "
+                "materialized in the cloud hash domain "
+                f"(cloud cache_config.block_size={self.block_size})"
+            )
+        if self._scheduler_block_size % manifest_block_size != 0:
+            raise ValueError(
+                "edge/cloud KV granularity mismatch: the cloud scheduler "
+                f"block size ({self._scheduler_block_size}) must be a "
+                f"multiple of the edge manifest granularity "
+                f"({manifest_block_size}) so hybrid cache-hit lengths land "
+                "on manifest boundaries"
+            )
         if manifest.request_id in self._reservations:
             raise ValueError(f"duplicate reservation {manifest.request_id!r}")
 
@@ -127,13 +222,22 @@ class CloudKVRequestManager:
                 break
             completed_blocks += 1
         max_hit_tokens = min(
-            completed_blocks * self.block_size,
+            completed_blocks * manifest_block_size,
             max(0, manifest.prompt_tokens - 1),
         )
         raw_blocks, hit_tokens = self._kv.coordinator.find_longest_cache_hit(
-            [BlockHash(digest) for digest in manifest.full_block_hashes],
+            self._coordination_block_hashes(
+                manifest.full_block_hashes,
+                manifest_block_size,
+            ),
             max_hit_tokens,
         )
+        if hit_tokens % manifest_block_size != 0:
+            raise RuntimeError(
+                "cloud KV cache hit length is not aligned to the edge "
+                f"manifest granularity: hit_tokens={hit_tokens}, "
+                f"manifest block size={manifest_block_size}"
+            )
         blocks = self._kv.create_kv_cache_blocks(raw_blocks)
         self._kv.block_pool.touch(chain.from_iterable(blocks.blocks))
         self._reservations[manifest.request_id] = _Reservation(
@@ -148,14 +252,14 @@ class CloudKVRequestManager:
             request_id=manifest.request_id,
             instance_id=self.instance_id,
             candidate_blocks=completed_blocks,
-            hit_blocks=hit_tokens // self.block_size,
+            hit_blocks=hit_tokens // manifest_block_size,
             hit_tokens=hit_tokens,
         )
         return ProbeResult(
             request_id=manifest.request_id,
             instance_id=self.instance_id,
-            block_size=self.block_size,
-            hit_blocks=hit_tokens // self.block_size,
+            block_size=manifest_block_size,
+            hit_blocks=hit_tokens // manifest_block_size,
             hit_tokens=hit_tokens,
         )
 
@@ -361,7 +465,10 @@ class CloudKVRequestManager:
             edge_cloud_request_id=control_request_id,
             edge_cloud_prefix_hit_tokens=data.num_computed_tokens,
         )
-        request.block_hashes = [BlockHash(digest) for digest in reservation.manifest.full_block_hashes]
+        request.block_hashes = self._coordination_block_hashes(
+            reservation.manifest.full_block_hashes,
+            reservation.manifest.block_size,
+        )
         common_hit_tokens = data.num_computed_tokens
         log_event(
             logger,
@@ -579,7 +686,7 @@ class CloudKVRequestManager:
                 state.request.num_computed_tokens,
                 state.manifest.prompt_tokens,
             )
-            // self.block_size
+            // state.manifest.block_size
         )
         self._completed_hashes.update(state.manifest.full_block_hashes[:completed_prompt_blocks])
         return completed_prompt_blocks
@@ -592,7 +699,7 @@ class CloudKVRequestManager:
         normal eager cache path assumes Request can hash every full block and
         would either assert or publish a placeholder hash during decoding.
         """
-        known_hashed_tokens = len(request.block_hashes) * self.block_size
+        known_hashed_tokens = len(request.block_hashes) * self._hash_block_size
         self._kv.cache_blocks(
             request,
             min(request.num_computed_tokens, known_hashed_tokens),
@@ -685,7 +792,9 @@ class CloudKVRequestManager:
                 raise RuntimeError("cloud finish has a different prompt length")
             publish_cache = final.publish_cache and request_id not in self._mtp_cache_publish_suppressed_request_ids
             if publish_cache:
-                expected_hashes = (final.prompt_tokens + final.completion_tokens) // self.block_size
+                expected_hashes = (
+                    final.prompt_tokens + final.completion_tokens
+                ) // state.manifest.block_size
                 if len(final.full_block_hashes) != expected_hashes:
                     raise RuntimeError("cloud finish hash count is inconsistent")
                 prompt_hash_count = len(state.manifest.full_block_hashes)
@@ -705,9 +814,12 @@ class CloudKVRequestManager:
                     request.num_computed_tokens,
                     max_safe_computed_tokens,
                 )
-                request.block_hashes = [BlockHash(digest) for digest in final.full_block_hashes]
+                request.block_hashes = self._coordination_block_hashes(
+                        final.full_block_hashes,
+                        state.manifest.block_size,
+                    )
                 self._kv.cache_blocks(request, request.num_computed_tokens)
-                completed_blocks = request.num_computed_tokens // self.block_size
+                completed_blocks = request.num_computed_tokens // state.manifest.block_size
                 self._completed_hashes.update(final.full_block_hashes[:completed_blocks])
             else:
                 # Fail-closed finish (e.g. the edge could not reconstruct the

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.kv_cache_utils import init_none_hash
+from vllm.v1.core.kv_cache_utils import BlockHash, init_none_hash
 from vllm.v1.core.sched.output import (
     BatchType,
     CachedRequestData,
@@ -95,6 +95,109 @@ def _hybrid_kv_cache_config(block_size):
         ],
     )
 
+
+def _unaligned_hybrid_kv_cache_config(block_size):
+    """Hybrid whose group-size gcd does not divide ``block_size`` — the hash
+    granularity could never be expanded into edge manifest digests."""
+    return KVCacheConfig(
+        num_blocks=16,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["group_a"],
+                FullAttentionSpec(
+                    block_size=9,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["group_b"],
+                FullAttentionSpec(
+                    block_size=12,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+        ],
+    )
+
+
+def _dsv4_style_kv_cache_config():
+    """DSV4-shaped hybrid (base block_size=16): compressed-MLA groups at 16
+    plus compressor-state groups at 4/8, mirroring the DeepSeek V4 group
+    layout on Ascend. Resolves to (scheduler_block_size=16,
+    hash_block_size=4)."""
+    def spec(block_size):
+        return FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        )
+
+    return KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["c4_attn"], spec(16)),
+            KVCacheGroupSpec(["c128_attn"], spec(16)),
+            KVCacheGroupSpec(["swa_attn"], spec(16)),
+            KVCacheGroupSpec(["c4_state"], spec(4)),
+            KVCacheGroupSpec(["c128_state"], spec(8)),
+        ],
+    )
+
+def _dsv4_deployed_cloud_kv_cache_config():
+    """Realistic DSV4-shaped hybrid on the cloud (``--block-size 128``):
+    compressed-MLA groups at 128 plus compressor-state groups at 8/32.
+    Resolves to (scheduler_block_size=128, hash_block_size=8)."""
+    def spec(block_size):
+        return FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        )
+
+    return KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["c4_attn"], spec(128)),
+            KVCacheGroupSpec(["c128_attn"], spec(128)),
+            KVCacheGroupSpec(["swa_attn"], spec(128)),
+            KVCacheGroupSpec(["c4_state"], spec(8)),
+            KVCacheGroupSpec(["c128_state"], spec(32)),
+        ],
+    )
+
+
+def _granular_hybrid_kv_cache_config():
+    """Small hybrid whose gcd is half the cloud block size: groups at 8 plus a
+    state group at 4, resolving to (scheduler_block_size=8,
+    hash_block_size=4) so an edge manifest at granularity 4 coexists with a
+    cloud ``cache_config.block_size=8`` and still yields exact hits."""
+    def spec(block_size):
+        return FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        )
+
+    return KVCacheConfig(
+        num_blocks=32,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["group_a"], spec(8)),
+            KVCacheGroupSpec(["group_b"], spec(8)),
+            KVCacheGroupSpec(["group_c"], spec(8)),
+            KVCacheGroupSpec(["group_d"], spec(4)),
+        ],
+    )
 
 def _hybrid_mtp_kv_cache_config(block_size):
     full_attention_spec = FullAttentionSpec(
@@ -854,3 +957,150 @@ def test_cloud_mtp_rejection_correction_preserves_media_manifest_chain():
     # Only the two prompt blocks (the second one media-aware) publish;
     # nothing beyond the corrected boundary leaks into _completed_hashes.
     assert manager._completed_hashes == set(manifest.full_block_hashes)
+
+
+def test_dsv4_style_hybrid_hash_domain_expansion():
+    """DSV4-shaped hybrid (block_size=16): the cloud hashes at the gcd of the
+    group sizes (4) while the edge manifest granularity is
+    cache_config.block_size (16). The manager sizes coordination to the manifest
+    granularity and expands each manifest digest into the cloud hash domain."""
+    block_size = 16
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_dsv4_style_kv_cache_config(),
+        vllm_config=_vllm_config(block_size),
+        instance_id="cloud-a",
+    )
+    # Coordination runs at the manifest granularity while the KV manager and
+    # block pool hash at the gcd of the hybrid group sizes.
+    assert manager.block_size == block_size
+    assert manager._hash_block_size == 4
+
+    digests = (b"\x11" * 32, b"\x22" * 32, b"\x33" * 32)
+    expanded = manager._coordination_block_hashes(digests)
+    assert len(expanded) == len(digests) * (block_size // manager._hash_block_size)
+    assert expanded[0] == BlockHash(digests[0])
+    assert expanded[3] == BlockHash(digests[0])
+    assert expanded[4] == BlockHash(digests[1])
+    assert expanded[-1] == BlockHash(digests[-1])
+
+    # probe still reports against the manifest granularity and returns hits
+    # that are integral manifest blocks.
+    hasher = PrefixHasher(b"tenant-a-secret-key-material", block_size)
+    manifest = hasher.build_manifest("control-1", list(range(32)))
+    result = manager.probe(manifest)
+    assert result.block_size == block_size
+    assert result.hit_tokens == result.hit_blocks * result.block_size
+
+
+def test_dsv4_style_hybrid_rejects_unaligned_hash_granularity():
+    """Hybrid group sizes whose gcd does not divide cache_config.block_size
+    cannot be expanded into edge manifest digests and must fail fast."""
+    block_size = 8
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    with pytest.raises(ValueError, match="integer multiple"):
+        CloudKVRequestManager(
+            kv_cache_config=_unaligned_hybrid_kv_cache_config(block_size),
+            vllm_config=_vllm_config(block_size),
+            instance_id="cloud-a",
+        )
+
+
+def test_dsv4_deployed_cloud_accepts_edge_hash_block_size_manifest():
+    """Regression for the real DSV4 deployment: the cloud runs
+    ``cache_config.block_size=128`` while the edge engine hashes manifests at
+    its own block size 8 (equal to the cloud hash granularity). probe must not
+    reject the manifest just because the granularities differ; coordination is
+    sized to ``manifest.block_size`` and reported back verbatim."""
+    cloud_block_size = 128
+    edge_manifest_size = 8
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_dsv4_deployed_cloud_kv_cache_config(),
+        vllm_config=_vllm_config(cloud_block_size),
+        instance_id="cloud-a",
+    )
+    assert manager.block_size == cloud_block_size
+    assert manager._hash_block_size == edge_manifest_size
+    assert manager._scheduler_block_size == cloud_block_size
+
+    hasher = PrefixHasher(b"tenant-a-secret-key-material", edge_manifest_size)
+    tokens = list(range(24))  # 3 manifest blocks at granularity 8
+    manifest = hasher.build_manifest("control-1", tokens)
+    miss = manager.probe(manifest)
+    assert miss.block_size == edge_manifest_size
+    assert miss.hit_tokens == 0
+    assert miss.hit_blocks == 0
+
+    replay = hasher.build_manifest("control-2", tokens)
+    again = manager.probe(replay)
+    assert again.block_size == edge_manifest_size
+    assert again.hit_tokens == 0
+
+
+def test_hybrid_edge_manifest_half_cloud_block_reports_manifest_granularity():
+    """The edge hashes at granularity 4 while the cloud cache block is 8
+    (groups 8/8/8/4 -> hash gcd 4). The full write/ack/finish/replay cycle
+    accounts in manifest blocks: a 12-token prompt (3 manifest blocks, 1.5
+    cloud blocks) makes only one full 8-token cloud block hittable, reported
+    as 2 manifest blocks on the manifest block size."""
+    cloud_block_size = 8
+    edge_manifest_size = 4
+    init_none_hash(lambda value: str(value).encode().ljust(32, b"0")[:32])
+    manager = CloudKVRequestManager(
+        kv_cache_config=_granular_hybrid_kv_cache_config(),
+        vllm_config=_vllm_config(cloud_block_size),
+        instance_id="cloud-a",
+    )
+    assert manager.block_size == cloud_block_size
+    assert manager._hash_block_size == edge_manifest_size
+    assert manager._scheduler_block_size == cloud_block_size
+
+    hasher = PrefixHasher(b"tenant-a-secret-key-material", edge_manifest_size)
+    tokens = list(range(12))  # 3 manifest blocks, one whole cloud block inside
+    manifest = hasher.build_manifest("control-1", tokens)
+    miss = manager.probe(manifest)
+    assert miss.block_size == edge_manifest_size
+    assert miss.hit_tokens == 0
+
+    new_request = NewRequestData(
+        req_id="internal-1",
+        prompt_token_ids=[0] * len(tokens),
+        mm_features=[],
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+        block_ids=([99, 100],),
+        num_computed_tokens=0,
+        lora_request=None,
+        edge_cloud_request_id="control-1",
+    )
+    cloud_output, usage = manager.rewrite_scheduler_output(
+        _scheduler_output(new_request, num_scheduled_tokens=len(tokens))
+    )
+    assert usage == []
+    manager.complete_scheduler_output(cloud_output)
+    # All three manifest blocks were acknowledged on the prompt.
+    assert set(manifest.full_block_hashes) <= manager._completed_hashes
+
+    final_manifest = hasher.build_manifest("control-1", tokens + [42])
+    finish = EdgeCloudFinishedRequest(
+        control_request_id="control-1",
+        prompt_tokens=len(tokens),
+        completion_tokens=1,
+        full_block_hashes=final_manifest.full_block_hashes,
+    )
+    _, usage = manager.rewrite_scheduler_output(
+        _scheduler_output(
+            finished={"internal-1"},
+            finish_data={"internal-1": finish},
+        )
+    )
+    assert usage[0][0] == "control-1"
+    assert usage[0][1].completion_tokens == 1
+
+    hit = manager.probe(hasher.build_manifest("control-2", tokens))
+    assert hit.block_size == edge_manifest_size
+    # Exactly one complete 8-token cloud block exists; a replay limited by
+    # prompt-1 sees full blocks only.
+    assert hit.hit_tokens == cloud_block_size
+    assert hit.hit_blocks == cloud_block_size // edge_manifest_size
