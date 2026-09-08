@@ -161,6 +161,10 @@ class NPUWorker(WorkerBase):
         if self.use_v2_model_runner and vllm_version_is("0.23.0"):
             logger.warning("VLLM_USE_V2_MODEL_RUNNER is not supported on vllm 0.23.0; falling back to v1 model runner.")
             self.use_v2_model_runner = False
+        # LWD (layerwise disaggregated): edge/cloud role flags for the worker-side LWD branches.
+        self.lwd_config = getattr(self.vllm_config, "lwd_config", None)
+        self.enable_lwd = bool(self.lwd_config is not None and self.lwd_config.enabled)
+        self.is_lwd_edge = bool(self.enable_lwd and self.lwd_config.is_edge)
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
