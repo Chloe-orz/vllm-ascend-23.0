@@ -529,6 +529,7 @@ class NPUWorker(WorkerBase):
         # and the recv managers once the device + distributed groups exist.
         self._lwd_cfg = get_ascend_config().lwd_config
         self._lwd_edge_sent_embeds: dict[str, int] = {}  # req_id -> chunks sent
+        self._lwd_edge_aborted: set[str] = set()         # aborted req tombstones
         if self._lwd_cfg.is_prefill_only and self.use_v2_model_runner:
             # The LWD hooks live on the V1 model runner; the V2 runner
             # (separate class) lacks them entirely — fail fast at bring-up
@@ -605,6 +606,16 @@ class NPUWorker(WorkerBase):
         # wire — others compute (or skip) but never send.
         is_wire_endpoint = get_tp_group().is_first_rank
         for chunk in scheduler_output.lwd_edge_embed_chunks or ():
+            if chunk.request_id in self._lwd_edge_aborted:
+                # Aborted while the batch was still queued: skip the chunk
+                # and advance the UP send-side seqno stream past it (the
+                # cloud-side recv was already dropped by abort_lwd_request,
+                # so this message will never be sent by design).
+                if is_wire_endpoint:
+                    get_lwd_comm_service().skip_seqno(
+                        LwdChannelType.UP, chunk.seqno, op="send"
+                    )
+                continue
             sent_so_far = self._lwd_edge_sent_embeds.get(chunk.request_id, 0)
             if chunk.chunk_idx != sent_so_far:
                 raise RuntimeError(
@@ -648,12 +659,20 @@ class NPUWorker(WorkerBase):
         """Cloud side (streaming): a finished request's DOWN stream simply
         STOPS (its last step packet already went out with that step).
         No FIN packet -- request termination is signaled by the control
-        plane (v2.6).  Here we only drop the collector bookkeeping."""
+        plane (v2.6).  Here we drop the collector bookkeeping AND release
+        the UP-side chunk table (prompt embeds recv buffers on device) —
+        finished_req_ids is the engine's own liveness signal, so this
+        cleanup does not depend on the control plane."""
+        from vllm_ascend.worker.lwd_recv_manager import (
+            get_lwd_up_recv_manager,
+        )
+
         collector = self.model_runner.lwd_cloud_collector
-        if collector is None:
-            return
+        up_manager = get_lwd_up_recv_manager()
         for req_id in finished_req_ids:
-            collector.drop(req_id)
+            if collector is not None:
+                collector.drop(req_id)
+            up_manager.pop_request(req_id)
 
     def abort_lwd_request(self, req_id: str) -> None:
         """prefill_only control-plane abort hook (streaming semantics).
@@ -681,6 +700,7 @@ class NPUWorker(WorkerBase):
         )
 
         if self._lwd_cfg.is_edge_node:
+            self._lwd_edge_aborted.add(req_id)
             self._lwd_edge_sent_embeds.pop(req_id, None)
             get_lwd_down_recv_manager().drop(req_id)
         elif self._lwd_cfg.is_cloud_node:
