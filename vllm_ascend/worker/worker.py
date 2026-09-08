@@ -542,9 +542,15 @@ class NPUWorker(WorkerBase):
             from vllm_ascend.worker.lwd_recv_manager import init_lwd_recv_managers
 
             lwd_wire.init_lwd_duplex_channels()
+            max_rows = 1
+            if self.vllm_config.speculative_config is not None:
+                max_rows = (
+                    self.vllm_config.speculative_config.num_speculative_tokens + 1
+                )
             init_lwd_recv_managers(
                 self.model_config.get_hidden_size(),
                 self._lwd_cfg.topk_k,
+                max_rows=max_rows,
             )
 
     # ------------------------------------------------------------------ #
@@ -611,44 +617,15 @@ class NPUWorker(WorkerBase):
         return EMPTY_MODEL_RUNNER_OUTPUT
 
     def _lwd_cloud_flush_finished(self, finished_req_ids) -> None:
-        """Cloud side: one-shot DOWN send of each finished request's
-        collected last-step packet.  Only TP rank 0 talks to the wire;
-        other TP ranks just drop their collector slots."""
+        """Cloud side (streaming): a finished request's DOWN stream simply
+        STOPS (its last step packet already went out with that step).
+        No FIN packet -- request termination is signaled by the control
+        plane (v2.6).  Here we only drop the collector bookkeeping."""
         collector = self.model_runner.lwd_cloud_collector
         if collector is None:
             return
-        is_wire_endpoint = get_tp_group().is_first_rank
         for req_id in finished_req_ids:
-            seqno = self.model_runner.pop_lwd_request_seqno(req_id)
-            if not is_wire_endpoint:
-                collector.drop(req_id)
-                continue
-            packed = collector.finalize(req_id)
-            if packed is None:
-                # Never collected (abort / sidecar missing): clean up the
-                # slot and the seqno entry as well, otherwise they leak
-                # with request churn.
-                collector.drop(req_id)
-                continue
-            if seqno is None:
-                # The request never opened a collector slot through the
-                # admission path — nothing was ever sent/expected.
-                collector.drop(req_id)
-                continue
-            get_lwd_comm_service().submit_send(
-                LwdCommRequest(
-                    channel=LwdChannelType.DOWN,
-                    op="send",
-                    num_elements=packed.numel(),
-                    tensor=packed,
-                    seqno=seqno,
-                )
-            )
-            collector.drop(req_id)  # slot destroyed with the send
-            logger.debug(
-                "[lwd] sent DOWN packet req=%s elements=%d seqno=%d",
-                req_id, packed.numel(), seqno,
-            )
+            collector.drop(req_id)
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:

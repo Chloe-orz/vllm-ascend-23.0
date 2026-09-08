@@ -42,6 +42,7 @@ from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 from vllm_ascend.worker.lwd_down_packet import (
     LwdDownPacket,
+    lwd_down_wire_num_elements,
     lwd_packet_num_elements,
     lwd_request_fingerprint,
     unpack_lwd_down_packet,
@@ -189,8 +190,14 @@ class _LwdDuplexRecvManagerBase:
 
     # -- waiting --------------------------------------------------------- #
 
-    def _wait_chunk(self, req: _ReqChunks, chunk_idx: int, deadline: float) -> torch.Tensor:
-        """Readiness gate for one chunk; returns its [n, H] buffer."""
+    def _wait_chunk(self, req: _ReqChunks, chunk_idx: int, deadline: float,
+                    consume: bool = False) -> torch.Tensor:
+        """Readiness gate for one chunk; returns its buffer.
+
+        ``consume=True`` (DOWN streaming): the chunk entry is removed
+        after a successful wait so the NEXT packet's expect for the same
+        request re-posts a recv.  UP gather does NOT consume (chunk
+        lifetime is owned by ``release_upto``)."""
         entry = req.chunks.get(chunk_idx)
         if entry is None:
             raise KeyError(
@@ -200,14 +207,18 @@ class _LwdDuplexRecvManagerBase:
             raise LwdEmbedsTimeoutError(f"{self._CHANNEL.value}: dropped")
         group = self._tp_group
         if group is None:
-            return self._wait_wire(entry, deadline)
-        if self._is_tp_endpoint:
             tensor = self._wait_wire(entry, deadline)
         else:
-            tensor = torch.empty(
-                entry.num_elements, dtype=torch.bfloat16, device="npu"
-            )
-        group.broadcast(tensor, src=0)
+            if self._is_tp_endpoint:
+                tensor = self._wait_wire(entry, deadline)
+            else:
+                tensor = torch.empty(
+                    entry.num_elements, dtype=torch.bfloat16, device="npu"
+                )
+            group.broadcast(tensor, src=0)
+        if consume:
+            with self._lock:
+                req.chunks.pop(chunk_idx, None)
         return tensor
 
     def _wait_wire(self, entry: _Entry, deadline: float) -> torch.Tensor:
@@ -362,46 +373,90 @@ class LwdCloudUpRecvManager(_LwdDuplexRecvManagerBase):
 
 
 class LwdEdgeDownRecvManager(_LwdDuplexRecvManagerBase):
-    """Edge side: combined c2e packets on the DOWN channel (single
-    message per request — the degenerate one-chunk case)."""
+    """Edge side, DOWN channel, STREAMING mode (v2.5/v2.6).
+
+    The cloud sends one fixed-size packet per request per step (after
+    prefill and after every decode step) plus exactly one FIN per
+    request.  **Negotiation lives in the ZMQ control plane (owned by
+    another module): before every cloud send, the control plane notifies
+    the edge, which calls ``expect_packet`` to pre-post the recv.**  This
+    manager therefore has NO ring/demux machinery — it is purely
+    notification-driven:
+
+      * every wire packet has the same fixed size
+        (``lwd_down_wire_num_elements(H, K, R_max)``), so the
+        notification only needs ``(req_id, seqno)``;
+      * per-packet seqno comes from the control plane (channel-global,
+        dense per direction; abort holes are skipped via ``drop``);
+      * ``wait_packet`` = readiness gate + parse + full validation
+        (fingerprint verified against req_id);
+      * request termination is control-plane-driven: ``close()`` for
+        normal finish, ``drop()`` for abort (no FIN packet on the wire).
+
+    TP>1: only TP rank 0 posts the wire recv; the payload is then
+    broadcast inside the TP group (all ranks call ``wait_packet`` in the
+    same order — same scheduler outputs).
+    """
 
     _CHANNEL = LwdChannelType.DOWN
 
-    def expect_packet(self, req_id: str, seqno: int, num_rows: int) -> None:
-        """Called on the control-plane notification carrying the packet's
-        row count R (HCCL needs exact numel)."""
+    def __init__(self, hidden_size: int, topk_k: int, max_rows: int = 1) -> None:
+        super().__init__(hidden_size, topk_k)
+        self._max_rows = max_rows
+        self._wire_num_elements = lwd_down_wire_num_elements(
+            hidden_size, topk_k, max_rows
+        )
+        # Per-request internal packet counter: each expect_packet gets the
+        # next slot, so multiple outstanding packets per request are
+        # supported (the control plane may notify ahead of consumption).
+        self._next_pkt_idx: dict[str, int] = {}
+
+    def expect_packet(self, req_id: str, seqno: int) -> None:
+        """Called on the control-plane notification preceding every
+        cloud send (data or FIN).  Idempotent per (req_id, seqno) at the
+        channel level; the wire size is fixed and config-derived."""
+        with self._lock:
+            pkt_idx = self._next_pkt_idx.get(req_id, 0)
+            self._next_pkt_idx[req_id] = pkt_idx + 1
         self._post_recv(
             req_id,
             seqno,
-            num_rows,  # num_tokens bookkeeping only
-            0,
-            1,
-            num_elements=lwd_packet_num_elements(
-                num_rows, self._hidden_size, self._topk_k
-            ),
+            self._max_rows,  # bookkeeping only
+            pkt_idx,
+            2**31,  # unbounded internal chunk space (per-packet slots)
+            num_elements=self._wire_num_elements,
         )
 
-    def wait_packet(self, req_id: str, *, max_rows: int) -> LwdDownPacket:
-        """Readiness gate + parse + validate.  ``max_rows`` =
-        num_speculative_tokens + 1 (1 when spec is off).  The header
-        fingerprint is verified against ``req_id`` — a mismatch means
-        cross-request mixup and fails closed."""
+    def wait_packet(self, req_id: str) -> LwdDownPacket:
+        """Readiness gate + parse + validate.  Stream end is
+        control-plane-driven (``close``/``drop``), not wire-driven."""
         deadline = time.monotonic() + envs.VLLM_ASCEND_LWD_EMBEDS_TIMEOUT_S
-        buf = self._wait_chunk(self._get_req(req_id), 0, deadline)
-        return unpack_lwd_down_packet(
+        with self._lock:
+            req = self._reqs.get(req_id)
+        if req is None or not req.chunks:
+            raise KeyError(f"lwd_down: no posted recv for {req_id!r}")
+        pkt_idx = min(req.chunks)  # consume in posting (wire) order
+        buf = self._wait_chunk(req, pkt_idx, deadline, consume=True)
+        packet = unpack_lwd_down_packet(
             buf,
             expected_fingerprint=lwd_request_fingerprint(req_id),
-            max_rows=max_rows,
+            max_rows=self._max_rows,
             max_topk_k=self._topk_k,
             hidden_size=self._hidden_size,
         )
+        return packet
 
-    def _get_req(self, req_id: str) -> _ReqChunks:
+    def close(self, req_id: str) -> None:
+        # Normal finish (control plane calls this): drop all bookkeeping
+        # for the request.  Distinguished from drop() (abort): close does
+        # NOT skip seqnos -- every notified packet was sent.
         with self._lock:
-            req = self._reqs.get(req_id)
-        if req is None:
-            raise KeyError(f"lwd_down: no packet registered for {req_id!r}")
-        return req
+            self._reqs.pop(req_id, None)
+            self._next_pkt_idx.pop(req_id, None)
+
+    def has_pending(self, req_id: str) -> bool:
+        with self._lock:
+            return req_id in self._reqs
 
 
 _UP_MANAGER: LwdCloudUpRecvManager | None = None
@@ -409,17 +464,26 @@ _DOWN_MANAGER: LwdEdgeDownRecvManager | None = None
 _MANAGER_LOCK = threading.Lock()
 
 
-def init_lwd_recv_managers(hidden_size: int, topk_k: int) -> None:
+def init_lwd_recv_managers(
+    hidden_size: int,
+    topk_k: int,
+    max_rows: int = 1,
+    ring_size: int = 8,
+) -> None:
     """Create both managers (idempotent).  Each process uses only the
-    one matching its role, but creating both keeps init trivial."""
+    one matching its role, but creating both keeps init trivial.
+    ``max_rows`` = num_speculative_tokens + 1 (1 when spec is off);
+    ``ring_size`` = anonymous recv ring depth on the DOWN channel."""
     global _UP_MANAGER, _DOWN_MANAGER
     with _MANAGER_LOCK:
         if _UP_MANAGER is None:
             _UP_MANAGER = LwdCloudUpRecvManager(hidden_size, topk_k)
-            _DOWN_MANAGER = LwdEdgeDownRecvManager(hidden_size, topk_k)
+            _DOWN_MANAGER = LwdEdgeDownRecvManager(
+                hidden_size, topk_k, max_rows=max_rows, ring_size=ring_size
+            )
             logger.info(
-                "[lwd-recv] managers initialized (H=%d, K=%d)",
-                hidden_size, topk_k,
+                "[lwd-recv] managers initialized (H=%d, K=%d, R_max=%d, ring=%d)",
+                hidden_size, topk_k, max_rows, ring_size,
             )
 
 

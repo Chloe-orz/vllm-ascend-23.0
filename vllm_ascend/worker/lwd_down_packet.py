@@ -45,6 +45,9 @@ LWD_DOWN_VERSION = 1
 LWD_HEADER_I32 = 16              # int32 fields
 LWD_HEADER_BF16 = LWD_HEADER_I32 * 2  # 32 bf16 slots
 
+# flags: currently all zero (reserved).  There is NO FIN packet —
+# request finish/abort is signaled by the control plane (v2.6).
+
 
 def lwd_row_stride(hidden_size: int, topk_k: int) -> int:
     """Per-row stride S in bf16 elements: H + 3K (K ids are int32 -> 2K
@@ -53,8 +56,17 @@ def lwd_row_stride(hidden_size: int, topk_k: int) -> int:
 
 
 def lwd_packet_num_elements(num_rows: int, hidden_size: int, topk_k: int) -> int:
-    """Total bf16 element count of a packet (recv-side buffer sizing)."""
+    """Total bf16 element count of a packet carrying ``num_rows`` rows."""
     return LWD_HEADER_BF16 + num_rows * lwd_row_stride(hidden_size, topk_k)
+
+
+def lwd_down_wire_num_elements(hidden_size: int, topk_k: int, max_rows: int) -> int:
+    """FIXED on-the-wire packet size (streaming mode): every DOWN packet
+    occupies exactly this many bf16 elements (R_max rows, padding
+    unused), so the receiver can pre-post a ring of recvs without
+    per-step size knowledge.  R_max = num_speculative_tokens + 1 (1 when
+    spec is off)."""
+    return lwd_packet_num_elements(max_rows, hidden_size, topk_k)
 
 
 def lwd_request_fingerprint(request_id: str) -> int:
@@ -74,9 +86,10 @@ class LwdDownPacket:
     hidden_size: int
     num_accepted: int
     fingerprint: int
-    hidden: torch.Tensor        # [R, H] bf16
-    topk_ids: torch.Tensor      # [R, K] int32
-    topk_logits: torch.Tensor   # [R, K] bf16
+    flags: int = 0
+    hidden: torch.Tensor | None = None      # [R, H] bf16
+    topk_ids: torch.Tensor | None = None    # [R, K] int32
+    topk_logits: torch.Tensor | None = None # [R, K] bf16
 
 
 def _u32(x: int) -> int:
@@ -93,8 +106,16 @@ def pack_lwd_down_packet(
     num_prompt_tokens: int,
     num_accepted: int,
     request_id: str,
+    flags: int = 0,
+    wire_num_elements: int | None = None,
 ) -> torch.Tensor:
-    """Assemble the flat bf16 wire tensor (device-side, no D2H)."""
+    """Assemble the flat bf16 wire tensor (device-side, no D2H).
+
+    Streaming mode: pass ``wire_num_elements`` =
+    ``lwd_down_wire_num_elements(H, K, R_max)`` so every packet on the
+    wire has the SAME fixed size (padded) and the receiver can pre-post
+    a recv ring without per-step size knowledge.
+    """
     assert hidden.dim() == 2 and hidden.dtype == torch.bfloat16
     R, H = hidden.shape
     K = topk_ids.shape[1]
@@ -102,6 +123,10 @@ def pack_lwd_down_packet(
     assert topk_ids.dtype == torch.int32 and topk_logits.dtype == torch.bfloat16
 
     total = lwd_packet_num_elements(R, H, K)
+    if wire_num_elements is not None:
+        assert wire_num_elements >= total, (
+            wire_num_elements, total)
+        total = wire_num_elements
     buf = torch.zeros(total, dtype=torch.bfloat16, device=hidden.device)
 
     # header
@@ -115,7 +140,7 @@ def pack_lwd_down_packet(
             K,
             H,
             num_accepted,
-            0,  # flags
+            flags,
             _u32(fp),
             _u32(fp >> 32),
             0, 0, 0, 0, 0, 0,
@@ -192,7 +217,10 @@ def unpack_lwd_down_packet(
         hidden_size=H,
         num_accepted=accepted,
         fingerprint=fp,
+        flags=flags,
         hidden=hidden,
         topk_ids=topk_ids,
         topk_logits=topk_logits,
     )
+
+

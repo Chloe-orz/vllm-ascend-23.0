@@ -57,6 +57,16 @@ class AscendConfig:
 
         lwd_config = additional_config.get("lwd_config", {})
         self.lwd_config = LwdConfig(lwd_config)
+        if self.lwd_config.is_prefill_only and vllm_config.speculative_config is not None:
+            # The DOWN stream's per-step collection is skipped for spec
+            # batches this period (P3), which would silently starve the
+            # edge — fail fast instead.  The wire format already supports
+            # R = accepted+1 rows per packet.
+            raise ValueError(
+                "lwd_config prefill_only does not support speculative "
+                "decoding yet (collection path is P3); the wire format "
+                "is already MTP-compatible"
+            )
 
         if self.profiling_chunk_config.enabled:
             max_batched = vllm_config.scheduler_config.max_num_batched_tokens

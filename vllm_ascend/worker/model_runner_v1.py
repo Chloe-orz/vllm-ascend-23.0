@@ -335,13 +335,12 @@ class NPUModelRunner(GPUModelRunner):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
 
-        # prefill_only LWD data plane (cloud side): the unified
-        # collection point for the c2e packet's three data items, plus the
-        # request -> UP/DOWN seqno map (populated by the admission glue).
+        # prefill_only LWD data plane (cloud side): per-step packet builder
+        # for the DOWN stream, plus the channel-global DOWN seqno counter.
         self.lwd_cloud_collector = None
-        self._lwd_request_seqnos: dict[str, int] = {}
+        self._lwd_down_next_seqno = 0
         if self.ascend_config.lwd_config.is_cloud_node:
-            from vllm_ascend.worker.lwd_cloud_collector import (
+            from vllm_ascend.worker.lwd_cloud_sample_collector import (
                 LwdCloudSampleCollector,
             )
 
@@ -353,9 +352,13 @@ class NPUModelRunner(GPUModelRunner):
                     "prefill_only cloud requires enable_reduce_sample=True "
                     "(the topk sidecar lives on that path)"
                 )
+            max_rows = 1
+            if self.speculative_config is not None:
+                max_rows = self.speculative_config.num_speculative_tokens + 1
             self.lwd_cloud_collector = LwdCloudSampleCollector(
                 hidden_size=self.model_config.get_hidden_size(),
                 topk_k=self.ascend_config.lwd_config.topk_k,
+                max_rows=max_rows,
             )
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
@@ -2598,21 +2601,21 @@ class NPUModelRunner(GPUModelRunner):
     def register_lwd_request(
         self,
         req_id: str,
-        seqno: int,
-        num_prompt_tokens: int,
-        rows_capacity: int = 1,
+        seqno: int | None = None,
+        num_prompt_tokens: int = 0,
     ) -> None:
         """Cloud-side admission glue (control plane calls this when a
-        remote-embeds request is admitted): open the collector slot and
-        record the request-level channel seqno."""
-        self._lwd_request_seqnos[req_id] = seqno
+        remote-embeds request is admitted).  DOWN packets carry a
+        channel-global seqno assigned at send time, so no per-request
+        seqno bookkeeping is needed here; the UP seqnos arrive with the
+        per-chunk control-plane notifications."""
         if self.lwd_cloud_collector is not None:
-            self.lwd_cloud_collector.open_request(
-                req_id, num_prompt_tokens, rows_capacity
-            )
+            self.lwd_cloud_collector.open_request(req_id, num_prompt_tokens)
 
-    def pop_lwd_request_seqno(self, req_id: str) -> int | None:
-        return self._lwd_request_seqnos.pop(req_id, None)
+    def _next_lwd_down_seqno(self) -> int:
+        seqno = self._lwd_down_next_seqno
+        self._lwd_down_next_seqno += 1
+        return seqno
 
     def lwd_edge_embed_forward(self, token_ids: list[int]) -> torch.Tensor:
         """Edge side: embed the whole prompt in one shot.
@@ -2641,29 +2644,56 @@ class NPUModelRunner(GPUModelRunner):
         scheduler_output: "SchedulerOutput",
         sample_hidden_states: torch.Tensor,
     ) -> None:
-        """Single collection call site (cloud, non-spec).  Sources:
+        """Streaming collect+send (cloud, non-spec): after prefill and
+        after EVERY decode step, pack this step's three data items per
+        request and isend each packet DOWN immediately.  Sources:
         sample_hidden_states (execute_model_state), the sampler sidecar,
-        and num_accepted (None for non-spec -> 0)."""
+        num_accepted (None for non-spec -> 0).  Only the TP wire endpoint
+        (rank 0) sends; other ranks skip (their collector state stays in
+        sync via the same call so drop/bookkeeping works everywhere)."""
         inner_sampler = getattr(self.sampler, "topk_topp_sampler", None)
         cand_ids = getattr(inner_sampler, "_lwd_last_cand_ids", None)
         cand_logits = getattr(inner_sampler, "_lwd_last_cand_logits", None)
         if cand_ids is None or cand_logits is None:
             logger.warning_once(
                 "[lwd] sampler sidecar unavailable (enable_reduce_sample "
-                "off?); skipping c2e collection for this step"
+                "off?); skipping c2e stream for this step"
             )
             return
         num_reqs = len(self.input_batch.req_ids)
         if num_reqs == 0:
             return
         req_ids = list(self.input_batch.req_ids[:num_reqs])
-        self.lwd_cloud_collector.collect_batch(
+        packets = self.lwd_cloud_collector.build_step_packets(
             req_ids,
             hidden_rows=sample_hidden_states[:num_reqs],
-            cand_ids=cand_ids[:num_reqs].to(torch.int32),
-            cand_logits=cand_logits[:num_reqs].to(torch.bfloat16),
+            cand_ids=cand_ids[:num_reqs],
+            cand_logits=cand_logits[:num_reqs],
             num_accepted=None,
         )
+        if not get_tp_group().is_first_rank:
+            return
+        from vllm_ascend.distributed.lwd_comm.service import (
+            get_lwd_comm_service,
+        )
+        from vllm_ascend.distributed.lwd_comm.types import (
+            LwdChannelType,
+            LwdCommRequest,
+        )
+
+        for req_id in req_ids:
+            packet = packets.get(req_id)
+            if packet is None:
+                continue
+            get_lwd_comm_service().submit_send(
+                LwdCommRequest(
+                    channel=LwdChannelType.DOWN,
+                    op="send",
+                    num_elements=packet.numel(),
+                    tensor=packet,
+                    seqno=self._next_lwd_down_seqno(),
+                )
+            )
 
     def lwd_edge_resample(self, pkt) -> None:
         """Edge-side interface reservation (NOT implemented this period).
