@@ -662,9 +662,12 @@ class NPUWorker(WorkerBase):
             # scheduler_config.pd_separation_enabled (a dynamic attribute that
             # may not reach every process).
             #
-            # Only local_rank==0 (PP-NPU0, the rank that issues the cross-node
-            # hidden irecv) needs early-recv; other cloud ranks receive hidden
-            # via TP-broadcast from rank0.
+            # Only the pair's P2P-member rank needs early-recv; other ranks
+            # receive hidden via TP-broadcast from the member.  Multi-edge
+            # per-rank mapping: every cloud rank is the member of its own
+            # pair, so CHER is enabled on every cloud worker (each posts
+            # only for its own pair; see the membership filter in
+            # start_early_irecv).
             _pc = self.vllm_config.parallel_config
             _ac = getattr(self.vllm_config, "additional_config", None) or {}
             _ec = _ac.get("edge_cloud_config", {}) if isinstance(_ac, dict) else {}
@@ -673,7 +676,6 @@ class NPUWorker(WorkerBase):
                 getattr(_pc, "enable_edge_cloud", False)
                 and not getattr(_pc, "is_edge_node", True)
                 and _pd.get("enabled", False)
-                and self.local_rank == 0
                 # Debug kill-switch for the multi-instance bring-up: CHER's
                 # early-posted irecv holds NIC/DMA resources until the edge
                 # sends; if that edge is behind, the pending op can starve
@@ -1086,13 +1088,13 @@ class NPUWorker(WorkerBase):
             )
             return
         # Multi-edge per-rank mapping: only the pair's mapped cloud rank may
-        # post the P2P recv for it.  The hint MQ currently lives on cloud
-        # worker local_rank==0 only, so hints for other pairs must be skipped
-        # here (their busy_loop self-posts on the member rank at execution
-        # time — correctness unaffected, only the early-post overlap is lost).
+        # post the P2P recv for it.  Legacy/unwrapped hts (single-pair mode
+        # and edge-side EHER) have no bucket — map to this worker's own
+        # instance so the membership check still lands on the right rank.
         _hint_edge_id = self._edge_bucket_of_token(ht)
-        if _hint_edge_id is not None and not self._is_pair_member_for_batch(
-                _hint_edge_id):
+        if _hint_edge_id is None and is_edge_device():
+            _hint_edge_id = self._edge_instance_id()
+        if not self._is_pair_member_for_batch(_hint_edge_id):
             return
         with self._early_recv_lock:
             if ht in self._early_recv_handles:
@@ -1538,7 +1540,12 @@ class NPUWorker(WorkerBase):
                 _cloud_include_mrope = self.model_runner.step_has_multimodal_req(
                     scheduler_output)
             if (self._cloud_hidden_early_recv_enabled and _ht
-                    and scheduler_output.batch_type == BatchType.PREFILL_FIRST):
+                    and scheduler_output.batch_type == BatchType.PREFILL_FIRST
+                    # Multi-edge per-rank mapping: only the pair's member
+                    # rank uses the early-recv path; non-member ranks receive
+                    # via TP broadcast from the member (their entry would
+                    # post no P2P anyway).
+                    and self._is_pair_member_for_batch(_pair_edge_id)):
                 _channel = self._hidden_channel_for(scheduler_output)
                 entry = self.get_or_post_early_recv(
                     _ht, _channel,

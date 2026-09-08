@@ -152,15 +152,17 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # [CHER] Cloud-side hidden early-receive: build a sideband MQ that
-        # PassiveEC writes recv-hints to and a guard thread on the cloud
-        # worker (the one issuing the cross-node irecv, i.e. PP NPU0 /
-        # local_rank==0) drains.  Using a dedicated MQ (not the
-        # rpc_broadcast_mq that busy_loop consumes) is essential: busy_loop is
+        # PassiveEC writes recv-hints to and a guard thread on each cloud
+        # worker drains.  Using a dedicated MQ (not the rpc_broadcast_mq
+        # that busy_loop consumes) is essential: busy_loop is
         # single-threaded and blocks inside execute_model for a long P-middle
         # batch, so a hint queued there would not be dequeued until that batch
         # finishes -- defeating the overlap.  Always created on a PD-separated
         # cloud node (CHER is a built-in part of PD masking); left None and
-        # hints are never sent otherwise.
+        # hints are never sent otherwise.  Multi-edge per-rank mapping: every
+        # cloud rank is the P2P member of its own pair, so the ring has one
+        # reader PER cloud worker; each worker's guard posts only for pairs
+        # it is a member of (start_early_irecv filters).
         self.cloud_recv_hint_mq: MessageQueue | None = None
         if (
             self.parallel_config.enable_edge_cloud
@@ -172,16 +174,10 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # fallback recv.
             and os.environ.get("VLLM_ASCEND_EC_CHER", "1") != "0"
         ):
-            # Small ring buffer: at most prefill_inflight_limit (<=2) P-middle
-            # batches are in flight on the cloud at once, so at most that many
-            # early-recv entries are ever useful -- the guard thread skips
-            # posting once the cache holds that many (see start_early_irecv),
-            # so it drains hints fast and the ring never fills.  8 slots x
-            # 1KB absorb the burst when the guard briefly stalls on a post or
-            # on _early_recv_lock; a larger ring would only mask a slow guard
-            # and let the cache grow unbounded (the earlier OOM).
+            # One reader per cloud worker (multi-edge per-rank mapping).
             self.cloud_recv_hint_mq = MessageQueue(
-                1, 1, max_chunk_bytes=1024, max_chunks=8,
+                self.local_world_size, self.local_world_size,
+                max_chunk_bytes=1024, max_chunks=8,
             )
             _hint_handle = self.cloud_recv_hint_mq.export_handle()
             os.environ[_CLOUD_RECV_HINT_MQ_ENV] = base64.b64encode(
@@ -540,7 +536,9 @@ def _cher_init_message_queues(self, input_shm_handle, vllm_config):
     self.cloud_recv_hint_mq = None
     if not (
         envs.VLLM_PP_NON_LEADER_ENGINE_CORE
-        and self.local_rank == 0
+        # Multi-edge per-rank mapping: EVERY cloud worker is the P2P member
+        # of its own pair, so every cloud worker needs the hint MQ (its
+        # guard thread posts early recvs only for pairs it is a member of).
         and not vllm_config.parallel_config.is_edge_node
         and _cloud_pd_enabled(vllm_config)
     ):
