@@ -27,6 +27,13 @@ bf16 slot pairs):
         [H      : H+2K)  topk_token_ids         int32 x K bit-packed
         [H+2K   : H+3K)  topk_logits            bf16 x K
 
+    Candidate semantics (wire contract): topk_logits are sorted by logit
+    descending (a true GLOBAL top-K reduction, correct for TP>1 where
+    the sampler's candidate set is a per-rank concatenation).  Padded /
+    masked-out entries carry logit == -inf and MUST be ignored by the
+    receiver — there is deliberately no separate valid-count field, the
+    -inf marker is unambiguous per row and survives the bf16 cast.
+
 Both sides derive S from config (H, K); R comes from the header — so the
 parser never needs the spec k.  The receiver learns R before posting the
 irecv from the control-plane notification (HCCL needs exact numel).
@@ -129,7 +136,7 @@ def pack_lwd_down_packet(
         total = wire_num_elements
     buf = torch.zeros(total, dtype=torch.bfloat16, device=hidden.device)
 
-    # header
+    # header (H2D once per request, at finalize only)
     fp = lwd_request_fingerprint(request_id)
     header = torch.tensor(
         [
@@ -146,7 +153,7 @@ def pack_lwd_down_packet(
             0, 0, 0, 0, 0, 0,
         ],
         dtype=torch.int32,
-    ).to(device=hidden.device, non_blocking=True)
+    ).to(device=hidden.device)
     buf[:LWD_HEADER_BF16].view(torch.int32).copy_(header)
 
     # payload: R rows x S

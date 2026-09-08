@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import OrderedDict
 
 import torch
 from vllm.logger import logger
@@ -64,6 +65,14 @@ def _tp_group_or_none():
 class LwdEmbedsTimeoutError(RuntimeError):
     """Raised when a readiness gate times out (fail the request instead
     of wedging the channel)."""
+
+
+# Upper bound on the dropped-request id tombstones.  Eviction is SAFE:
+# the tombstone is only an optimization that avoids posting a recv for
+# an aborted seqno — even without it, the channel's reorder buffer
+# rejects a late submission whose seqno has already passed
+# (``seqno < next_seqno``), so no wire op is ever issued either way.
+_DROPPED_REQ_IDS_CAP = 8192
 
 
 class _Entry:
@@ -115,8 +124,8 @@ class _LwdDuplexRecvManagerBase:
         # Requests dropped BEFORE their notification arrived: a late
         # expect_* for these must skip the seqno without posting a recv,
         # otherwise the never-sent payload leaves a permanent hole in the
-        # channel FIFO.
-        self._dropped_req_ids: set[str] = set()
+        # channel FIFO.  Bounded LRU (see _DROPPED_REQ_IDS_CAP).
+        self._dropped_req_ids: OrderedDict[str, None] = OrderedDict()
         self._lock = threading.Lock()
 
     # -- TP endpoint helpers -------------------------------------------- #
@@ -249,7 +258,7 @@ class _LwdDuplexRecvManagerBase:
         (endpoint rank only), and record the request so LATE
         notifications are skipped without posting (no permanent hole)."""
         with self._lock:
-            self._dropped_req_ids.add(req_id)
+            self._mark_dropped(req_id)
             req = self._reqs.get(req_id)
             if req is None:
                 return
@@ -260,6 +269,14 @@ class _LwdDuplexRecvManagerBase:
         if self._is_tp_endpoint:
             for seqno in seqnos:
                 get_lwd_comm_service().skip_seqno(self._CHANNEL, seqno, op="recv")
+
+    def _mark_dropped(self, req_id: str) -> None:
+        """Record a dropped request id with a bounded LRU eviction.
+        Caller holds the lock."""
+        self._dropped_req_ids[req_id] = None
+        self._dropped_req_ids.move_to_end(req_id)
+        while len(self._dropped_req_ids) > _DROPPED_REQ_IDS_CAP:
+            self._dropped_req_ids.popitem(last=False)
 
     def is_dropped(self, req_id: str) -> bool:
         with self._lock:
@@ -328,10 +345,26 @@ class LwdCloudUpRecvManager(_LwdDuplexRecvManagerBase):
             )
         parts = []
         with self._lock:
-            req = self._reqs[req_id]
+            req = self._reqs.get(req_id)
+            if req is None:
+                raise KeyError(f"lwd_up: no chunks registered for {req_id!r}")
             chunk_entries = dict(req.chunks)
+            consumed_upto = req.consumed_upto
         for idx, lo, hi in covering:
             if idx not in chunk_entries:
+                if idx < consumed_upto:
+                    # The chunk was released after full consumption —
+                    # re-gathering it means the request was
+                    # preempted/recomputed, which the transport-level
+                    # seqno contract cannot retransmit.  LWD requests
+                    # must not be preempted (or chunks must be retained
+                    # until finish).
+                    raise KeyError(
+                        f"lwd_up: chunk {idx} of {req_id!r} was already "
+                        "consumed and released; preemption/recompute of "
+                        "an LWD request is not supported by the wire "
+                        "protocol"
+                    )
                 raise KeyError(
                     f"lwd_up: chunk {idx} of {req_id!r} not registered yet"
                 )

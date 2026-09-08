@@ -98,19 +98,36 @@ class LwdCloudSampleCollector:
             return packets
         B = len(req_ids)
         assert hidden_rows.shape[0] == B, (hidden_rows.shape, B)
+        # Normalize the candidate width to the fixed wire width K.
+        #
+        # The sampler sidecar's width is dynamic per batch (request top_k,
+        # or the full local vocab when unset) and, with TP>1, is the
+        # PER-RANK-concatenation of each rank's local top-k — globally
+        # unsorted.  Blindly truncating the first K entries would ship
+        # rank-0-local candidates, not the global top-K, so reduce by
+        # logit first: a top-K over the (logit, id) pairs is correct for
+        # any layout of the sidecar.
+        #
+        # Invalid candidates (masked by top-k/top-p as -inf, or absent
+        # when the sidecar is narrower than K) are represented as
+        # logit=-inf; the edge MUST ignore -inf-logit entries (wire
+        # contract, see lwd_down_packet).  Zero-padding logits would be
+        # indistinguishable from a real candidate for token id 0.
         K = self._topk_k
-        if cand_ids.shape[1] != K:
-            w = min(cand_ids.shape[1], K)
-            padded_ids = torch.zeros(B, K, dtype=torch.int32,
-                                     device=cand_ids.device)
-            padded_ids[:, :w] = cand_ids[:, :w].to(torch.int32)
-            padded_logits = torch.zeros(B, K, dtype=torch.bfloat16,
-                                        device=cand_logits.device)
-            padded_logits[:, :w] = cand_logits[:, :w].to(torch.bfloat16)
-            cand_ids, cand_logits = padded_ids, padded_logits
+        W = cand_ids.shape[1]
+        if W >= K:
+            top = torch.topk(cand_logits.float(), k=K, dim=1)
+            cand_logits = top.values.to(torch.bfloat16)
+            cand_ids = cand_ids.gather(1, top.indices).to(torch.int32)
         else:
-            cand_ids = cand_ids.to(torch.int32)
-            cand_logits = cand_logits.to(torch.bfloat16)
+            pad_ids = torch.zeros(B, K - W, dtype=torch.int32,
+                                  device=cand_ids.device)
+            pad_logits = torch.full((B, K - W), float("-inf"),
+                                    dtype=torch.bfloat16,
+                                    device=cand_logits.device)
+            cand_ids = torch.cat([cand_ids.to(torch.int32), pad_ids], dim=1)
+            cand_logits = torch.cat(
+                [cand_logits.to(torch.bfloat16), pad_logits], dim=1)
         with self._lock:
             prompt_tokens = [self._prompt_tokens.get(r, 0) for r in req_ids]
         for i, req_id in enumerate(req_ids):
@@ -129,6 +146,17 @@ class LwdCloudSampleCollector:
                 wire_num_elements=self._wire_num_elements,
             )
         return packets
+
+    def num_live_slots(self) -> int:
+        """Number of open (registered, not yet dropped) requests — the
+        fast-path gate for the per-step collection point."""
+        return self.num_live_requests()
+
+    def has_slot(self, req_id: str) -> bool:
+        """Whether the request is currently registered — used by the
+        collection point to skip unregistered traffic."""
+        with self._lock:
+            return req_id in self._prompt_tokens
 
     @property
     def wire_num_elements(self) -> int:

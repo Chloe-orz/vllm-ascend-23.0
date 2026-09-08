@@ -627,6 +627,40 @@ class NPUWorker(WorkerBase):
         for req_id in finished_req_ids:
             collector.drop(req_id)
 
+    def abort_lwd_request(self, req_id: str) -> None:
+        """prefill_only control-plane abort hook (streaming semantics).
+
+        MUST be driven on BOTH peers for the same request:
+          * edge: drop the DOWN recv side (skips the recv seqnos of any
+            posted-but-unfilled packets) and clear the per-request send
+            bookkeeping (unsent embed chunks are simply never
+            dispatched);
+          * cloud: drop the UP recv side (skips the recv seqnos of
+            chunks the edge will never send) and destroy the collector
+            bookkeeping — the DOWN stream just stops (per-step packets
+            are built from live registrations only, and the DOWN seqno
+            is assigned at send time from a channel-global counter, so
+            an aborted request leaves NO hole in the send sequence).
+
+        A send already posted to HCCL cannot be un-posted — the control
+        plane must abort before dispatching the request's tail.
+        """
+        if not self._lwd_cfg.is_prefill_only:
+            return
+        from vllm_ascend.worker.lwd_recv_manager import (
+            get_lwd_down_recv_manager,
+            get_lwd_up_recv_manager,
+        )
+
+        if self._lwd_cfg.is_edge_node:
+            self._lwd_edge_sent_embeds.pop(req_id, None)
+            get_lwd_down_recv_manager().drop(req_id)
+        elif self._lwd_cfg.is_cloud_node:
+            get_lwd_up_recv_manager().drop(req_id)
+            collector = self.model_runner.lwd_cloud_collector
+            if collector is not None:
+                collector.drop(req_id)
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much

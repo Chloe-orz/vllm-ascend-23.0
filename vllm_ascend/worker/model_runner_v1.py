@@ -355,11 +355,14 @@ class NPUModelRunner(GPUModelRunner):
             max_rows = 1
             if self.speculative_config is not None:
                 max_rows = self.speculative_config.num_speculative_tokens + 1
-            self.lwd_cloud_collector = LwdCloudSampleCollector(
-                hidden_size=self.model_config.get_hidden_size(),
-                topk_k=self.ascend_config.lwd_config.topk_k,
-                max_rows=max_rows,
-            )
+            # Only TP rank 0 talks to the wire; skip collector creation on
+            # the other ranks (their packets would never be sent).
+            if get_tp_group().is_first_rank:
+                self.lwd_cloud_collector = LwdCloudSampleCollector(
+                    hidden_size=self.model_config.get_hidden_size(),
+                    topk_k=self.ascend_config.lwd_config.topk_k,
+                    max_rows=max_rows,
+                )
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
 
         # Dump / PrecisionDebugger configuration now comes from AscendConfig
@@ -2648,9 +2651,14 @@ class NPUModelRunner(GPUModelRunner):
         after EVERY decode step, pack this step's three data items per
         request and isend each packet DOWN immediately.  Sources:
         sample_hidden_states (execute_model_state), the sampler sidecar,
-        num_accepted (None for non-spec -> 0).  Only the TP wire endpoint
-        (rank 0) sends; other ranks skip (their collector state stays in
-        sync via the same call so drop/bookkeeping works everywhere)."""
+        and num_accepted (None for non-spec -> 0).  Only the TP wire
+        endpoint (rank 0) holds a collector and sends; other ranks skip
+        (collector is None there)."""
+        collector = self.lwd_cloud_collector
+        # Fast path: no remote-embeds request in flight -> zero per-step
+        # cost (no candidate-width normalization, no row filtering).
+        if collector.num_live_slots() == 0:
+            return
         inner_sampler = getattr(self.sampler, "topk_topp_sampler", None)
         cand_ids = getattr(inner_sampler, "_lwd_last_cand_ids", None)
         cand_logits = getattr(inner_sampler, "_lwd_last_cand_logits", None)
@@ -2660,19 +2668,23 @@ class NPUModelRunner(GPUModelRunner):
                 "off?); skipping c2e stream for this step"
             )
             return
-        num_reqs = len(self.input_batch.req_ids)
-        if num_reqs == 0:
+        # Rows of sample_hidden_states/cand_* follow input_batch order
+        # (this runner's logits_indices covers every input-batch row).
+        # Collect ONLY registered requests: the top-K normalization in
+        # build_step_packets is O(B x W) with W up to the full vocab, so
+        # running it on unregistered traffic is pure waste.
+        batch_req_ids = self.input_batch.req_ids
+        idx = [i for i, r in enumerate(batch_req_ids) if collector.has_slot(r)]
+        if not idx:
             return
-        req_ids = list(self.input_batch.req_ids[:num_reqs])
-        packets = self.lwd_cloud_collector.build_step_packets(
+        req_ids = [batch_req_ids[i] for i in idx]
+        packets = collector.build_step_packets(
             req_ids,
-            hidden_rows=sample_hidden_states[:num_reqs],
-            cand_ids=cand_ids[:num_reqs],
-            cand_logits=cand_logits[:num_reqs],
+            hidden_rows=sample_hidden_states[idx],
+            cand_ids=cand_ids[idx],
+            cand_logits=cand_logits[idx],
             num_accepted=None,
         )
-        if not get_tp_group().is_first_rank:
-            return
         from vllm_ascend.distributed.lwd_comm.service import (
             get_lwd_comm_service,
         )

@@ -81,6 +81,35 @@ class AscendSampler(Sampler):
             HAS_TRITON,
         )
 
+    def sample(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        logprobs_mode_override=None,
+    ):
+        # prefill_only edge-cloud c2e packet: pin the sidecar semantics to
+        # "THIS step's candidates or None".  Without the entry clear, an
+        # all-greedy batch (which returns from Sampler.sample before ever
+        # entering forward_native) would leave the PREVIOUS step's
+        # candidate set in place, and the collector would pair it with
+        # this step's hidden states.
+        sidecar = self.topk_topp_sampler
+        sidecar._lwd_last_cand_ids = None
+        sidecar._lwd_last_cand_logits = None
+        sampled, processed_logprobs = super().sample(
+            logits, sampling_metadata, logprobs_mode_override
+        )
+        if sampling_metadata.all_greedy and sidecar._lwd_last_cand_ids is None:
+            # All-greedy batch: forward_native never ran.  Synthesize the
+            # degenerate top-1 candidate set so greedy requests still get
+            # a well-formed c2e packet (width 1; the collector pads to the
+            # wire width K with -inf logits).
+            sidecar._lwd_last_cand_ids = sampled.unsqueeze(1)
+            sidecar._lwd_last_cand_logits = logits.gather(
+                1, sampled.unsqueeze(1)
+            )
+        return sampled, processed_logprobs
+
     def set_q_event(self, q, event):
         self.topk_topp_sampler.set_q_event(q, event)
 

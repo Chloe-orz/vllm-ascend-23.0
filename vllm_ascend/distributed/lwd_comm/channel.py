@@ -207,6 +207,15 @@ class LwdChannel:
                     "(never-posted) request(s); lowest missing seqno=%s",
                     self.channel_type.value, len(self._held), self._next_seqno,
                 )
+                # Fail the deferred futures before dropping them: their
+                # waiters must not hang until the readiness-gate timeout.
+                for _, held_future in self._held.values():
+                    held_future._finalize(
+                        error=RuntimeError(
+                            f"channel {self.channel_type.value} shut down "
+                            "with the request still held (never posted)"
+                        )
+                    )
                 self._held.clear()
             with self._lock:
                 pending = list(self._pending)
@@ -248,6 +257,11 @@ class LwdChannel:
         tensor: torch.Tensor | None = None
         keepalive: Any = None
         stream = self._stream()
+        # Capture the producer stream BEFORE entering the channel-stream
+        # context: inside the `with` block torch.npu.current_stream() IS
+        # the channel stream, so waiting on it there would be a no-op
+        # self-wait and the send could read a half-written snapshot.
+        producer_stream = torch.npu.current_stream()
         # The wire op MUST be issued on the channel stream: seqno
         # ordering only holds if every op on this FIFO lands on the same
         # device stream (HCCL P2P has no tags; matching order = device
@@ -256,9 +270,9 @@ class LwdChannel:
             self._order_after(predecessor)
             if req.op == "send":
                 assert req.tensor is not None, "send requires tensor"
-                # The snapshot was produced on the producer's (current)
-                # stream; order the channel stream after it.
-                stream.wait_stream(torch.npu.current_stream())
+                # The snapshot was produced on the producer stream; order
+                # the channel stream after it.
+                stream.wait_stream(producer_stream)
                 handles = self._wire_send(req)
                 keepalive = req.tensor
             else:

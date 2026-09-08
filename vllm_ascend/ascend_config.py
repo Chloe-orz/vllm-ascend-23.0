@@ -931,8 +931,12 @@ class LwdConfig:
         self._validate()
 
     def __getattr__(self, key):
-        if key in self.config:
-            return self.config[key]
+        # Go through __dict__ directly: during unpickling/copying
+        # ``config`` may not exist yet, and ``self.config`` here would
+        # re-enter __getattr__ and recurse.
+        config = self.__dict__.get("config")
+        if config is not None and key in config:
+            return config[key]
         raise AttributeError(f"LwdConfig has no attribute '{key}'")
 
     @property
