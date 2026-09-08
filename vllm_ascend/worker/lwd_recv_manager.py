@@ -44,7 +44,6 @@ from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommReques
 from vllm_ascend.worker.lwd_down_packet import (
     LwdDownPacket,
     lwd_down_wire_num_elements,
-    lwd_packet_num_elements,
     lwd_request_fingerprint,
     unpack_lwd_down_packet,
 )
@@ -117,9 +116,8 @@ class _LwdDuplexRecvManagerBase:
 
     _CHANNEL: LwdChannelType
 
-    def __init__(self, hidden_size: int, topk_k: int) -> None:
+    def __init__(self, hidden_size: int) -> None:
         self._hidden_size = hidden_size
-        self._topk_k = topk_k
         self._reqs: dict[str, _ReqChunks] = {}
         # Requests dropped BEFORE their notification arrived: a late
         # expect_* for these must skip the seqno without posting a recv,
@@ -409,15 +407,15 @@ class LwdEdgeDownRecvManager(_LwdDuplexRecvManagerBase):
     """Edge side, DOWN channel, STREAMING mode (v2.5/v2.6).
 
     The cloud sends one fixed-size packet per request per step (after
-    prefill and after every decode step) plus exactly one FIN per
-    request.  **Negotiation lives in the ZMQ control plane (owned by
-    another module): before every cloud send, the control plane notifies
-    the edge, which calls ``expect_packet`` to pre-post the recv.**  This
-    manager therefore has NO ring/demux machinery — it is purely
-    notification-driven:
+    prefill and after every decode step); there is NO FIN packet —
+    request termination is control-plane-driven.  **Negotiation lives in
+    the ZMQ control plane (owned by another module): before every cloud
+    send, the control plane notifies the edge, which calls
+    ``expect_packet`` to pre-post the recv.**  This manager therefore
+    has NO ring/demux machinery — it is purely notification-driven:
 
       * every wire packet has the same fixed size
-        (``lwd_down_wire_num_elements(H, K, R_max)``), so the
+        (``lwd_down_wire_num_elements(H, R_max)``), so the
         notification only needs ``(req_id, seqno)``;
       * per-packet seqno comes from the control plane (channel-global,
         dense per direction; abort holes are skipped via ``drop``);
@@ -433,11 +431,11 @@ class LwdEdgeDownRecvManager(_LwdDuplexRecvManagerBase):
 
     _CHANNEL = LwdChannelType.DOWN
 
-    def __init__(self, hidden_size: int, topk_k: int, max_rows: int = 1) -> None:
-        super().__init__(hidden_size, topk_k)
+    def __init__(self, hidden_size: int, max_rows: int = 1) -> None:
+        super().__init__(hidden_size)
         self._max_rows = max_rows
         self._wire_num_elements = lwd_down_wire_num_elements(
-            hidden_size, topk_k, max_rows
+            hidden_size, max_rows
         )
         # Per-request internal packet counter: each expect_packet gets the
         # next slot, so multiple outstanding packets per request are
@@ -446,7 +444,7 @@ class LwdEdgeDownRecvManager(_LwdDuplexRecvManagerBase):
 
     def expect_packet(self, req_id: str, seqno: int) -> None:
         """Called on the control-plane notification preceding every
-        cloud send (data or FIN).  Idempotent per (req_id, seqno) at the
+        cloud send.  Idempotent per (req_id, seqno) at the
         channel level; the wire size is fixed and config-derived."""
         with self._lock:
             pkt_idx = self._next_pkt_idx.get(req_id, 0)
@@ -474,7 +472,6 @@ class LwdEdgeDownRecvManager(_LwdDuplexRecvManagerBase):
             buf,
             expected_fingerprint=lwd_request_fingerprint(req_id),
             max_rows=self._max_rows,
-            max_topk_k=self._topk_k,
             hidden_size=self._hidden_size,
         )
         return packet
@@ -499,7 +496,6 @@ _MANAGER_LOCK = threading.Lock()
 
 def init_lwd_recv_managers(
     hidden_size: int,
-    topk_k: int,
     max_rows: int = 1,
 ) -> None:
     """Create both managers (idempotent).  Each process uses only the
@@ -509,13 +505,13 @@ def init_lwd_recv_managers(
     global _UP_MANAGER, _DOWN_MANAGER
     with _MANAGER_LOCK:
         if _UP_MANAGER is None:
-            _UP_MANAGER = LwdCloudUpRecvManager(hidden_size, topk_k)
+            _UP_MANAGER = LwdCloudUpRecvManager(hidden_size)
             _DOWN_MANAGER = LwdEdgeDownRecvManager(
-                hidden_size, topk_k, max_rows=max_rows
+                hidden_size, max_rows=max_rows
             )
             logger.info(
-                "[lwd-recv] managers initialized (H=%d, K=%d, R_max=%d)",
-                hidden_size, topk_k, max_rows,
+                "[lwd-recv] managers initialized (H=%d, R_max=%d)",
+                hidden_size, max_rows,
             )
 
 

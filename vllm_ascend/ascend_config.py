@@ -903,9 +903,6 @@ class LwdConfig:
         # the wire layer falls back to the 2-rank PP-group convention.
         "edge_global_rank": None,
         "cloud_global_rank": None,
-        # topk width of the cloud->edge combined packet (wire contract,
-        # fixed per deployment so the per-row stride H+3K is constant).
-        "topk_k": 20,
     }
 
     def __init__(self, user_config: dict | None = None):
@@ -951,9 +948,6 @@ class LwdConfig:
         if self.role not in ("edge", "cloud"):
             raise ValueError(
                 f"lwd_config.role must be 'edge' or 'cloud'; got {self.role!r}")
-        if not isinstance(self.topk_k, int) or self.topk_k <= 0:
-            raise ValueError(
-                f"lwd_config.topk_k must be a positive int; got {self.topk_k!r}")
 
 
 _ASCEND_CONFIG: AscendConfig | None = None

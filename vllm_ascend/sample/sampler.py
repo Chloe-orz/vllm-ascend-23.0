@@ -81,35 +81,6 @@ class AscendSampler(Sampler):
             HAS_TRITON,
         )
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-        logprobs_mode_override=None,
-    ):
-        # prefill_only edge-cloud c2e packet: pin the sidecar semantics to
-        # "THIS step's candidates or None".  Without the entry clear, an
-        # all-greedy batch (which returns from Sampler.sample before ever
-        # entering forward_native) would leave the PREVIOUS step's
-        # candidate set in place, and the collector would pair it with
-        # this step's hidden states.
-        sidecar = self.topk_topp_sampler
-        sidecar._lwd_last_cand_ids = None
-        sidecar._lwd_last_cand_logits = None
-        sampled, processed_logprobs = super().sample(
-            logits, sampling_metadata, logprobs_mode_override
-        )
-        if sampling_metadata.all_greedy and sidecar._lwd_last_cand_ids is None:
-            # All-greedy batch: forward_native never ran.  Synthesize the
-            # degenerate top-1 candidate set so greedy requests still get
-            # a well-formed c2e packet (width 1; the collector pads to the
-            # wire width K with -inf logits).
-            sidecar._lwd_last_cand_ids = sampled.unsqueeze(1)
-            sidecar._lwd_last_cand_logits = logits.gather(
-                1, sampled.unsqueeze(1)
-            )
-        return sampled, processed_logprobs
-
     def set_q_event(self, q, event):
         self.topk_topp_sampler.set_q_event(q, event)
 
@@ -159,12 +130,6 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         super().__init__(**kwargs)
         self.apply_top_k_top_p = apply_top_k_top_p
         self.top_k = None
-        # prefill_only edge-cloud c2e packet: sidecar exposing the last
-        # step's topk candidates (references only, zero-copy).  Read and
-        # consumed by the runner's collection point; None when the last
-        # call did not produce candidates.
-        self._lwd_last_cand_ids: torch.Tensor | None = None
-        self._lwd_last_cand_logits: torch.Tensor | None = None
 
     def set_q_event(self, q, event):
         # Pass in async exponential results.
@@ -187,10 +152,6 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 "[sample/sampler] BATCH_INVARIANT mode enabled, "
                 "falling back to vLLM native top-k/top-p implementation.",
             )
-            # Clear the sidecar so a stale candidate set from a previous
-            # reduce-sample step is never collected.
-            self._lwd_last_cand_ids = None
-            self._lwd_last_cand_logits = None
             return super().forward_native(logits, generators, k, p)
 
         if get_ascend_config().enable_reduce_sample:
@@ -199,8 +160,6 @@ class AscendTopKTopPSampler(TopKTopPSampler):
                 "top-k/top-p with TP all-gather for distributed sampling.",
             )
             cand_logits, cand_idx = self.apply_top_k_top_p(logits, k, p, self.top_k)
-            self._lwd_last_cand_ids = cand_idx
-            self._lwd_last_cand_logits = cand_logits
             logits_to_return = None
             if self.logprobs_mode == "processed_logits":
                 logits_to_return = cand_logits
@@ -214,10 +173,6 @@ class AscendTopKTopPSampler(TopKTopPSampler):
             return next_token, logits_to_return
         else:
             logits = self.apply_top_k_top_p(logits, k, p)
-            # The fallback path computes no candidate set; clear the
-            # sidecar so a stale one is never collected.
-            self._lwd_last_cand_ids = None
-            self._lwd_last_cand_logits = None
             logits_to_return = None
             if self.logprobs_mode == "processed_logits":
                 logits_to_return = logits

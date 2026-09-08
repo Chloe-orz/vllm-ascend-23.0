@@ -550,7 +550,6 @@ class NPUWorker(WorkerBase):
                 )
             init_lwd_recv_managers(
                 self.model_config.get_hidden_size(),
-                self._lwd_cfg.topk_k,
                 max_rows=max_rows,
             )
             if self._lwd_cfg.is_cloud_node:

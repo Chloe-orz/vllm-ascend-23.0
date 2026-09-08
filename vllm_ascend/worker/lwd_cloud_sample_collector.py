@@ -1,18 +1,16 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """LwdCloudSampleCollector: cloud-side per-step packet builder for the
-DOWN stream (streaming mode, v2.5).
+DOWN stream (streaming mode, v2 rank-replay).
 
-Semantics changed from the v2.2 single-slot collector: there is NO
-accumulation at all — after prefill and after EVERY decode step, the
-step's three data items (final hidden rows / topk candidates /
+There is NO accumulation at all — after prefill and after EVERY decode
+step, the step's data items (final hidden rows / sampled ranks /
 num_accepted) are packed into one fixed-size wire packet per request
 and returned to the caller for immediate sending.  The only per-request
 state kept is ``num_prompt_tokens`` (packet header) and open/closed
 bookkeeping.
 
 Every request's DOWN stream is a sequence of fixed-size step packets;
-request finish/abort is signaled by the control plane (no FIN packet,
-removed in v2.6 as redundant with per-packet notification).
+request finish/abort is signaled by the control plane (no FIN packet).
 """
 
 from __future__ import annotations
@@ -20,7 +18,6 @@ from __future__ import annotations
 import threading
 
 import torch
-from vllm.logger import logger
 
 from vllm_ascend.worker.lwd_down_packet import (
     lwd_down_wire_num_elements,
@@ -39,19 +36,17 @@ class LwdCloudSampleCollector:
     def __init__(
         self,
         hidden_size: int,
-        topk_k: int,
         max_rows: int = 1,
         device: str = "npu",
     ) -> None:
         self._device = device
         self._hidden_size = hidden_size
-        self._topk_k = topk_k
         self._max_rows = max_rows
-        # Fixed on-the-wire size: every DOWN packet (data or FIN) has
-        # exactly this many bf16 elements, so the edge can pre-post a
-        # recv ring without per-step size knowledge.
+        # Fixed on-the-wire size: every DOWN packet has exactly this many
+        # bf16 elements, so the edge can pre-post a recv ring without
+        # per-step size knowledge.
         self._wire_num_elements = lwd_down_wire_num_elements(
-            hidden_size, topk_k, max_rows
+            hidden_size, max_rows
         )
         self._prompt_tokens: dict[str, int] = {}
         self._lock = threading.Lock()
@@ -81,9 +76,8 @@ class LwdCloudSampleCollector:
         req_ids: list[str],
         *,
         hidden_rows: torch.Tensor,          # [B, H] bf16
-        cand_ids: torch.Tensor,             # [B, W] int32/int64
-        cand_logits: torch.Tensor,          # [B, W]
-        num_accepted: torch.Tensor | None,  # [B] int32; None -> 0
+        ranks: torch.Tensor,                # [B] int32/int64
+        num_accepted: torch.Tensor | None = None,  # [B] int32; None -> 0
     ) -> dict[str, torch.Tensor]:
         """Pack this step's data for every request (streaming: one packet
         per request per step, sent immediately by the caller).
@@ -96,10 +90,8 @@ class LwdCloudSampleCollector:
             return packets
         B = len(req_ids)
         assert hidden_rows.shape[0] == B, (hidden_rows.shape, B)
-        assert cand_ids.shape[0] == B and cand_logits.shape[0] == B
-        cand_ids, cand_logits = self._normalize_candidates(
-            B, cand_ids, cand_logits
-        )
+        assert ranks.shape[0] == B
+        ranks = ranks.to(torch.int32)
         with self._lock:
             prompt_tokens = [self._prompt_tokens.get(r, 0) for r in req_ids]
         for i, req_id in enumerate(req_ids):
@@ -111,8 +103,7 @@ class LwdCloudSampleCollector:
             packets[req_id] = self._pack_one(
                 req_id,
                 hidden=hidden_rows[i : i + 1],
-                cand_ids=cand_ids[i : i + 1],
-                cand_logits=cand_logits[i : i + 1],
+                ranks=ranks[i : i + 1],
                 num_accepted=accepted,
                 prompt_tokens=prompt_tokens[i],
             )
@@ -123,8 +114,7 @@ class LwdCloudSampleCollector:
         req_id: str,
         *,
         hidden: torch.Tensor,        # [R, H], R = accepted+1 (spec verify)
-        cand_ids: torch.Tensor,      # [R, W]
-        cand_logits: torch.Tensor,   # [R, W]
+        ranks: torch.Tensor,         # [R] int32/int64
         num_accepted: int,
     ) -> torch.Tensor | None:
         """Single-request packet with variable row count (spec/MTP verify
@@ -134,9 +124,7 @@ class LwdCloudSampleCollector:
             raise ValueError(
                 f"row count {R} out of [1, {self._max_rows}] for {req_id!r}"
             )
-        cand_ids, cand_logits = self._normalize_candidates(
-            R, cand_ids, cand_logits
-        )
+        assert ranks.shape[0] == R
         with self._lock:
             prompt_tokens = self._prompt_tokens.get(req_id)
         if prompt_tokens is None:
@@ -144,8 +132,7 @@ class LwdCloudSampleCollector:
         return self._pack_one(
             req_id,
             hidden=hidden,
-            cand_ids=cand_ids,
-            cand_logits=cand_logits,
+            ranks=ranks.to(torch.int32),
             num_accepted=num_accepted,
             prompt_tokens=prompt_tokens,
         )
@@ -154,60 +141,18 @@ class LwdCloudSampleCollector:
     # Internal                                                            #
     # ------------------------------------------------------------------ #
 
-    def _normalize_candidates(
-        self,
-        B: int,
-        cand_ids: torch.Tensor,
-        cand_logits: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Normalize the candidate width to the fixed wire width K.
-
-        The sampler sidecar's width is dynamic per batch (request top_k,
-        or the full local vocab when unset) and, with TP>1, is the
-        PER-RANK-concatenation of each rank's local top-k — globally
-        unsorted.  Blindly truncating the first K entries would ship
-        rank-0-local candidates, not the global top-K, so reduce by
-        logit first: a top-K over the (logit, id) pairs is correct for
-        any layout of the sidecar.
-
-        Invalid candidates (masked by top-k/top-p as -inf, or absent
-        when the sidecar is narrower than K) are represented as
-        logit=-inf; the edge MUST ignore -inf-logit entries (wire
-        contract, see lwd_down_packet).  Zero-padding logits would be
-        indistinguishable from a real candidate for token id 0.
-        """
-        K = self._topk_k
-        W = cand_ids.shape[1]
-        if W >= K:
-            top = torch.topk(cand_logits.float(), k=K, dim=1)
-            return (
-                cand_ids.gather(1, top.indices).to(torch.int32),
-                top.values.to(torch.bfloat16),
-            )
-        pad_ids = torch.zeros(B, K - W, dtype=torch.int32,
-                              device=cand_ids.device)
-        pad_logits = torch.full((B, K - W), float("-inf"),
-                                dtype=torch.bfloat16,
-                                device=cand_logits.device)
-        return (
-            torch.cat([cand_ids.to(torch.int32), pad_ids], dim=1),
-            torch.cat([cand_logits.to(torch.bfloat16), pad_logits], dim=1),
-        )
-
     def _pack_one(
         self,
         req_id: str,
         *,
         hidden: torch.Tensor,
-        cand_ids: torch.Tensor,
-        cand_logits: torch.Tensor,
+        ranks: torch.Tensor,
         num_accepted: int,
         prompt_tokens: int,
     ) -> torch.Tensor:
         return pack_lwd_down_packet(
             hidden=hidden,
-            topk_ids=cand_ids,
-            topk_logits=cand_logits,
+            ranks=ranks,
             num_prompt_tokens=prompt_tokens,
             num_accepted=num_accepted,
             request_id=req_id,
@@ -228,7 +173,3 @@ class LwdCloudSampleCollector:
     @property
     def wire_num_elements(self) -> int:
         return self._wire_num_elements
-
-    @property
-    def topk_k(self) -> int:
-        return self._topk_k

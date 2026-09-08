@@ -344,14 +344,6 @@ class NPUModelRunner(GPUModelRunner):
                 LwdCloudSampleCollector,
             )
 
-            if not self.ascend_config.enable_reduce_sample:
-                # The topk sidecar only exists on the reduce-sample path;
-                # without it the c2e packet would silently never be sent
-                # and the edge would only fail on a 30s readiness timeout.
-                raise RuntimeError(
-                    "prefill_only cloud requires enable_reduce_sample=True "
-                    "(the topk sidecar lives on that path)"
-                )
             max_rows = 1
             if self.speculative_config is not None:
                 max_rows = self.speculative_config.num_speculative_tokens + 1
@@ -360,7 +352,6 @@ class NPUModelRunner(GPUModelRunner):
             if get_tp_group().is_first_rank:
                 self.lwd_cloud_collector = LwdCloudSampleCollector(
                     hidden_size=self.model_config.get_hidden_size(),
-                    topk_k=self.ascend_config.lwd_config.topk_k,
                     max_rows=max_rows,
                 )
         set_weight_prefetch_method(self.ascend_config.weight_prefetch_config)
@@ -2654,22 +2645,26 @@ class NPUModelRunner(GPUModelRunner):
         sampler_output,
     ) -> None:
         """Streaming collect+send (cloud): after prefill and after EVERY
-        decode step, pack this step's three data items per request and
-        isend each packet DOWN immediately.
+        decode step, pack this step's data per request and isend each
+        packet DOWN immediately.
 
-        Non-spec: one row per request (R=1, accepted=0), candidates from
-        the sampler sidecar (reduce-sample path).
+        Packet content per row (v2 rank-replay): the position's pre-
+        lm_head hidden + the GLOBAL RANK of the sampled token in the
+        step's logits + num_accepted.  The token id itself is never on
+        the wire — the edge replays it via hidden -> local lm_head ->
+        pick the rank-th largest.
+
+        Non-spec: one row per request (R=1, accepted=0).
         Spec/MTP verify steps: R = accepted+1 rows per request — the
         accepted rows are a PREFIX of the request's verify segment
         (accepted draft positions + bonus row are contiguous), segments
-        delimited by cu_num_sampled_tokens; candidates are a fresh top-K
-        over this step's target logits rows (the rejection sampler's
-        per-position candidate set is not exposed; target logits are the
-        same distribution the rejection sampler verified against).
+        delimited by cu_num_sampled_tokens; each row's rank is computed
+        against that row's target logits (the distribution the
+        rejection sampler verified against).
         """
         collector = self.lwd_cloud_collector
         # Fast path: no remote-embeds request in flight -> zero per-step
-        # cost (no candidate-width normalization, no row filtering).
+        # cost (no rank computation, no row filtering).
         if collector.num_live_slots() == 0:
             return
         from vllm_ascend.distributed.lwd_comm.service import (
@@ -2695,32 +2690,61 @@ class NPUModelRunner(GPUModelRunner):
 
         if spec_decode_metadata is None:
             self._lwd_collect_nonspec(
-                collector, sample_hidden_states, _send)
+                collector, sample_hidden_states, logits, sampler_output, _send)
             return
         self._lwd_collect_spec(
             collector, sample_hidden_states, logits,
             spec_decode_metadata, sampler_output, _send)
 
-    def _lwd_collect_nonspec(self, collector, sample_hidden_states, send) -> None:
-        inner_sampler = getattr(self.sampler, "topk_topp_sampler", None)
-        cand_ids = getattr(inner_sampler, "_lwd_last_cand_ids", None)
-        cand_logits = getattr(inner_sampler, "_lwd_last_cand_logits", None)
-        if cand_ids is None or cand_logits is None:
+    def _lwd_sampled_valid_mask(self, num_reqs: int):
+        """Per-row mask: whether the request's last token was scheduled
+        this step (i.e. its sampled token is real, not a discarded
+        partial-prefill artifact).  Streaming sends every step
+        immediately, so discarded rows MUST be filtered here — the old
+        single-slot design masked them via last-write-wins, the stream
+        cannot."""
+        return ~self.discard_request_mask.np[:num_reqs]
+
+    @staticmethod
+    def _lwd_global_ranks(logits_rows: torch.Tensor,
+                          sampled_ids: torch.Tensor) -> torch.Tensor:
+        """Global rank of each sampled token: the number of vocab
+        entries with a logit STRICTLY greater than the sampled token's
+        logit.  Monotone-transform invariant (temperature-safe); the
+        edge re-resolves it to a token via its own lm_head ranking."""
+        lg = logits_rows.float()
+        thresh = lg.gather(1, sampled_ids.long().unsqueeze(1))
+        return (lg > thresh).sum(dim=1).to(torch.int32)
+
+    def _lwd_collect_nonspec(self, collector, sample_hidden_states, logits,
+                             sampler_output, send) -> None:
+        if logits is None:
             logger.warning_once(
-                "[lwd] sampler sidecar unavailable (enable_reduce_sample "
-                "off?); skipping c2e stream for this step"
+                "[lwd] step without logits; skipping c2e stream"
             )
             return
+        if lmhead_tp_enable():
+            # With lmhead TP the logits here are vocab SHARDS — a global
+            # rank needs a cross-rank reduction (not implemented).  Skip
+            # rather than ship shard-local ranks.
+            logger.warning_once(
+                "[lwd] rank collection is not supported with lmhead TP "
+                "(logits are vocab shards); skipping c2e stream"
+            )
+            return
+        sampled = sampler_output.sampled_token_ids  # [B, 1]
         batch_req_ids = self.input_batch.req_ids
-        idx = [i for i, r in enumerate(batch_req_ids) if collector.has_slot(r)]
+        valid = self._lwd_sampled_valid_mask(len(batch_req_ids))
+        idx = [i for i, r in enumerate(batch_req_ids)
+               if collector.has_slot(r) and valid[i]]
         if not idx:
             return
         req_ids = [batch_req_ids[i] for i in idx]
+        ranks = self._lwd_global_ranks(logits[idx], sampled[idx][:, 0])
         packets = collector.build_step_packets(
             req_ids,
             hidden_rows=sample_hidden_states[idx],
-            cand_ids=cand_ids[idx],
-            cand_logits=cand_logits[idx],
+            ranks=ranks,
             num_accepted=None,
         )
         for req_id in req_ids:
@@ -2737,13 +2761,12 @@ class NPUModelRunner(GPUModelRunner):
             return
         tp = get_tp_group()
         if tp.world_size > 1:
-            # The candidates here would be a top-K over THIS rank's vocab
-            # shard (lmhead TP) — wrong ids and no global reduction.
-            # (The non-spec path avoids this via the reduce-sample
-            # sidecar.)  Skip rather than ship local top-K.
+            # The ranks here would be computed over THIS rank's vocab
+            # shard (lmhead TP) — not a global rank.  Skip rather than
+            # ship shard-local ranks.
             logger.warning_once(
                 "[lwd] spec collection is not supported with lmhead TP>1 "
-                "(candidates would be rank-local); skipping c2e stream"
+                "(ranks would be shard-local); skipping c2e stream"
             )
             return
         sampled = sampler_output.sampled_token_ids  # [B, max_spec_len+1], -1 = invalid
@@ -2756,16 +2779,16 @@ class NPUModelRunner(GPUModelRunner):
         batch_req_ids = self.input_batch.req_ids
         assert sampled.shape[0] == len(batch_req_ids), (
             sampled.shape, len(batch_req_ids))
+        valid = self._lwd_sampled_valid_mask(len(batch_req_ids))
         # accepted+1 == number of valid (non -1) entries per row; one D2H
         # for the whole batch per spec step.
         counts = (sampled != -1).sum(dim=1)
         counts_cpu = counts.tolist()
         cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
-        K = collector.topk_k
         seg_start = 0
         for i, req_id in enumerate(batch_req_ids):
             seg_end = cu[i]
-            if not collector.has_slot(req_id):
+            if not collector.has_slot(req_id) or not valid[i]:
                 seg_start = seg_end
                 continue
             rows = int(counts_cpu[i])          # accepted+1
@@ -2773,14 +2796,12 @@ class NPUModelRunner(GPUModelRunner):
                 seg_start = seg_end
                 continue
             seg_hidden = sample_hidden_states[seg_start: seg_start + rows]
-            seg_logits = logits[seg_start: seg_start + rows].float()
-            w = min(K, seg_logits.shape[1])
-            top = torch.topk(seg_logits, k=w, dim=1)
+            seg_logits = logits[seg_start: seg_start + rows]
+            seg_sampled = sampled[i, :rows]
             packet = collector.build_step_packet(
                 req_id,
                 hidden=seg_hidden,
-                cand_ids=top.indices.to(torch.int32),
-                cand_logits=top.values.to(torch.bfloat16),
+                ranks=self._lwd_global_ranks(seg_logits, seg_sampled),
                 num_accepted=rows - 1,
             )
             send(req_id, packet)
@@ -2789,10 +2810,13 @@ class NPUModelRunner(GPUModelRunner):
     def lwd_edge_resample(self, pkt) -> None:
         """Edge-side interface reservation (NOT implemented this period).
 
-        Contract: pkt.hidden -> local lm_head -> logits [R, vocab];
-        sampler external-candidate injection (cloud topk constrains the
-        candidate set, edge RNG draws the final token);
-        pkt.num_accepted -> edge scheduler bookkeeping.
+        Contract (v2 rank-replay): pkt.hidden -> local lm_head ->
+        logits [R, vocab]; per row, the token with exactly pkt.ranks[r]
+        entries above it (argsort descending, index ranks[r]) IS the
+        cloud's sampled token; pkt.num_accepted -> edge scheduler
+        bookkeeping.  Rank is temperature-invariant; reordering logits
+        processors (penalties / grammar masks) break replay and must be
+        absent or mirrored on the edge.
         """
         raise NotImplementedError(
             "lwd_edge_resample is a P2-phase interface reservation"
