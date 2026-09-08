@@ -2735,13 +2735,32 @@ class NPUModelRunner(GPUModelRunner):
                 "[lwd] spec step without logits; skipping c2e stream"
             )
             return
+        tp = get_tp_group()
+        if tp.world_size > 1:
+            # The candidates here would be a top-K over THIS rank's vocab
+            # shard (lmhead TP) — wrong ids and no global reduction.
+            # (The non-spec path avoids this via the reduce-sample
+            # sidecar.)  Skip rather than ship local top-K.
+            logger.warning_once(
+                "[lwd] spec collection is not supported with lmhead TP>1 "
+                "(candidates would be rank-local); skipping c2e stream"
+            )
+            return
         sampled = sampler_output.sampled_token_ids  # [B, max_spec_len+1], -1 = invalid
+        if sampled is None or sampled.dim() != 2:
+            logger.warning_once(
+                "[lwd] unexpected sampled_token_ids shape in spec step; "
+                "skipping c2e stream"
+            )
+            return
+        batch_req_ids = self.input_batch.req_ids
+        assert sampled.shape[0] == len(batch_req_ids), (
+            sampled.shape, len(batch_req_ids))
         # accepted+1 == number of valid (non -1) entries per row; one D2H
         # for the whole batch per spec step.
         counts = (sampled != -1).sum(dim=1)
         counts_cpu = counts.tolist()
         cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
-        batch_req_ids = self.input_batch.req_ids
         K = collector.topk_k
         seg_start = 0
         for i, req_id in enumerate(batch_req_ids):

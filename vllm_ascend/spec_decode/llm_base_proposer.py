@@ -1369,24 +1369,55 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         replaced by the received embeddings).
 
         Returns None (caller falls back to the token-id path) when no
-        provider is configured or any request lacks received embeds.
+        provider is configured, any request lacks received embeds, the
+        request is not in its full-prompt first pass (chunked prefill),
+        the draft model does not consume ``inputs_embeds``, or a CP
+        (pcp) manager rewrites first-pass inputs (different layout).
         """
         provider = self._lwd_prompt_embeds_provider
         runner = self.runner
         if provider is None or runner is None:
             return None
+        # The draft model must actually consume inputs_embeds (checked
+        # once); otherwise the token-id path stays authoritative.
+        accepts = getattr(self, "_lwd_accepts_inputs_embeds", None)
+        if accepts is None:
+            import inspect
+
+            try:
+                accepts = (
+                    "inputs_embeds"
+                    in inspect.signature(self.model.forward).parameters
+                )
+            except (TypeError, ValueError):
+                accepts = False
+            self._lwd_accepts_inputs_embeds = accepts
+        if not accepts:
+            return None
+        # CP (pcp) first-pass rewriting changes the token layout
+        # (all-gather); the shift alignment below no longer holds.
+        if getattr(runner, "pcp_manager", None) is not None:
+            return None
         req_ids = list(runner.input_batch.req_ids)
         if not req_ids:
+            return None
+        # Chunk base per request: only a FULL-prompt first pass (base == 0
+        # for every request) satisfies the "position j holds prompt
+        # token j+1" alignment; chunked prefill shifts the window.
+        computed = getattr(runner.input_batch, "num_computed_tokens_cpu", None)
+        if computed is None:
             return None
         qsl = (cad.query_start_loc_cpu.tolist()
                if getattr(cad, "query_start_loc_cpu", None) is not None
                else cad.query_start_loc.tolist())
-        hidden = self.hidden_size
         out = self.inputs_embeds  # persistent buffer (graph-safe)
         wrote_any = False
         for i, req_id in enumerate(req_ids):
             s, e = int(qsl[i]), int(qsl[i + 1])
             seg_len = e - s
+            base = int(computed[i]) if i < len(computed) else 0
+            if base != 0:
+                return None  # chunked prefill: alignment breaks -> fallback
             prompt_embeds = provider(req_id)  # [N_i, H] or None
             if prompt_embeds is None or prompt_embeds.shape[0] < seg_len:
                 return None  # fallback: token-id path for the whole batch
