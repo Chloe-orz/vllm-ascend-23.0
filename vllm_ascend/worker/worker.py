@@ -552,6 +552,34 @@ class NPUWorker(WorkerBase):
                 self._lwd_cfg.topk_k,
                 max_rows=max_rows,
             )
+            if self._lwd_cfg.is_cloud_node:
+                # Wire the draft proposer's first-pass prompt-embeds
+                # provider (task: organize draft first-pass inputs from
+                # the received embeddings, not token-id lookups).
+                # Degradation contract: provider returns None when the
+                # request's chunks were already released -> the proposer
+                # falls back to the token-id path.  Spec deployments must
+                # defer release_upto until the draft first pass (or
+                # request finish) for full coverage.
+                from vllm_ascend.spec_decode.llm_base_proposer import (
+                    AscendSpecDecodeBaseProposer,
+                )
+                from vllm_ascend.worker.lwd_recv_manager import (
+                    get_lwd_up_recv_manager,
+                )
+
+                def _lwd_prompt_embeds_provider(req_id: str):
+                    mgr = get_lwd_up_recv_manager()
+                    if not mgr.has_pending(req_id):
+                        return None
+                    try:
+                        return mgr.wait_embeds(req_id)
+                    except Exception:
+                        return None
+
+                AscendSpecDecodeBaseProposer.set_lwd_prompt_embeds_provider(
+                    _lwd_prompt_embeds_provider
+                )
 
     # ------------------------------------------------------------------ #
     # prefill_only LWD data plane                                  #

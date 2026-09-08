@@ -2435,11 +2435,14 @@ class NPUModelRunner(GPUModelRunner):
         with record_function_or_nullcontext("sample_token"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        # prefill_only cloud: collect the c2e packet's three data items at
-        # this single call site (overwrite-in-place; only the last decode
-        # step survives).  Non-spec path only — spec/MTP is a P3 item.
-        if self.lwd_cloud_collector is not None and spec_decode_metadata is None:
-            self._lwd_cloud_collect_step(scheduler_output, sample_hidden_states)
+        # prefill_only cloud: pack and stream this step's c2e data per
+        # request — non-spec (one row per request) AND spec/MTP (verify
+        # steps, R = accepted+1 rows per request).
+        if self.lwd_cloud_collector is not None:
+            self._lwd_cloud_collect_step(
+                scheduler_output, sample_hidden_states, logits,
+                spec_decode_metadata, sampler_output,
+            )
 
         if self.need_accepted_tokens:
             if self.sampling_done_event is None:
@@ -2646,19 +2649,59 @@ class NPUModelRunner(GPUModelRunner):
         self,
         scheduler_output: "SchedulerOutput",
         sample_hidden_states: torch.Tensor,
+        logits: torch.Tensor | None,
+        spec_decode_metadata,
+        sampler_output,
     ) -> None:
-        """Streaming collect+send (cloud, non-spec): after prefill and
-        after EVERY decode step, pack this step's three data items per
-        request and isend each packet DOWN immediately.  Sources:
-        sample_hidden_states (execute_model_state), the sampler sidecar,
-        and num_accepted (None for non-spec -> 0).  Only the TP wire
-        endpoint (rank 0) holds a collector and sends; other ranks skip
-        (collector is None there)."""
+        """Streaming collect+send (cloud): after prefill and after EVERY
+        decode step, pack this step's three data items per request and
+        isend each packet DOWN immediately.
+
+        Non-spec: one row per request (R=1, accepted=0), candidates from
+        the sampler sidecar (reduce-sample path).
+        Spec/MTP verify steps: R = accepted+1 rows per request — the
+        accepted rows are a PREFIX of the request's verify segment
+        (accepted draft positions + bonus row are contiguous), segments
+        delimited by cu_num_sampled_tokens; candidates are a fresh top-K
+        over this step's target logits rows (the rejection sampler's
+        per-position candidate set is not exposed; target logits are the
+        same distribution the rejection sampler verified against).
+        """
         collector = self.lwd_cloud_collector
         # Fast path: no remote-embeds request in flight -> zero per-step
         # cost (no candidate-width normalization, no row filtering).
         if collector.num_live_slots() == 0:
             return
+        from vllm_ascend.distributed.lwd_comm.service import (
+            get_lwd_comm_service,
+        )
+        from vllm_ascend.distributed.lwd_comm.types import (
+            LwdChannelType,
+            LwdCommRequest,
+        )
+
+        def _send(req_id: str, packet) -> None:
+            if packet is None:
+                return
+            get_lwd_comm_service().submit_send(
+                LwdCommRequest(
+                    channel=LwdChannelType.DOWN,
+                    op="send",
+                    num_elements=packet.numel(),
+                    tensor=packet,
+                    seqno=self._next_lwd_down_seqno(),
+                )
+            )
+
+        if spec_decode_metadata is None:
+            self._lwd_collect_nonspec(
+                collector, sample_hidden_states, _send)
+            return
+        self._lwd_collect_spec(
+            collector, sample_hidden_states, logits,
+            spec_decode_metadata, sampler_output, _send)
+
+    def _lwd_collect_nonspec(self, collector, sample_hidden_states, send) -> None:
         inner_sampler = getattr(self.sampler, "topk_topp_sampler", None)
         cand_ids = getattr(inner_sampler, "_lwd_last_cand_ids", None)
         cand_logits = getattr(inner_sampler, "_lwd_last_cand_logits", None)
@@ -2668,11 +2711,6 @@ class NPUModelRunner(GPUModelRunner):
                 "off?); skipping c2e stream for this step"
             )
             return
-        # Rows of sample_hidden_states/cand_* follow input_batch order
-        # (this runner's logits_indices covers every input-batch row).
-        # Collect ONLY registered requests: the top-K normalization in
-        # build_step_packets is O(B x W) with W up to the full vocab, so
-        # running it on unregistered traffic is pure waste.
         batch_req_ids = self.input_batch.req_ids
         idx = [i for i, r in enumerate(batch_req_ids) if collector.has_slot(r)]
         if not idx:
@@ -2685,27 +2723,49 @@ class NPUModelRunner(GPUModelRunner):
             cand_logits=cand_logits[idx],
             num_accepted=None,
         )
-        from vllm_ascend.distributed.lwd_comm.service import (
-            get_lwd_comm_service,
-        )
-        from vllm_ascend.distributed.lwd_comm.types import (
-            LwdChannelType,
-            LwdCommRequest,
-        )
-
         for req_id in req_ids:
-            packet = packets.get(req_id)
-            if packet is None:
-                continue
-            get_lwd_comm_service().submit_send(
-                LwdCommRequest(
-                    channel=LwdChannelType.DOWN,
-                    op="send",
-                    num_elements=packet.numel(),
-                    tensor=packet,
-                    seqno=self._next_lwd_down_seqno(),
-                )
+            send(req_id, packets.get(req_id))
+
+    def _lwd_collect_spec(
+        self, collector, sample_hidden_states, logits,
+        spec_decode_metadata, sampler_output, send,
+    ) -> None:
+        if logits is None:
+            logger.warning_once(
+                "[lwd] spec step without logits; skipping c2e stream"
             )
+            return
+        sampled = sampler_output.sampled_token_ids  # [B, max_spec_len+1], -1 = invalid
+        # accepted+1 == number of valid (non -1) entries per row; one D2H
+        # for the whole batch per spec step.
+        counts = (sampled != -1).sum(dim=1)
+        counts_cpu = counts.tolist()
+        cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
+        batch_req_ids = self.input_batch.req_ids
+        K = collector.topk_k
+        seg_start = 0
+        for i, req_id in enumerate(batch_req_ids):
+            seg_end = cu[i]
+            if not collector.has_slot(req_id):
+                seg_start = seg_end
+                continue
+            rows = int(counts_cpu[i])          # accepted+1
+            if rows < 1:
+                seg_start = seg_end
+                continue
+            seg_hidden = sample_hidden_states[seg_start: seg_start + rows]
+            seg_logits = logits[seg_start: seg_start + rows].float()
+            w = min(K, seg_logits.shape[1])
+            top = torch.topk(seg_logits, k=w, dim=1)
+            packet = collector.build_step_packet(
+                req_id,
+                hidden=seg_hidden,
+                cand_ids=top.indices.to(torch.int32),
+                cand_logits=top.values.to(torch.bfloat16),
+                num_accepted=rows - 1,
+            )
+            send(req_id, packet)
+            seg_start = seg_end
 
     def lwd_edge_resample(self, pkt) -> None:
         """Edge-side interface reservation (NOT implemented this period).

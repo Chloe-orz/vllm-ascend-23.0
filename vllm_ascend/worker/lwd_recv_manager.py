@@ -501,22 +501,21 @@ def init_lwd_recv_managers(
     hidden_size: int,
     topk_k: int,
     max_rows: int = 1,
-    ring_size: int = 8,
 ) -> None:
     """Create both managers (idempotent).  Each process uses only the
     one matching its role, but creating both keeps init trivial.
-    ``max_rows`` = num_speculative_tokens + 1 (1 when spec is off);
-    ``ring_size`` = anonymous recv ring depth on the DOWN channel."""
+    ``max_rows`` = num_speculative_tokens + 1 (1 when spec is off) —
+    the fixed DOWN wire size basis."""
     global _UP_MANAGER, _DOWN_MANAGER
     with _MANAGER_LOCK:
         if _UP_MANAGER is None:
             _UP_MANAGER = LwdCloudUpRecvManager(hidden_size, topk_k)
             _DOWN_MANAGER = LwdEdgeDownRecvManager(
-                hidden_size, topk_k, max_rows=max_rows, ring_size=ring_size
+                hidden_size, topk_k, max_rows=max_rows
             )
             logger.info(
-                "[lwd-recv] managers initialized (H=%d, K=%d, R_max=%d, ring=%d)",
-                hidden_size, topk_k, max_rows, ring_size,
+                "[lwd-recv] managers initialized (H=%d, K=%d, R_max=%d)",
+                hidden_size, topk_k, max_rows,
             )
 
 

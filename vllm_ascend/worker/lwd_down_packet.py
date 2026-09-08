@@ -156,9 +156,9 @@ def pack_lwd_down_packet(
     ).to(device=hidden.device)
     buf[:LWD_HEADER_BF16].view(torch.int32).copy_(header)
 
-    # payload: R rows x S
+    # payload: R rows x S (the wire buffer may be padded to R_max rows)
     S = lwd_row_stride(H, K)
-    rows = buf[LWD_HEADER_BF16:].view(R, S)
+    rows = buf[LWD_HEADER_BF16:LWD_HEADER_BF16 + R * S].view(R, S)
     rows[:, :H].copy_(hidden)
     rows[:, H:H + 2 * K].copy_(topk_ids.view(torch.bfloat16))
     rows[:, H + 2 * K:H + 3 * K].copy_(topk_logits)

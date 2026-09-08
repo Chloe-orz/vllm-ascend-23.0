@@ -88,64 +88,131 @@ class LwdCloudSampleCollector:
         """Pack this step's data for every request (streaming: one packet
         per request per step, sent immediately by the caller).
 
-        The candidate width W is dynamic per batch (request top_k, or
-        ~vocab when unset) and is normalized to the fixed wire width K
-        (narrow -> zero-pad, wider -> truncate; top_k > K requests are
-        rejected at admission).
+        Non-spec fast path: exactly one row per request.  Spec/MTP verify
+        steps use ``build_step_packet`` (variable R = accepted+1 rows).
         """
         packets: dict[str, torch.Tensor] = {}
         if not req_ids:
             return packets
         B = len(req_ids)
         assert hidden_rows.shape[0] == B, (hidden_rows.shape, B)
-        # Normalize the candidate width to the fixed wire width K.
-        #
-        # The sampler sidecar's width is dynamic per batch (request top_k,
-        # or the full local vocab when unset) and, with TP>1, is the
-        # PER-RANK-concatenation of each rank's local top-k — globally
-        # unsorted.  Blindly truncating the first K entries would ship
-        # rank-0-local candidates, not the global top-K, so reduce by
-        # logit first: a top-K over the (logit, id) pairs is correct for
-        # any layout of the sidecar.
-        #
-        # Invalid candidates (masked by top-k/top-p as -inf, or absent
-        # when the sidecar is narrower than K) are represented as
-        # logit=-inf; the edge MUST ignore -inf-logit entries (wire
-        # contract, see lwd_down_packet).  Zero-padding logits would be
-        # indistinguishable from a real candidate for token id 0.
-        K = self._topk_k
-        W = cand_ids.shape[1]
-        if W >= K:
-            top = torch.topk(cand_logits.float(), k=K, dim=1)
-            cand_logits = top.values.to(torch.bfloat16)
-            cand_ids = cand_ids.gather(1, top.indices).to(torch.int32)
-        else:
-            pad_ids = torch.zeros(B, K - W, dtype=torch.int32,
-                                  device=cand_ids.device)
-            pad_logits = torch.full((B, K - W), float("-inf"),
-                                    dtype=torch.bfloat16,
-                                    device=cand_logits.device)
-            cand_ids = torch.cat([cand_ids.to(torch.int32), pad_ids], dim=1)
-            cand_logits = torch.cat(
-                [cand_logits.to(torch.bfloat16), pad_logits], dim=1)
+        assert cand_ids.shape[0] == B and cand_logits.shape[0] == B
+        cand_ids, cand_logits = self._normalize_candidates(
+            B, cand_ids, cand_logits
+        )
         with self._lock:
             prompt_tokens = [self._prompt_tokens.get(r, 0) for r in req_ids]
         for i, req_id in enumerate(req_ids):
             accepted = 0
             if num_accepted is not None:
                 # NOTE: per-request D2H here is acceptable in the spec
-                # path (P3); the non-spec default passes None (no sync).
+                # path; the non-spec default passes None (no sync).
                 accepted = int(num_accepted[i])
-            packets[req_id] = pack_lwd_down_packet(
+            packets[req_id] = self._pack_one(
+                req_id,
                 hidden=hidden_rows[i : i + 1],
-                topk_ids=cand_ids[i : i + 1],
-                topk_logits=cand_logits[i : i + 1],
-                num_prompt_tokens=prompt_tokens[i],
+                cand_ids=cand_ids[i : i + 1],
+                cand_logits=cand_logits[i : i + 1],
                 num_accepted=accepted,
-                request_id=req_id,
-                wire_num_elements=self._wire_num_elements,
+                prompt_tokens=prompt_tokens[i],
             )
         return packets
+
+    def build_step_packet(
+        self,
+        req_id: str,
+        *,
+        hidden: torch.Tensor,        # [R, H], R = accepted+1 (spec verify)
+        cand_ids: torch.Tensor,      # [R, W]
+        cand_logits: torch.Tensor,   # [R, W]
+        num_accepted: int,
+    ) -> torch.Tensor | None:
+        """Single-request packet with variable row count (spec/MTP verify
+        steps).  Returns None for unregistered requests."""
+        R = hidden.shape[0]
+        if R < 1 or R > self._max_rows:
+            raise ValueError(
+                f"row count {R} out of [1, {self._max_rows}] for {req_id!r}"
+            )
+        cand_ids, cand_logits = self._normalize_candidates(
+            R, cand_ids, cand_logits
+        )
+        with self._lock:
+            prompt_tokens = self._prompt_tokens.get(req_id)
+        if prompt_tokens is None:
+            return None
+        return self._pack_one(
+            req_id,
+            hidden=hidden,
+            cand_ids=cand_ids,
+            cand_logits=cand_logits,
+            num_accepted=num_accepted,
+            prompt_tokens=prompt_tokens,
+        )
+
+    # ------------------------------------------------------------------ #
+    # Internal                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _normalize_candidates(
+        self,
+        B: int,
+        cand_ids: torch.Tensor,
+        cand_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Normalize the candidate width to the fixed wire width K.
+
+        The sampler sidecar's width is dynamic per batch (request top_k,
+        or the full local vocab when unset) and, with TP>1, is the
+        PER-RANK-concatenation of each rank's local top-k — globally
+        unsorted.  Blindly truncating the first K entries would ship
+        rank-0-local candidates, not the global top-K, so reduce by
+        logit first: a top-K over the (logit, id) pairs is correct for
+        any layout of the sidecar.
+
+        Invalid candidates (masked by top-k/top-p as -inf, or absent
+        when the sidecar is narrower than K) are represented as
+        logit=-inf; the edge MUST ignore -inf-logit entries (wire
+        contract, see lwd_down_packet).  Zero-padding logits would be
+        indistinguishable from a real candidate for token id 0.
+        """
+        K = self._topk_k
+        W = cand_ids.shape[1]
+        if W >= K:
+            top = torch.topk(cand_logits.float(), k=K, dim=1)
+            return (
+                cand_ids.gather(1, top.indices).to(torch.int32),
+                top.values.to(torch.bfloat16),
+            )
+        pad_ids = torch.zeros(B, K - W, dtype=torch.int32,
+                              device=cand_ids.device)
+        pad_logits = torch.full((B, K - W), float("-inf"),
+                                dtype=torch.bfloat16,
+                                device=cand_logits.device)
+        return (
+            torch.cat([cand_ids.to(torch.int32), pad_ids], dim=1),
+            torch.cat([cand_logits.to(torch.bfloat16), pad_logits], dim=1),
+        )
+
+    def _pack_one(
+        self,
+        req_id: str,
+        *,
+        hidden: torch.Tensor,
+        cand_ids: torch.Tensor,
+        cand_logits: torch.Tensor,
+        num_accepted: int,
+        prompt_tokens: int,
+    ) -> torch.Tensor:
+        return pack_lwd_down_packet(
+            hidden=hidden,
+            topk_ids=cand_ids,
+            topk_logits=cand_logits,
+            num_prompt_tokens=prompt_tokens,
+            num_accepted=num_accepted,
+            request_id=req_id,
+            wire_num_elements=self._wire_num_elements,
+        )
 
     def num_live_slots(self) -> int:
         """Number of open (registered, not yet dropped) requests — the
@@ -161,3 +228,7 @@ class LwdCloudSampleCollector:
     @property
     def wire_num_elements(self) -> int:
         return self._wire_num_elements
+
+    @property
+    def topk_k(self) -> int:
+        return self._topk_k
