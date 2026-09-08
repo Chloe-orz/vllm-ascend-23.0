@@ -5397,10 +5397,13 @@ class NPUModelRunner(GPUModelRunner):
                     and "mrope_positions" in recv_intermediate_tensors.tensors):
                 recv_intermediate_tensors.wait_for_comm()
                 recv_mrope = recv_intermediate_tensors.tensors["mrope_positions"]
-                self.mrope_positions.gpu[:, :num_tokens_padded].copy_(
-                    recv_mrope[:num_tokens_padded].t().contiguous()
-                )
-
+                recv_len = min(recv_mrope.shape[0], num_tokens_padded)
+                if recv_len > 0:
+                    self.mrope_positions.gpu[:, :recv_len].copy_(
+                        recv_mrope[:recv_len].t().contiguous()
+                    )
+                if recv_len < num_tokens_padded:
+                    self.mrope_positions.gpu[:, recv_len:num_tokens_padded].zero_()
             (
                 input_ids,
                 inputs_embeds,
