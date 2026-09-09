@@ -211,16 +211,6 @@ class GraphCaptureContext:
     stream: torch.npu.Stream
 
 
-@dataclass
-class LwdEdgeResampleResult:
-    """One request's rank-replay output (edge side): the resolved token
-    ids for this step (device tensor [R_i]) and the step's draft accept
-    count (edge scheduler bookkeeping)."""
-
-    token_ids: torch.Tensor
-    num_accepted: int
-
-
 @contextmanager
 def graph_capture(device: torch.device):
     """
@@ -349,6 +339,7 @@ class NPUModelRunner(GPUModelRunner):
         # for the DOWN stream, plus the channel-global DOWN seqno counter.
         self.lwd_cloud_collector = None
         self._lwd_pending_down_packet = None
+        self._lwd_pending_c2e_meta = None
         if self.ascend_config.lwd_config.is_cloud_node:
             from vllm_ascend.worker.lwd_cloud_sample_collector import (
                 LwdCloudSampleCollector,
@@ -2674,20 +2665,31 @@ class NPUModelRunner(GPUModelRunner):
                 spec_decode_metadata, sampler_output)
         if entries:
             # Data plane layering: the runner ONLY extracts per-step
-            # data and packs it; the actual DOWN send happens at the
-            # worker layer (NPUWorker.sample_tokens drains this slot).
-            self._lwd_pending_down_packet = (
-                collector.build_batch_packet(entries)
-            )
+            # data.  The DOWN wire carries ONLY the hidden tensor
+            # (hidden_cat); ranks / num_accepted / req_ids ride back to
+            # the scheduler on ModelRunnerOutput.lwd_c2e_meta (control
+            # plane forwards them ahead).  Both are drained by the worker
+            # layer (NPUWorker.sample_tokens).
+            hidden, meta = collector.build_hidden_payload(entries)
+            self._lwd_pending_down_packet = hidden
+            self._lwd_pending_c2e_meta = meta
 
     def take_lwd_pending_down_packet(self):
-        """Worker layer drains the packet built by
+        """Worker layer drains the hidden tensor built by
         ``_lwd_cloud_collect_step`` (single-slot, overwritten per step —
         the worker's sample_tokens runs once per step, so it is always
         drained before the next build)."""
         packet = self._lwd_pending_down_packet
         self._lwd_pending_down_packet = None
         return packet
+
+    def take_lwd_pending_c2e_meta(self):
+        """Worker layer drains the step metadata (ranks / num_accepted /
+        req_ids) that rides ModelRunnerOutput.lwd_c2e_meta back to the
+        scheduler (control plane forwards it to the edge ahead)."""
+        meta = self._lwd_pending_c2e_meta
+        self._lwd_pending_c2e_meta = None
+        return meta
 
     def _lwd_sampled_valid_mask(self, num_reqs: int):
         """Per-row mask: whether the request's last token was scheduled
@@ -2801,54 +2803,19 @@ class NPUModelRunner(GPUModelRunner):
             seg_start = seg_end
         return entries
 
-    def lwd_edge_resample(self, pkt) -> dict:
-        """Edge-side rank-replay (v3): resolve the cloud's sampled tokens
-        from a received DOWN batch packet.
+    def lwd_edge_resample(self, pkt) -> None:
+        """Edge-side interface reservation (NOT implemented).
 
-        For every entry (one request) in the packet:
-        ``entry.hidden -> local lm_head -> logits [R_i, V]``; row r's
-        token is the one with exactly ``entry.ranks[r]`` vocab entries
-        above it (argsort descending, index ``ranks[r]``).  Replay is
-        deterministic and temperature-invariant; the cloud's RNG and the
-        token id itself are never needed.
-
-        Returns ``{fingerprint: LwdEdgeResampleResult}`` — the caller
-        (business glue) maps fingerprints back to request ids via
-        ``lwd_request_fingerprint(req_id)`` and consumes
-        ``token_ids`` (streaming output) and ``num_accepted`` (edge
-        scheduler bookkeeping).
+        Contract (v3 hidden-only DOWN): the edge receives the hidden
+        tensor over the data plane; ranks / num_accepted / req_ids
+        arrive ahead of it via the scheduler control plane (ZMQ,
+        carried on ModelRunnerOutput.lwd_c2e_meta).  The edge-side
+        sampling business consumes those two channels and produces
+        token ids -- it is OUT of this module's scope.
         """
-        results = {}
-        for entry in pkt.entries:
-            hidden = entry.hidden  # [R_i, H] bf16 on device
-            if hidden is None or entry.num_rows < 1:
-                continue
-            # lm_head: full-model case exposes compute_logits (logits
-            # processor); bare-module case falls back to lm_head matmul.
-            compute_logits = getattr(self.model, "compute_logits", None)
-            if compute_logits is not None:
-                logits = compute_logits(hidden)
-            else:
-                lm_head = getattr(self.model, "lm_head", None)
-                if lm_head is None:
-                    raise RuntimeError(
-                        "[lwd] edge model exposes neither compute_logits "
-                        "nor lm_head for rank replay"
-                    )
-                logits = lm_head(hidden)
-            if logits is None:
-                raise RuntimeError(
-                    "[lwd] compute_logits returned None during rank replay"
-                )
-            order = logits.float().argsort(dim=1, descending=True)
-            tokens = order.gather(
-                1, entry.ranks.long().unsqueeze(1)
-            ).squeeze(1)  # [R_i] int
-            results[entry.fingerprint] = LwdEdgeResampleResult(
-                token_ids=tokens,
-                num_accepted=entry.num_accepted,
-            )
-        return results
+        raise NotImplementedError(
+            "lwd_edge_resample is an interface reservation"
+        )
 
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.

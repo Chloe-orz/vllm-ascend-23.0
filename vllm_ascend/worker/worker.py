@@ -58,7 +58,6 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
-from vllm_ascend.worker.lwd_down_packet import lwd_request_fingerprint
 from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
@@ -531,8 +530,6 @@ class NPUWorker(WorkerBase):
         self._lwd_cfg = get_ascend_config().lwd_config
         self._lwd_edge_sent_embeds: dict[str, int] = {}  # req_id -> chunks sent
         self._lwd_edge_aborted: set[str] = set()         # aborted req tombstones
-        # fp(req_id) -> req_id for DOWN demux -> ModelRunnerOutput mapping
-        self._lwd_edge_live_reqs: dict[int, str] = {}
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
         self._lwd_down_next_seqno = 0
         if self._lwd_cfg.is_prefill_only and self.use_v2_model_runner:
@@ -701,69 +698,12 @@ class NPUWorker(WorkerBase):
         if self._lwd_cfg.is_edge_node:
             self._lwd_edge_aborted.add(req_id)
             self._lwd_edge_sent_embeds.pop(req_id, None)
-            self._lwd_edge_live_reqs.pop(
-                lwd_request_fingerprint(req_id), None)
             get_lwd_down_recv_manager().drop(req_id)
         elif self._lwd_cfg.is_cloud_node:
             get_lwd_up_recv_manager().drop(req_id)
             collector = self.model_runner.lwd_cloud_collector
             if collector is not None:
                 collector.drop(req_id)
-
-    def register_lwd_edge_request(self, req_id: str) -> None:
-        """Control-plane admission glue (edge): register the request's
-        fingerprint so DOWN batch-packet entries can be mapped back to
-        request ids (req_id itself is not on the wire)."""
-        self._lwd_edge_live_reqs[lwd_request_fingerprint(req_id)] = req_id
-
-    def close_lwd_edge_request(self, req_id: str) -> None:
-        """Control-plane finish glue (edge): normal termination cleanup.
-        Distinguished from abort_lwd_request: close does NOT skip seqnos
-        (every notified packet was sent), it only drops bookkeeping."""
-        self._lwd_edge_live_reqs.pop(lwd_request_fingerprint(req_id), None)
-        self._lwd_edge_sent_embeds.pop(req_id, None)
-        get_lwd_down_recv_manager().close(req_id)
-
-    def _lwd_edge_down_sample_step(self) -> ModelRunnerOutput:
-        """Edge side (streaming): consume every posted DOWN packet (wire
-        order), rank-replay each entry to token ids, and assemble the
-        ModelRunnerOutput — THE END of the LWD edge data path
-        (packet -> sampling -> token_ids).
-
-        Fingerprints are resolved to request ids through
-        ``_lwd_edge_live_reqs`` (control-plane registered); an unknown
-        fingerprint means cross-request mixup and fails fast.
-        """
-        from vllm_ascend.worker.lwd_recv_manager import (
-            get_lwd_down_recv_manager,
-        )
-
-        manager = get_lwd_down_recv_manager()
-        req_ids: list[str] = []
-        sampled: list[list[int]] = []
-        accepted: list[int] = []
-        while manager.has_pending():
-            packet = manager.wait_packet()
-            replays = self.model_runner.lwd_edge_resample(packet)
-            for fp, result in replays.items():
-                req_id = self._lwd_edge_live_reqs.get(fp)
-                if req_id is None:
-                    raise RuntimeError(
-                        f"[lwd] DOWN packet fingerprint {fp:#x} does not "
-                        "match any live edge request (cross-request mixup)"
-                    )
-                req_ids.append(req_id)
-                sampled.append(result.token_ids.tolist())
-                accepted.append(result.num_accepted)
-        if not req_ids:
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        output = ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index={r: i for i, r in enumerate(req_ids)},
-            sampled_token_ids=sampled,
-        )
-        output.num_accepted_tokens = accepted  # edge scheduler bookkeeping
-        return output
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
@@ -849,12 +789,6 @@ class NPUWorker(WorkerBase):
                 and scheduler_output.lwd_edge_embed_chunks is not None):
             return self._lwd_edge_execute_embed(scheduler_output)
 
-        # Edge side, DOWN sampling: consume any posted DOWN packets and
-        # rank-replay them to token ids (packet -> sampling -> token_ids,
-        # the end of the LWD edge data path).
-        if self._lwd_cfg.is_edge_node:
-            return self._lwd_edge_down_sample_step()
-
         # prefill_only cloud: finished requests trigger the one-shot DOWN
         # send of their collected last-step packet (finish is only known
         # to the engine after sampling; the worker learns it via
@@ -931,23 +865,27 @@ class NPUWorker(WorkerBase):
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
-        # LWD cloud: drain the DOWN batch packet built by the runner's
-        # collection hook and send it from the WORKER layer — all LWD
-        # wire actions live at this layer (edge UP send, edge DOWN
-        # sample step, cloud DOWN send).  The runner only extracts
-        # per-step data and packs; it never talks to the wire.
+        # LWD cloud: the DOWN wire carries ONLY the hidden tensor — the
+        # runner built it during sampling; we send it here (all LWD wire
+        # actions live at the worker layer).  The step metadata (ranks /
+        # num_accepted / req_ids) rides back to the scheduler on
+        # output.lwd_c2e_meta; the control plane forwards it to the edge
+        # ahead of the tensor.
         if self._lwd_cfg.is_cloud_node:
-            packet = self.model_runner.take_lwd_pending_down_packet()
-            if packet is not None:
+            hidden = self.model_runner.take_lwd_pending_down_packet()
+            if hidden is not None:
                 get_lwd_comm_service().submit_send(
                     LwdCommRequest(
                         channel=LwdChannelType.DOWN,
                         op="send",
-                        num_elements=packet.numel(),
-                        tensor=packet,
+                        num_elements=hidden.numel(),
+                        tensor=hidden,
                         seqno=self._lwd_next_down_seqno(),
                     )
                 )
+            meta = self.model_runner.take_lwd_pending_c2e_meta()
+            if meta is not None and output is not None:
+                output.lwd_c2e_meta = meta
         return output
 
     def _lwd_next_down_seqno(self) -> int:

@@ -41,11 +41,7 @@ from vllm_ascend import envs
 from vllm_ascend.distributed.lwd_comm.future import LwdCommFuture
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
-from vllm_ascend.worker.lwd_down_packet import (
-    LwdDownBatchPacket,
-    lwd_request_fingerprint,
-    unpack_lwd_down_batch_packet,
-)
+from vllm_ascend.worker.lwd_down_packet import lwd_request_fingerprint
 
 
 def _tp_group_or_none():
@@ -463,9 +459,14 @@ class LwdEdgeDownRecvManager(_LwdDuplexRecvManagerBase):
                 future, num_elements, seqno, 0
             )
 
-    def wait_packet(self) -> LwdDownBatchPacket:
-        """Readiness gate + parse + validate the NEXT step packet (in
-        wire order), with aborted requests' entries stripped."""
+    def wait_packet(self) -> torch.Tensor:
+        """Readiness gate for the NEXT DOWN hidden tensor (wire order).
+
+        The wire now carries ONLY the flat hidden tensor (no header, no
+        request table, no ranks) — the step metadata (top_id_ths /
+        num_accepted / req_ids) travels ahead via the scheduler control
+        plane (ModelRunnerOutput.lwd_c2e_meta), so there is nothing to
+        unpack here.  Returns the raw bf16 buffer."""
         deadline = time.monotonic() + envs.VLLM_ASCEND_LWD_EMBEDS_TIMEOUT_S
         with self._lock:
             if not self._packets:
@@ -485,15 +486,7 @@ class LwdEdgeDownRecvManager(_LwdDuplexRecvManagerBase):
             group.broadcast(buf, src=0)
         with self._lock:
             self._packets.pop(pkt_idx, None)
-            aborted = set(self._aborted_fps)
-        packet = unpack_lwd_down_batch_packet(
-            buf, hidden_size=self._hidden_size
-        )
-        if aborted:
-            packet.entries = [
-                e for e in packet.entries if e.fingerprint not in aborted
-            ]
-        return packet
+        return buf.view(-1, self._hidden_size)  # [R_tot, H] flat rows
 
     def drop(self, req_id: str) -> None:
         """Abort: the request's in-flight rows ride inside shared step
