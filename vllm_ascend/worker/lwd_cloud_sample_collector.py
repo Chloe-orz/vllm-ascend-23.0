@@ -19,8 +19,6 @@ import threading
 
 import torch
 
-from vllm_ascend.worker.lwd_down_packet import pack_lwd_down_batch_packet
-
 
 class LwdCloudSampleCollector:
     """Per-step batch packet builder (cloud side, wire endpoint rank
