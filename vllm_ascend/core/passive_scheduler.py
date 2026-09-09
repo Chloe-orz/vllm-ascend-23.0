@@ -132,7 +132,7 @@ class PassiveScheduler:
         self.ready_decodes: deque[SchedulerOutput] = deque()
 
         # ---- Multi-edge (2E1C) global queue state ----
-        # When a role registry with >1 edge is configured, inbound segments
+        # When a role registry is configured, inbound segments
         # are wrapped (id prefix) + block-id translated at ingress and land
         # in a single global arrival-ordered queue; a promotion step then
         # moves per-edge head segments into the legacy ready queues, so the
@@ -149,7 +149,10 @@ class PassiveScheduler:
             from vllm_ascend.edge_cloud.role_registry import (
                 get_role_registry)
             _registry = get_role_registry()
-            if _registry is not None and len(_registry.edge_ids) > 1:
+            # PassiveEngineCore uses MultiEdgeChannelMux for every registry,
+            # including a single edge. Its triples land in _me_inbox, so the
+            # registry ingress must consume them and wrap IDs in both cases.
+            if _registry is not None:
                 self._me_enabled = True
                 self._me_registry = _registry
                 logger.info(
