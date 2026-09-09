@@ -211,6 +211,16 @@ class GraphCaptureContext:
     stream: torch.npu.Stream
 
 
+@dataclass
+class LwdEdgeResampleResult:
+    """One request's rank-replay output (edge side): the resolved token
+    ids for this step (device tensor [R_i]) and the step's draft accept
+    count (edge scheduler bookkeeping)."""
+
+    token_ids: torch.Tensor
+    num_accepted: int
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """
@@ -338,7 +348,7 @@ class NPUModelRunner(GPUModelRunner):
         # prefill_only LWD data plane (cloud side): per-step packet builder
         # for the DOWN stream, plus the channel-global DOWN seqno counter.
         self.lwd_cloud_collector = None
-        self._lwd_down_next_seqno = 0
+        self._lwd_pending_down_packet = None
         if self.ascend_config.lwd_config.is_cloud_node:
             from vllm_ascend.worker.lwd_cloud_sample_collector import (
                 LwdCloudSampleCollector,
@@ -2603,11 +2613,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.lwd_cloud_collector is not None:
             self.lwd_cloud_collector.open_request(req_id, num_prompt_tokens)
 
-    def _next_lwd_down_seqno(self) -> int:
-        seqno = self._lwd_down_next_seqno
-        self._lwd_down_next_seqno += 1
-        return seqno
-
     def lwd_edge_embed_forward(self, token_ids: list[int]) -> torch.Tensor:
         """Edge side: embed the whole prompt in one shot.
 
@@ -2660,27 +2665,6 @@ class NPUModelRunner(GPUModelRunner):
         # cost (no rank computation, no row filtering).
         if collector.num_live_slots() == 0:
             return
-        from vllm_ascend.distributed.lwd_comm.service import (
-            get_lwd_comm_service,
-        )
-        from vllm_ascend.distributed.lwd_comm.types import (
-            LwdChannelType,
-            LwdCommRequest,
-        )
-
-        def _send(packet) -> None:
-            if packet is None:
-                return
-            get_lwd_comm_service().submit_send(
-                LwdCommRequest(
-                    channel=LwdChannelType.DOWN,
-                    op="send",
-                    num_elements=packet.numel(),
-                    tensor=packet,
-                    seqno=self._next_lwd_down_seqno(),
-                )
-            )
-
         if spec_decode_metadata is None:
             entries = self._lwd_collect_nonspec(
                 collector, sample_hidden_states, logits, sampler_output)
@@ -2689,7 +2673,21 @@ class NPUModelRunner(GPUModelRunner):
                 collector, sample_hidden_states, logits,
                 spec_decode_metadata, sampler_output)
         if entries:
-            _send(collector.build_batch_packet(entries))
+            # Data plane layering: the runner ONLY extracts per-step
+            # data and packs it; the actual DOWN send happens at the
+            # worker layer (NPUWorker.sample_tokens drains this slot).
+            self._lwd_pending_down_packet = (
+                collector.build_batch_packet(entries)
+            )
+
+    def take_lwd_pending_down_packet(self):
+        """Worker layer drains the packet built by
+        ``_lwd_cloud_collect_step`` (single-slot, overwritten per step —
+        the worker's sample_tokens runs once per step, so it is always
+        drained before the next build)."""
+        packet = self._lwd_pending_down_packet
+        self._lwd_pending_down_packet = None
+        return packet
 
     def _lwd_sampled_valid_mask(self, num_reqs: int):
         """Per-row mask: whether the request's last token was scheduled
@@ -2803,20 +2801,54 @@ class NPUModelRunner(GPUModelRunner):
             seg_start = seg_end
         return entries
 
-    def lwd_edge_resample(self, pkt) -> None:
-        """Edge-side interface reservation (NOT implemented this period).
+    def lwd_edge_resample(self, pkt) -> dict:
+        """Edge-side rank-replay (v3): resolve the cloud's sampled tokens
+        from a received DOWN batch packet.
 
-        Contract (v2 rank-replay): pkt.hidden -> local lm_head ->
-        logits [R, vocab]; per row, the token with exactly pkt.ranks[r]
-        entries above it (argsort descending, index ranks[r]) IS the
-        cloud's sampled token; pkt.num_accepted -> edge scheduler
-        bookkeeping.  Rank is temperature-invariant; reordering logits
-        processors (penalties / grammar masks) break replay and must be
-        absent or mirrored on the edge.
+        For every entry (one request) in the packet:
+        ``entry.hidden -> local lm_head -> logits [R_i, V]``; row r's
+        token is the one with exactly ``entry.ranks[r]`` vocab entries
+        above it (argsort descending, index ``ranks[r]``).  Replay is
+        deterministic and temperature-invariant; the cloud's RNG and the
+        token id itself are never needed.
+
+        Returns ``{fingerprint: LwdEdgeResampleResult}`` — the caller
+        (business glue) maps fingerprints back to request ids via
+        ``lwd_request_fingerprint(req_id)`` and consumes
+        ``token_ids`` (streaming output) and ``num_accepted`` (edge
+        scheduler bookkeeping).
         """
-        raise NotImplementedError(
-            "lwd_edge_resample is a P2-phase interface reservation"
-        )
+        results = {}
+        for entry in pkt.entries:
+            hidden = entry.hidden  # [R_i, H] bf16 on device
+            if hidden is None or entry.num_rows < 1:
+                continue
+            # lm_head: full-model case exposes compute_logits (logits
+            # processor); bare-module case falls back to lm_head matmul.
+            compute_logits = getattr(self.model, "compute_logits", None)
+            if compute_logits is not None:
+                logits = compute_logits(hidden)
+            else:
+                lm_head = getattr(self.model, "lm_head", None)
+                if lm_head is None:
+                    raise RuntimeError(
+                        "[lwd] edge model exposes neither compute_logits "
+                        "nor lm_head for rank replay"
+                    )
+                logits = lm_head(hidden)
+            if logits is None:
+                raise RuntimeError(
+                    "[lwd] compute_logits returned None during rank replay"
+                )
+            order = logits.float().argsort(dim=1, descending=True)
+            tokens = order.gather(
+                1, entry.ranks.long().unsqueeze(1)
+            ).squeeze(1)  # [R_i] int
+            results[entry.fingerprint] = LwdEdgeResampleResult(
+                token_ids=tokens,
+                num_accepted=entry.num_accepted,
+            )
+        return results
 
     def _sample(self, logits, spec_decode_metadata):
         # Sample the next token and get logprobs if needed.
