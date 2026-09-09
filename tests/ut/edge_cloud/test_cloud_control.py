@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import asyncio
 import base64
 import hashlib
+import json
 import queue
 import threading
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
+import vllm_ascend.edge_cloud.cloud_control as cloud_control_module
 from vllm_ascend.edge_cloud.cloud_control import (
     CloudControlBridge,
     CloudControlProcessor,
@@ -17,6 +21,7 @@ from vllm_ascend.edge_cloud.cloud_control import (
 from vllm_ascend.edge_cloud.mm_identity import mm_abi_header_value
 from vllm_ascend.edge_cloud.prefix_protocol import (
     HEADER_MM_ABI,
+    HEADER_PROMPT_TOKENS,
     HEADER_PROTOCOL,
     PROTOCOL_VERSION,
     PROTOCOL_VERSION_MM,
@@ -72,7 +77,6 @@ def test_http_probe_wraps_namespace_and_strips_prefix_on_response():
     body = {
         "model": "edge-cloud-internal",
         "messages": manifest.to_messages(),
-        "edge_cloud_prompt_tokens": 4,
     }
     seen_wrapped: list[str] = []
 
@@ -80,43 +84,56 @@ def test_http_probe_wraps_namespace_and_strips_prefix_on_response():
         command = commands.get(timeout=10)
         wrapped = command["manifest"].request_id
         seen_wrapped.append(wrapped)
-        events.put({
-            "type": "probe",
-            "request_id": wrapped,
-            "ok": True,
-            "result": ProbeResult(
-                request_id=wrapped,
-                instance_id="cloud-a",
-                block_size=4,
-                hit_blocks=0,
-                hit_tokens=0,
-            ),
-        })
-        events.put({
-            "type": "usage",
-            "request_id": wrapped,
-            "usage": UsageInfo(4, 2, 0),
-        })
+        events.put(
+            {
+                "type": "probe",
+                "request_id": wrapped,
+                "ok": True,
+                "result": ProbeResult(
+                    request_id=wrapped,
+                    instance_id="cloud-a",
+                    block_size=4,
+                    hit_blocks=0,
+                    hit_tokens=0,
+                ),
+            }
+        )
+        events.put(
+            {
+                "type": "usage",
+                "request_id": wrapped,
+                "usage": UsageInfo(4, 2, 0),
+            }
+        )
 
     thread = threading.Thread(target=responder, daemon=True)
     thread.start()
-    with TestClient(app) as client:
-        with client.stream(
+    with (
+        TestClient(app) as client,
+        client.stream(
             "POST",
             "/v1/chat/completions",
             headers={**manifest.to_headers(), "X-Edge-Cloud-Edge-Id": "1"},
             json=body,
-        ) as response:
-            assert response.status_code == 200
-            # The edge gets its own raw request id back.
-            assert response.headers["X-Edge-Cloud-Request-ID"] == "req-1"
-            content = "".join(response.iter_text())
+        ) as response,
+    ):
+        assert response.status_code == 200
+        # The edge gets its own raw request id back.
+        assert response.headers["X-Edge-Cloud-Request-ID"] == "req-1"
+        content = "".join(response.iter_text())
     thread.join(timeout=10)
 
     # Internally the probe was keyed by the wrapped, edge-namespaced id.
     assert seen_wrapped == ["e1-req-1"]
     assert '"total_tokens":6' in content
     assert '"id":"req-1"' in content
+    chunks = [json.loads(line[6:]) for line in content.splitlines() if line.startswith("data: {")]
+    message = json.loads(chunks[0]["choices"][0]["delta"]["content"])
+    assert message["request_id"] == "req-1"
+    assert message["type"] == "edge_cloud_probe"
+    assert chunks[1]["choices"][0]["delta"] == {}
+    assert chunks[2]["choices"] == []
+    assert chunks[2]["usage"]["total_tokens"] == 6
 
 
 @pytest.fixture
@@ -143,7 +160,6 @@ def _control_payload(protocol=PROTOCOL_VERSION, mm_abi=None):
         "messages": manifest.to_messages(),
         "stream": True,
         "stream_options": {"include_usage": True},
-        "edge_cloud_prompt_tokens": manifest.prompt_tokens,
     }
     return headers, body
 
@@ -191,6 +207,22 @@ def test_v1_request_still_accepted(control_client):
     assert response.headers[HEADER_PROTOCOL] == PROTOCOL_VERSION
     assert HEADER_MM_ABI not in response.headers
     assert "data: [DONE]" in response.text
+
+
+@pytest.mark.parametrize("prompt_tokens", [None, "-1", "invalid", "8"])
+def test_http_rejects_invalid_prompt_token_header_before_probe(control_client, prompt_tokens):
+    client, commands, _ = control_client
+    headers, body = _control_payload()
+    if prompt_tokens is None:
+        del headers[HEADER_PROMPT_TOKENS]
+        body["edge_cloud_prompt_tokens"] = 4
+    else:
+        headers[HEADER_PROMPT_TOKENS] = prompt_tokens
+
+    response = client.post("/v1/chat/completions", headers=headers, json=body)
+
+    assert response.status_code == 400
+    assert commands.empty()
 
 
 def test_v1_request_with_mm_abi_header_is_rejected(control_client):
@@ -241,6 +273,79 @@ def test_v2_request_accepted_and_echoes_mm_abi(control_client):
     assert response.headers[HEADER_PROTOCOL] == PROTOCOL_VERSION_MM
     assert response.headers[HEADER_MM_ABI] == MM_ABI
     assert "data: [DONE]" in response.text
+    chunk = json.loads(response.text.splitlines()[0].removeprefix("data: "))
+    control = json.loads(chunk["choices"][0]["delta"]["content"])
+    assert control["protocol"] == PROTOCOL_VERSION_MM
+    assert control["mm_abi"] == MM_ABI
+
+
+@pytest.mark.parametrize("disconnect", [False, True])
+def test_probe_and_flush_precede_usage_and_heartbeat_keeps_waiter_alive(monkeypatch, disconnect):
+    """Inspect frames before FINISH; TestClient would buffer the whole stream."""
+    monkeypatch.setattr(cloud_control_module, "_USAGE_HEARTBEAT_INTERVAL", 0.001)
+
+    class Bridge:
+        def __init__(self):
+            self.finish = asyncio.Event()
+            self.waiter_started = asyncio.Event()
+            self.waiter_closed = asyncio.Event()
+
+        async def probe(self, manifest):
+            return _KVManager().probe(manifest)
+
+        async def wait_usage(self, request_id):
+            self.waiter_started.set()
+            try:
+                await self.finish.wait()
+                return UsageInfo(4, 2, 0)
+            finally:
+                self.waiter_closed.set()
+
+    async def run():
+        bridge = Bridge()
+        app = create_cloud_control_app(bridge)
+        endpoint = next(route.endpoint for route in app.routes if route.path == "/v1/chat/completions")
+        headers, body = _control_payload()
+
+        async def receive():
+            return {"type": "http.request", "body": json.dumps(body).encode(), "more_body": False}
+
+        request = Request(
+            {
+                "type": "http",
+                "headers": [(key.lower().encode(), value.encode()) for key, value in headers.items()],
+            },
+            receive,
+        )
+        response = await endpoint(request)
+        stream = response.body_iterator
+        try:
+            probe = json.loads((await anext(stream)).removeprefix("data: "))
+            control = json.loads(probe["choices"][0]["delta"]["content"])
+            assert control["type"] == "edge_cloud_probe"
+            assert control["request_id"] == "req-1"
+            flush = json.loads((await anext(stream)).removeprefix("data: "))
+            assert flush["choices"][0]["delta"] == {}
+            assert flush["choices"][0]["finish_reason"] is None
+            assert (await anext(stream)).startswith(": edge-cloud-usage-pending")
+            assert bridge.waiter_started.is_set()
+            assert not bridge.finish.is_set()
+            assert not bridge.waiter_closed.is_set()
+            if not disconnect:
+                bridge.finish.set()
+                usage_frame = await anext(stream)
+                while usage_frame.startswith(":"):
+                    usage_frame = await anext(stream)
+                assert json.loads(usage_frame.removeprefix("data: "))["usage"]["total_tokens"] == 6
+                assert await anext(stream) == "data: [DONE]\n\n"
+        finally:
+            await stream.aclose()
+        assert bridge.waiter_closed.is_set()
+
+    async def run_with_timeout():
+        await asyncio.wait_for(run(), timeout=1)
+
+    asyncio.run(run_with_timeout())
 
 
 def test_v2_request_with_mismatched_fingerprint_is_rejected(control_client):
@@ -295,4 +400,3 @@ def test_unknown_protocol_version_is_rejected(control_client):
     response = client.post("/v1/chat/completions", headers=headers, json=body)
 
     assert response.status_code == 400
-

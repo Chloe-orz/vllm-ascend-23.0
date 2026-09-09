@@ -13,7 +13,10 @@ prefix 协商 + 云侧 KV 自管理（CloudKVRequestManager 统一池）。
 |---|---|---|
 | E0、E1、C0 | `registry_2e1c.yaml`（三机同一份） | 静态注册表：全局 rank、地址、ZMQ 端口；改动需全员重启 |
 | E0、E1 | 租户密钥文件 `/run/secrets/edge-cloud-tenant-key`（两边同一把） | HMAC hash 链密钥，仅边侧持有 |
-| C0 | 无需密钥 | 云不配置 `tenant_key_file` / `consumer_id` |
+| C0 | 无需密钥 | 云不配置 `tenant_key_file` |
+
+经 NewAPI 时，E0、E1 各自设置环境变量 `VLLM_ASCEND_EDGE_CLOUD_API_KEY`，
+用于 Bearer 鉴权和计费归属；与租户摘要密钥独立，无需令牌文件。
 
 `registry_2e1c.yaml`（本目录有模板）：
 
@@ -90,7 +93,6 @@ vllm serve /home/extra/Qwen3.5-27B \
           "enabled": true,
           "control_url": "http://10.0.0.13:8100/v1/chat/completions",
           "tenant_key_file": "/run/secrets/edge-cloud-tenant-key",
-          "consumer_id": "enterprise-a-edge0",
           "connect_timeout": 5.0
         }
       }
@@ -99,8 +101,8 @@ vllm serve /home/extra/Qwen3.5-27B \
 
 ## 4. E1 启动命令（10.0.0.12）
 
-与 E0 仅三处不同：`--edge-id 1`、`consumer_id` 换值、`tenant_key_file` 内容与
-E0 相同。
+E1 使用 `--edge-id 1`，`tenant_key_file` 内容与 E0 相同。经 NewAPI 时，
+可为两个边配置不同的 API 令牌，以区分消耗。
 
 ```bash
 export ASCEND_RT_VISIBLE_DEVICES=0
@@ -124,7 +126,6 @@ vllm serve /home/extra/Qwen3.5-27B \
           "enabled": true,
           "control_url": "http://10.0.0.13:8100/v1/chat/completions",
           "tenant_key_file": "/run/secrets/edge-cloud-tenant-key",
-          "consumer_id": "enterprise-a-edge1",
           "connect_timeout": 5.0
         }
       }
@@ -176,10 +177,17 @@ vllm serve /weight/Qwen3.5-27B \
 4. 启动顺序：建议 C0 先起（HTTP 控制面 :8100 + ZMQ 通道 + pair 组建好），再起
    E0、E1；E1 会等 E0 经 TCPStore 发布 scheduler KV 配置（隐含依赖 E0 先完成
    KV sizing）。
-5. 走 Higress（可选）：两边 `control_url` 改为
-   `http://HIGRESS_HOST/<路由>/v1/chat/completions`，并确认网关透传
-   `X-Edge-Cloud-*` 请求/响应头（含 `X-Edge-Cloud-Edge-Id`）；`consumer_id`
-   用法不变。
+5. 走 NewAPI（可选）：两边 `control_url` 改为网关的 `/v1/chat/completions`，
+   启动服务前设置 `export VLLM_ASCEND_EDGE_CLOUD_API_KEY='sk-你的NewAPI令牌'`。
+   变量值不要带 `Bearer` 前缀，边侧读取后发送 `Authorization: Bearer ...`，
+   不再发送 `X-Mse-Consumer`。直连无鉴权云端时不设置该变量。
+   输入长度放在 `X-Edge-Cloud-Prompt-Tokens` 请求头，旧请求体字段已移除。
+   NewAPI 普通 OpenAI 渠道配置 `X-Edge-Cloud-*` 请求头透传即可保留控制元数据，
+   无需开启请求体透传；关闭消息改写及系统提示词注入。回程 Probe 已放入标准
+   SSE `delta.content`，紧跟空 delta 推动网关刷新；无需修改 NewAPI 或透传响应头。
+   Edge/Cloud 必须同步升级。`probe_timeout` 默认 30 秒；网关上游空闲超时应大于
+   Cloud 的 10 秒心跳周期并留余量，完整请求时限需覆盖推理。若还有下游代理，
+   需考虑开启 NewAPI SSE ping。外部 `stream=true/false` 均使用这条内部 SSE 通道。
 6. 静态 `kv_partition` 已移除：多边部署必须开启 `prefix_cache_coordination`
    （云侧 CloudKVRequestManager 统一管理整个 KV 池，边发来的 block id 一律
    丢弃并在云侧重新分配），启动校验会拒绝"注册表多边 + coordination 关闭"

@@ -30,6 +30,7 @@ HEADER_REQUEST_ID = "X-Edge-Cloud-Request-ID"
 HEADER_EDGE_ID = "X-Edge-Cloud-Edge-Id"
 HEADER_INSTANCE_ID = "X-Edge-Cloud-Instance-ID"
 HEADER_BLOCK_SIZE = "X-Edge-Cloud-Block-Size"
+HEADER_PROMPT_TOKENS = "X-Edge-Cloud-Prompt-Tokens"
 HEADER_HIT_BLOCKS = "X-Edge-Cloud-Prefix-Hit-Blocks"
 HEADER_HIT_TOKENS = "X-Edge-Cloud-Prefix-Hit-Tokens"
 HEADER_MM_ABI = "X-Edge-Cloud-MM-ABI"
@@ -141,6 +142,7 @@ class PrefixManifest:
             HEADER_PROTOCOL: PROTOCOL_VERSION,
             HEADER_REQUEST_ID: self.request_id,
             HEADER_BLOCK_SIZE: str(self.block_size),
+            HEADER_PROMPT_TOKENS: str(self.prompt_tokens),
         }
 
     @classmethod
@@ -158,6 +160,10 @@ class PrefixManifest:
         if protocol != PROTOCOL_VERSION:
             raise ValueError(f"unsupported edge-cloud protocol {protocol!r}")
         request_id = required_header(HEADER_REQUEST_ID)
+        prompt_tokens_value = required_header(HEADER_PROMPT_TOKENS)
+        if not prompt_tokens_value.isascii() or not prompt_tokens_value.isdecimal():
+            raise ValueError(f"{HEADER_PROMPT_TOKENS} must be a non-negative integer")
+        prompt_tokens = int(prompt_tokens_value)
         try:
             block_size = int(required_header(HEADER_BLOCK_SIZE))
         except ValueError as exc:
@@ -185,12 +191,9 @@ class PrefixManifest:
             else:
                 raise ValueError("message content is not an edge-cloud hash")
 
-        prompt_tokens_value = body.get("edge_cloud_prompt_tokens")
-        if not isinstance(prompt_tokens_value, int) or isinstance(prompt_tokens_value, bool):
-            raise ValueError("edge_cloud_prompt_tokens must be an integer")
         return cls(
             request_id=request_id,
-            prompt_tokens=prompt_tokens_value,
+            prompt_tokens=prompt_tokens,
             block_size=block_size,
             full_block_hashes=tuple(full_hashes),
             tail_hash=tail_hash,
@@ -368,6 +371,40 @@ class ProbeResult:
             HEADER_HIT_BLOCKS: str(self.hit_blocks),
             HEADER_HIT_TOKENS: str(self.hit_tokens),
         }
+
+    def to_control_message(self, protocol: str, mm_abi: str | None = None) -> dict[str, Any]:
+        """Build the JSON object carried inside an OpenAI delta.content."""
+        message: dict[str, Any] = {
+            "type": "edge_cloud_probe",
+            "protocol": protocol,
+            "request_id": self.request_id,
+            "instance_id": self.instance_id,
+            "block_size": self.block_size,
+            "hit_blocks": self.hit_blocks,
+            "hit_tokens": self.hit_tokens,
+        }
+        if mm_abi is not None:
+            message["mm_abi"] = mm_abi
+        return message
+
+    @classmethod
+    def from_control_message(cls, message: Mapping[str, Any]) -> ProbeResult:
+        """Validate the probe payload independently of transport headers."""
+        if message.get("type") != "edge_cloud_probe":
+            raise ValueError("expected an edge_cloud_probe control message")
+        for name in ("request_id", "instance_id"):
+            if not isinstance(message.get(name), str):
+                raise ValueError(f"probe {name} must be a string")
+        for name in ("block_size", "hit_blocks", "hit_tokens"):
+            if type(message.get(name)) is not int:
+                raise ValueError(f"probe {name} must be an integer")
+        return cls(
+            request_id=message["request_id"],
+            instance_id=message["instance_id"],
+            block_size=message["block_size"],
+            hit_blocks=message["hit_blocks"],
+            hit_tokens=message["hit_tokens"],
+        )
 
     @classmethod
     def from_headers(cls, headers: Mapping[str, str]) -> ProbeResult:

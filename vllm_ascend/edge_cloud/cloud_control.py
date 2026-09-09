@@ -35,6 +35,8 @@ from vllm_ascend.edge_cloud.prefix_protocol import (
     UsageInfo,
 )
 
+_USAGE_HEARTBEAT_INTERVAL = 10.0
+
 
 def _validate_mm_abi_header(value: str | None) -> str:
     """Validate a ``X-Edge-Cloud-MM-ABI`` header and return it unchanged."""
@@ -391,9 +393,7 @@ def create_cloud_control_app(
                 try:
                     edge_id = int(edge_id_header)
                 except ValueError as exc:
-                    raise ValueError(
-                        f"invalid {HEADER_EDGE_ID} header {edge_id_header!r}"
-                    ) from exc
+                    raise ValueError(f"invalid {HEADER_EDGE_ID} header {edge_id_header!r}") from exc
                 manifest = replace(
                     manifest,
                     request_id=wrap_req_id(edge_id, raw_request_id),
@@ -431,11 +431,35 @@ def create_cloud_control_app(
         )
 
         model = body.get("model", "edge-cloud-internal")
+        protocol = PROTOCOL_VERSION_MM if mm_abi_header is not None else PROTOCOL_VERSION
+        control_message = replace(probe, request_id=raw_request_id).to_control_message(protocol, mm_abi_header)
+        chunk_base = {
+            "id": raw_request_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+        }
 
         async def events():
+            usage_task = asyncio.create_task(bridge.wait_usage(manifest.request_id))
             try:
-                yield ": edge-cloud-prefix-reserved\n\n"
-                usage = await bridge.wait_usage(manifest.request_id)
+                # A standard content delta survives gateway DTO conversion.
+                # The second frame flushes gateways that retain the last chunk
+                # for usage extraction (including NewAPI's OpenAI adapter).
+                for delta in (
+                    {"role": "assistant", "content": json.dumps(control_message, separators=(",", ":"))},
+                    {},
+                ):
+                    chunk = {
+                        **chunk_base,
+                        "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+                    }
+                    yield f"data: {json.dumps(chunk, separators=(',', ':'))}\n\n"
+                while not usage_task.done():
+                    done, _ = await asyncio.wait({usage_task}, timeout=_USAGE_HEARTBEAT_INTERVAL)
+                    if not done:
+                        yield ": edge-cloud-usage-pending\n\n"
+                usage = usage_task.result()
                 log_event(
                     logger,
                     "info",
@@ -446,10 +470,7 @@ def create_cloud_control_app(
                     cached_tokens=usage.cached_tokens,
                 )
                 chunk = {
-                    "id": raw_request_id,
-                    "object": "chat.completion.chunk",
-                    "created": int(time.time()),
-                    "model": model,
+                    **chunk_base,
                     "choices": [],
                     "usage": usage.to_openai_dict(),
                 }
@@ -474,6 +495,9 @@ def create_cloud_control_app(
                 )
                 raise
             finally:
+                if not usage_task.done():
+                    usage_task.cancel()
+                await asyncio.gather(usage_task, return_exceptions=True)
                 log_event(
                     logger,
                     "debug",

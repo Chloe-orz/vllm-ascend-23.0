@@ -114,6 +114,12 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
     # Whether to use MultiBlockPool for KV cache management
     "VLLM_ASCEND_APPLY_DSV4_PATCH": lambda: bool(int(os.getenv("VLLM_ASCEND_APPLY_DSV4_PATCH", "0"))),
+    # Edge-cloud gateway Bearer API token (sensitive; never log its value).
+    # Default None: no Authorization header for direct, unauthenticated cloud
+    # connections. When set, use a non-empty visible ASCII token without
+    # whitespace or the "Bearer " prefix. Read once when the edge HTTP client
+    # is created; restart the edge API process after changing the token.
+    "VLLM_ASCEND_EDGE_CLOUD_API_KEY": lambda: os.getenv("VLLM_ASCEND_EDGE_CLOUD_API_KEY"),
     # Edge-cloud: merge hidden_states + residual into a single
     # isend/irecv to save one HCCL P2P RTT per direction per iteration.
     # Default 1 (enabled). Set to 0 to disable and revert to per-tensor

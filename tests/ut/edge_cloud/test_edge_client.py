@@ -4,6 +4,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from vllm_ascend.edge_cloud.mm_identity import mm_abi_header_value
 from vllm_ascend.edge_cloud.prefix_protocol import (
     BLOCK_HASH_PREFIX,
     HEADER_MM_ABI,
+    HEADER_PROMPT_TOKENS,
     HEADER_PROTOCOL,
     PROTOCOL_VERSION,
     PROTOCOL_VERSION_MM,
@@ -27,6 +29,12 @@ from vllm_ascend.edge_cloud.prefix_protocol import (
 TENANT_KEY = b"tenant-a-secret-key-material"
 PROCESSOR_FINGERPRINT = hashlib.sha256(b"processor-config").digest()
 IMAGE_DIGEST = hashlib.sha256(b"image-a").digest()
+API_TOKEN = "sk-newapi-test-token"
+
+
+@pytest.fixture(autouse=True)
+def clear_gateway_api_key(monkeypatch):
+    monkeypatch.delenv("VLLM_ASCEND_EDGE_CLOUD_API_KEY", raising=False)
 
 
 @dataclass(frozen=True)
@@ -46,7 +54,6 @@ def client(tmp_path: Path):
     return EdgePrefixClient(
         control_url="http://cloud.example/v1/chat/completions",
         tenant_key_file=str(key_file),
-        consumer_id="enterprise-a",
         block_size=4,
         connect_timeout=1.0,
     )
@@ -59,7 +66,6 @@ def mm_client(tmp_path: Path):
     return EdgePrefixClient(
         control_url="http://cloud.example/v1/chat/completions",
         tenant_key_file=str(key_file),
-        consumer_id="enterprise-a",
         block_size=4,
         connect_timeout=1.0,
         processor_fingerprint=PROCESSOR_FINGERPRINT,
@@ -112,18 +118,18 @@ def test_build_control_request_removes_original_prompt(client):
         "messages",
         "stream",
         "stream_options",
-        "edge_cloud_prompt_tokens",
     }
     assert body["model"] == "Qwen/Qwen3.5-9B"
     assert body["messages"][0]["content"].startswith(BLOCK_HASH_PREFIX)
     assert body["messages"][1]["content"].startswith(TAIL_HASH_PREFIX)
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
-    assert body["edge_cloud_prompt_tokens"] == 5
+    assert headers[HEADER_PROMPT_TOKENS] == "5"
     assert headers[HEADER_PROTOCOL] == PROTOCOL_VERSION
     assert HEADER_MM_ABI not in headers
     assert headers["X-Edge-Cloud-Request-ID"] == "req-1"
-    assert headers["X-Mse-Consumer"] == "enterprise-a"
+    assert "X-Mse-Consumer" not in headers
+    assert "Authorization" not in headers
     # No registry identity configured: the edge-id header stays absent so
     # the cloud keeps the legacy single-edge (unwrapped) namespace.
     assert "X-Edge-Cloud-Edge-Id" not in headers
@@ -135,7 +141,6 @@ def test_build_control_request_self_reports_edge_id(tmp_path: Path):
     edge_client = EdgePrefixClient(
         control_url="http://cloud.example/v1/chat/completions",
         tenant_key_file=str(key_file),
-        consumer_id="enterprise-a",
         block_size=4,
         connect_timeout=1.0,
         edge_id=1,
@@ -152,6 +157,64 @@ def test_build_control_request_self_reports_edge_id(tmp_path: Path):
     # raw and the cloud wraps/unwraps the namespace internally.
     assert headers["X-Edge-Cloud-Edge-Id"] == "1"
     assert headers["X-Edge-Cloud-Request-ID"] == "req-1"
+
+
+@pytest.mark.parametrize("multimodal", [False, True])
+def test_negotiate_sends_gateway_bearer_token(tmp_path, monkeypatch, caplog, multimodal):
+    key_file = tmp_path / "tenant-key"
+    key_file.write_bytes(TENANT_KEY)
+    monkeypatch.setenv("VLLM_ASCEND_EDGE_CLOUD_API_KEY", API_TOKEN)
+    caplog.set_level(logging.INFO)
+    edge_client = EdgePrefixClient(
+        control_url="http://gateway.example/v1/chat/completions",
+        tenant_key_file=str(key_file),
+        block_size=4,
+        connect_timeout=1.0,
+        edge_id=1,
+        processor_fingerprint=PROCESSOR_FINGERPRINT if multimodal else None,
+    )
+    response = _FakeResponse(
+        _probe_headers(
+            "req-1",
+            protocol=PROTOCOL_VERSION_MM if multimodal else PROTOCOL_VERSION,
+            mm_abi=mm_abi_header_value(PROCESSOR_FINGERPRINT) if multimodal else None,
+        )
+    )
+    session = _install_fake_session(monkeypatch, response)
+    request = _image_request() if multimodal else {"messages": [{"role": "user", "content": "hello"}]}
+    result = _run_negotiate(
+        edge_client,
+        "req-1",
+        [1, 2, 3, 4, 5],
+        request,
+        media_items=[MediaItem("image", IMAGE_DIGEST, 0, 2)] if multimodal else (),
+    )
+
+    assert result.request_id == "req-1"
+    assert session.last_headers["Authorization"] == f"Bearer {API_TOKEN}"
+    assert session.last_headers["X-Edge-Cloud-Edge-Id"] == "1"
+    assert "X-Mse-Consumer" not in session.last_headers
+    assert session.last_headers[HEADER_PROMPT_TOKENS] == "5"
+    assert "edge_cloud_prompt_tokens" not in session.last_body
+    assert API_TOKEN not in json.dumps(session.last_body)
+    assert "edge_usage_received" in caplog.text
+    assert API_TOKEN not in caplog.text
+    assert TENANT_KEY.decode() not in caplog.text
+
+
+@pytest.mark.parametrize("token", ["", " \n", "sk-token\r\nInjected: value", "sk token", "sk-令牌", "sk-\x7f"])
+def test_rejects_invalid_gateway_api_token(tmp_path, monkeypatch, token):
+    key_file = tmp_path / "tenant-key"
+    key_file.write_bytes(TENANT_KEY)
+    monkeypatch.setenv("VLLM_ASCEND_EDGE_CLOUD_API_KEY", token)
+
+    with pytest.raises(ValueError, match="VLLM_ASCEND_EDGE_CLOUD_API_KEY must contain"):
+        EdgePrefixClient(
+            control_url="http://gateway.example/v1/chat/completions",
+            tenant_key_file=str(key_file),
+            block_size=4,
+            connect_timeout=1.0,
+        )
 
 
 def test_build_control_request_accepts_structured_text_content(client):
@@ -181,6 +244,7 @@ def test_image_request_uses_v2_protocol_and_media_manifest(mm_client):
     headers, body = mm_client.build_control_request("req-mm-1", tokens, _image_request(), media_items=media_items)
 
     assert headers[HEADER_PROTOCOL] == PROTOCOL_VERSION_MM
+    assert headers[HEADER_PROMPT_TOKENS] == str(len(tokens))
     assert headers[HEADER_MM_ABI] == mm_abi_header_value(PROCESSOR_FINGERPRINT)
     # Two full blocks, no tail; the media URL never crosses the edge.
     assert [message["content"][:5] for message in body["messages"]] == [
@@ -193,7 +257,6 @@ def test_image_request_uses_v2_protocol_and_media_manifest(mm_client):
         "messages",
         "stream",
         "stream_options",
-        "edge_cloud_prompt_tokens",
     }
     # The media-free first block keeps the byte-identical v1 digest; the
     # block covering the image diverges from the token-only chain.
@@ -376,13 +439,26 @@ class _FakeContent:
 class _FakeResponse:
     def __init__(self, headers):
         self.status = 200
-        self.headers = CIMultiDict(headers)
-        usage = json.dumps({"usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}}).encode()
-        self.content = _FakeContent([b"data: " + usage + b"\n", b"data: [DONE]\n"])
+        # Deliberately drop all protocol response headers, as NewAPI does.
+        self.headers = CIMultiDict()
+        self.probe = ProbeResult.from_headers({**headers, HEADER_PROTOCOL: PROTOCOL_VERSION}).to_control_message(
+            headers[HEADER_PROTOCOL], headers.get(HEADER_MM_ABI)
+        )
+        self.content = _sse_content(
+            {"choices": [{"delta": {"content": json.dumps(self.probe)}}]},
+            {"choices": [{"delta": {}}]},
+            {"choices": [], "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10}},
+            "[DONE]",
+        )
         self.closed = False
 
     def close(self):
         self.closed = True
+
+
+def _sse_content(*chunks):
+    wire = "".join(f"data: {chunk if isinstance(chunk, str) else json.dumps(chunk)}\n\n" for chunk in chunks)
+    return _FakeContent(wire.encode().splitlines(keepends=True))
 
 
 class _FakeSession:
@@ -431,7 +507,7 @@ def _run_negotiate(client, *args, **kwargs):
     return asyncio.run(run())
 
 
-def test_v1_negotiate_unchanged(client, monkeypatch):
+def test_v1_negotiate_reads_probe_without_response_headers(client, monkeypatch):
     response = _FakeResponse(_probe_headers("req-1"))
     session = _install_fake_session(monkeypatch, response)
     request = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
@@ -442,6 +518,102 @@ def test_v1_negotiate_unchanged(client, monkeypatch):
     assert session.last_headers[HEADER_PROTOCOL] == PROTOCOL_VERSION
     assert HEADER_MM_ABI not in session.last_headers
     assert session.closed is True
+
+
+def test_fragmented_probe_with_multiline_sse_and_comments(client, monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
+    response = _FakeResponse(_probe_headers("req-1"))
+    message = json.dumps(response.probe)
+    # A gateway may split content across deltas and use multiline SSE data.
+    first = json.dumps({"choices": [{"delta": {"content": message[:30]}}]}, indent=2)
+    wire = ": ping\r\n\r\n" + "".join(f"data: {line}\r\n" for line in first.splitlines()) + "\r\n"
+    wire += "data: " + json.dumps({"choices": [{"delta": {"content": message[30:]}}]}) + "\n\n"
+    wire += 'data: {"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n'
+    wire += "data: [DONE]\n\n"
+    response.content = _FakeContent(wire.encode().splitlines(keepends=True))
+    session = _install_fake_session(monkeypatch, response)
+
+    result = _run_negotiate(client, "req-1", [1, 2, 3, 4, 5], {"messages": []})
+
+    assert result.instance_id == "cloud-a"
+    assert "total_tokens=7" in caplog.text
+    assert session.closed
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"type": "unrecognized"},
+        {"request_id": "other-request"},
+        {"block_size": 8},
+        {"hit_tokens": 8, "hit_blocks": 2},
+        {"hit_tokens": -4, "hit_blocks": -1},
+        {"hit_blocks": True},
+        {"instance_id": ""},
+    ],
+)
+def test_invalid_probe_is_rejected_and_connection_closed(client, monkeypatch, changes):
+    response = _FakeResponse(_probe_headers("req-1"))
+    message = {**response.probe, **changes}
+    response.content = _sse_content({"choices": [{"delta": {"content": json.dumps(message)}}]})
+    session = _install_fake_session(monkeypatch, response)
+
+    with pytest.raises((ValueError, RuntimeError)):
+        _run_negotiate(client, "req-1", [1, 2, 3, 4, 5], {"messages": []})
+
+    assert response.closed and session.closed
+    assert not client._request_ids_in_use
+
+
+@pytest.mark.parametrize(
+    "chunks", [[], ["[DONE]"], [{"usage": {"total_tokens": 10}}], [{"error": {"message": "failed"}}]]
+)
+def test_stream_without_probe_is_rejected(client, monkeypatch, chunks):
+    response = _FakeResponse(_probe_headers("req-1"))
+    response.content = _sse_content(*chunks)
+    session = _install_fake_session(monkeypatch, response)
+
+    with pytest.raises(RuntimeError, match="before"):
+        _run_negotiate(client, "req-1", [1], {"messages": []})
+
+    assert response.closed and session.closed
+    assert not client._request_ids_in_use
+
+
+def test_probe_timeout_covers_sse_wait_and_cleans_up(client, monkeypatch):
+    class NoProbe:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.Event().wait()
+
+    response = _FakeResponse(_probe_headers("req-1"))
+    response.content = NoProbe()
+    session = _install_fake_session(monkeypatch, response)
+    client._probe_timeout = 0.01
+
+    with pytest.raises(asyncio.TimeoutError):
+        _run_negotiate(client, "req-1", [1], {"messages": []})
+
+    assert response.closed and session.closed
+    assert not client._request_ids_in_use
+
+
+def test_probe_timeout_covers_wait_for_response_headers(client, monkeypatch):
+    response = _FakeResponse(_probe_headers("req-1"))
+    session = _install_fake_session(monkeypatch, response)
+
+    async def wait_for_headers(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(session, "post", wait_for_headers)
+    client._probe_timeout = 0.01
+    with pytest.raises(asyncio.TimeoutError):
+        _run_negotiate(client, "req-1", [1], {"messages": []})
+
+    assert session.closed
+    assert not client._request_ids_in_use
 
 
 def test_v2_negotiate_accepts_matching_mm_abi_echo(mm_client, monkeypatch):

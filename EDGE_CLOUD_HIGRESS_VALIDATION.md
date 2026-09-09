@@ -1,5 +1,13 @@
 # 边云 Prefix Cache 协商接入 Higress 验证指南
 
+> 历史验证说明：本文保留旧版 Higress 验证步骤与结果。当前 Edge 已移除
+> `consumer_id` 配置及 `X-Mse-Consumer` 请求头，改为可选的环境变量
+> `VLLM_ASCEND_EDGE_CLOUD_API_KEY` 和标准 Bearer 鉴权。Probe 回程也已改为标准 SSE
+> `delta.content` 控制消息加空 delta，不再依赖响应头；请求输入长度已改用
+> `X-Edge-Cloud-Prompt-Tokens`。下文的旧 Consumer Header、响应头握手及请求体字段
+> 步骤和日志不再代表当前源码；当前接入方式见
+> [部署指南](EDGE_CLOUD_PREFIX_CACHE_DEPLOYMENT.md#6-第二阶段接入-ai-网关)。
+
 本文档说明如何把已经通过 Edge 直连 Cloud 验证的 Prefix Cache 协商链路切换到
 Higress，并验证透明路由、响应头、长 SSE 生命周期、Consumer 维度 Token 统计和
 Prefix Cache 命中信息。

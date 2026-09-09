@@ -2,7 +2,7 @@
 
 本文档说明如何在现有 Edge:Cloud = 1:1 的 vLLM/vLLM-Ascend 边云系统中，
 启用 Prefix Cache 协商和 Cloud 独立 KV Cache 管理。第一阶段使用 Edge 直连
-Cloud HTTP 控制服务；第二阶段只将该连接切换到 Higress。
+Cloud HTTP 控制服务；第二阶段将该连接切换到 NewAPI 或 Higress。
 
 ## 1. 当前范围
 
@@ -182,7 +182,6 @@ vllm serve /home/extra/Qwen3.5-27B \
           "enabled": true,
           "control_url": "http://CLOUD_IP:8100/v1/chat/completions",
           "tenant_key_file": "/run/secrets/edge-cloud-tenant-key",
-          "consumer_id": "enterprise-a",
           "connect_timeout": 5.0
         }
       }
@@ -193,16 +192,18 @@ vllm serve /home/extra/Qwen3.5-27B \
     }'
 ```
 
-`consumer_id` 是 Edge 必填的计费租户标识，必须是 1 到 128 个不含空白的可见
-ASCII 字符。Edge 会把它写入内部请求的 `X-Mse-Consumer` Header；同一企业的
-多个 Edge 实例使用相同值时，Higress 会把它们聚合到同一个 Consumer。若需要
-按 Edge 实例区分，则为每个实例配置不同值。不要使用 tenant key 或其他密钥作为
-`consumer_id`。
+直连无鉴权的 Cloud 控制服务时无需 API Token。经 NewAPI 等支持 Bearer
+鉴权的网关时，设置环境变量 `VLLM_ASCEND_EDGE_CLOUD_API_KEY`，值为 `sk-...`，
+不要包含空白或 `Bearer` 前缀。Edge 在首次创建控制客户端时读取该变量，
+并发送 `Authorization: Bearer <token>`，轮换令牌后
+需重启 Edge API 进程。令牌与 `tenant_key_file` 中的 HMAC 密钥独立。
+NewAPI 根据令牌对应的用户及最终 usage 计费，可为每个 Edge 分配独立令牌。
+旧的 `consumer_id` 配置已移除，Edge 不再发送 `X-Mse-Consumer`。
 
 ### 4.2 Cloud 启动命令
 
 Cloud 的 `instance_id` 必须在所有 Cloud 实例中唯一。Cloud 不配置
-`tenant_key_file` 或 `consumer_id`。
+`tenant_key_file`，也无需设置 `VLLM_ASCEND_EDGE_CLOUD_API_KEY`。
 
 ```bash
 vllm serve /weight/Qwen3.5-27B \
@@ -353,13 +354,74 @@ Prefix Cache 只能复用完整 KV block。短于一个 block 或只在尾部不
 完成串行验证后，再按 2、4、8、16 等梯度提高并发，观察 KV block 使用量、
 请求完成率和输出一致性。
 
-## 6. 第二阶段：接入 Higress
+## 6. 第二阶段：接入 AI 网关
+
+NewAPI 接入时，在启动边侧服务前设置令牌：
+
+```bash
+export VLLM_ASCEND_EDGE_CLOUD_API_KEY='sk-你的NewAPI令牌'
+```
+
+边侧配置如下：
+
+```json
+{
+  "prefix_cache_coordination": {
+    "enabled": true,
+    "control_url": "http://NEWAPI_HOST/v1/chat/completions",
+    "tenant_key_file": "/run/secrets/edge-cloud-tenant-key",
+    "connect_timeout": 5.0,
+    "probe_timeout": 30.0
+  }
+}
+```
+
+输入 Token 数通过 `X-Edge-Cloud-Prompt-Tokens` 请求头传输，云侧要求该头为
+非负十进制整数，并核对摘要块数及尾块是否一致。请求体只保留标准 OpenAI
+字段 `model`、`messages`、`stream`、`stream_options`；不再发送或读取旧的
+`edge_cloud_prompt_tokens` 请求体字段，边云需同步升级。
+
+NewAPI 使用普通 OpenAI 渠道，在独立请求头覆盖中配置
+`{"regex:(?i)^x-edge-cloud-": ""}` 即可保留控制元数据，无需为此开启
+`pass_through_body_enabled`。关闭系统提示词注入、消息改写及供应商协议转换，
+保持摘要消息的内容和顺序。边侧的 API Token 由 NewAPI 用于鉴权，不需透传给云侧。
+
+回程不再依赖 `X-Edge-Cloud-*` 响应头，不需要修改 NewAPI：
+
+1. Cloud 完成 Prefix 预约后，立即发送标准 OpenAI SSE chunk，在
+   `choices[0].delta.content` 中放置 JSON 编码的 `edge_cloud_probe` 控制消息。
+   消息包含 `protocol`、`request_id`、`instance_id`、`block_size`、`hit_blocks`、
+   `hit_tokens`；v2 额外包含 `mm_abi`。
+2. 紧跟一个 `delta: {}`、`finish_reason: null` 的标准 chunk，推动 NewAPI
+   转发暂存的前一个 Probe chunk。只发 Probe 或 SSE comment 不足以解除该缓冲。
+3. Edge 读取并校验 Probe 后开始数据面推理，后台继续消费同一个 SSE 迭代器。
+   这条内部控制流不会作为模型回答转发给用户。
+4. 等待推理完成期间，Cloud 每 10 秒发送 SSE comment，维持网关上游读活跃；
+   完成后发送 `choices: []` 的标准 usage chunk（含 `cached_tokens`）及 `[DONE]`。
+   NewAPI 按最终 usage 计费，不按 Probe JSON 的文本长度计费。
+
+`probe_timeout` 默认 30 秒，限制从发起 HTTP 请求到读到完整 Probe 的等待，
+包括 Cloud admission 等待；它不是推理总时限。网关的上游流式空闲超时应大于
+10 秒并留余量，总请求时限要覆盖完整推理。NewAPI 不会转发 SSE comment，若边侧
+与 NewAPI 之间还有设置空闲超时的代理，应开启 NewAPI 下游 SSE ping 或相应调高超时。
+仍应禁用控制请求的自动重试。云侧响应头仅保留作直连调试或网关观测，不参与协商。
+此次开发态改动无旧响应头协议回退，Edge 和 Cloud 必须同步升级。
+
+已使用未修改的 NewAPI v1.0.0-rc.34 隔离实例，与实际 EdgePrefixClient、Cloud HTTP/SSE
+控制服务联调：关闭请求体透传，仅配置上述请求头规则；两边同 request ID 并发，
+覆盖 v1/v2 和用户 `stream=false/true` 共 8 个请求。全部在发布 FINISH 前收到 Probe，
+最终 usage、缓存 Token 和网关计费记录一致，并验证了心跳保活。仅 KV Probe 与
+推理完成事件使用模拟值，未执行 NPU 推理。详见
+[NewAPI 控制面验证记录](EDGE_CLOUD_NEWAPI_VALIDATION.md)。
+
+以下 Higress 插件配置保留作为参考；Edge 不再提供 Higress 专用计费 Header，
+若仍使用该网关，应由其认证插件建立 Consumer 身份。
 
 从服务来源、透明路由、超时/重试、`ai-statistics`、联合验证到回退的完整操作，见
 [边云 Prefix Cache 协商接入 Higress 验证指南](EDGE_CLOUD_HIGRESS_VALIDATION.md)。
 
-Higress MVP 不需要修改源码。Cloud 配置保持不变，只修改 Edge 的
-`control_url`；`consumer_id` 继续作为计费租户标识发送：
+接入支持 Bearer 鉴权的 Higress 路由时，Cloud 配置保持不变，修改 Edge 的
+`control_url`，并设置 `VLLM_ASCEND_EDGE_CLOUD_API_KEY` 为该网关的 API Token：
 
 ```json
 {
@@ -367,7 +429,6 @@ Higress MVP 不需要修改源码。Cloud 配置保持不变，只修改 Edge �
     "enabled": true,
     "control_url": "http://HIGRESS_HOST/INTERNAL_ROUTE/v1/chat/completions",
     "tenant_key_file": "/run/secrets/edge-cloud-tenant-key",
-    "consumer_id": "enterprise-a",
     "connect_timeout": 5.0
   }
 }
@@ -379,8 +440,8 @@ Higress 需要：
 - 开启 `ai-statistics`；
 - 禁止该内部 POST 的自动重试；
 - 调高或关闭长 SSE 的 stream idle timeout；
-- 不移除或覆盖 Edge 发送的 `X-Mse-Consumer` 请求头；
-- 允许 `X-Edge-Cloud-*` 响应头透传；
+- 通过认证插件根据 Bearer 凭据建立计费 Consumer 身份；
+- 保持 SSE content delta 不变并及时转发；`X-Edge-Cloud-*` 响应头仅在需要观测时透传；
 - 保持 HTTP stream 到最终 usage 和 `[DONE]` 后再结束。
 
 在当前 1:1 或只验证统计信息的场景中，不需要 `ai-load-balancer` 和 Redis，
@@ -388,12 +449,9 @@ Higress 需要：
 和 least-request 回退时，才需要开启 `ai-load-balancer` 的 `prefix_cache` 策略并
 配置 Redis。
 
-当前内部 HTTP 场景不使用鉴权或 TLS。如果后续启用 Higress 鉴权、HTTPS 或
-mTLS，需要另外扩展 Edge HTTP Client 的认证配置。
-
-无鉴权时，`X-Mse-Consumer` 是 Edge 声明的可信内部身份，不具备防伪能力。
-因此 Higress 的该内部路由不能直接暴露给不可信客户端。后续启用认证时，应由
-认证插件根据凭据生成或覆盖此 Header，不能信任外部用户自行传入的值。
+Edge 通过 `VLLM_ASCEND_EDGE_CLOUD_API_KEY` 提供 Bearer 凭据；部署时使用 HTTPS 保护令牌。
+如果使用 mTLS，需要另外配置客户端证书支持。`X-Mse-Consumer` 如仍用于
+Higress 统计，应由认证插件根据凭据生成或覆盖，不能信任客户端自声明的值。
 
 ### 6.1 北向非流式请求与内部长 SSE
 
@@ -409,9 +467,9 @@ control 请求时，会固定覆盖为：
 }
 ```
 
-因此，即使用户发送 `stream=false`，Edge 对 Higress/Cloud 的内部统计通道仍是
-长 SSE。Cloud 先通过响应头完成 Prefix 预约，推理完成后再在同一连接中发送
-`choices: []`、标准 OpenAI usage 和 `[DONE]`。Higress 看到的是长 SSE，Edge
+因此，即使用户发送 `stream=false`，Edge 对网关/Cloud 的内部统计通道仍是
+长 SSE。Cloud 先通过标准 content delta 返回 Prefix 预约结果，推理完成后再在同一连接中发送
+`choices: []`、标准 OpenAI usage 和 `[DONE]`。网关看到的是长 SSE，Edge
 向用户返回的仍可以是普通非流式 JSON，两者没有冲突。
 
 Higress `ai-statistics` 同时兼容普通 `application/json` 非流式响应。该路径适合
@@ -445,7 +503,7 @@ cloud_compute_tokens = uncached_prompt_tokens + completion_tokens
 
 `ai-statistics` 独立于 `attributes` 配置读取请求头 `X-Mse-Consumer`，并把它写入
 Prometheus 标签 `ai_consumer`。Header 缺失时标签回退为 `none`。因此 Consumer
-Usage 的来源区分依赖 Edge 的 `consumer_id`，不需要额外添加
+Usage 的来源区分依赖 Higress 认证插件产生的 Consumer 身份，不需要额外添加
 `attributes.consumer`。
 
 在 `ai-statistics 2.0.1` 中，`use_default_response_attributes: true` 会优先使用
@@ -549,8 +607,8 @@ Higress 内置 Dashboard 的 Consumer Usage 使用 Prometheus `increase()` 计�
 每条日志还包含稳定的 `event=<事件名>`，并尽量携带 `request_id`、
 `control_request_id`、`engine_request_id`、`head_token`、命中 token 数或请求数。
 日志不会记录原始 Prompt、token ID 列表、Hash 值、tenant key 或完整 HTTP body。
-Edge 的 `edge_client_initialized` 和 `edge_negotiate_start` 还会记录非敏感的
-`consumer_id`，用于确认计费租户 Header 的来源。
+Edge 的 `edge_client_initialized` 记录 `authenticated`，表示是否配置了网关
+鉴权；日志不记录 API Token。
 
 默认 INFO 日志可以观察一次请求的关键状态转换：
 

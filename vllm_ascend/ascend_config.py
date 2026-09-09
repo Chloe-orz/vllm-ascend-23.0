@@ -1149,8 +1149,9 @@ class PrefixCacheCoordinationConfig:
     The edge opens an OpenAI-compatible streaming request to ``control_url``.
     The cloud exposes that endpoint on ``listen_host`` and ``listen_port``.
     Only the edge reads ``tenant_key_file``; raw tenant key material never
-    crosses the trust boundary. The edge sends the non-secret ``consumer_id``
-    as ``X-Mse-Consumer`` so Higress can aggregate usage by billing tenant.
+    crosses the trust boundary. The optional ``VLLM_ASCEND_EDGE_CLOUD_API_KEY``
+    environment variable supplies the gateway Bearer token, independently
+    of the tenant hash key and this configuration object.
     """
 
     def __init__(self, user_config: dict | None = None, *, role: str = "edge"):
@@ -1162,8 +1163,9 @@ class PrefixCacheCoordinationConfig:
         self.listen_port: int = int(user_config.get("listen_port", 8100))
         self.instance_id: str = user_config.get("instance_id", "cloud-0")
         self.tenant_key_file: str | None = user_config.get("tenant_key_file")
-        self.consumer_id: str | None = user_config.get("consumer_id")
         self.connect_timeout: float = float(user_config.get("connect_timeout", 5.0))
+        # Bounds HTTP admission plus receiving the SSE Probe, not generation.
+        self.probe_timeout: float = float(user_config.get("probe_timeout", 30.0))
         self.enforce_mm_abi_match: bool = user_config.get(
             "enforce_mm_abi_match",
             False,
@@ -1182,16 +1184,6 @@ class PrefixCacheCoordinationConfig:
                 raise ValueError("control_url must use http:// or https://")
             if not self.tenant_key_file:
                 raise ValueError("edge prefix cache coordination requires tenant_key_file")
-            if not self.consumer_id:
-                raise ValueError("edge prefix cache coordination requires consumer_id")
-            if (
-                not isinstance(self.consumer_id, str)
-                or len(self.consumer_id) > 128
-                or not self.consumer_id.isascii()
-                or not self.consumer_id.isprintable()
-                or any(character.isspace() for character in self.consumer_id)
-            ):
-                raise ValueError("consumer_id must contain 1-128 visible ASCII characters without whitespace")
         elif role == "cloud":
             if not self.instance_id:
                 raise ValueError("cloud prefix cache coordination requires instance_id")
@@ -1199,12 +1191,13 @@ class PrefixCacheCoordinationConfig:
                 raise ValueError("listen_port must be between 1 and 65535")
         if self.connect_timeout <= 0:
             raise ValueError("connect_timeout must be positive")
+        if not 0 < self.probe_timeout < float("inf"):
+            raise ValueError("probe_timeout must be finite and positive")
 
     def __repr__(self) -> str:
         return (
             "PrefixCacheCoordinationConfig("
             f"enabled={self.enabled}, control_url={self.control_url!r}, "
-            f"consumer_id={self.consumer_id!r}, "
             f"listen_host={self.listen_host!r}, listen_port={self.listen_port}, "
             f"instance_id={self.instance_id!r}, "
             f"enforce_mm_abi_match={self.enforce_mm_abi_match})"

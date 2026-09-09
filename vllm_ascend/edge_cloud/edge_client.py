@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ import aiohttp
 from vllm.engine.protocol import EdgeCloudMediaItem, EdgeCloudPrefixResult
 from vllm.logger import logger
 
+from vllm_ascend import envs
 from vllm_ascend.edge_cloud.mm_identity import mm_abi_header_value
 from vllm_ascend.edge_cloud.observability import format_event, log_event
 from vllm_ascend.edge_cloud.prefix_protocol import (
@@ -55,7 +56,30 @@ _UNSUPPORTED_CONTENT_FIELDS = frozenset(
     }
 )
 
-HIGRESS_CONSUMER_HEADER = "X-Mse-Consumer"
+
+_MAX_CONTROL_MESSAGE_CHARS = 16 * 1024
+
+
+async def _iter_sse_data(content: AsyncIterable[bytes]) -> AsyncIterator[str]:
+    """Read SSE events, preserving multiline data and ignoring heartbeats."""
+    data: list[str] = []
+    size = 0
+    async for raw_line in content:
+        line = raw_line.decode("utf-8").rstrip("\r\n")
+        if not line:
+            if data:
+                payload = "\n".join(data)
+                data.clear()
+                size = 0
+                yield payload
+        elif line == "data" or line.startswith("data:"):
+            value = line.partition(":")[2].removeprefix(" ")
+            size += len(value) + 1
+            if size > _MAX_CONTROL_MESSAGE_CHARS:
+                raise ValueError("edge-cloud SSE event exceeds the control message limit")
+            data.append(value)
+    if data:
+        yield "\n".join(data)
 
 
 class EdgePrefixClient:
@@ -66,9 +90,9 @@ class EdgePrefixClient:
         *,
         control_url: str,
         tenant_key_file: str,
-        consumer_id: str,
         block_size: int,
         connect_timeout: float,
+        probe_timeout: float = 30.0,
         edge_id: int | None = None,
         processor_fingerprint: bytes | None = None,
     ) -> None:
@@ -76,8 +100,20 @@ class EdgePrefixClient:
         self._hasher = PrefixHasher(tenant_key, block_size, processor_fingerprint)
         self._mm_abi_header = mm_abi_header_value(processor_fingerprint) if processor_fingerprint is not None else None
         self._control_url = control_url
-        self._consumer_id = consumer_id
+        api_key = envs.VLLM_ASCEND_EDGE_CLOUD_API_KEY
+        if api_key is not None:
+            if (
+                not api_key
+                or not api_key.isascii()
+                or not api_key.isprintable()
+                or any(character.isspace() for character in api_key)
+            ):
+                raise ValueError(
+                    "VLLM_ASCEND_EDGE_CLOUD_API_KEY must contain a non-empty ASCII API token without whitespace"
+                )
+        self._api_key: str | None = api_key
         self._connect_timeout = connect_timeout
+        self._probe_timeout = probe_timeout
         # Self-reported identity only: the edge never sees the cloud-side
         # namespace prefix; the cloud wraps/unwraps request ids internally.
         self._edge_id = edge_id
@@ -90,7 +126,7 @@ class EdgePrefixClient:
             logger,
             "info",
             "edge_client_initialized",
-            consumer_id=consumer_id,
+            authenticated=self._api_key is not None,
             block_size=block_size,
             connect_timeout=connect_timeout,
             edge_id=edge_id,
@@ -122,14 +158,13 @@ class EdgePrefixClient:
             )
             raise
         manifest = self._hasher.build_manifest(request_id, prompt_token_ids, media_items)
-        # Whitelisted shadow body: only the manifest, streaming flags and the
-        # prompt length cross the edge. Sampling parameters, metadata and the
-        # original messages (which may embed media URLs or base64) never do.
+        # Keep the shadow body OpenAI-compatible; control metadata such as
+        # prompt length travels in headers. Sampling parameters, metadata and
+        # original messages (which may embed media URLs or base64) never cross.
         body: dict[str, Any] = {
             "messages": manifest.to_messages(),
             "stream": True,
             "stream_options": {"include_usage": True},
-            "edge_cloud_prompt_tokens": manifest.prompt_tokens,
         }
         model = openai_request.get("model")
         if model is not None:
@@ -139,7 +174,8 @@ class EdgePrefixClient:
             headers[HEADER_PROTOCOL] = PROTOCOL_VERSION_MM
             assert self._mm_abi_header is not None
             headers[HEADER_MM_ABI] = self._mm_abi_header
-        headers[HIGRESS_CONSUMER_HEADER] = self._consumer_id
+        if self._api_key is not None:
+            headers["Authorization"] = f"Bearer {self._api_key}"
         if self._edge_id is not None:
             headers[HEADER_EDGE_ID] = str(self._edge_id)
         return headers, body
@@ -177,7 +213,6 @@ class EdgePrefixClient:
             "info",
             "edge_negotiate_start",
             request_id=request_id,
-            consumer_id=self._consumer_id,
             prompt_tokens=len(prompt_token_ids),
             full_blocks=len(prompt_token_ids) // self.block_size,
             tail_tokens=len(prompt_token_ids) % self.block_size,
@@ -188,24 +223,28 @@ class EdgePrefixClient:
         response: aiohttp.ClientResponse | None = None
         try:
             session = aiohttp.ClientSession(timeout=timeout)
-            response = await session.post(
-                self._control_url,
-                headers={**headers, "Accept": "text/event-stream"},
-                json=body,
-            )
-            if response.status != 200:
-                log_event(
-                    logger,
-                    "warning",
-                    "edge_probe_http_failed",
-                    request_id=request_id,
-                    http_status=response.status,
+
+            async def receive_probe() -> tuple[ProbeResult, AsyncIterator[str]]:
+                nonlocal response
+                response = await session.post(
+                    self._control_url,
+                    headers={**headers, "Accept": "text/event-stream"},
+                    json=body,
                 )
-                raise RuntimeError(f"edge-cloud prefix negotiation failed with HTTP {response.status}")
-            if media_items:
-                probe = self._parse_mm_probe_response(request_id, response)
-            else:
-                probe = ProbeResult.from_headers(response.headers)
+                if response.status != 200:
+                    log_event(
+                        logger,
+                        "warning",
+                        "edge_probe_http_failed",
+                        request_id=request_id,
+                        http_status=response.status,
+                    )
+                    raise RuntimeError(f"edge-cloud prefix negotiation failed with HTTP {response.status}")
+                sse_data = _iter_sse_data(response.content)
+                probe = await self._read_probe(sse_data, multimodal=bool(media_items))
+                return probe, sse_data
+
+            probe, sse_data = await asyncio.wait_for(receive_probe(), timeout=self._probe_timeout)
             if probe.request_id != request_id:
                 raise RuntimeError("cloud returned a different request ID")
             if probe.block_size != self.block_size:
@@ -215,8 +254,9 @@ class EdgePrefixClient:
             if probe.hit_tokens > len(prompt_token_ids):
                 raise RuntimeError("cloud prefix hit exceeds the prompt length")
 
+            assert response is not None
             task = asyncio.create_task(
-                self._drain_stream(request_id, response, session),
+                self._drain_stream(request_id, response, session, sse_data),
                 name=f"edge-cloud-usage-{request_id}",
             )
         except BaseException as exc:
@@ -299,14 +339,11 @@ class EdgePrefixClient:
         request_id: str,
         response: aiohttp.ClientResponse,
         session: aiohttp.ClientSession,
+        sse_data: AsyncIterator[str] | None = None,
     ) -> None:
         usage: dict[str, Any] | None = None
         try:
-            async for raw_line in response.content:
-                line = raw_line.decode("utf-8").strip()
-                if not line.startswith("data:"):
-                    continue
-                payload = line.removeprefix("data:").strip()
+            async for payload in sse_data if sse_data is not None else _iter_sse_data(response.content):
                 if payload == "[DONE]":
                     break
                 chunk = json.loads(payload)
@@ -380,33 +417,42 @@ class EdgePrefixClient:
                 request_id=request_id,
             )
 
-    def _parse_mm_probe_response(
-        self,
-        request_id: str,
-        response: aiohttp.ClientResponse,
-    ) -> ProbeResult:
-        """Validate a v2 probe response and parse it as a v1 manifest result.
-
-        Fail closed when the cloud does not speak v2 or echoes a different
-        MM-ABI fingerprint: reject the request instead of degrading to a
-        token-only interpretation. The v1 control plane has no post-Probe
-        cancel/TTL yet, so closing this response does not claim to release an
-        already-created Cloud reservation.
-        """
-        if response.headers.get(HEADER_PROTOCOL) != PROTOCOL_VERSION_MM:
-            raise RuntimeError(f"cloud did not acknowledge {PROTOCOL_VERSION_MM} for request {request_id!r}")
-        echoed_mm_abi = response.headers.get(HEADER_MM_ABI)
-        if echoed_mm_abi is None:
-            raise RuntimeError(f"cloud response is missing {HEADER_MM_ABI}")
-        if echoed_mm_abi != self._mm_abi_header:
-            raise RuntimeError("cloud MM-ABI fingerprint does not match the local processor fingerprint")
-        # The v2 manifest wire format is isomorphic to v1; parse the probe
-        # result with the v1 header reader after the protocol marker checks.
-        parse_headers = {
-            key: value for key, value in response.headers.items() if key.lower() != HEADER_PROTOCOL.lower()
-        }
-        parse_headers[HEADER_PROTOCOL] = PROTOCOL_VERSION
-        return ProbeResult.from_headers(parse_headers)
+    async def _read_probe(self, sse_data: AsyncIterator[str], *, multimodal: bool) -> ProbeResult:
+        """Consume the Probe delta before handing this same iterator to usage."""
+        content = ""
+        async for payload in sse_data:
+            if payload == "[DONE]":
+                break
+            chunk = json.loads(payload)
+            if chunk.get("usage") is not None or chunk.get("error") is not None:
+                raise RuntimeError("cloud stream returned usage or an error before the Probe")
+            for choice in chunk.get("choices", []):
+                fragment = choice.get("delta", {}).get("content")
+                if fragment is None:
+                    continue
+                if not isinstance(fragment, str):
+                    raise ValueError("cloud Probe delta.content must be a string")
+                content += fragment
+                if len(content) > _MAX_CONTROL_MESSAGE_CHARS:
+                    raise ValueError("cloud Probe exceeds the control message limit")
+                try:
+                    message = json.loads(content)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(message, dict):
+                    raise ValueError("cloud Probe must contain a JSON object")
+                protocol = PROTOCOL_VERSION_MM if multimodal else PROTOCOL_VERSION
+                if message.get("protocol") != protocol:
+                    raise RuntimeError(f"cloud did not acknowledge {protocol}")
+                if multimodal:
+                    if message.get("mm_abi") is None:
+                        raise RuntimeError("cloud Probe is missing MM-ABI")
+                    if message["mm_abi"] != self._mm_abi_header:
+                        raise RuntimeError("cloud MM-ABI fingerprint does not match the local processor fingerprint")
+                elif "mm_abi" in message:
+                    raise RuntimeError("cloud returned MM-ABI for a text-only Probe")
+                return ProbeResult.from_control_message(message)
+        raise RuntimeError("cloud stream ended before a complete Probe control message")
 
     @staticmethod
     def _validate_phase_one_request(

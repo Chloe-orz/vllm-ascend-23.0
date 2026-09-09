@@ -40,7 +40,6 @@ def _config(role="edge", **coordination):
         "enabled": True,
         "control_url": "http://cloud.example/v1/chat/completions",
         "tenant_key_file": "/run/secrets/tenant-key",
-        "consumer_id": "enterprise-a",
         "instance_id": "cloud-a",
     }
     defaults.update(coordination)
@@ -58,31 +57,13 @@ def test_accepts_qwen35_dense_edge_configuration(model_type):
 
     assert config.prefix_cache_coordination.enabled
     assert config.prefix_cache_coordination.control_url == ("http://cloud.example/v1/chat/completions")
-    assert config.prefix_cache_coordination.consumer_id == "enterprise-a"
-
-
-def test_edge_coordination_requires_consumer_id():
-    config = _config()
-    del config["prefix_cache_coordination"]["consumer_id"]
-
-    with pytest.raises(ValueError, match="requires consumer_id"):
-        EdgeCloudConfig(config, _vllm_config())
-
-
-@pytest.mark.parametrize(
-    "consumer_id",
-    ["", "enterprise a", "enterprise\na", "企业-a", "a" * 129, 1],
-)
-def test_edge_coordination_rejects_invalid_consumer_id(consumer_id):
-    with pytest.raises(ValueError, match="consumer_id"):
-        EdgeCloudConfig(_config(consumer_id=consumer_id), _vllm_config())
+    assert config.prefix_cache_coordination.probe_timeout == 30.0
 
 
 def test_accepts_qwen35_dense_cloud_configuration_without_tenant_key():
     config = _config(role="cloud")
     del config["prefix_cache_coordination"]["tenant_key_file"]
     del config["prefix_cache_coordination"]["control_url"]
-    del config["prefix_cache_coordination"]["consumer_id"]
 
     parsed = EdgeCloudConfig(config, _vllm_config())
 
@@ -90,11 +71,16 @@ def test_accepts_qwen35_dense_cloud_configuration_without_tenant_key():
     assert parsed.prefix_cache_coordination.enforce_mm_abi_match is False
 
 
+@pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+def test_rejects_invalid_probe_timeout(value):
+    with pytest.raises(ValueError, match="probe_timeout"):
+        EdgeCloudConfig(_config(probe_timeout=value), _vllm_config())
+
+
 def test_cloud_coordination_can_enforce_mm_abi_match():
     config = _config(role="cloud", enforce_mm_abi_match=True)
     del config["prefix_cache_coordination"]["tenant_key_file"]
     del config["prefix_cache_coordination"]["control_url"]
-    del config["prefix_cache_coordination"]["consumer_id"]
 
     parsed = EdgeCloudConfig(config, _vllm_config())
 
@@ -106,7 +92,6 @@ def test_cloud_coordination_rejects_non_boolean_mm_abi_match(value):
     config = _config(role="cloud", enforce_mm_abi_match=value)
     del config["prefix_cache_coordination"]["tenant_key_file"]
     del config["prefix_cache_coordination"]["control_url"]
-    del config["prefix_cache_coordination"]["consumer_id"]
 
     with pytest.raises(ValueError, match="enforce_mm_abi_match must be a bool"):
         EdgeCloudConfig(config, _vllm_config())
@@ -231,7 +216,6 @@ def test_cloud_coordination_does_not_gate_mm_hasher_digest(monkeypatch):
     config = _config(role="cloud")
     del config["prefix_cache_coordination"]["tenant_key_file"]
     del config["prefix_cache_coordination"]["control_url"]
-    del config["prefix_cache_coordination"]["consumer_id"]
 
     parsed = EdgeCloudConfig(config, _vllm_config())
 

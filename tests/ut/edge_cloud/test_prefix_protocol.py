@@ -10,12 +10,11 @@ import pytest
 
 from vllm_ascend.edge_cloud.prefix_protocol import (
     _MODALITY_IDS,
-    BLOCK_HASH_PREFIX,
     HEADER_BLOCK_SIZE,
+    HEADER_PROMPT_TOKENS,
     HEADER_PROTOCOL,
     HEADER_REQUEST_ID,
     PROTOCOL_VERSION,
-    TAIL_HASH_PREFIX,
     PrefixHasher,
     PrefixManifest,
     ProbeResult,
@@ -70,21 +69,48 @@ def test_manifest_marks_only_partial_tail(tokens, full_blocks, has_tail):
     assert (manifest.tail_hash is not None) is has_tail
 
 
-def test_manifest_round_trips_through_openai_request():
-    manifest = PrefixHasher(TENANT_KEY, 4).build_manifest("req-1", [1, 2, 3, 4, 5])
+@pytest.mark.parametrize("tokens", [[], [1], [1, 2, 3, 4], [1, 2, 3, 4, 5]])
+def test_manifest_round_trips_through_openai_request(tokens):
+    manifest = PrefixHasher(TENANT_KEY, 4).build_manifest("req-1", tokens)
     body = {
         "model": "Qwen/Qwen3.5-9B",
         "messages": manifest.to_messages(),
         "stream": True,
         "stream_options": {"include_usage": True},
-        "edge_cloud_prompt_tokens": manifest.prompt_tokens,
     }
 
-    parsed = PrefixManifest.from_openai_request(manifest.to_headers(), body)
+    headers = manifest.to_headers()
+    assert headers[HEADER_PROMPT_TOKENS] == str(len(tokens))
+    parsed = PrefixManifest.from_openai_request({key.lower(): value for key, value in headers.items()}, body)
 
     assert parsed == manifest
-    assert body["messages"][0]["content"].startswith(BLOCK_HASH_PREFIX)
-    assert body["messages"][1]["content"].startswith(TAIL_HASH_PREFIX)
+
+
+@pytest.mark.parametrize("value", ["", "-1", "1.5", "true", "1_000", "+5", " 5", "５"])
+def test_manifest_rejects_invalid_prompt_token_header(value):
+    manifest = PrefixHasher(TENANT_KEY, 4).build_manifest("req-1", [1, 2, 3, 4, 5])
+    headers = {**manifest.to_headers(), HEADER_PROMPT_TOKENS: value}
+
+    with pytest.raises(ValueError, match=HEADER_PROMPT_TOKENS):
+        PrefixManifest.from_openai_request(headers, {"messages": manifest.to_messages()})
+
+
+def test_manifest_requires_prompt_token_header_without_body_fallback():
+    manifest = PrefixHasher(TENANT_KEY, 4).build_manifest("req-1", [1, 2, 3, 4, 5])
+    headers = manifest.to_headers()
+    del headers[HEADER_PROMPT_TOKENS]
+
+    with pytest.raises(ValueError, match=f"missing required header {HEADER_PROMPT_TOKENS}"):
+        PrefixManifest.from_openai_request(headers, {"messages": manifest.to_messages(), "edge_cloud_prompt_tokens": 5})
+
+
+@pytest.mark.parametrize("prompt_tokens", [3, 4, 8])
+def test_manifest_rejects_prompt_token_header_inconsistent_with_hashes(prompt_tokens):
+    manifest = PrefixHasher(TENANT_KEY, 4).build_manifest("req-1", [1, 2, 3, 4, 5])
+    headers = {**manifest.to_headers(), HEADER_PROMPT_TOKENS: str(prompt_tokens)}
+
+    with pytest.raises(ValueError):
+        PrefixManifest.from_openai_request(headers, {"messages": manifest.to_messages()})
 
 
 def test_manifest_parser_rejects_non_hash_content():
@@ -92,10 +118,10 @@ def test_manifest_parser_rejects_non_hash_content():
         HEADER_PROTOCOL: PROTOCOL_VERSION,
         HEADER_REQUEST_ID: "req-1",
         HEADER_BLOCK_SIZE: "4",
+        HEADER_PROMPT_TOKENS: "1",
     }
     body = {
         "messages": [{"role": "user", "content": "original secret prompt"}],
-        "edge_cloud_prompt_tokens": 1,
     }
 
     with pytest.raises(ValueError, match="not an edge-cloud hash"):
