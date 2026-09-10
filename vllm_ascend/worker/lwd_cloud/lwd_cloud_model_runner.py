@@ -136,171 +136,98 @@ class LwdCloudModelRunner(NPUModelRunner):
         spec_decode_metadata,
         sampler_output,
     ) -> None:
-        """Streaming collect (cloud): after prefill and after EVERY decode
-        step, pack this step's data for ALL live LWD requests of the batch
-        into one hidden-only DOWN payload + one metadata record.
-
-        Payload rows: each position's pre-lm_head hidden; the metadata
-        (carried on ModelRunnerOutput.lwd_c2e_meta, forwarded to the edge
-        ahead via the ZMQ control plane) carries the GLOBAL RANK of each
-        sampled token + per-request row counts and num_accepted.  The
-        token id itself is never on the wire.
-
-        Non-spec: one row per request.  Spec/MTP verify steps:
-        accepted+1 rows per request — the accepted rows are a PREFIX of
-        the request's verify segment (accepted draft positions + bonus
-        row are contiguous), segments delimited by cu_num_sampled_tokens;
-        each row's rank is computed against that row's target logits
-        (the distribution the rejection sampler verified against).
-        """
+        """每步收集批内在途 LWD 请求的 (hidden, 全局秩, accepted)，组包入槽
+        供 worker 层发送；元信息随 ModelRunnerOutput.lwd_c2e_meta 回调度器。"""
         collector = self.lwd_cloud_collector
-        # Fast path: no remote-embeds request in flight -> zero per-step
-        # cost (no rank computation, no row filtering).
-        if collector.num_live_slots() == 0:
+        if collector.num_live_slots() == 0 or logits is None:
             return
-        if spec_decode_metadata is None:
-            entries = self._lwd_collect_nonspec(
-                collector, sample_hidden_states, logits, sampler_output)
-        else:
-            entries = self._lwd_collect_spec(
-                collector, sample_hidden_states, logits,
-                spec_decode_metadata, sampler_output)
+        entries = self._lwd_collect_batch(
+            collector, sample_hidden_states, logits,
+            spec_decode_metadata, sampler_output,
+        )
         if entries:
-            # Data plane layering: the runner ONLY extracts per-step
-            # data.  The DOWN wire carries ONLY the hidden tensor
-            # (hidden_cat); ranks / num_accepted / req_ids ride back to
-            # the scheduler on ModelRunnerOutput.lwd_c2e_meta (control
-            # plane forwards them ahead).  Both are drained by the worker
-            # layer (LwdCloudWorker.sample_tokens).
             hidden, meta = collector.build_hidden_payload(entries)
             self._lwd_pending_down_packet = hidden
             self._lwd_pending_c2e_meta = meta
 
     def take_lwd_pending_down_packet(self):
-        """Worker layer drains the hidden tensor built by
-        ``_lwd_cloud_collect_step`` (single-slot, overwritten per step —
-        the worker's sample_tokens runs once per step, so it is always
-        drained before the next build)."""
+        """worker 层取走本步 DOWN hidden 张量（单槽覆盖写，每步必被取走）。"""
         packet = self._lwd_pending_down_packet
         self._lwd_pending_down_packet = None
         return packet
 
     def take_lwd_pending_c2e_meta(self):
-        """Worker layer drains the step metadata (ranks / num_accepted /
-        req_ids) that rides ModelRunnerOutput.lwd_c2e_meta back to the
-        scheduler (control plane forwards it to the edge ahead)."""
+        """worker 层取走本步元信息（ranks/accepted/req_ids）。"""
         meta = self._lwd_pending_c2e_meta
         self._lwd_pending_c2e_meta = None
         return meta
 
-    def _lwd_sampled_valid_mask(self, num_reqs: int):
-        """Per-row mask: whether the request's last token was scheduled
-        this step (i.e. its sampled token is real, not a discarded
-        partial-prefill artifact).  Streaming sends every step
-        immediately, so discarded rows MUST be filtered here — the old
-        single-slot design masked them via last-write-wins, the stream
-        cannot."""
-        return ~self.discard_request_mask.np[:num_reqs]
-
-    @staticmethod
-    def _lwd_global_ranks(logits_rows: torch.Tensor,
-                          sampled_ids: torch.Tensor) -> torch.Tensor:
-        """Global rank of each sampled token: the number of vocab
-        entries with a logit STRICTLY greater than the sampled token's
-        logit.  Monotone-transform invariant (temperature-safe); the
-        edge re-resolves it to a token via its own lm_head ranking."""
-        lg = logits_rows.float()
-        thresh = lg.gather(1, sampled_ids.long().unsqueeze(1))
-        return (lg > thresh).sum(dim=1).to(torch.int32)
-
-    def _lwd_collect_nonspec(self, collector, sample_hidden_states, logits,
-                             sampler_output) -> list:
-        """Non-spec step -> one entry per live LWD request (R=1)."""
-        if logits is None:
-            logger.warning_once(
-                "[lwd] step without logits; skipping c2e stream"
-            )
-            return []
-        if lmhead_tp_enable():
-            # With lmhead TP the logits here are vocab SHARDS — a global
-            # rank needs a cross-rank reduction (not implemented).  Skip
-            # rather than ship shard-local ranks.
-            logger.warning_once(
-                "[lwd] rank collection is not supported with lmhead TP "
-                "(logits are vocab shards); skipping c2e stream"
-            )
-            return []
-        sampled = sampler_output.sampled_token_ids  # [B, 1]
-        batch_req_ids = self.input_batch.req_ids
-        valid = self._lwd_sampled_valid_mask(len(batch_req_ids))
-        idx = [i for i, r in enumerate(batch_req_ids)
-               if collector.has_slot(r) and valid[i]]
-        if not idx:
-            return []
-        ranks = self._lwd_global_ranks(logits[idx], sampled[idx][:, 0])
-        return [
-            (batch_req_ids[i], sample_hidden_states[i : i + 1], ranks[j : j + 1], 0)
-            for j, i in enumerate(idx)
-        ]
-
-    def _lwd_collect_spec(
+    def _lwd_collect_batch(
         self, collector, sample_hidden_states, logits,
         spec_decode_metadata, sampler_output,
     ) -> list:
-        """Spec verify step -> one entry per live LWD request
-        (R = accepted+1 rows)."""
-        if logits is None:
-            logger.warning_once(
-                "[lwd] spec step without logits; skipping c2e stream"
-            )
-            return []
-        tp = get_tp_group()
-        if tp.world_size > 1:
-            # The ranks here would be computed over THIS rank's vocab
-            # shard (lmhead TP) — not a global rank.  Skip rather than
-            # ship shard-local ranks.
-            logger.warning_once(
-                "[lwd] spec collection is not supported with lmhead TP>1 "
-                "(ranks would be shard-local); skipping c2e stream"
-            )
-            return []
-        sampled = sampler_output.sampled_token_ids  # [B, max_spec_len+1], -1 = invalid
+        """产出 entries: (req_id, hidden_rows, ranks, accepted)，行序 = input_batch 序。
+
+        非 spec 每请求 1 行（accepted=0）；spec verify 每请求 accepted+1 行
+        （rejection 后有效行是该请求 verify 段的前缀，段界 cu_num_sampled_tokens）。
+        行过滤：has_slot（已注册）x ~discard_request_mask（本步真采样）。
+        """
+        sampled = sampler_output.sampled_token_ids  # [B, k+1], -1 为无效位
         if sampled is None or sampled.dim() != 2:
-            logger.warning_once(
-                "[lwd] unexpected sampled_token_ids shape in spec step; "
-                "skipping c2e stream"
-            )
+            logger.warning_once("[lwd] bad sampled_token_ids; skip c2e stream")
             return []
         batch_req_ids = self.input_batch.req_ids
         assert sampled.shape[0] == len(batch_req_ids), (
             sampled.shape, len(batch_req_ids))
-        valid = self._lwd_sampled_valid_mask(len(batch_req_ids))
-        # accepted+1 == number of valid (non -1) entries per row; one D2H
-        # for the whole batch per spec step.
-        counts = (sampled != -1).sum(dim=1)
-        counts_cpu = counts.tolist()
+        valid = ~self.discard_request_mask.np[: len(batch_req_ids)]
+
+        if spec_decode_metadata is None:
+            idx = [i for i, r in enumerate(batch_req_ids)
+                   if collector.has_slot(r) and valid[i]]
+            if not idx:
+                return []
+            ranks = self._lwd_global_ranks(
+                self._lwd_full_vocab_logits(logits[idx]), sampled[idx][:, 0]
+            )
+            return [
+                (batch_req_ids[i], sample_hidden_states[i : i + 1],
+                 ranks[j : j + 1], 0)
+                for j, i in enumerate(idx)
+            ]
+
+        counts = (sampled != -1).sum(dim=1).tolist()  # accepted+1
         cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
-        entries = []
-        seg_start = 0
+        entries, seg_start = [], 0
         for i, req_id in enumerate(batch_req_ids):
             seg_end = cu[i]
-            if not collector.has_slot(req_id) or not valid[i]:
-                seg_start = seg_end
-                continue
-            rows = int(counts_cpu[i])          # accepted+1
-            if rows < 1:
-                seg_start = seg_end
-                continue
-            seg_hidden = sample_hidden_states[seg_start: seg_start + rows]
-            seg_logits = logits[seg_start: seg_start + rows]
-            seg_sampled = sampled[i, :rows]
-            entries.append(
-                (
-                    req_id,
-                    seg_hidden,
-                    self._lwd_global_ranks(seg_logits, seg_sampled),
-                    rows - 1,
+            rows = counts[i]
+            if collector.has_slot(req_id) and valid[i] and rows >= 1:
+                seg_logits = self._lwd_full_vocab_logits(
+                    logits[seg_start : seg_start + rows]
                 )
-            )
+                entries.append((
+                    req_id,
+                    sample_hidden_states[seg_start : seg_start + rows],
+                    self._lwd_global_ranks(seg_logits, sampled[i, :rows]),
+                    rows - 1,
+                ))
             seg_start = seg_end
         return entries
+
+    @staticmethod
+    def _lwd_full_vocab_logits(logits_rows: torch.Tensor) -> torch.Tensor:
+        """lmhead TP 时按词表维 all_gather 归约出全词表 fp32 logits（否则直通）。"""
+        tp = get_tp_group()
+        rows_f32 = logits_rows.float()
+        if tp.world_size > 1 and lmhead_tp_enable():
+            return tp.all_gather(rows_f32, dim=-1)
+        return rows_f32
+
+    @staticmethod
+    def _lwd_global_ranks(logits_rows: torch.Tensor,
+                          sampled_ids: torch.Tensor) -> torch.Tensor:
+        """采样 token 的全局秩 = 全词表中严格超过其 logit 的条目数（int32）。"""
+        lg = logits_rows.float()
+        thresh = lg.gather(1, sampled_ids.long().unsqueeze(1))
+        return (lg > thresh).sum(dim=1).to(torch.int32)
+
