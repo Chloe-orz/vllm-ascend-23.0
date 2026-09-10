@@ -60,6 +60,7 @@ class LwdCloudWorker(NPUWorker):
         from vllm_ascend.distributed import lwd_wire
 
         lwd_wire.init_lwd_duplex_channels()
+        self._register_lwd_prompt_embeds_provider()
 
     # ------------------------------------------------------------------ #
     # Engine step wiring                                                  #
@@ -193,6 +194,31 @@ class LwdCloudWorker(NPUWorker):
         for req_id in finished_req_ids:
             if collector is not None:
                 collector.drop(req_id)
+
+    def _register_lwd_prompt_embeds_provider(self) -> None:
+        """Wire the draft proposer's first-pass prompt-embeds provider.
+
+        The provider resolves the request's prompt embeds from the
+        runner's ``input_batch.req_prompt_embeds`` (already injected by
+        ``_lwd_inject_remote_embeds`` during prefill); a missing entry
+        (not scheduled / not LWD) returns None and the proposer falls
+        back to the token-id path.
+        """
+        from vllm_ascend.spec_decode.llm_base_proposer import (
+            AscendSpecDecodeBaseProposer,
+        )
+
+        runner = self.model_runner
+
+        def _lwd_prompt_embeds_provider(req_id: str):
+            idx = runner.input_batch.req_id_to_index.get(req_id)
+            if idx is None:
+                return None
+            return runner.input_batch.req_prompt_embeds.get(idx)
+
+        AscendSpecDecodeBaseProposer.set_lwd_prompt_embeds_provider(
+            _lwd_prompt_embeds_provider
+        )
 
     def _lwd_next_down_seqno(self) -> int:
         seqno = self._lwd_down_next_seqno
