@@ -150,6 +150,14 @@ def _is_glm_model(model_config) -> bool:
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
+    # prefill_only LWD: provider of edge-computed prompt embeddings for the
+    # draft model's first pass (set by the worker at bring-up on the cloud).
+    # provider(req_id) -> Tensor [N, H] | None.
+    _lwd_prompt_embeds_provider = None
+
+    @classmethod
+    def set_lwd_prompt_embeds_provider(cls, provider) -> None:
+        cls._lwd_prompt_embeds_provider = provider
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
 
@@ -868,7 +876,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
-        if self.supports_mm_inputs:
+        lwd_inputs_embeds = self._lwd_build_first_pass_embeds(
+            num_tokens, num_input_tokens, next_token_ids,
+            token_indices_to_sample, common_attn_metadata,
+        )
+        if lwd_inputs_embeds is not None:
+            # prefill_only LWD: organize the first-pass inputs from the
+            # edge-computed prompt embeddings (received over the UP
+            # channel), not from token-id lookups.
+            inputs_embeds = lwd_inputs_embeds
+        elif self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
             inputs_embeds = self.model.embed_input_ids(
                 self.input_ids[:num_tokens], multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
@@ -1331,6 +1348,89 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # [batch_size, num_speculative_tokens]
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
         return draft_token_ids
+
+    def _lwd_build_first_pass_embeds(
+        self,
+        num_tokens: int,
+        num_input_tokens: int,
+        next_token_ids: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+        cad: CommonAttentionMetadata,
+    ) -> torch.Tensor | None:
+        """prefill_only LWD: organize the draft first-pass inputs from the
+        edge-computed prompt embeddings (received over the UP channel)
+        instead of token-id lookups.
+
+        Alignment with ``set_inputs_first_pass``: after the one-position
+        right shift, position j of request i holds prompt token j+1, so
+        its input embedding is exactly prompt_embeds[j+1]; the sampling
+        position of each request holds the next token, embedded by the
+        draft model itself (its own embed table — only the prompt span is
+        replaced by the received embeddings).
+
+        Returns None (caller falls back to the token-id path) when no
+        provider is configured, any request lacks received embeds, the
+        request is not in its full-prompt first pass (chunked prefill),
+        the draft model does not consume ``inputs_embeds``, or a CP
+        (pcp) manager rewrites first-pass inputs (different layout).
+        """
+        provider = self._lwd_prompt_embeds_provider
+        runner = self.runner
+        if provider is None or runner is None:
+            return None
+        # The draft model must actually consume inputs_embeds (checked
+        # once); otherwise the token-id path stays authoritative.
+        accepts = getattr(self, "_lwd_accepts_inputs_embeds", None)
+        if accepts is None:
+            import inspect
+
+            try:
+                accepts = (
+                    "inputs_embeds"
+                    in inspect.signature(self.model.forward).parameters
+                )
+            except (TypeError, ValueError):
+                accepts = False
+            self._lwd_accepts_inputs_embeds = accepts
+        if not accepts:
+            return None
+        # CP (pcp) first-pass rewriting changes the token layout
+        # (all-gather); the shift alignment below no longer holds.
+        if getattr(runner, "pcp_manager", None) is not None:
+            return None
+        req_ids = list(runner.input_batch.req_ids)
+        if not req_ids:
+            return None
+        # Chunk base per request: only a FULL-prompt first pass (base == 0
+        # for every request) satisfies the "position j holds prompt
+        # token j+1" alignment; chunked prefill shifts the window.
+        computed = getattr(runner.input_batch, "num_computed_tokens_cpu", None)
+        if computed is None:
+            return None
+        qsl = (cad.query_start_loc_cpu.tolist()
+               if getattr(cad, "query_start_loc_cpu", None) is not None
+               else cad.query_start_loc.tolist())
+        out = self.inputs_embeds  # persistent buffer (graph-safe)
+        wrote_any = False
+        for i, req_id in enumerate(req_ids):
+            s, e = int(qsl[i]), int(qsl[i + 1])
+            seg_len = e - s
+            base = int(computed[i]) if i < len(computed) else 0
+            if base != 0:
+                return None  # chunked prefill: alignment breaks -> fallback
+            prompt_embeds = provider(req_id)  # [N_i, H] or None
+            if prompt_embeds is None or prompt_embeds.shape[0] < seg_len:
+                return None  # fallback: token-id path for the whole batch
+            # positions s..e-2 hold prompt tokens 1..seg_len-1
+            out[s: e - 1] = prompt_embeds[1:seg_len]
+            wrote_any = True
+        if not wrote_any:
+            return None
+        # sampling positions hold the next token (embedded by the draft
+        # model's own table)
+        next_embeds = self.model.embed_input_ids(next_token_ids)
+        out[token_indices_to_sample] = next_embeds
+        return out[:num_input_tokens]
 
     def set_inputs_first_pass(
         self,

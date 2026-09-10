@@ -523,6 +523,36 @@ class NPUWorker(WorkerBase):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
+        # prefill_only LWD embed-prompt adaptation: register the draft
+        # proposer's first-pass prompt-embeds provider on the cloud.
+        # Self-contained and defensive: without the LWD data plane
+        # (lwd_recv_manager absent / managers not initialized) the
+        # provider returns None and the proposer falls back to the
+        # token-id path.
+        lwd_cfg = (self.vllm_config.additional_config or {}).get(
+            "lwd_config") or {}
+        if (lwd_cfg.get("enabled") and lwd_cfg.get("mode") == "prefill_only"
+                and lwd_cfg.get("role") == "cloud"):
+            from vllm_ascend.spec_decode.llm_base_proposer import (
+                AscendSpecDecodeBaseProposer,
+            )
+
+            def _lwd_prompt_embeds_provider(req_id: str):
+                try:
+                    from vllm_ascend.worker.lwd_recv_manager import (
+                        get_lwd_up_recv_manager,
+                    )
+
+                    mgr = get_lwd_up_recv_manager()
+                    if not mgr.has_pending(req_id):
+                        return None
+                    return mgr.wait_embeds(req_id)
+                except Exception:
+                    return None
+
+            AscendSpecDecodeBaseProposer.set_lwd_prompt_embeds_provider(
+                _lwd_prompt_embeds_provider
+            )
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
