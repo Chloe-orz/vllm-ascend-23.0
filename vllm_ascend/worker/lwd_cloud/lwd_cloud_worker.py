@@ -19,11 +19,24 @@ from vllm.logger import logger
 from vllm.v1.core.sched.output import GrammarOutput  # noqa: F401  (type)
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 from vllm_ascend.worker.lwd_cloud.lwd_cloud_model_runner import LwdCloudModelRunner
 from vllm_ascend.worker.worker import NPUWorker
+
+
+class _LwdRoleView:
+    """Derived role/mode flags over the vllm-native ``LwdConfig``
+    (``vllm/config/lwd.py``: fields enabled/role/mode + ``is_edge``).
+
+    The vllm config has no prefill_only/node-role properties, so this
+    tiny view centralizes the derivations every LWD call site uses."""
+
+    def __init__(self, cfg) -> None:
+        self.enabled = bool(cfg is not None and cfg.enabled)
+        self.is_prefill_only = self.enabled and cfg.mode == "prefill_only"
+        self.is_edge_node = self.enabled and cfg.is_edge
+        self.is_cloud_node = self.enabled and not cfg.is_edge
 
 
 class LwdCloudWorker(NPUWorker):
@@ -31,7 +44,9 @@ class LwdCloudWorker(NPUWorker):
 
     def init_device(self):
         super().init_device()
-        self._lwd_cfg = get_ascend_config().lwd_config
+        # self.lwd_config is set by NPUWorker.__init__ from
+        # vllm_config.lwd_config (vllm-native LWD config bootstrap).
+        self._lwd_cfg = _LwdRoleView(self.lwd_config)
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
         self._lwd_down_next_seqno = 0
         self._lwd_edge_sent_embeds: dict[str, int] = {}  # req_id -> chunks sent

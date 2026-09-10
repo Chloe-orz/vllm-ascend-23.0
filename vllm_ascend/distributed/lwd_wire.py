@@ -39,19 +39,20 @@ def init_lwd_duplex_channels() -> None:
     Called once per worker process when ``is_prefill_only`` is on.
     Idempotent.
 
-    Endpoint ranks come from ``lwd_config.edge_global_rank`` /
-    ``cloud_global_rank`` (explicit, deployment-owned).  When unset,
-    fall back to the PP-group convention (2-rank group: rank[0]=edge,
-    rank[1]=cloud), which matches the demo 1E1C topology.
+    Endpoint ranks come from explicit ``edge_global_rank`` /
+    ``cloud_global_rank`` keys in ``lwd_config`` when present
+    (deployment-owned, forward-compatible).  Otherwise fall back to the
+    PP-group convention (2-rank group: rank[0]=edge, rank[1]=cloud),
+    which matches the demo 1E1C topology.
     """
     global _INITIALIZED, _LWD_ENDPOINTS
     if _INITIALIZED:
         return
-    from vllm_ascend.ascend_config import get_ascend_config
+    from vllm.config import get_current_vllm_config
 
-    cfg = get_ascend_config().lwd_config
-    edge_rank = cfg.edge_global_rank
-    cloud_rank = cfg.cloud_global_rank
+    cfg = get_current_vllm_config().lwd_config
+    edge_rank = getattr(cfg, "edge_global_rank", None)
+    cloud_rank = getattr(cfg, "cloud_global_rank", None)
     if edge_rank is None or cloud_rank is None:
         pp_group = get_pp_group()
         if pp_group.world_size != 2:

@@ -34,7 +34,12 @@ class LwdCloudModelRunner(NPUModelRunner):
         self._lwd_pending_down_packet = None
         self._lwd_pending_c2e_meta = None
         self._lwd_captured_sampler_output = None
-        if self.ascend_config.lwd_config.is_cloud_node:
+        lwd_cfg = getattr(self.vllm_config, "lwd_config", None)
+        is_cloud_node = bool(
+            lwd_cfg is not None and lwd_cfg.enabled
+            and lwd_cfg.mode == "prefill_only" and not lwd_cfg.is_edge
+        )
+        if is_cloud_node:
             from vllm_ascend.worker.lwd_cloud.lwd_cloud_sample_collector import (
                 LwdCloudSampleCollector,
             )
