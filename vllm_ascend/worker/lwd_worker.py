@@ -85,12 +85,10 @@ class LwdWorker(NPUWorker):
         if not batch_meta.req_ids:
             return ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[])
 
-        # (1) one recv for the whole batch's DOWN buffer.
-        total_num_elements = sum(batch_meta.recv_num_elements) # TODO: recv_num_elements is a list or int
         request = LwdCommRequest(
             channel=LwdChannelType.DOWN,
             op="recv",
-            num_elements=total_num_elements,
+            num_elements=batch_meta.recv_num_elements,
             seqno=seqno,
             src_dst=self.rank + 1,  # edge rank + 1 = cloud first card
         )
