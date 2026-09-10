@@ -656,6 +656,13 @@ class NPUPlatform(Platform):
             elif ascend_config.xlite_graph_config.enabled:
                 logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
                 parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
+            elif ascend_config.lwd_config.is_prefill_only:
+                # prefill_only LWD edge-cloud data plane: the LWD logic
+                # lives in subclasses (LwdCloudWorker /
+                # LwdCloudModelRunner), the base worker/runner stay clean.
+                parallel_config.worker_cls = (
+                    "vllm_ascend.worker.lwd_cloud.lwd_cloud_worker.LwdCloudWorker"
+                )
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
