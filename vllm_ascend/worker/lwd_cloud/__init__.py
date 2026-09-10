@@ -4,5 +4,4 @@
 - ``lwd_cloud_worker``: NPUWorker subclass (LWD wire actions at worker layer)
 - ``lwd_cloud_model_runner``: NPUModelRunner subclass (cloud-side collection)
 - ``lwd_cloud_sample_collector``: per-step DOWN payload builder
-- ``lwd_recv_manager``: UP/DOWN recv bookkeeping (pre-post / readiness / abort)
 """

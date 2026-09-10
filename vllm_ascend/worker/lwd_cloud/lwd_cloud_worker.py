@@ -25,33 +25,21 @@ from vllm_ascend.worker.lwd_cloud.lwd_cloud_model_runner import LwdCloudModelRun
 from vllm_ascend.worker.worker import NPUWorker
 
 
-class _LwdRoleView:
-    """Derived role/mode flags over the vllm-native ``LwdConfig``
-    (``vllm/config/lwd.py``: fields enabled/role/mode + ``is_edge``).
-
-    The vllm config has no prefill_only/node-role properties, so this
-    tiny view centralizes the derivations every LWD call site uses."""
-
-    def __init__(self, cfg) -> None:
-        self.enabled = bool(cfg is not None and cfg.enabled)
-        self.is_prefill_only = self.enabled and cfg.mode == "prefill_only"
-        self.is_edge_node = self.enabled and cfg.is_edge
-        self.is_cloud_node = self.enabled and not cfg.is_edge
-
-
 class LwdCloudWorker(NPUWorker):
-    """NPUWorker + prefill_only LWD data-plane wiring (cloud & edge)."""
+    """NPUWorker + LWD data-plane wiring (cloud side only).
+
+    This subclass is selected by ``platform.py`` only when the LWD
+    deployment enables LWD on a cloud process, so no role/mode checks
+    are needed here — ``self.enable_lwd`` (set by NPUWorker.__init__
+    from vllm_config.lwd_config) is the single switch."""
 
     def init_device(self):
         super().init_device()
-        # self.lwd_config is set by NPUWorker.__init__ from
-        # vllm_config.lwd_config (vllm-native LWD config bootstrap).
-        self._lwd_cfg = _LwdRoleView(self.lwd_config)
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
         self._lwd_down_next_seqno = 0
-        self._lwd_edge_sent_embeds: dict[str, int] = {}  # req_id -> chunks sent
-        self._lwd_edge_aborted: set[str] = set()         # aborted req tombstones
-        if not self._lwd_cfg.is_prefill_only:
+        # req_id -> posted UP recv futures (consumed by take_lwd_up_embeds)
+        self._lwd_up_recv_futures: dict[str, list] = {}
+        if not self.enable_lwd:
             return
         if self.use_v2_model_runner:
             # The LWD hooks live on the V1 model runner; the V2 runner
@@ -62,28 +50,101 @@ class LwdCloudWorker(NPUWorker):
                 "use_v2_model_runner is not supported"
             )
         # Swap in the LWD model runner BEFORE any model load/usage.
-        self.model_runner = LwdCloudModelRunner(self.vllm_config, self.device)
+        # The cloud feeds on edge-computed prompt embeddings (no token
+        # ids on its input), so the native prompt-embeds path must be
+        # enabled for the runner to allocate inputs_embeds buffers.
+        self.model_config.enable_prompt_embeds = True
+        self.model_runner = LwdCloudModelRunner(
+            self.vllm_config, self.device, worker=self
+        )
         from vllm_ascend.distributed import lwd_wire
-        from vllm_ascend.worker.lwd_cloud.lwd_recv_manager import init_lwd_recv_managers
 
         lwd_wire.init_lwd_duplex_channels()
-        init_lwd_recv_managers(self.model_config.get_hidden_size())
 
     # ------------------------------------------------------------------ #
     # Engine step wiring                                                  #
     # ------------------------------------------------------------------ #
 
     def execute_model(self, scheduler_output):
-        # prefill_only cloud: finished requests trigger local cleanup
-        # (collector bookkeeping + UP chunk table); finished_req_ids is
-        # the engine's own liveness signal.
-        if (self._lwd_cfg.is_cloud_node
-                and scheduler_output.finished_req_ids):
+        if self.enable_lwd:
+            # Auto-register newly scheduled LWD requests into the
+            # collector (so their rows are collected into DOWN packets
+            # from the first sampled step).  No control-plane glue
+            # needed: scheduled_new_reqs is itself the admission signal.
+            collector = self.model_runner.lwd_cloud_collector
+            if collector is not None:
+                for req_data in scheduler_output.scheduled_new_reqs:
+                    collector.open_request(req_data.req_id, 0)
+            # cloud: post the exact-size UP irecv for every incoming
+            # LWD_EMBED batch (control info rides scheduler_output.lwd_batch).
+            self._lwd_up_post_recvs(scheduler_output)
+
+        # cloud: finished requests trigger local cleanup (collector
+        # bookkeeping + UP chunk table); finished_req_ids is the
+        # engine's own liveness signal.
+        if scheduler_output.finished_req_ids:
             self._lwd_cloud_flush_finished(scheduler_output.finished_req_ids)
 
-        if self._lwd_cfg.is_prefill_only:
-            get_lwd_comm_service().poll_completions()  # lazy keepalive reap
+        get_lwd_comm_service().poll_completions()  # lazy keepalive reap
         return super().execute_model(scheduler_output)
+
+    def _lwd_up_post_recvs(self, scheduler_output) -> None:
+        """Post the UP irecv for an incoming LWD_EMBED batch.
+
+        All control info rides the SchedulerOutput (edge -> cloud
+        control plane fills it in):
+          * ``scheduler_output.lwd_batch.batch_type == LWD_EMBED``
+          * ``batch.seqno`` — the edge dispatch seqno of THIS batch
+            (one UP hidden message per dispatch)
+          * ``batch.batch_meta.token_ids`` — per-request token lists;
+            the batch's hidden rows are the concatenation of these
+            prompts, so the recv size is ``sum(len) x H``.
+
+        HCCL rendezvous makes the edge's isend wait for this post, so
+        no separate notification is needed.  A mismatched/missing batch
+        is skipped (non-LWD step or control-plane error)."""
+        from vllm.v1.core.sched.output import LwdBatchType
+
+        batch = getattr(scheduler_output, "lwd_batch", None)
+        if batch is None or batch.batch_type is not LwdBatchType.LWD_EMBED:
+            return
+        meta = batch.batch_meta
+        if meta is None or not meta.req_ids:
+            return
+        hidden_size = self.model_config.get_hidden_size()
+        num_tokens = sum(len(t) for t in meta.token_ids)
+        if num_tokens <= 0:
+            return
+        future = get_lwd_comm_service().submit_recv(
+            LwdCommRequest(
+                channel=LwdChannelType.UP,
+                op="recv",
+                num_elements=num_tokens * hidden_size,
+                seqno=batch.seqno,
+            )
+        )
+        self._lwd_up_recv_futures[batch.seqno] = (future, meta)
+        logger.debug(
+            "[lwd] posted UP recv batch_seqno=%d reqs=%d tokens=%d",
+            batch.seqno, len(meta.req_ids), num_tokens,
+        )
+
+    def take_lwd_up_embeds(self, batch_seqno: int):
+        """Wait for and return one LWD_EMBED batch's UP embeds.
+
+        Returns ``(embeds, meta)`` where ``embeds`` is the concatenated
+        ``[total_tokens, H]`` tensor and ``meta`` is the batch's
+        ``LwdEmbedBatch`` (per-request token lists, used by the runner
+        to split rows back to requests).  Returns ``(None, None)`` when
+        nothing was posted for this seqno."""
+        item = self._lwd_up_recv_futures.pop(batch_seqno, None)
+        if item is None:
+            return None, None
+        future, meta = item
+        result = future.wait()
+        assert result.tensor is not None
+        hidden_size = self.model_config.get_hidden_size()
+        return result.tensor.view(-1, hidden_size), meta
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -94,20 +155,26 @@ class LwdCloudWorker(NPUWorker):
         # num_accepted / req_ids) rides back to the scheduler on
         # output.lwd_c2e_meta; the control plane forwards it to the edge
         # ahead of the tensor.
-        if self._lwd_cfg.is_cloud_node:
+        if self.enable_lwd:
             hidden = self.model_runner.take_lwd_pending_down_packet()
+            seqno = None
             if hidden is not None:
+                seqno = self._lwd_next_down_seqno()
                 get_lwd_comm_service().submit_send(
                     LwdCommRequest(
                         channel=LwdChannelType.DOWN,
                         op="send",
                         num_elements=hidden.numel(),
                         tensor=hidden,
-                        seqno=self._lwd_next_down_seqno(),
+                        seqno=seqno,
                     )
                 )
             meta = self.model_runner.take_lwd_pending_c2e_meta()
             if meta is not None and output is not None:
+                # Carry the DOWN seqno back so the edge can post its
+                # matching irecv (tag-less HCCL pairing).
+                if seqno is not None:
+                    meta.down_seqno = seqno
                 output.lwd_c2e_meta = meta
         return output
 
@@ -119,56 +186,11 @@ class LwdCloudWorker(NPUWorker):
         """Cloud side (streaming): a finished request's DOWN stream simply
         STOPS (its last step packet already went out with that step).
         No FIN packet -- request termination is signaled by the control
-        plane (v2.6).  Here we drop the collector bookkeeping AND release
-        the UP-side chunk table (prompt embeds recv buffers on device) —
+        plane (v2.6).  Here we drop the collector bookkeeping —
         finished_req_ids is the engine's own liveness signal, so this
         cleanup does not depend on the control plane."""
-        from vllm_ascend.worker.lwd_cloud.lwd_recv_manager import (
-            get_lwd_up_recv_manager,
-        )
-
         collector = self.model_runner.lwd_cloud_collector
-        up_manager = get_lwd_up_recv_manager()
         for req_id in finished_req_ids:
-            if collector is not None:
-                collector.drop(req_id)
-            up_manager.pop_request(req_id)
-
-    def abort_lwd_request(self, req_id: str) -> None:
-        """prefill_only control-plane abort hook (streaming semantics).
-
-        MUST be driven on BOTH peers for the same request:
-          * edge: mark the request aborted on the DOWN recv side (its
-            in-flight rows ride inside shared per-step batch packets and
-            are filtered at demux — DOWN seqnos are dense by
-            construction, so there is NO seqno to skip) and clear the
-            per-request send bookkeeping (unsent embed chunks are simply
-            never dispatched);
-          * cloud: drop the UP recv side (skips the recv seqnos of
-            chunks the edge will never send) and destroy the collector
-            bookkeeping — the request's rows simply stop appearing in
-            the per-step batch packets (they are built from live
-            registrations only, and the DOWN seqno is assigned at send
-            time from a channel-global counter, so an aborted request
-            leaves NO hole in the send sequence).
-
-        A send already posted to HCCL cannot be un-posted — the control
-        plane must abort before dispatching the request's tail.
-        """
-        if not self._lwd_cfg.is_prefill_only:
-            return
-        from vllm_ascend.worker.lwd_cloud.lwd_recv_manager import (
-            get_lwd_down_recv_manager,
-            get_lwd_up_recv_manager,
-        )
-
-        if self._lwd_cfg.is_edge_node:
-            self._lwd_edge_aborted.add(req_id)
-            self._lwd_edge_sent_embeds.pop(req_id, None)
-            get_lwd_down_recv_manager().drop(req_id)
-        elif self._lwd_cfg.is_cloud_node:
-            get_lwd_up_recv_manager().drop(req_id)
-            collector = self.model_runner.lwd_cloud_collector
             if collector is not None:
                 collector.drop(req_id)
 

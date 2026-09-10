@@ -25,8 +25,9 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 class LwdCloudModelRunner(NPUModelRunner):
     """NPUModelRunner + prefill_only LWD cloud-side runner logic."""
 
-    def __init__(self, vllm_config, device):
+    def __init__(self, vllm_config, device, worker=None):
         super().__init__(vllm_config, device)
+        self.worker = worker  # LwdCloudWorker ref (UP recv futures live there)
         # prefill_only LWD data plane (cloud side): per-step payload
         # builder for the DOWN stream, plus the two pending slots the
         # worker layer drains.
@@ -34,24 +35,62 @@ class LwdCloudModelRunner(NPUModelRunner):
         self._lwd_pending_down_packet = None
         self._lwd_pending_c2e_meta = None
         self._lwd_captured_sampler_output = None
-        lwd_cfg = getattr(self.vllm_config, "lwd_config", None)
-        is_cloud_node = bool(
-            lwd_cfg is not None and lwd_cfg.enabled
-            and lwd_cfg.mode == "prefill_only" and not lwd_cfg.is_edge
+        # This runner class is only instantiated on the cloud side
+        # (see platform worker_cls selection); no role check needed.
+        from vllm_ascend.worker.lwd_cloud.lwd_cloud_sample_collector import (
+            LwdCloudSampleCollector,
         )
-        if is_cloud_node:
-            from vllm_ascend.worker.lwd_cloud.lwd_cloud_sample_collector import (
-                LwdCloudSampleCollector,
-            )
 
-            # Only TP rank 0 talks to the wire; skip collector creation on
-            # the other ranks (their packets would never be sent).
-            if get_tp_group().is_first_rank:
-                self.lwd_cloud_collector = LwdCloudSampleCollector()
+        # Only TP rank 0 talks to the wire; skip collector creation on
+        # the other ranks (their packets would never be sent).
+        if get_tp_group().is_first_rank:
+            self.lwd_cloud_collector = LwdCloudSampleCollector()
 
     # ------------------------------------------------------------------ #
-    # Sampling hook: capture, don't touch the wire                        #
+    # Remote embeds injection (cloud input has NO token ids — the prompt   #
+    # embeddings arrive over the UP channel and must drive forward)        #
     # ------------------------------------------------------------------ #
+
+    def _prepare_inputs(self, scheduler_output, num_scheduled_tokens):
+        """Inject the edge-computed prompt embeddings into the native
+        prompt-embeds machinery BEFORE the base fill loop runs.
+
+        The cloud receives no token ids for LWD requests: their whole
+        prompt arrives as embeddings over the UP channel.  Here we wait
+        for and place them into ``input_batch.req_prompt_embeds`` with
+        the ``is_token_ids`` mask cleared, so the base runner's native
+        fill loop (per-request ``num_computed_tokens`` offsets) feeds
+        them to forward as ``inputs_embeds`` — chunked prefill included.
+        """
+        if self._lwd_enabled():
+            self._lwd_inject_remote_embeds()
+        return super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
+
+    def _lwd_enabled(self) -> bool:
+        cfg = getattr(self.vllm_config, "lwd_config", None)
+        return bool(cfg is not None and cfg.enabled)
+
+    def _lwd_inject_remote_embeds(self) -> None:
+        worker = self.worker
+        if worker is None:
+            return
+        posted = getattr(worker, "_lwd_up_recv_futures", None)
+        if not posted:
+            return
+        for batch_seqno in list(posted.keys()):
+            embeds, meta = worker.take_lwd_up_embeds(batch_seqno)
+            if embeds is None:
+                continue
+            # Split the concatenated batch rows back per request
+            # (rows follow batch_meta order).
+            row = 0
+            for req_id, token_ids in zip(meta.req_ids, meta.token_ids):
+                n = len(token_ids)
+                idx = self.input_batch.req_id_to_index.get(req_id)
+                if idx is not None and n > 0:
+                    self.input_batch.req_prompt_embeds[idx] = embeds[row: row + n]
+                    self.input_batch.is_token_ids[idx, :n] = False
+                row += n
 
     def _sample(self, logits, spec_decode_metadata):
         """Capture the sampler output for the post-sample collection
@@ -84,24 +123,6 @@ class LwdCloudModelRunner(NPUModelRunner):
                 self._lwd_captured_sampler_output,
             )
         return output
-
-    # ------------------------------------------------------------------ #
-    # LWD request bookkeeping (control-plane glue)                        #
-    # ------------------------------------------------------------------ #
-
-    def register_lwd_request(
-        self,
-        req_id: str,
-        seqno: int | None = None,
-        num_prompt_tokens: int = 0,
-    ) -> None:
-        """Cloud-side admission glue (control plane calls this when a
-        remote-embeds request is admitted).  DOWN packets carry a
-        channel-global seqno assigned at send time, so no per-request
-        seqno bookkeeping is needed here; the UP seqnos arrive with the
-        per-chunk control-plane notifications."""
-        if self.lwd_cloud_collector is not None:
-            self.lwd_cloud_collector.open_request(req_id, num_prompt_tokens)
 
     # ------------------------------------------------------------------ #
     # Collection (cloud)                                                  #
