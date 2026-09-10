@@ -653,7 +653,10 @@ class NPUPlatform(Platform):
                 parallel_config.all2all_backend = "flashinfer_all2allv"
             lwd_config = getattr(vllm_config, "lwd_config", None)
             if lwd_config is not None and lwd_config.enabled:
-                parallel_config.worker_cls = "vllm_ascend.worker.lwd_worker.LwdWorker"
+                if lwd_config.is_edge():
+                    parallel_config.worker_cls = "vllm_ascend.worker.lwd_edge_worker.LwdEdgeWorker"
+                else:
+                    parallel_config.worker_cls = "vllm_ascend.worker.lwd_cloud_worker.LwdCloudWorker"
             elif is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:

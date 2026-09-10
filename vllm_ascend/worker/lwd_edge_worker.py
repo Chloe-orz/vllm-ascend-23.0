@@ -39,7 +39,7 @@ def compute_top_id_th(logits: torch.Tensor, token_id: int) -> int:
 
 
 # ---- edge worker ----
-class LwdWorker(NPUWorker):
+class LwdEdgeWorker(NPUWorker):
     """LWD edge worker: embed (prefill) + unembed (token recovery) only."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
