@@ -27,11 +27,11 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from vllm.distributed import get_tp_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed import lwd_wire
 from vllm_ascend.distributed.lwd_comm.future import LwdCommFuture
+from vllm_ascend.distributed.lwd_comm.types import LwdChannelType
 from vllm_ascend.distributed.lwd_comm.types import LwdCommRequest, LwdChannelType
 
 
@@ -313,6 +313,11 @@ class LwdChannel:
             peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
         tensor = req.tensor
         assert tensor is not None
+        # UP(边→云)用全 world 广播:embeds 对云侧每个 TP rank 都必须
+        # 可见,广播免去"leader 收完再组内分发",不存在内部 rank 的特殊
+        # 路径;DOWN(云 leader→边)保持点对点。
+        if self.channel_type == LwdChannelType.UP:
+            return [dist.broadcast(tensor.contiguous(), src=0)]
         return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
 
     def _wire_recv(self, req: LwdCommRequest):
@@ -325,25 +330,11 @@ class LwdChannel:
         buffer = torch.empty(
             req.num_elements, dtype=torch.bfloat16, device="npu"
         )
-        if peer is not None and peer >= 0:
-            # 端点 rank(云 leader):跨节点 P2P 直收边侧 chunk;收完随即
-            # 在云 TP 组内广播给内部 rank——广播挂在同一 channel 流上,
-            # 排在 irecv 完成之后(TP>1 时云侧每卡都需要 embeds)。
-            handles: list[Any] = [dist.irecv(buffer, src=peer, group=group)]
-            tp = get_tp_group()
-            if tp.world_size > 1:
-                handles.append(
-                    dist.broadcast(
-                        buffer, src=tp.ranks[0], group=tp.device_group
-                    )
-                )
-            return buffer, handles
-        # 内部云 TP rank(peer=-1,非跨节点组成员):不参与跨节点 P2P,
-        # 只加入云 TP 组内广播,从 leader 处取得同份 embeds。
-        tp = get_tp_group()
-        return buffer, [
-            dist.broadcast(buffer, src=tp.ranks[0], group=tp.device_group)
-        ]
+        if self.channel_type == LwdChannelType.UP:
+            # 云侧全部 TP rank 参与广播接收(src=边 rank 0),与边的 UP
+            # 广播配对;每个 rank 拿到同份 embeds。
+            return buffer, [dist.broadcast(buffer, src=0)]
+        return buffer, [dist.irecv(buffer, src=peer, group=group)]
 
     def _bridge_and_record(self, handles: list[Any]):
         """Bridge HCCL completion onto the channel stream and record an
