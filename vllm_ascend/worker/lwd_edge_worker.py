@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+from vllm.logger import logger
 
 from vllm.v1.core.sched.output import (
     LwdBatchType,
@@ -40,29 +41,64 @@ def compute_top_id_th(logits: torch.Tensor, token_id: int) -> int:
 # ---- edge worker ----
 class LwdEdgeWorker(NPUWorker):
     """LWD edge worker: embed (prefill) + unembed (token recovery) only."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
 
-        # init lwd comm service
+    def init_device(self):
+        # The duplex channels MUST be built here, never in ``__init__``.
+        # ``init_lwd_duplex_channels`` creates the two HCCL process groups
+        # (``dist.new_group``) and then warms them up with a two-sided P2P
+        # exchange (world barrier plus the edge/cloud isend/irecv pair), so it
+        # needs the distributed environment -- world group and PP group --
+        # which ``NPUWorker._init_worker_distributed_environment`` only builds
+        # inside ``init_device``.  The executor constructs the worker first and
+        # calls ``init_device`` afterwards, so running it from ``__init__``
+        # would trip the "group is not initialized" assertions; the two-sided
+        # warmup additionally requires both peers to reach it in the same fixed
+        # order, which only holds once every rank is past its distributed init.
+        super().init_device()
+        self.comm_service = get_lwd_comm_service()
+
         from vllm_ascend.distributed import lwd_wire
         lwd_wire.init_lwd_duplex_channels()
-
-        self.comm_service = get_lwd_comm_service()
+        logger.info(
+            "[lwd-edge] worker ready: duplex channels (UP/DOWN) initialized "
+            "on global rank=%d",
+            self.rank,
+        )
 
     def get_kv_cache_spec(self) -> dict[str, "KVCacheSpec"]:
         """The LWD edge runs no attention/transformer, so it needs no KV cache."""
         return {}
 
     def execute_model(self, scheduler_output: "SchedulerOutput"):
-        if scheduler_output.lwd_batch is None:
+        lwd_batch = scheduler_output.lwd_batch
+        if lwd_batch is None:
+            logger.debug("[lwd-edge] step carries no LWD batch; nothing to do")
             return None
 
-        lwd_batch = scheduler_output.lwd_batch
+        batch_meta = lwd_batch.batch_meta
         if lwd_batch.batch_type == LwdBatchType.LWD_EMBED:
-            return self._execute_lwd_embed(lwd_batch.seqno, lwd_batch.batch_meta)
+            logger.debug(
+                "[lwd-edge] EMBED seqno=%d reqs=%d tokens=%d",
+                lwd_batch.seqno,
+                len(batch_meta.req_ids),
+                sum(len(token_ids) for token_ids in batch_meta.token_ids),
+            )
+            return self._execute_lwd_embed(lwd_batch.seqno, batch_meta)
         if lwd_batch.batch_type == LwdBatchType.LWD_UNEMBED:
-            return self._execute_lwd_unembed(lwd_batch.seqno, lwd_batch.batch_meta)
+            logger.debug(
+                "[lwd-edge] UNEMBED seqno=%d reqs=%d accepted=%d "
+                "num_elements=%d",
+                lwd_batch.seqno,
+                len(batch_meta.req_ids),
+                sum(batch_meta.num_accept_tokens),
+                batch_meta.recv_num_elements,
+            )
+            return self._execute_lwd_unembed(lwd_batch.seqno, batch_meta)
 
+        logger.debug(
+            "[lwd-edge] unknown LWD batch type %r; nothing to do",
+            lwd_batch.batch_type,
+        )
         return None
 
     def _execute_lwd_embed(self, seqno: int, batch_meta: LwdEmbedBatch) -> None:
