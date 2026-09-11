@@ -27,6 +27,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+from vllm.distributed import get_tp_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed import lwd_wire
@@ -324,7 +325,25 @@ class LwdChannel:
         buffer = torch.empty(
             req.num_elements, dtype=torch.bfloat16, device="npu"
         )
-        return buffer, [dist.irecv(buffer, src=peer, group=group)]
+        if peer is not None and peer >= 0:
+            # 端点 rank(云 leader):跨节点 P2P 直收边侧 chunk;收完随即
+            # 在云 TP 组内广播给内部 rank——广播挂在同一 channel 流上,
+            # 排在 irecv 完成之后(TP>1 时云侧每卡都需要 embeds)。
+            handles: list[Any] = [dist.irecv(buffer, src=peer, group=group)]
+            tp = get_tp_group()
+            if tp.world_size > 1:
+                handles.append(
+                    dist.broadcast(
+                        buffer, src=tp.ranks[0], group=tp.device_group
+                    )
+                )
+            return buffer, handles
+        # 内部云 TP rank(peer=-1,非跨节点组成员):不参与跨节点 P2P,
+        # 只加入云 TP 组内广播,从 leader 处取得同份 embeds。
+        tp = get_tp_group()
+        return buffer, [
+            dist.broadcast(buffer, src=tp.ranks[0], group=tp.device_group)
+        ]
 
     def _bridge_and_record(self, handles: list[Any]):
         """Bridge HCCL completion onto the channel stream and record an
