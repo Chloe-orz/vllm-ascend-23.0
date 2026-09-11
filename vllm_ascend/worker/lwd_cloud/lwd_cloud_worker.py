@@ -18,7 +18,16 @@ import torch
 from vllm.logger import logger
 from vllm.v1.core.sched.output import GrammarOutput  # noqa: F401  (type)
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 
+from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.distributed.lwd_comm.lwd_parallel_init import (
+    init_lwd_ascend_model_parallel,
+)
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 
@@ -36,6 +45,31 @@ class LwdCloudWorker(NPUWorker):
     deployment enables LWD on a cloud process, so no role/mode checks
     are needed here — ``self.enable_lwd`` (set by NPUWorker.__init__
     from vllm_config.lwd_config) is the single switch."""
+
+    def _init_worker_distributed_environment(self) -> None:
+        """覆写原生入口(worker.py):ascend 侧并行组按 Lwd 布局构建。
+
+        vllm 侧分组由 parallel_state.initialize_model_parallel 的 Lwd
+        分支完成;ascend 侧原生 init_ascend_model_parallel 按 (dp, pp,
+        pcp, tp) 均匀网格切分,表达不了非对称边云拓扑,故以
+        init_lwd_ascend_model_parallel 替代(构建 MC2 等组后注入)。
+        其余步骤与原生 worker.py 保持一致。"""
+        init_batch_invariance()
+        init_distributed_environment(
+            self.parallel_config.world_size,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+            "hccl",
+        )
+        ensure_model_parallel_initialized(
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size,
+            self.parallel_config.prefill_context_parallel_size,
+            self.parallel_config.decode_context_parallel_size,
+        )
+        init_lwd_ascend_model_parallel(self.parallel_config)
+        ensure_ec_transfer_initialized(self.vllm_config)
 
     def init_device(self):
         super().init_device()
