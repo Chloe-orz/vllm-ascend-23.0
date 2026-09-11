@@ -21,6 +21,10 @@ from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
+
+# ops 须先于 model_runner 链初始化，否则 device_op 与 ops 包循环导入
+#（对齐 worker.py 的导入顺序）
+import vllm_ascend.ops  # noqa: F401
 from vllm_ascend.worker.lwd_cloud.lwd_cloud_model_runner import LwdCloudModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
