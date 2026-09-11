@@ -39,30 +39,34 @@ def init_lwd_duplex_channels() -> None:
     Called once per worker process when ``is_prefill_only`` is on.
     Idempotent.
 
-    Endpoint ranks come from explicit ``edge_global_rank`` /
-    ``cloud_global_rank`` keys in ``lwd_config`` when present
-    (deployment-owned, forward-compatible).  Otherwise fall back to the
-    PP-group convention (2-rank group: rank[0]=edge, rank[1]=cloud),
-    which matches the demo 1E1C topology.
+    Endpoint ranks are resolved from existing deployment info, in order:
+      1. ``lwd_config.edge_global_rank`` / ``cloud_global_rank`` —
+         derived in ``VllmConfig.__post_init__`` from the
+         ``--edge-npu-count`` / ``--cloud-npu-count`` CLI counts
+         (contiguous edge-first layout: edge [0, E), cloud [E, E + C),
+         endpoints (0, E));
+      2. PP-group convention: a 2-rank PP group spans exactly the
+         edge/cloud pair (rank[0]=edge, rank[1]=cloud) — the demo 1E1C
+         topology.
+      Only the two endpoint ranks ever touch the channels; interior
+      ranks (extra cloud TP ranks) join the group collective but get
+      peer=-1.
     """
     global _INITIALIZED, _LWD_ENDPOINTS
     if _INITIALIZED:
         return
     from vllm.config import get_current_vllm_config
 
-    cfg = get_current_vllm_config().lwd_config
-    edge_rank = getattr(cfg, "edge_global_rank", None)
-    cloud_rank = getattr(cfg, "cloud_global_rank", None)
-    if edge_rank is None or cloud_rank is None:
-        pp_group = get_pp_group()
-        if pp_group.world_size != 2:
-            raise RuntimeError(
-                "prefill_only duplex channels need explicit "
-                "lwd_config.edge_global_rank/cloud_global_rank "
-                "when the PP group does not span exactly the edge/cloud "
-                f"pair (pp world_size={pp_group.world_size})"
-            )
-        edge_rank, cloud_rank = pp_group.ranks[0], pp_group.ranks[1]
+    pp_group = get_pp_group()
+    if pp_group.world_size != 2:
+        raise RuntimeError(
+            "prefill_only duplex channels cannot resolve edge/cloud "
+            "endpoint ranks: lwd_config endpoint ranks unset (check "
+            "--edge-npu-count/--cloud-npu-count) and the PP group "
+            "does not span exactly the edge/cloud pair "
+            f"(pp world_size={pp_group.world_size})"
+        )
+    edge_rank, cloud_rank = pp_group.ranks[0], pp_group.ranks[1]
     ranks = [edge_rank, cloud_rank]
     backend = dist.get_backend(get_world_group().device_group)
     my_rank = dist.get_rank()

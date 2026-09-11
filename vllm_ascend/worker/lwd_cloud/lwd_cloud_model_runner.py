@@ -168,9 +168,10 @@ class LwdCloudModelRunner(NPUModelRunner):
     ) -> list:
         """产出 entries: (req_id, hidden_rows, ranks, accepted)，行序 = input_batch 序。
 
-        非 spec 每请求 1 行（accepted=0）；spec verify 每请求 accepted+1 行
-        （rejection 后有效行是该请求 verify 段的前缀，段界 cu_num_sampled_tokens）。
-        行过滤：has_slot（已注册）x ~discard_request_mask（本步真采样）。
+        accepted 语义 = 本步返回行数:非 spec 每请求 1 行(accepted=1);
+        spec verify 每请求 accepted+1 行(rejection 后有效行是该请求
+        verify 段的前缀,段界 cu_num_sampled_tokens)。
+        行过滤:has_slot(已注册)x ~discard_request_mask(本步真采样)。
         """
         sampled = sampler_output.sampled_token_ids  # [B, k+1], -1 为无效位
         if sampled is None or sampled.dim() != 2:
@@ -190,8 +191,9 @@ class LwdCloudModelRunner(NPUModelRunner):
                 self._lwd_full_vocab_logits(logits[idx]), sampled[idx][:, 0]
             )
             return [
+                # num_accepted 语义 = 本步返回行数(非 spec 恒 1 行)
                 (batch_req_ids[i], sample_hidden_states[i : i + 1],
-                 ranks[j : j + 1], 0)
+                 ranks[j : j + 1], 1)
                 for j, i in enumerate(idx)
             ]
 
@@ -209,7 +211,10 @@ class LwdCloudModelRunner(NPUModelRunner):
                     req_id,
                     sample_hidden_states[seg_start : seg_start + rows],
                     self._lwd_global_ranks(seg_logits, sampled[i, :rows]),
-                    rows - 1,
+                    # num_accepted 语义 = 本步返回行数(spec verify =
+                    # accepted+1 行,即有效 sampled 数),与 top_id_ths
+                    # 行数恒等,边侧按行数还原 token 不会取错
+                    rows,
                 ))
             seg_start = seg_end
         return entries

@@ -78,6 +78,11 @@ class LwdCloudWorker(NPUWorker):
             # cloud: post the exact-size UP irecv for every incoming
             # LWD_EMBED batch (control info rides scheduler_output.lwd_batch).
             self._lwd_up_post_recvs(scheduler_output)
+            # abort drain: chunks whose RangeNotify arrived but whose
+            # request died before scheduling still have an in-flight UP
+            # send on the edge; recv-and-drop them at exact size to keep
+            # the channel FIFO paired ("rather recv once more than miss").
+            self._lwd_up_drain(scheduler_output)
 
         # cloud: finished requests trigger local cleanup (collector
         # bookkeeping + UP chunk table); finished_req_ids is the
@@ -128,6 +133,38 @@ class LwdCloudWorker(NPUWorker):
             "[lwd] posted UP recv batch_seqno=%d reqs=%d tokens=%d",
             batch.seqno, len(meta.req_ids), num_tokens,
         )
+
+    def _lwd_up_drain(self, scheduler_output) -> None:
+        """Recv-and-drop UP chunks of aborted requests (pairing repair).
+
+        ``scheduler_output.lwd_up_drain_entries`` carries ``(seqno,
+        num_tokens)`` entries swept by the scheduler on finish/abort.
+        Every registered seqno has an in-flight send on the edge (notify
+        and dispatch are synchronous there), so the only safe repair is
+        to receive the payload at exact size and discard it — skipping
+        the seqno would misalign all later pairings on the tag-less
+        wire.  The futures are never consumed; completion is reaped by
+        ``poll_completions``."""
+        entries = getattr(scheduler_output, "lwd_up_drain_entries", None)
+        if not entries:
+            return
+        hidden_size = self.model_config.get_hidden_size()
+        service = get_lwd_comm_service()
+        for seqno, num_tokens in entries:
+            if num_tokens <= 0:
+                continue
+            service.submit_recv(
+                LwdCommRequest(
+                    channel=LwdChannelType.UP,
+                    op="recv",
+                    num_elements=num_tokens * hidden_size,
+                    seqno=seqno,
+                )
+            )
+            logger.info(
+                "[lwd] draining aborted UP chunk seqno=%d tokens=%d",
+                seqno, num_tokens,
+            )
 
     def take_lwd_up_embeds(self, batch_seqno: int):
         """Wait for and return one LWD_EMBED batch's UP embeds.
