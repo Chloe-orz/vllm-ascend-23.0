@@ -111,16 +111,16 @@ class LwdEdgeWorker(NPUWorker):
 
         batch_meta = lwd_batch.batch_meta
         if lwd_batch.batch_type == LwdBatchType.LWD_EMBED:
-            logger.debug(
-                "[lwd-edge] EMBED seqno=%d reqs=%d tokens=%d",
+            logger.info(
+                "[Lwd][edge-worker] EMBED seqno=%d reqs=%d tokens=%d",
                 lwd_batch.seqno,
                 len(batch_meta.req_ids),
                 sum(len(token_ids) for token_ids in batch_meta.token_ids),
             )
             return self._execute_lwd_embed(lwd_batch.seqno, batch_meta)
         if lwd_batch.batch_type == LwdBatchType.LWD_UNEMBED:
-            logger.debug(
-                "[lwd-edge] UNEMBED seqno=%d reqs=%d accepted=%d "
+            logger.info(
+                "[Lwd][edge-worker] UNEMBED seqno=%d reqs=%d accepted=%d "
                 "num_elements=%d",
                 lwd_batch.seqno,
                 len(batch_meta.req_ids),

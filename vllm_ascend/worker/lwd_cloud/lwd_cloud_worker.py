@@ -163,8 +163,8 @@ class LwdCloudWorker(NPUWorker):
             )
         )
         self._lwd_up_recv_futures[batch.seqno] = (future, meta)
-        logger.debug(
-            "[lwd] posted UP recv batch_seqno=%d reqs=%d tokens=%d",
+        logger.info(
+            "[Lwd][cloud-worker] UP recv posted seqno=%d reqs=%d tokens=%d",
             batch.seqno, len(meta.req_ids), num_tokens,
         )
 
@@ -199,6 +199,10 @@ class LwdCloudWorker(NPUWorker):
             seqno = None
             if hidden is not None:
                 seqno = self._lwd_next_down_seqno()
+                logger.info(
+                    "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
+                    seqno, hidden.numel(),
+                )
                 get_lwd_comm_service().submit_send(
                     LwdCommRequest(
                         channel=LwdChannelType.DOWN,
@@ -234,6 +238,9 @@ class LwdCloudWorker(NPUWorker):
         collector = self.model_runner.lwd_cloud_collector
         embeds_map = self.model_runner.input_batch.req_prompt_embeds
         req_id_to_index = self.model_runner.input_batch.req_id_to_index
+        logger.info(
+            "[Lwd][cloud-worker] flush finished reqs=%s", list(finished_req_ids)
+        )
         for req_id in finished_req_ids:
             if collector is not None:
                 collector.drop(req_id)

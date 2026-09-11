@@ -127,6 +127,12 @@ class LwdCloudModelRunner(NPUModelRunner):
             embeds, meta = worker.take_lwd_up_embeds(batch_seqno)
             if embeds is None:
                 continue
+            logger.info(
+                "[Lwd][cloud-runner] UP embeds consumed seqno=%s rows=%s "
+                "reqs=%s",
+                batch_seqno, embeds.shape[0] if embeds is not None else 0,
+                meta.req_ids,
+            )
             # Split the concatenated batch rows back per request
             # (rows follow batch_meta order).
             row = 0
