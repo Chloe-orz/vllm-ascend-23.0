@@ -4,7 +4,6 @@
 """LWD (layerwise disaggregated) prefill_only mode edge worker."""
 from __future__ import annotations
 
-import time
 from typing import TYPE_CHECKING
 
 import torch
@@ -15,13 +14,13 @@ from vllm.v1.core.sched.output import (
     LwdUnembedBatch,
 )
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
+from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 from vllm_ascend.worker.worker import NPUWorker
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.kv_cache_interface import KVCacheSpec
-
-#TODO: import LwdChannelType LwdCommRequest and ...
 
 
 # ---- token recovery / logit-rank lookup ----
@@ -43,13 +42,21 @@ class LwdEdgeWorker(NPUWorker):
     """LWD edge worker: embed (prefill) + unembed (token recovery) only."""
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.comm_service = get_lwd_comm_service() # TODO: import lwd_comm
+
+        # init lwd comm service
+        from vllm_ascend.distributed import lwd_wire
+        lwd_wire.init_lwd_duplex_channels()
+
+        self.comm_service = get_lwd_comm_service()
 
     def get_kv_cache_spec(self) -> dict[str, "KVCacheSpec"]:
         """The LWD edge runs no attention/transformer, so it needs no KV cache."""
         return {}
 
     def execute_model(self, scheduler_output: "SchedulerOutput"):
+        if scheduler_output.lwd_batch is None:
+            return None
+
         lwd_batch = scheduler_output.lwd_batch
         if lwd_batch.batch_type == LwdBatchType.LWD_EMBED:
             return self._execute_lwd_embed(lwd_batch.seqno, lwd_batch.batch_meta)
@@ -74,7 +81,6 @@ class LwdEdgeWorker(NPUWorker):
             num_elements=embeds.numel(),                     # total_N * H
             tensor=embeds,
             seqno=seqno,
-            src_dst=self.rank + 1,  # edge rank + 1 = cloud first card
         )
         self.comm_service.submit_send(request)
 
@@ -85,20 +91,18 @@ class LwdEdgeWorker(NPUWorker):
         if not batch_meta.req_ids:
             return ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[])
 
-        request = LwdCommRequest(
-            channel=LwdChannelType.DOWN,
-            op="recv",
-            num_elements=batch_meta.recv_num_elements,
-            seqno=seqno,
-            src_dst=self.rank + 1,  # edge rank + 1 = cloud first card
+        recv_future = self.comm_service.submit_recv(
+            LwdCommRequest(
+                channel=LwdChannelType.DOWN,
+                op="recv",
+                num_elements=batch_meta.recv_num_elements,  # int = rows_total * hidden_size
+                seqno=seqno,
+            )
         )
-        self.comm_service.submit_recv(request)
-        comm_result = self.comm_service.wait()
-        while comm_result.status != LwdCommStatus.OK: # TODO: check is the status
-            time.sleep(0.001)
-
-        hidden_states = comm_result.tensor
-        logits = model.lm_head(hidden_states)
+        result = recv_future.wait()  # blocks until OK; raises TimeoutError / RuntimeError
+        hidden_size = self.model_config.get_hidden_size()
+        hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
+        logits = model.lm_head(hidden_states)                # (rows_total, V)
 
         sampled_token_ids: list[list[int]] = []
         row_offset = 0
