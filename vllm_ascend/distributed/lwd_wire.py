@@ -57,16 +57,21 @@ def init_lwd_duplex_channels() -> None:
         return
     from vllm.config import get_current_vllm_config
 
-    pp_group = get_pp_group()
-    if pp_group.world_size != 2:
-        raise RuntimeError(
-            "prefill_only duplex channels cannot resolve edge/cloud "
-            "endpoint ranks: lwd_config endpoint ranks unset (check "
-            "--edge-npu-count/--cloud-npu-count) and the PP group "
-            "does not span exactly the edge/cloud pair "
-            f"(pp world_size={pp_group.world_size})"
-        )
-    edge_rank, cloud_rank = pp_group.ranks[0], pp_group.ranks[1]
+    lwd_cfg = get_current_vllm_config().parallel_config.lwd_config
+    if lwd_cfg.enable_lwd and lwd_cfg.edge_npu_count > 0:
+        # 连续 edge-first 布局：edge [0, E), cloud [E, E+C)，端点取 (0, E)
+        edge_rank, cloud_rank = 0, lwd_cfg.edge_npu_count
+    else:
+        pp_group = get_pp_group()
+        if pp_group.world_size != 2:
+            raise RuntimeError(
+                "prefill_only duplex channels cannot resolve edge/cloud "
+                "endpoint ranks: lwd_config endpoint ranks unset (check "
+                "--edge-npu-count/--cloud-npu-count) and the PP group "
+                "does not span exactly the edge/cloud pair "
+                f"(pp world_size={pp_group.world_size})"
+            )
+        edge_rank, cloud_rank = pp_group.ranks[0], pp_group.ranks[1]
     ranks = [edge_rank, cloud_rank]
     backend = dist.get_backend(get_world_group().device_group)
     my_rank = dist.get_rank()
