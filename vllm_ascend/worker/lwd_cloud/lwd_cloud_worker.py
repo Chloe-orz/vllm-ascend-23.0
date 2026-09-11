@@ -3,7 +3,7 @@
 
 All LWD worker-side logic lives here (moved out of ``worker.py``):
 init bring-up of the duplex channels + recv managers, the EDGE_EMBED
-dispatch hook, the cloud finished-flush, the abort hook, and the
+dispatch hook, the cloud finished-flush, and the
 DOWN send (draining the runner's per-step hidden payload + attaching
 ``lwd_c2e_meta`` to the ModelRunnerOutput).
 
@@ -60,6 +60,7 @@ class LwdCloudWorker(NPUWorker):
         from vllm_ascend.distributed import lwd_wire
 
         lwd_wire.init_lwd_duplex_channels()
+        self._register_lwd_prompt_embeds_provider()
 
     # ------------------------------------------------------------------ #
     # Engine step wiring                                                  #
@@ -78,11 +79,6 @@ class LwdCloudWorker(NPUWorker):
             # cloud: post the exact-size UP irecv for every incoming
             # LWD_EMBED batch (control info rides scheduler_output.lwd_batch).
             self._lwd_up_post_recvs(scheduler_output)
-            # abort drain: chunks whose RangeNotify arrived but whose
-            # request died before scheduling still have an in-flight UP
-            # send on the edge; recv-and-drop them at exact size to keep
-            # the channel FIFO paired ("rather recv once more than miss").
-            self._lwd_up_drain(scheduler_output)
 
         # cloud: finished requests trigger local cleanup (collector
         # bookkeeping + UP chunk table); finished_req_ids is the
@@ -133,38 +129,6 @@ class LwdCloudWorker(NPUWorker):
             "[lwd] posted UP recv batch_seqno=%d reqs=%d tokens=%d",
             batch.seqno, len(meta.req_ids), num_tokens,
         )
-
-    def _lwd_up_drain(self, scheduler_output) -> None:
-        """Recv-and-drop UP chunks of aborted requests (pairing repair).
-
-        ``scheduler_output.lwd_up_drain_entries`` carries ``(seqno,
-        num_tokens)`` entries swept by the scheduler on finish/abort.
-        Every registered seqno has an in-flight send on the edge (notify
-        and dispatch are synchronous there), so the only safe repair is
-        to receive the payload at exact size and discard it — skipping
-        the seqno would misalign all later pairings on the tag-less
-        wire.  The futures are never consumed; completion is reaped by
-        ``poll_completions``."""
-        entries = getattr(scheduler_output, "lwd_up_drain_entries", None)
-        if not entries:
-            return
-        hidden_size = self.model_config.get_hidden_size()
-        service = get_lwd_comm_service()
-        for seqno, num_tokens in entries:
-            if num_tokens <= 0:
-                continue
-            service.submit_recv(
-                LwdCommRequest(
-                    channel=LwdChannelType.UP,
-                    op="recv",
-                    num_elements=num_tokens * hidden_size,
-                    seqno=seqno,
-                )
-            )
-            logger.info(
-                "[lwd] draining aborted UP chunk seqno=%d tokens=%d",
-                seqno, num_tokens,
-            )
 
     def take_lwd_up_embeds(self, batch_seqno: int):
         """Wait for and return one LWD_EMBED batch's UP embeds.
@@ -225,11 +189,44 @@ class LwdCloudWorker(NPUWorker):
         No FIN packet -- request termination is signaled by the control
         plane (v2.6).  Here we drop the collector bookkeeping —
         finished_req_ids is the engine's own liveness signal, so this
-        cleanup does not depend on the control plane."""
+        cleanup does not depend on the control plane.  Also releases the
+        request's prompt-embeds assembly buffer (backstop for abort
+        mid-prefill; normal prefill completion frees it in the runner's
+        ``_lwd_release_consumed_prompt_embeds``)."""
         collector = self.model_runner.lwd_cloud_collector
+        embeds_map = self.model_runner.input_batch.req_prompt_embeds
+        req_id_to_index = self.model_runner.input_batch.req_id_to_index
         for req_id in finished_req_ids:
             if collector is not None:
                 collector.drop(req_id)
+            idx = req_id_to_index.get(req_id)
+            if idx is not None:
+                embeds_map.pop(idx, None)
+
+    def _register_lwd_prompt_embeds_provider(self) -> None:
+        """Wire the draft proposer's first-pass prompt-embeds provider.
+
+        The provider resolves the request's prompt embeds from the
+        runner's ``input_batch.req_prompt_embeds`` (already injected by
+        ``_lwd_inject_remote_embeds`` during prefill); a missing entry
+        (not scheduled / not LWD) returns None and the proposer falls
+        back to the token-id path.
+        """
+        from vllm_ascend.spec_decode.llm_base_proposer import (
+            AscendSpecDecodeBaseProposer,
+        )
+
+        runner = self.model_runner
+
+        def _lwd_prompt_embeds_provider(req_id: str):
+            idx = runner.input_batch.req_id_to_index.get(req_id)
+            if idx is None:
+                return None
+            return runner.input_batch.req_prompt_embeds.get(idx)
+
+        AscendSpecDecodeBaseProposer.set_lwd_prompt_embeds_provider(
+            _lwd_prompt_embeds_provider
+        )
 
     def _lwd_next_down_seqno(self) -> int:
         seqno = self._lwd_down_next_seqno
