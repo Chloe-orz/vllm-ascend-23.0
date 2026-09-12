@@ -218,7 +218,11 @@ class LwdCloudWorker(NPUWorker):
                 # matching irecv (tag-less HCCL pairing).
                 if seqno is not None:
                     meta.down_seqno = seqno
-                output.lwd_c2e_meta = meta
+                # async scheduling 下 output 是 AsyncGPUModelRunnerOutput
+                # 包装器,get_output() 返回的是内层 ModelRunnerOutput——
+                # meta 必须挂到内层,否则解包时丢失。
+                target = getattr(output, "_model_runner_output", output)
+                target.lwd_c2e_meta = meta
                 logger.info(
                     "[Lwd][cloud-worker] c2e_meta attached: reqs=%s "
                     "down_seqno=%s (hidden_sent=%s)",
