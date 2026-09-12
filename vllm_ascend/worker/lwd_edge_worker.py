@@ -152,6 +152,9 @@ class LwdEdgeWorker(NPUWorker):
 
         # Flatten all requests' prompt tokens into one batch (order = req_ids).
         flat_token_ids = [tid for token_ids in batch_meta.token_ids for tid in token_ids]
+        logger.info(
+            "[Lwd][edge-worker] embed token_ids=%s", flat_token_ids
+        )
         token_ids_tensor = torch.tensor(flat_token_ids, dtype=torch.long, device=device)
         embeds = model.embed_input_ids(token_ids_tensor)      # (total_N, H)
         request = LwdCommRequest(
@@ -195,7 +198,11 @@ class LwdEdgeWorker(NPUWorker):
             ]
             sampled_token_ids.append(token_ids)
             row_offset += num_rows
-
+        logger.info(
+            "[Lwd][edge-worker] unembed selected token_ids=%s "
+            "(top_id_ths=%s)",
+            sampled_token_ids, batch_meta.top_id_ths,
+        )
         req_id_to_index = {
             req_id: index for index, req_id in enumerate(batch_meta.req_ids)
         }
