@@ -99,6 +99,15 @@ class LwdEdgeWorker(NPUWorker):
             self.rank,
         )
 
+    def compile_or_warm_up_model(self):
+        # LWD 边侧运行期 forward 被 LWD 流程劫持(execute_model 只走
+        # embed/unembed 直调),模型级 warmup 与 cudagraph 捕获均用不到;
+        # 且 0 层拓扑下 full-forward 会在 final norm 解包失败。整体跳过。
+        from vllm.v1.worker.worker_base import CompilationTimes
+
+        logger.info("[lwd-edge] skip model warmup/capture (forward is hijacked by LWD)")
+        return CompilationTimes(language_model=0.0, encoder=0.0)
+
     def get_kv_cache_spec(self) -> dict[str, "KVCacheSpec"]:
         """The LWD edge runs no attention/transformer, so it needs no KV cache."""
         return {}
