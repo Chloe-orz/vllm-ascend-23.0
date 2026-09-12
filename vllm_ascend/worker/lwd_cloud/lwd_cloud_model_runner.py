@@ -139,6 +139,15 @@ class LwdCloudModelRunner(NPUModelRunner):
             for req_id, token_ids in zip(meta.req_ids, meta.token_ids):
                 n = len(token_ids)
                 idx = self.input_batch.req_id_to_index.get(req_id)
+                if idx is None:
+                    # 静默丢行会破坏该请求的整段 prompt embedding
+                    # (保持 is_token_ids=True,模型去 embed placeholder
+                    # token 0)——必须显式暴露。
+                    logger.warning(
+                        "[Lwd][cloud-runner] INJECT DROP req=%s seqno=%s "
+                        "rows=%d: req not in input_batch (batch=%s)",
+                        req_id, batch_seqno, n, self.input_batch.req_ids,
+                    )
                 if idx is not None and n > 0:
                     prompt_len = int(num_prompt[idx])
                     buf = embeds_map.get(idx)
@@ -156,6 +165,12 @@ class LwdCloudModelRunner(NPUModelRunner):
                     start = int(computed[idx])
                     buf[start : start + n].copy_(embeds[row : row + n])
                     self.input_batch.is_token_ids[idx, start : start + n] = False
+                    from vllm_ascend.distributed import lwd_wire
+                    lwd_wire.dump_tensor(
+                        f"[Lwd][DUMP][req={req_id}][seqno={batch_seqno}] "
+                        f"INJECT window[{start}:{start + n}]",
+                        buf[start : start + n],
+                    )
                 row += n
             # Drop the NPU chunk reference promptly (the recv buffer is
             # reaped by the comm layer once no future/result holds it).
