@@ -129,10 +129,19 @@ def warmup_lwd_duplex_channels() -> None:
             continue
         payload = torch.zeros(8, dtype=torch.bfloat16, device="npu")
         if am_sender:
+            logger.info(
+                "[lwd-warmup] SEND post channel=%s my_rank=%d peer=%d "
+                "group_ranks=%s", channel, my_rank, peer,
+                dist.get_process_group_ranks(group))
             handle = dist.isend(payload, dst=peer, group=group)
         else:
+            logger.info(
+                "[lwd-warmup] RECV post channel=%s my_rank=%d src=%d "
+                "group_ranks=%s", channel, my_rank, peer,
+                dist.get_process_group_ranks(group))
             handle = dist.irecv(payload, src=peer, group=group)
         handle.wait()
+        logger.info("[lwd-warmup] DONE channel=%s my_rank=%d", channel, my_rank)
     get_world_group().barrier()
     logger.info("[lwd-wire] duplex channels warmed up (UP + DOWN)")
 
