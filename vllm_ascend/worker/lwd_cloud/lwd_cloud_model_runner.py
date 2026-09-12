@@ -209,6 +209,10 @@ class LwdCloudModelRunner(NPUModelRunner):
         供 worker 层发送；元信息随 ModelRunnerOutput.lwd_c2e_meta 回调度器。"""
         collector = self.lwd_cloud_collector
         if collector.num_live_slots() == 0 or logits is None:
+            logger.debug(
+                "[Lwd][cloud-runner] collect skipped: live_slots=%s logits=%s",
+                collector.num_live_slots(), logits is not None,
+            )
             return
         entries = self._lwd_collect_batch(
             collector, sample_hidden_states, logits,
@@ -218,6 +222,14 @@ class LwdCloudModelRunner(NPUModelRunner):
             hidden, meta = collector.build_hidden_payload(entries)
             self._lwd_pending_down_packet = hidden
             self._lwd_pending_c2e_meta = meta
+            logger.info(
+                "[Lwd][cloud-runner] DOWN packet built: reqs=%s rows=%d numel=%d",
+                getattr(meta, "req_ids", None),
+                hidden.shape[0] if hidden is not None else 0,
+                hidden.numel() if hidden is not None else 0,
+            )
+        else:
+            logger.debug("[Lwd][cloud-runner] collect: no LWD entries this step")
 
     def take_lwd_pending_down_packet(self):
         """worker 层取走本步 DOWN hidden 张量（单槽覆盖写，每步必被取走）。"""

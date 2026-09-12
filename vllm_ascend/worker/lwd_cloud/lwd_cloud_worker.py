@@ -219,6 +219,13 @@ class LwdCloudWorker(NPUWorker):
                 if seqno is not None:
                     meta.down_seqno = seqno
                 output.lwd_c2e_meta = meta
+                logger.info(
+                    "[Lwd][cloud-worker] c2e_meta attached: reqs=%s "
+                    "down_seqno=%s (hidden_sent=%s)",
+                    getattr(meta, "req_ids", None),
+                    getattr(meta, "down_seqno", None),
+                    seqno is not None,
+                )
         return output
 
     # ------------------------------------------------------------------ #
