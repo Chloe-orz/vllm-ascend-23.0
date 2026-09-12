@@ -33,6 +33,20 @@ _LWD_ENDPOINTS: tuple[int, int] | None = None  # (edge_global_rank, cloud_global
 _INITIALIZED = False
 
 
+def dump_tensor(tag: str, tensor: "torch.Tensor") -> None:
+    """调试:全量打印数据面张量,供边云两端成对对比数值。
+
+    tag 形如 "[Lwd][DUMP][req=...][seqno=...] SEND/RECV ...";
+    fp32 + numpy threshold=inf 保证两端打印格式与精度一致。
+    """
+    import numpy as np
+
+    arr = tensor.detach().to("cpu", torch.float32).numpy()
+    with np.printoptions(threshold=np.inf, linewidth=10000, precision=8):
+        logger.info("%s shape=%s dtype=%s\n%s", tag, tuple(tensor.shape),
+                    tensor.dtype, arr)
+
+
 def init_lwd_duplex_channels() -> None:
     """Create the two duplex channels for the edge/cloud rank pair.
 

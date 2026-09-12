@@ -183,7 +183,14 @@ class LwdCloudWorker(NPUWorker):
         result = future.wait()
         assert result.tensor is not None
         hidden_size = self.model_config.get_hidden_size()
-        return result.tensor.view(-1, hidden_size), meta
+        embeds = result.tensor.view(-1, hidden_size)
+        from vllm_ascend.distributed import lwd_wire
+        lwd_wire.dump_tensor(
+            f"[Lwd][DUMP][req={meta.req_ids}][seqno={batch_seqno}] "
+            f"RECV UP embeds",
+            embeds,
+        )
+        return embeds, meta
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -218,6 +225,13 @@ class LwdCloudWorker(NPUWorker):
                 # matching irecv (tag-less HCCL pairing).
                 if seqno is not None:
                     meta.down_seqno = seqno
+                if hidden is not None:
+                    from vllm_ascend.distributed import lwd_wire
+                    lwd_wire.dump_tensor(
+                        f"[Lwd][DUMP][req={meta.req_ids}]"
+                        f"[seqno={seqno}] SEND DOWN hidden",
+                        hidden,
+                    )
                 # async scheduling 下 output 是 AsyncGPUModelRunnerOutput
                 # 包装器,get_output() 返回的是内层 ModelRunnerOutput——
                 # meta 必须挂到内层,否则解包时丢失。
