@@ -34,17 +34,20 @@ _INITIALIZED = False
 
 
 def dump_tensor(tag: str, tensor: "torch.Tensor") -> None:
-    """调试:全量打印数据面张量,供边云两端成对对比数值。
+    """调试:打印数据面张量摘要,供边云两端成对对比数值。
 
     tag 形如 "[Lwd][DUMP][req=...][seqno=...] SEND/RECV ...";
-    fp32 + numpy threshold=inf 保证两端打印格式与精度一致。
+    fp32 统一精度,输出 shape/dtype/首尾各 10 个数/sum/mean。
     """
     import numpy as np
 
-    arr = tensor.detach().to("cpu", torch.float32).numpy()
+    flat = tensor.detach().to("cpu", torch.float32).numpy().reshape(-1)
     with np.printoptions(threshold=np.inf, linewidth=10000, precision=8):
-        logger.info("%s shape=%s dtype=%s\n%s", tag, tuple(tensor.shape),
-                    tensor.dtype, arr)
+        logger.info(
+            "%s shape=%s dtype=%s head10=%s tail10=%s sum=%.6f mean=%.8f",
+            tag, tuple(tensor.shape), tensor.dtype,
+            flat[:10], flat[-10:], float(flat.sum()), float(flat.mean()),
+        )
 
 
 def init_lwd_duplex_channels() -> None:
