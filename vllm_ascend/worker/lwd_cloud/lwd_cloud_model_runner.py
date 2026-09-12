@@ -16,6 +16,7 @@ from __future__ import annotations
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
+from vllm.v1.lwd_control.lwd_debug import LwdDebug
 from vllm.v1.outputs import ModelRunnerOutput
 
 from vllm_ascend.utils import lmhead_tp_enable
@@ -67,7 +68,9 @@ class LwdCloudModelRunner(NPUModelRunner):
         if self._lwd_enabled():
             self._lwd_release_consumed_prompt_embeds()
             self._lwd_inject_remote_embeds()
-        return super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
+        out = super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
+        LwdDebug.cloud_prepared_inputs(self, num_scheduled_tokens)  # [lwd-debug]
+        return out
 
     def _lwd_enabled(self) -> bool:
         cfg = getattr(self.vllm_config, "lwd_config", None)
@@ -171,6 +174,7 @@ class LwdCloudModelRunner(NPUModelRunner):
                         f"INJECT window[{start}:{start + n}]",
                         buf[start : start + n],
                     )
+                    LwdDebug.cloud_embeds_injected(req_id, idx, start, n, buf)  # [lwd-debug]
                 row += n
             # Drop the NPU chunk reference promptly (the recv buffer is
             # reaped by the comm layer once no future/result holds it).
@@ -335,6 +339,9 @@ class LwdCloudModelRunner(NPUModelRunner):
                     rows,
                 ))
             seg_start = seg_end
+        logger.info(
+            "[Lwd][cloud-sample] intended sampled ids=%s", sampled.tolist()
+        )
         return entries
 
     @staticmethod
