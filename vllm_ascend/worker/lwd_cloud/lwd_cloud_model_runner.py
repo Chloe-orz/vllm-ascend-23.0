@@ -14,6 +14,7 @@ runner class at init_device when ``lwd_config`` enables prefill_only.
 from __future__ import annotations
 
 import torch
+from vllm.config import set_current_vllm_config
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.v1.outputs import ModelRunnerOutput
@@ -24,6 +25,21 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 class LwdCloudModelRunner(NPUModelRunner):
     """NPUModelRunner + prefill_only LWD cloud-side runner logic."""
+
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: "IntermediateTensors | None" = None,
+    ):
+        # Lwd 覆写依赖:PP 组的 is_first_rank/is_last_rank 在 Lwd 下应恒为
+        # True(两侧同时充当头尾),但该判定读的是进程级"当前 config"——
+        # 只在 set_current_vllm_config 的 with 块里存活,execute_model 发生
+        # 在块外,覆写静默失效并回退朴素 rank 比较。这里把上下文补上,云侧
+        # 判定恢复正确语义(prompt-embeds 分支依赖 is_first_rank 为 True)。
+        with set_current_vllm_config(self.vllm_config):
+            return super().execute_model(
+                scheduler_output, intermediate_tensors
+            )
 
     def __init__(self, vllm_config, device, worker=None):
         super().__init__(vllm_config, device)
