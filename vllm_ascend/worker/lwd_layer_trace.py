@@ -85,6 +85,27 @@ def _make_step_hook():
     return pre_hook
 
 
+def _find_text_backbone(model):
+    """定位文本 backbone:兼容普通结构(model.model.layers)与 VL 包装
+    结构(model.language_model[.model].layers,顶层是 visual+language_model)。
+    返回 (backbone, layers);找不到返回 (None, None)。"""
+    candidates = (
+        getattr(model, "model", None),
+        getattr(getattr(model, "language_model", None), "model", None),
+        getattr(model, "language_model", None),
+    )
+    for holder in candidates:
+        if holder is None:
+            continue
+        layers = (
+            getattr(holder, "layers", None)
+            or getattr(holder, "decoder_layers", None)
+        )
+        if layers is not None:
+            return holder, layers
+    return None, None
+
+
 def install_lwd_layer_trace(model) -> None:
     """L0+L2:层数/结构日志 + 逐层 forward hook(幂等,env 门控)。
 
@@ -98,11 +119,7 @@ def install_lwd_layer_trace(model) -> None:
     from vllm.logger import init_logger
 
     log = init_logger(__name__)
-    backbone = getattr(model, "model", model)
-    layers = (
-        getattr(backbone, "layers", None)
-        or getattr(backbone, "decoder_layers", None)
-    )
+    backbone, layers = _find_text_backbone(model)
     if layers is None:
         log.warning(
             "[layer-trace] no decoder layers found on %r; top modules=%s",
