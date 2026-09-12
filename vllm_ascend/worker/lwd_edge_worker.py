@@ -181,12 +181,9 @@ class LwdEdgeWorker(NPUWorker):
         result = recv_future.wait()  # blocks until OK; raises TimeoutError / RuntimeError
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
-        # 包装层模型(如 Qwen3_5ForConditionalGeneration)的 lm_head 挂在
-        # 内层 language_model 上;单体模型则直接在顶层。
-        lm_head = getattr(model, "lm_head", None)
-        if lm_head is None:
-            lm_head = model.language_model.lm_head
-        logits = lm_head(hidden_states)                    # (rows_total, V)
+        # lm_head 不允许直接调用(ParallelLMHead.forward 强制经 sampler);
+        # compute_logits 是标准接口,包装层/单体模型都有。
+        logits = model.compute_logits(hidden_states)       # (rows_total, V)
 
         sampled_token_ids: list[list[int]] = []
         row_offset = 0
