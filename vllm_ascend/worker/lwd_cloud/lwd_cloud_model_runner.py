@@ -247,6 +247,16 @@ class LwdCloudModelRunner(NPUModelRunner):
         self._lwd_pending_c2e_meta = None
         return meta
 
+    def _lwd_detokenize(self, token_ids: list[int]) -> str:
+        """调试:把云侧采样 token ids 解码成最终返回用户形态的文本。"""
+        if getattr(self, "_lwd_tokenizer", None) is None:
+            from transformers import AutoTokenizer
+            self._lwd_tokenizer = AutoTokenizer.from_pretrained(
+                self.vllm_config.model_config.model,
+                trust_remote_code=self.vllm_config.model_config.trust_remote_code,
+            )
+        return self._lwd_tokenizer.decode(token_ids)
+
     def _lwd_collect_batch(
         self, collector, sample_hidden_states, logits,
         spec_decode_metadata, sampler_output,
@@ -275,6 +285,12 @@ class LwdCloudModelRunner(NPUModelRunner):
             ranks = self._lwd_global_ranks(
                 self._lwd_full_vocab_logits(logits[idx]), sampled[idx][:, 0]
             )
+            logger.info(
+                "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
+                [batch_req_ids[i] for i in idx],
+                [self._lwd_detokenize(ids)
+                 for ids in sampled[idx][:, 0].tolist()],
+            )
             return [
                 # num_accepted 语义 = 本步返回行数(非 spec 恒 1 行)
                 (batch_req_ids[i], sample_hidden_states[i : i + 1],
@@ -292,10 +308,16 @@ class LwdCloudModelRunner(NPUModelRunner):
                 seg_logits = self._lwd_full_vocab_logits(
                     logits[seg_start : seg_start + rows]
                 )
+                seg_ranks = self._lwd_global_ranks(seg_logits, sampled[i, :rows])
+                logger.info(
+                    "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
+                    req_id,
+                    self._lwd_detokenize(sampled[i, :rows].tolist()),
+                )
                 entries.append((
                     req_id,
                     sample_hidden_states[seg_start : seg_start + rows],
-                    self._lwd_global_ranks(seg_logits, sampled[i, :rows]),
+                    seg_ranks,
                     # num_accepted 语义 = 本步返回行数(spec verify =
                     # accepted+1 行,即有效 sampled 数),与 top_id_ths
                     # 行数恒等,边侧按行数还原 token 不会取错
