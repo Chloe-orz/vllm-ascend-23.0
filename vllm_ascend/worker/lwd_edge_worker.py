@@ -199,6 +199,24 @@ class LwdEdgeWorker(NPUWorker):
         # lm_head 不允许直接调用(ParallelLMHead.forward 强制经 sampler);
         # compute_logits 是标准接口,包装层/单体模型都有。
         logits = model.compute_logits(hidden_states)       # (rows_total, V)
+        # L5 对拍:首行 top-20,与云侧 sampler 入口的 [layer-trace]
+        # top20 逐位对照——排名换位即重放漂移的直接视图。
+        try:
+            from vllm_ascend.worker.lwd_layer_trace import (
+                lwd_layer_trace_enabled,
+            )
+
+            if lwd_layer_trace_enabled() and logits.dim() == 2:
+                row = logits[0].detach().float()
+                vals, tids = torch.topk(row, min(20, row.numel()))
+                logger.info(
+                    "[layer-trace] edge lm_head logits shape=%s row0 l2=%.4f "
+                    "top20=%s",
+                    tuple(logits.shape), row.norm().item(),
+                    list(zip(tids.tolist(), [round(v, 3) for v in vals.tolist()])),
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
         sampled_token_ids: list[list[int]] = []
         row_offset = 0

@@ -3766,6 +3766,11 @@ class NPUModelRunner(GPUModelRunner):
         if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self._start_dump_data()
 
+        # Lwd 逐层对拍插桩(env 门控,集中式/边云同路径;详见模块 docstring)
+        from vllm_ascend.worker.lwd_layer_trace import install_lwd_layer_trace
+
+        install_lwd_layer_trace(self.model)
+
         load_model_total_time = time.perf_counter() - load_model_start_time
         logger.info(
             "Model runner load_model total time: %.2f seconds",
