@@ -291,6 +291,13 @@ class LwdCloudModelRunner(NPUModelRunner):
                 [self._lwd_detokenize(ids)
                  for ids in sampled[idx][:, 0].tolist()],
             )
+            # 对账锚点(log_analyze_tools/lwd_token_diff.py 优先消费):
+            # 每步每请求的完整交付 id,req 级归属,MTP 多 token/步准确。
+            for i in idx:
+                logger.info(
+                    "[Lwd][cloud-tokens] req=%s ids=%s",
+                    batch_req_ids[i], [int(sampled[i, 0])],
+                )
             return [
                 # num_accepted 语义 = 本步返回行数(非 spec 恒 1 行)
                 (batch_req_ids[i], sample_hidden_states[i : i + 1],
@@ -313,6 +320,11 @@ class LwdCloudModelRunner(NPUModelRunner):
                     "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
                     req_id,
                     self._lwd_detokenize(sampled[i, :rows].tolist()),
+                )
+                # 对账锚点(同上):spec 步含本步全部 accepted+bonus id。
+                logger.info(
+                    "[Lwd][cloud-tokens] req=%s ids=%s",
+                    req_id, sampled[i, :rows].tolist(),
                 )
                 entries.append((
                     req_id,
