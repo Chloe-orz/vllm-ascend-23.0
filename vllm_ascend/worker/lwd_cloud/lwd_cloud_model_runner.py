@@ -219,8 +219,6 @@ class LwdCloudModelRunner(NPUModelRunner):
           (hidden_packet, pinned_view, meta_event, req_ids, rows_per_req)
         或 None(本步无在途请求)。
         """
-        from vllm_ascend.distributed import lwd_timing
-
         sampled = sampler_output.sampled_token_ids
         if sampled is None or sampled.dim() != 2 or logits is None:
             return None
@@ -228,7 +226,6 @@ class LwdCloudModelRunner(NPUModelRunner):
         valid = ~self.discard_request_mask.np[: len(batch_req_ids)]
         is_spec = spec_decode_metadata is not None
 
-        t0 = lwd_timing.synced_now(sync=False)
         rows_list, ranks_list, accepted = [], [], []
         lg = logits  # bf16 原生,直接比较(cast 无精度增益)
         full_cover = all(valid[: len(batch_req_ids)])
@@ -275,10 +272,6 @@ class LwdCloudModelRunner(NPUModelRunner):
             pinned[:n_meta].copy_(meta_dev, non_blocking=True)
             event = torch.npu.Event()
             event.record(side)
-        lwd_timing.log_duration(
-            f"[Lwd][timing] collect payload rows={hidden_packet.shape[0]} "
-            f"meta={n_meta}", t0, sync=False,
-        )
         return (
             hidden_packet,
             pinned[:n_meta],
