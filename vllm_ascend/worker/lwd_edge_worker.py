@@ -184,7 +184,9 @@ class LwdEdgeWorker(NPUWorker):
             )
         )
         _t_post = time.monotonic()
-        result = recv_future.wait()  # blocks until OK; raises TimeoutError / RuntimeError
+        # wait_for_comm:设备序等待(替代 wait 的 50ms 轮询 tick),主机不阻塞
+        recv_future.wait_for_comm()
+        result = recv_future.result()
         _t_tensor = time.monotonic()
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)

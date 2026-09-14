@@ -203,7 +203,9 @@ class LwdCloudWorker(NPUWorker):
         if item is None:
             return None, None
         future, meta = item
-        result = future.wait()
+        # wait_for_comm:设备序等待(替代 wait 的 50ms 轮询 tick),主机不阻塞
+        future.wait_for_comm()
+        result = future.result()
         assert result.tensor is not None
         hidden_size = self.model_config.get_hidden_size()
         embeds = result.tensor.view(-1, hidden_size)
