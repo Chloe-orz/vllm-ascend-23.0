@@ -180,7 +180,7 @@ class LwdEdgeWorker(NPUWorker):
         self, seqno: int, batch_meta: LwdUnembedBatch
     ) -> ModelRunnerOutput:
         from vllm_ascend.distributed import lwd_timing
-        t_total = lwd_timing.synced_now()
+        t_total = lwd_timing.synced_now(sync=False)
         model = self.model_runner.get_model()
         if not batch_meta.req_ids:
             return ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[])
@@ -235,7 +235,8 @@ class LwdEdgeWorker(NPUWorker):
             batch_meta.req_ids, seqno, sampled_token_ids,
         )
         lwd_timing.log_duration(
-            f"[Lwd][timing] edge unembed total seqno={seqno}", t_total
+            f"[Lwd][timing] edge unembed total seqno={seqno}", t_total,
+            sync=False,
         )
         return ModelRunnerOutput(
             req_ids=batch_meta.req_ids,

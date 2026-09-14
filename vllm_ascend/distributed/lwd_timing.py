@@ -58,23 +58,30 @@ def enabled() -> bool:
     return _ENABLED
 
 
-def synced_now() -> float:
-    """同步后取当前时间戳(计时起点);关闭时返回 0.0。"""
+def synced_now(*, sync: bool = True) -> float:
+    """取当前时间戳(计时起点);关闭时返回 0.0。
+
+    sync=True(通信段)先 torch.npu.synchronize() 再取时间;
+    sync=False(计算段)不打断异步流水线,日志照常输出。
+    """
     if not _ENABLED:
         return 0.0
-    torch.npu.synchronize()
+    if sync:
+        torch.npu.synchronize()
     return time.perf_counter()
 
 
-def log_duration(tag: str, t0: float, *, chain: str = "lwd") -> None:
-    """同步后打印 t0 至今的耗时,以及与同侧上一个计时点的间隔。
+def log_duration(tag: str, t0: float, *, chain: str = "lwd", sync: bool = True) -> None:
+    """打印 t0 至今的耗时,以及与同侧上一个计时点的间隔。
 
     输出形如 ``tag: 1.234 ms (+5.678 ms since prev)``;
-    chain 相同的点构成一条时间链(默认全进程一条,如需多链可显式分键)。
+    chain 相同的点构成一条时间链(默认全进程一条,如需多链可显式分键);
+    sync=True 打印前再做一次 synchronize(通信段),False 则不做(计算段)。
     """
     if not _ENABLED:
         return
-    torch.npu.synchronize()
+    if sync:
+        torch.npu.synchronize()
     now = time.perf_counter()
     prev = _last_end.get(chain)
     _last_end[chain] = now
