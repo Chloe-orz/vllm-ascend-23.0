@@ -209,12 +209,7 @@ class LwdCloudWorker(NPUWorker):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        from vllm_ascend.distributed import lwd_timing
-        _t_sample = lwd_timing.synced_now(sync=False)
         output = self.model_runner.sample_tokens(grammar_output)
-        lwd_timing.log_duration(
-            "[Lwd][timing] cloud sample_tokens step", _t_sample, sync=False
-        )
         # token 直传模式:云侧不再经 runner 收集/组 meta——控制面(引擎)
         # 直接从 ModelRunnerOutput 取 sampled_token_ids 发边。
         return output

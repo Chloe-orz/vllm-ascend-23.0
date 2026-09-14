@@ -640,12 +640,7 @@ class NPUWorker(WorkerBase):
         if self.profiler is not None:
             self.profiler.step()
 
-        from vllm_ascend.distributed import lwd_timing
-        _t_step = lwd_timing.synced_now(sync=False)
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        lwd_timing.log_duration(
-            "[Lwd][timing] worker execute_model step", _t_step, sync=False
-        )
         if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput, NoneType)):
             return output
 

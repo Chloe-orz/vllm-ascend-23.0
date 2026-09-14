@@ -203,74 +203,95 @@ class LwdCloudModelRunner(NPUModelRunner):
     def _lwd_collect_probe(
         self, sample_hidden_states, logits, spec_decode_metadata, sampler_output,
     ) -> None:
-        """完整复现旧 rank-replay 采集流程(隐藏组包+全词表秩+num_accept),
-        分段打点分析耗时构成;结果即弃,不下发。
+        """完整复现旧 rank-replay 采集流程,细粒度分段打点;结果即弃,不下发。
 
-        段 1 ranks:全词表 logits 归约(fp32 转换/lmhead TP all_gather)
-        + 全局秩计算;段 2 hidden pack:行拼接;段 3 meta 物化:
-        ranks.tolist()(host 同步)。内嵌常驻执行,日志由
-        VLLM_ASCEND_LWD_TIMING 控制输出。
+        细分点:spec-meta D2H / fp32 cast / lmhead all_gather / 秩核心 /
+        hidden-pack / meta 物化。内嵌常驻,日志由 VLLM_ASCEND_LWD_TIMING 控制。
         """
         from vllm_ascend.distributed import lwd_timing
         if logits is None:
             return
+        from vllm.distributed.parallel_state import get_tp_group
+        from vllm_ascend.utils import lmhead_tp_enable
+
         sampled = sampler_output.sampled_token_ids
         if sampled is None or sampled.dim() != 2:
             return
         batch_req_ids = self.input_batch.req_ids
         valid = ~self.discard_request_mask.np[: len(batch_req_ids)]
+        is_spec = spec_decode_metadata is not None
 
-        # ---- 段 1:全词表秩(topk rank)计算 ----
-        t1 = lwd_timing.synced_now(sync=True)
-        rows_list, ranks_list, accepted_list = [], [], []
-        if spec_decode_metadata is None:
-            idx = [i for i, r in enumerate(batch_req_ids) if valid[i]]
-            if idx:
-                ranks = self._probe_global_ranks(
-                    self._probe_full_vocab_logits(logits[idx]),
-                    sampled[idx][:, 0],
-                )
-                rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
-                ranks_list.append(ranks)
-                accepted_list.extend([1] * len(idx))
-        else:
+        # ---- p0: spec 元数据 D2H(counts / cu 段界) ----
+        counts = cu = None
+        if is_spec:
+            t0 = lwd_timing.synced_now(sync=True)
             counts = (sampled != -1).sum(dim=1).tolist()
             cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
+            lwd_timing.log_duration("[Lwd][timing] probe p0 spec-meta d2h", t0, sync=True)
+
+        # ---- p1a: 全词表 fp32 cast ----
+        t1 = lwd_timing.synced_now(sync=True)
+        lg = logits.float()
+        lwd_timing.log_duration(
+            f"[Lwd][timing] probe p1a cast fp32 shape={tuple(logits.shape)}",
+            t1, sync=True,
+        )
+
+        # ---- p1b: lmhead TP all_gather ----
+        tp = get_tp_group()
+        if tp.world_size > 1 and lmhead_tp_enable():
+            t1b = lwd_timing.synced_now(sync=True)
+            lg = tp.all_gather(lg, dim=-1)
+            lwd_timing.log_duration(
+                f"[Lwd][timing] probe p1b lmhead all_gather -> shape={tuple(lg.shape)}",
+                t1b, sync=True,
+            )
+
+        # ---- p2: 秩核心(gather + 全词表比较 + 归约) ----
+        t2 = lwd_timing.synced_now(sync=True)
+        rows_list, ranks_list, accepted_list = [], [], []
+        if not is_spec:
+            idx = [i for i, r in enumerate(batch_req_ids) if valid[i]]
+            if idx:
+                ranks_list.append(self._probe_global_ranks(
+                    lg[idx], sampled[idx][:, 0]))
+                rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
+                accepted_list.extend([1] * len(idx))
+        else:
             seg_start = 0
             for i, req_id in enumerate(batch_req_ids):
                 rows = counts[i]
                 if valid[i] and rows >= 1:
                     ranks_list.append(self._probe_global_ranks(
-                        self._probe_full_vocab_logits(
-                            logits[seg_start : seg_start + rows]),
-                        sampled[i, :rows],
-                    ))
+                        lg[seg_start : seg_start + rows], sampled[i, :rows]))
                     rows_list.append(
                         sample_hidden_states[seg_start : seg_start + rows])
                     accepted_list.append(rows)
                 seg_start = cu[i]
         lwd_timing.log_duration(
-            f"[Lwd][timing] probe ranks rows={len(rows_list)}", t1, sync=True
+            f"[Lwd][timing] probe p2 rank-core rows={len(rows_list)} vocab={lg.shape[-1]}",
+            t2, sync=True,
         )
         if not rows_list:
             return
 
-        # ---- 段 2:hidden 组包 ----
-        t2 = lwd_timing.synced_now(sync=True)
+        # ---- p3: hidden 组包 ----
+        t3 = lwd_timing.synced_now(sync=True)
         hidden_packet = torch.cat(rows_list)
         lwd_timing.log_duration(
-            f"[Lwd][timing] probe hidden-pack rows={hidden_packet.shape[0]} "
-            f"numel={hidden_packet.numel()}", t2, sync=True,
+            f"[Lwd][timing] probe p3 hidden-pack rows={hidden_packet.shape[0]} "
+            f"numel={hidden_packet.numel()}", t3, sync=True,
         )
 
-        # ---- 段 3:meta 物化(ranks/accepted 转 host) ----
-        t3 = lwd_timing.synced_now(sync=True)
+        # ---- p4: meta 物化(ranks/accepted 转 host,全链同步) ----
+        t4 = lwd_timing.synced_now(sync=True)
         top_id_ths = [r.tolist() for r in ranks_list]
         num_accepted = list(accepted_list)
         _ = (hidden_packet, top_id_ths, num_accepted)  # 即弃
         lwd_timing.log_duration(
-            "[Lwd][timing] probe meta-materialize", t3, sync=True
+            "[Lwd][timing] probe p4 meta-materialize", t4, sync=True
         )
+
 
     @staticmethod
     def _probe_full_vocab_logits(logits_rows: torch.Tensor) -> torch.Tensor:
