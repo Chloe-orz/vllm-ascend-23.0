@@ -204,9 +204,16 @@ class LwdCloudWorker(NPUWorker):
             return None, None
         future, meta = item
         # wait_for_comm:设备序等待(替代 wait 的 50ms 轮询 tick),主机不阻塞
+        _ready = future.done()  # 纯 CPU 查询:取用时张量是否早已到达
         future.wait_for_comm()
         result = future.result()
         assert result.tensor is not None
+        # [Lwd][perf] TTFT 探针:ready_at_take=False = 云侧消费晚于张量到达
+        # (云侧调度/注入在拖 chunk 节奏);True = 边侧发送晚(边是源头)
+        logger.info(
+            "[Lwd][perf] up-recv seqno=%s ready_at_take=%s",
+            batch_seqno, _ready,
+        )
         hidden_size = self.model_config.get_hidden_size()
         embeds = result.tensor.view(-1, hidden_size)
         return embeds, meta

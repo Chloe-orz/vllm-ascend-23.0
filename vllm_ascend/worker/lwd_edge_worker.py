@@ -157,7 +157,9 @@ class LwdEdgeWorker(NPUWorker):
             "[Lwd][edge-worker] embed token_ids=%s", flat_token_ids
         )
         token_ids_tensor = torch.tensor(flat_token_ids, dtype=torch.long, device=device)
+        _t0 = time.monotonic()
         embeds = model.embed_input_ids(token_ids_tensor)      # (total_N, H)
+        _t_fwd = time.monotonic()
         request = LwdCommRequest(
             channel=LwdChannelType.UP,
             op="send",
@@ -166,6 +168,17 @@ class LwdEdgeWorker(NPUWorker):
             seqno=seqno,
         )
         self.comm_service.submit_send(request)
+        # [Lwd][perf] TTFT 探针:forward=embed 前向;submit_send=快照clone+
+        # 广播提交(含 bridge 的 handle.wait)——若 UP 世界广播在等云侧
+        # 入队,此段会显著变大(chunk 级锁步的直接证据)
+        logger.info(
+            "[Lwd][perf] embed seqno=%s forward=%.2f submit_send=%.2f "
+            "total=%.2fms tokens=%d",
+            seqno, (_t_fwd - _t0) * 1000,
+            (time.monotonic() - _t_fwd) * 1000,
+            (time.monotonic() - _t0) * 1000,
+            len(flat_token_ids),
+        )
 
     def _execute_lwd_unembed(
         self, seqno: int, batch_meta: LwdUnembedBatch
