@@ -187,7 +187,8 @@ class LwdEdgeWorker(NPUWorker):
                 seqno=seqno,
             )
         )
-        result = recv_future.wait()  # blocks until OK; raises TimeoutError / RuntimeError
+        recv_future.wait_for_comm()  # blocks until OK; raises TimeoutError / RuntimeError
+        result = recv_future.result()
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
         from vllm_ascend.distributed import lwd_wire
