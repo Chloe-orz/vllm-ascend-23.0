@@ -189,12 +189,12 @@ class LwdCloudModelRunner(NPUModelRunner):
             #  spec_decode_common_attn_metadata, hidden_states,
             #  sample_hidden_states, ...)
             state = self.execute_model_state
-            captured = (state[5], state[1], state[2])  # sample_hidden, logits, spec_meta
+            captured = (state[5], state[1], state[2], state[0])  # +scheduler_output
         self._lwd_captured_sampler_output = None
         output = super().sample_tokens(grammar_output)
         if captured is not None and self._lwd_captured_sampler_output is not None:
             self._lwd_pending_down_payload = self._lwd_collect_down_payload(
-                captured[0], captured[1], captured[2],
+                captured[0], captured[1], captured[2], captured[3],
                 self._lwd_captured_sampler_output,
             )
         return output
@@ -207,7 +207,8 @@ class LwdCloudModelRunner(NPUModelRunner):
 
     @torch.inference_mode()
     def _lwd_collect_down_payload(
-        self, sample_hidden_states, logits, spec_decode_metadata, sampler_output,
+        self, sample_hidden_states, logits, spec_decode_metadata,
+        scheduler_output, sampler_output,
     ):
         """生产级 DOWN 采集(rank-replay):hidden 组包 + 全局秩 + num_accepted。
 
@@ -240,11 +241,26 @@ class LwdCloudModelRunner(NPUModelRunner):
             rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
             accepted.extend([1] * len(idx))
         else:
-            counts = (sampled != -1).sum(dim=1)
-            cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
+            # counts/cu 零同步来源:
+            # counts = 框架每步已异步 D2H 的 accepted 计数(CPU tensor);
+            # cu = 按 host 侧 scheduled_spec_decode_tokens 累加(1+draft_len)
+            if self.num_accepted_tokens_event is not None:
+                self.num_accepted_tokens_event.synchronize()
+            counts = (
+                self.input_batch.num_accepted_tokens_cpu_tensor[
+                    : len(batch_req_ids)
+                ].tolist()
+            )
+            spec_tokens = getattr(
+                scheduler_output, "scheduled_spec_decode_tokens", None
+            ) or {}
+            cu, _acc = [], 0
+            for req_id in batch_req_ids:
+                _acc += 1 + len(spec_tokens.get(req_id, ()))
+                cu.append(_acc)
             seg_start = 0
             for i in range(len(batch_req_ids)):
-                rows = int(counts[i])
+                rows = counts[i]
                 if valid[i] and rows >= 1:
                     seg_lg = lg[seg_start : seg_start + rows]
                     thresh = seg_lg.gather(
