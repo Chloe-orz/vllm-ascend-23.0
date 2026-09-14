@@ -152,7 +152,7 @@ class LwdEdgeWorker(NPUWorker):
 
         # Flatten all requests' prompt tokens into one batch (order = req_ids).
         flat_token_ids = [tid for token_ids in batch_meta.token_ids for tid in token_ids]
-        logger.info(
+        logger.debug(
             "[Lwd][edge-worker] embed token_ids=%s", flat_token_ids
         )
         token_ids_tensor = torch.tensor(flat_token_ids, dtype=torch.long, device=device)
