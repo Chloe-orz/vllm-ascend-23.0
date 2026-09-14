@@ -38,7 +38,9 @@ if TYPE_CHECKING:
 def select_token(logits: torch.Tensor, top_id_th: int) -> int:
     """Map ``top_id_th`` (0-based ordinal in descending logits) back to a token id."""
     logits = logits.reshape(-1)
-    return int(torch.argsort(logits, descending=True)[top_id_th].item())
+    # topk(r+1) 取第 r 大的下标 = 降序第 r 名,等价于 argsort 但 O(V·k)
+    # 代替 O(V·logV) 的全排序
+    return int(torch.topk(logits, top_id_th + 1).indices[-1].item())
 
 
 def compute_top_id_th(logits: torch.Tensor, token_id: int) -> int:
