@@ -203,33 +203,90 @@ class LwdCloudModelRunner(NPUModelRunner):
     def _lwd_collect_probe(
         self, sample_hidden_states, logits, spec_decode_metadata, sampler_output,
     ) -> None:
-        """完整复现旧 rank-replay 采集流程,连续游标分段计时(段间无遗漏,
-        Sigma(段) 约等于 probe TOTAL);结果即弃,不下发。"""
+        """采集流程耗时探针(结果即弃,协议只回 token_ids)。
+
+        LWD_PROBE_MODE 四种模式(默认 full):
+          off        函数体全跳过(验证成本是否在函数体内)
+          only_tolist  只复现 meta 物化的 D2H 同步(验证同步/流水线放干)
+          no_alloc   保留计算但去掉新分配与物化(bf16 直比/不取材/不 cat/
+                     不 tolist,验证分配器抖动)
+          full       完整流程+连续分段计时
+        """
+        import os
+
         from vllm_ascend.distributed import lwd_timing
         if logits is None:
             return
-        from vllm.distributed.parallel_state import get_tp_group
-        from vllm_ascend.utils import lmhead_tp_enable
+        mode = os.environ.get("LWD_PROBE_MODE", "full").lower()
+        if mode == "off":
+            return
 
-        def _seg(name: str, cur: float) -> float:
-            """结束上一段并把游标推进到下一段起点(段间连续)。"""
-            lwd_timing.log_duration(f"[Lwd][timing] probe {name}", cur, sync=True)
-            return lwd_timing.synced_now(sync=True)
-
-        t_total = lwd_timing.synced_now(sync=True)
-        cur = t_total
-
-        # s0: sampled ids 有效性 + valid 掩码(host)
         sampled = sampler_output.sampled_token_ids
         if sampled is None or sampled.dim() != 2:
             return
         batch_req_ids = self.input_batch.req_ids
         valid = ~self.discard_request_mask.np[: len(batch_req_ids)]
+        is_spec = spec_decode_metadata is not None
+        if is_spec:
+            idx = [i for i in range(len(batch_req_ids)) if valid[i]]
+        else:
+            idx = [i for i, r in enumerate(batch_req_ids) if valid[i]]
+
+        t_total = lwd_timing.synced_now(sync=True)
+
+        # ---------------- only_tolist:只复现 meta 物化的 D2H 同步 ----------------
+        if mode == "only_tolist":
+            fake = torch.zeros(max(1, len(idx)), dtype=torch.int32,
+                               device=logits.device)
+            _ = fake.tolist()  # 与 ranks.tolist() 等价的 D2H 全链放干
+            lwd_timing.log_duration(
+                f"[Lwd][timing] probe TOTAL (only_tolist rows={len(idx)})",
+                t_total, sync=True,
+            )
+            return
+
+        # ---------------- no_alloc:计算保留,去掉新分配与物化 ----------------
+        if mode == "no_alloc":
+            full_cover = idx == list(range(len(batch_req_ids)))
+            # bf16 直接比较,不做 fp32 cast、不做高级索引取材(全覆盖时)
+            lg_sel = logits if full_cover else logits[idx]
+            sm_sel = (sampled[:, 0] if full_cover else sampled[idx][:, 0])
+            if not is_spec:
+                thresh = lg_sel.gather(1, sm_sel.long().unsqueeze(1))
+                ranks = (lg_sel > thresh).sum(dim=1).to(torch.int32)
+                _ = ranks  # 即弃,不 tolist
+            else:
+                counts = (sampled != -1).sum(dim=1).tolist()
+                cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
+                seg_start = 0
+                for i in range(len(batch_req_ids)):
+                    rows = counts[i]
+                    if valid[i] and rows >= 1:
+                        seg_lg = logits[seg_start : seg_start + rows]
+                        thresh = seg_lg.gather(
+                            1, sampled[i, :rows].long().unsqueeze(1))
+                        _ = (seg_lg > thresh).sum(dim=1).to(torch.int32)
+                    seg_start = cu[i]
+            # 不 cat hidden、不 tolist、不物化
+            lwd_timing.log_duration(
+                f"[Lwd][timing] probe TOTAL (no_alloc rows={len(idx)})",
+                t_total, sync=True,
+            )
+            return
+
+        # ---------------- full:完整流程+连续分段 ----------------
+        from vllm.distributed.parallel_state import get_tp_group
+        from vllm_ascend.utils import lmhead_tp_enable
+
+        def _seg(name: str, cur: float) -> float:
+            lwd_timing.log_duration(f"[Lwd][timing] probe {name}", cur, sync=True)
+            return lwd_timing.synced_now(sync=True)
+
+        cur = t_total
         cur = _seg("s0 mask+meta", cur)
 
-        # s1: spec 元数据(counts 归约 + 两次 tolist D2H)
         counts = cu = None
-        if spec_decode_metadata is not None:
+        if is_spec:
             counts = (sampled != -1).sum(dim=1)
             cu = spec_decode_metadata.cu_num_sampled_tokens
             cur = _seg("s1 spec-counts kernel", cur)
@@ -237,25 +294,19 @@ class LwdCloudModelRunner(NPUModelRunner):
             cu = cu.tolist()
             cur = _seg("s1 spec-counts d2h", cur)
 
-        # s2: 全词表 fp32 cast
         lg = logits.float()
         cur = _seg(f"s2 cast fp32 {tuple(logits.shape)}", cur)
 
-        # s3: lmhead TP all_gather
         tp = get_tp_group()
         if tp.world_size > 1 and lmhead_tp_enable():
             lg = tp.all_gather(lg, dim=-1)
             cur = _seg(f"s3 lmhead all_gather -> {tuple(lg.shape)}", cur)
 
-        # s4: 索引取材(高级索引/切片拷贝)
         rows_list, ranks_list, accepted_list = [], [], []
-        if spec_decode_metadata is None:
-            idx = [i for i, r in enumerate(batch_req_ids) if valid[i]]
+        if not is_spec:
             lg_sel = lg[idx] if idx else None
             sm_sel = sampled[idx][:, 0] if idx else None
             cur = _seg(f"s4 index-select rows={len(idx)}", cur)
-
-            # s5: 秩核心(gather+比较+归约)
             if idx:
                 ranks_list.append(self._probe_global_ranks(lg_sel, sm_sel))
                 rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
@@ -280,21 +331,19 @@ class LwdCloudModelRunner(NPUModelRunner):
             )
             return
 
-        # s6: hidden 组包 cat
         hidden_packet = torch.cat(rows_list)
         cur = _seg(
             f"s6 hidden-pack rows={hidden_packet.shape[0]} "
             f"numel={hidden_packet.numel()}", cur,
         )
 
-        # s7: meta 物化(ranks.tolist D2H + host 列表)
         top_id_ths = [r.tolist() for r in ranks_list]
         num_accepted = list(accepted_list)
         _ = (hidden_packet, top_id_ths, num_accepted)  # 即弃
         cur = _seg("s7 meta-materialize", cur)
 
         lwd_timing.log_duration(
-            "[Lwd][timing] probe TOTAL", t_total, sync=True
+            f"[Lwd][timing] probe TOTAL (full)", t_total, sync=True
         )
 
 
