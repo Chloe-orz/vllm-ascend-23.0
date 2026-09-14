@@ -129,14 +129,6 @@ class LwdCloudWorker(NPUWorker):
 
     def execute_model(self, scheduler_output):
         if self.enable_lwd:
-            # Auto-register newly scheduled LWD requests into the
-            # collector (so their rows are collected into DOWN packets
-            # from the first sampled step).  No control-plane glue
-            # needed: scheduled_new_reqs is itself the admission signal.
-            collector = self.model_runner.lwd_cloud_collector
-            if collector is not None:
-                for req_data in scheduler_output.scheduled_new_reqs:
-                    collector.open_request(req_data.req_id, 0)
             # cloud: post the exact-size UP irecv for every incoming
             # LWD_EMBED batch (control info rides scheduler_output.lwd_batch).
             self._lwd_up_post_recvs(scheduler_output)
@@ -217,25 +209,14 @@ class LwdCloudWorker(NPUWorker):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        from vllm_ascend.distributed import lwd_timing
+        _t_sample = lwd_timing.synced_now(sync=False)
         output = self.model_runner.sample_tokens(grammar_output)
-        # LWD cloud (token direct mode): the DOWN wire carries NOTHING —
-        # sampled token ids ride the c2e meta on the ZMQ control plane.
-        # The step metadata (token_ids / num_accepted / req_ids) rides
-        # back to the scheduler on output.lwd_c2e_meta.
-        if self.enable_lwd:
-            meta = self.model_runner.take_lwd_pending_c2e_meta()
-            if meta is not None and output is not None:
-                # async scheduling 下 output 是 AsyncGPUModelRunnerOutput
-                # 包装器,get_output() 返回的是内层 ModelRunnerOutput——
-                # meta 必须挂到内层,否则解包时丢失。
-                target = getattr(output, "_model_runner_output", output)
-                target.lwd_c2e_meta = meta
-                logger.info(
-                    "[Lwd][cloud-worker] c2e_meta attached: reqs=%s "
-                    "tokens=%d",
-                    getattr(meta, "req_ids", None),
-                    sum(len(t) for t in getattr(meta, "token_ids", None) or []),
-                )
+        lwd_timing.log_duration(
+            "[Lwd][timing] cloud sample_tokens step", _t_sample, sync=False
+        )
+        # token 直传模式:云侧不再经 runner 收集/组 meta——控制面(引擎)
+        # 直接从 ModelRunnerOutput 取 sampled_token_ids 发边。
         return output
 
     # ------------------------------------------------------------------ #
@@ -252,15 +233,12 @@ class LwdCloudWorker(NPUWorker):
         request's prompt-embeds assembly buffer (backstop for abort
         mid-prefill; normal prefill completion frees it in the runner's
         ``_lwd_release_consumed_prompt_embeds``)."""
-        collector = self.model_runner.lwd_cloud_collector
         embeds_map = self.model_runner.input_batch.req_prompt_embeds
         req_id_to_index = self.model_runner.input_batch.req_id_to_index
         logger.info(
             "[Lwd][cloud-worker] flush finished reqs=%s", list(finished_req_ids)
         )
         for req_id in finished_req_ids:
-            if collector is not None:
-                collector.drop(req_id)
             idx = req_id_to_index.get(req_id)
             if idx is not None:
                 embeds_map.pop(idx, None)

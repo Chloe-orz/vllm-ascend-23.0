@@ -14,12 +14,9 @@ runner class at init_device when ``lwd_config`` enables prefill_only.
 from __future__ import annotations
 
 import torch
-from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.v1.lwd_debug import LwdDebug
-from vllm.v1.outputs import ModelRunnerOutput
 
-from vllm_ascend.utils import lmhead_tp_enable
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -29,23 +26,9 @@ class LwdCloudModelRunner(NPUModelRunner):
     def __init__(self, vllm_config, device, worker=None):
         super().__init__(vllm_config, device)
         self.worker = worker  # LwdCloudWorker ref (UP recv futures live there)
-        # prefill_only LWD data plane (cloud side): per-step payload
-        # builder for the DOWN stream, plus the two pending slots the
-        # worker layer drains.
-        self.lwd_cloud_collector = None
-        self._lwd_pending_down_packet = None
-        self._lwd_pending_c2e_meta = None
-        self._lwd_captured_sampler_output = None
-        # This runner class is only instantiated on the cloud side
-        # (see platform worker_cls selection); no role check needed.
-        from vllm_ascend.worker.lwd_cloud.lwd_cloud_sample_collector import (
-            LwdCloudSampleCollector,
-        )
-
-        # Only TP rank 0 talks to the wire; skip collector creation on
-        # the other ranks (their packets would never be sent).
-        if get_tp_group().is_first_rank:
-            self.lwd_cloud_collector = LwdCloudSampleCollector()
+        # token 直传模式:云侧不做任何采样收集——控制面(引擎)直接从
+        # ModelRunnerOutput 取 sampled_token_ids 发边;本 runner 只保留
+        # UP embeds 注入(prefill 输入)相关逻辑。
 
     # ------------------------------------------------------------------ #
     # Remote embeds injection (cloud input has NO token ids — the prompt   #
@@ -162,188 +145,3 @@ class LwdCloudModelRunner(NPUModelRunner):
             # Drop the NPU chunk reference promptly (the recv buffer is
             # reaped by the comm layer once no future/result holds it).
             del embeds
-
-    def _sample(self, logits, spec_decode_metadata):
-        """Capture the sampler output for the post-sample collection
-        (the base sample_tokens clears execute_model_state on return)."""
-        sampler_output = super()._sample(logits, spec_decode_metadata)
-        self._lwd_captured_sampler_output = sampler_output
-        return sampler_output
-
-    @torch.inference_mode()
-    def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
-        captured = None
-        if self.lwd_cloud_collector is not None and \
-                self.execute_model_state is not None:
-            # ExecuteModelState layout (see model_runner_v1.sample_tokens):
-            # (scheduler_output, logits, spec_decode_metadata,
-            #  spec_decode_common_attn_metadata, hidden_states,
-            #  sample_hidden_states, ...)
-            state = self.execute_model_state
-            captured = (
-                state[0],   # scheduler_output
-                state[5],   # sample_hidden_states
-                state[1],   # logits
-                state[2],   # spec_decode_metadata
-            )
-        self._lwd_captured_sampler_output = None
-        output = super().sample_tokens(grammar_output)
-        if captured is not None and self._lwd_captured_sampler_output is not None:
-            self._lwd_cloud_collect_step(
-                captured[0], captured[1], captured[2], captured[3],
-                self._lwd_captured_sampler_output,
-            )
-        return output
-
-    # ------------------------------------------------------------------ #
-    # Collection (cloud)                                                  #
-    # ------------------------------------------------------------------ #
-
-    def _lwd_cloud_collect_step(
-        self,
-        scheduler_output,
-        sample_hidden_states: torch.Tensor,
-        logits: torch.Tensor | None,
-        spec_decode_metadata,
-        sampler_output,
-    ) -> None:
-        """每步收集批内在途 LWD 请求的 (hidden, 全局秩, accepted)，组包入槽
-        供 worker 层发送；元信息随 ModelRunnerOutput.lwd_c2e_meta 回调度器。"""
-        collector = self.lwd_cloud_collector
-        if collector.num_live_slots() == 0 or logits is None:
-            logger.debug(
-                "[Lwd][cloud-runner] collect skipped: live_slots=%s logits=%s",
-                collector.num_live_slots(), logits is not None,
-            )
-            return
-        entries = self._lwd_collect_batch(
-            collector, sample_hidden_states, logits,
-            spec_decode_metadata, sampler_output,
-        )
-        if entries:
-            _, meta = collector.build_token_payload(entries)
-            self._lwd_pending_c2e_meta = meta
-            logger.info(
-                "[Lwd][cloud-runner] c2e packet built: reqs=%s tokens=%d",
-                getattr(meta, "req_ids", None),
-                sum(len(t) for t in getattr(meta, "token_ids", None) or []),
-            )
-        else:
-            logger.debug("[Lwd][cloud-runner] collect: no LWD entries this step")
-
-    def take_lwd_pending_down_packet(self):
-        """worker 层取走本步 DOWN hidden 张量（单槽覆盖写，每步必被取走）。"""
-        packet = self._lwd_pending_down_packet
-        self._lwd_pending_down_packet = None
-        return packet
-
-    def take_lwd_pending_c2e_meta(self):
-        """worker 层取走本步元信息（ranks/accepted/req_ids）。"""
-        meta = self._lwd_pending_c2e_meta
-        self._lwd_pending_c2e_meta = None
-        return meta
-
-    def _lwd_detokenize(self, token_ids: list[int]) -> str:
-        """调试:把云侧采样 token ids 解码成最终返回用户形态的文本。"""
-        if getattr(self, "_lwd_tokenizer", None) is None:
-            from transformers import AutoTokenizer
-            self._lwd_tokenizer = AutoTokenizer.from_pretrained(
-                self.vllm_config.model_config.model,
-                trust_remote_code=self.vllm_config.model_config.trust_remote_code,
-            )
-        return self._lwd_tokenizer.decode(token_ids)
-
-    def _lwd_collect_batch(
-        self, collector, sample_hidden_states, logits,
-        spec_decode_metadata, sampler_output,
-    ) -> list:
-        """产出 entries: (req_id, token_ids, accepted)，行序 = input_batch 序。
-
-        token_id 直传模式:不产 hidden/不做全词表秩计算(rank-replay 专用),
-        sampled id 原样随 meta 回边。
-        accepted 语义 = 本步返回行数:非 spec 每请求 1 行(accepted=1);
-        spec verify 每请求 accepted+1 行(rejection 后有效行是该请求
-        verify 段的前缀,段界 cu_num_sampled_tokens)。
-        行过滤:has_slot(已注册)x ~discard_request_mask(本步真采样)。
-        """
-        sampled = sampler_output.sampled_token_ids  # [B, k+1], -1 为无效位
-        if sampled is None or sampled.dim() != 2:
-            logger.warning_once("[lwd] bad sampled_token_ids; skip c2e stream")
-            return []
-        batch_req_ids = self.input_batch.req_ids
-        assert sampled.shape[0] == len(batch_req_ids), (
-            sampled.shape, len(batch_req_ids))
-        valid = ~self.discard_request_mask.np[: len(batch_req_ids)]
-
-        if spec_decode_metadata is None:
-            idx = [i for i, r in enumerate(batch_req_ids)
-                   if collector.has_slot(r) and valid[i]]
-            if not idx:
-                return []
-            logger.info(
-                "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
-                [batch_req_ids[i] for i in idx],
-                [self._lwd_detokenize(ids)
-                 for ids in sampled[idx][:, 0].tolist()],
-            )
-            # 对账锚点(log_analyze_tools/lwd_token_diff.py 优先消费):
-            # 每步每请求的完整交付 id,req 级归属,MTP 多 token/步准确。
-            for i in idx:
-                logger.info(
-                    "[Lwd][cloud-tokens] req=%s ids=%s",
-                    batch_req_ids[i], [int(sampled[i, 0])],
-                )
-            return [
-                # num_accepted 语义 = 本步返回行数(非 spec 恒 1 行)
-                (batch_req_ids[i], [int(sampled[i, 0])], 1)
-                for i in idx
-            ]
-
-        counts = (sampled != -1).sum(dim=1).tolist()  # accepted+1
-        cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
-        entries, seg_start = [], 0
-        for i, req_id in enumerate(batch_req_ids):
-            seg_end = cu[i]
-            rows = counts[i]
-            if collector.has_slot(req_id) and valid[i] and rows >= 1:
-                logger.info(
-                    "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
-                    req_id,
-                    self._lwd_detokenize(sampled[i, :rows].tolist()),
-                )
-                # 对账锚点(同上):spec 步含本步全部 accepted+bonus id。
-                logger.info(
-                    "[Lwd][cloud-tokens] req=%s ids=%s",
-                    req_id, sampled[i, :rows].tolist(),
-                )
-                entries.append((
-                    req_id,
-                    sampled[i, :rows].tolist(),
-                    # num_accepted 语义 = 本步返回行数(spec verify =
-                    # accepted+1 行,即有效 sampled 数),与 token_ids
-                    # 行数恒等,边侧按行直出
-                    rows,
-                ))
-            seg_start = seg_end
-        logger.info(
-            "[Lwd][cloud-sample] intended sampled ids=%s", sampled.tolist()
-        )
-        return entries
-
-    @staticmethod
-    def _lwd_full_vocab_logits(logits_rows: torch.Tensor) -> torch.Tensor:
-        """lmhead TP 时按词表维 all_gather 归约出全词表 fp32 logits（否则直通）。"""
-        tp = get_tp_group()
-        rows_f32 = logits_rows.float()
-        if tp.world_size > 1 and lmhead_tp_enable():
-            return tp.all_gather(rows_f32, dim=-1)
-        return rows_f32
-
-    @staticmethod
-    def _lwd_global_ranks(logits_rows: torch.Tensor,
-                          sampled_ids: torch.Tensor) -> torch.Tensor:
-        """采样 token 的全局秩 = 全词表中严格超过其 logit 的条目数（int32）。"""
-        lg = logits_rows.float()
-        thresh = lg.gather(1, sampled_ids.long().unsqueeze(1))
-        return (lg > thresh).sum(dim=1).to(torch.int32)
-
