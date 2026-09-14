@@ -157,12 +157,13 @@ class LwdEdgeWorker(NPUWorker):
         )
         token_ids_tensor = torch.tensor(flat_token_ids, dtype=torch.long, device=device)
         embeds = model.embed_input_ids(token_ids_tensor)      # (total_N, H)
-        from vllm_ascend.distributed import lwd_wire
+        from vllm_ascend.distributed import lwd_timing, lwd_wire
         lwd_wire.dump_tensor(
             f"[Lwd][DUMP][req={batch_meta.req_ids}][seqno={seqno}] "
             f"SEND UP embeds",
             embeds,
         )
+        t_send = lwd_timing.synced_now()
         request = LwdCommRequest(
             channel=LwdChannelType.UP,
             op="send",
@@ -171,10 +172,15 @@ class LwdEdgeWorker(NPUWorker):
             seqno=seqno,
         )
         self.comm_service.submit_send(request)
+        lwd_timing.log_duration(
+            f"[Lwd][timing] edge UP-send submit seqno={seqno}", t_send
+        )
 
     def _execute_lwd_unembed(
         self, seqno: int, batch_meta: LwdUnembedBatch
     ) -> ModelRunnerOutput:
+        from vllm_ascend.distributed import lwd_timing
+        t_total = lwd_timing.synced_now()
         model = self.model_runner.get_model()
         if not batch_meta.req_ids:
             return ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[])
@@ -187,7 +193,11 @@ class LwdEdgeWorker(NPUWorker):
                 seqno=seqno,
             )
         )
+        t_recv = lwd_timing.synced_now()
         result = recv_future.wait()  # blocks until OK; raises TimeoutError / RuntimeError
+        lwd_timing.log_duration(
+            f"[Lwd][timing] edge DOWN-recv wait seqno={seqno}", t_recv
+        )
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
         from vllm_ascend.distributed import lwd_wire
@@ -223,6 +233,9 @@ class LwdEdgeWorker(NPUWorker):
         logger.info(
             "[Lwd][DUMP][req=%s][seqno=%s] RECV DOWN recovered token_ids=%s",
             batch_meta.req_ids, seqno, sampled_token_ids,
+        )
+        lwd_timing.log_duration(
+            f"[Lwd][timing] edge unembed total seqno={seqno}", t_total
         )
         return ModelRunnerOutput(
             req_ids=batch_meta.req_ids,

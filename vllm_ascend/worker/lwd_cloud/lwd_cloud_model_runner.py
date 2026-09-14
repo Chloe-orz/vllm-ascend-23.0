@@ -233,6 +233,8 @@ class LwdCloudModelRunner(NPUModelRunner):
                 collector.num_live_slots(), logits is not None,
             )
             return
+        from vllm_ascend.distributed import lwd_timing
+        t_collect = lwd_timing.synced_now()
         entries = self._lwd_collect_batch(
             collector, sample_hidden_states, logits,
             spec_decode_metadata, sampler_output,
@@ -241,6 +243,10 @@ class LwdCloudModelRunner(NPUModelRunner):
             hidden, meta = collector.build_hidden_payload(entries)
             self._lwd_pending_down_packet = hidden
             self._lwd_pending_c2e_meta = meta
+            lwd_timing.log_duration(
+                f"[Lwd][timing] cloud collect+pack reqs={len(entries)} "
+                f"rows={hidden.shape[0]}", t_collect
+            )
             logger.info(
                 "[Lwd][cloud-runner] DOWN packet built: reqs=%s rows=%d numel=%d",
                 getattr(meta, "req_ids", None),

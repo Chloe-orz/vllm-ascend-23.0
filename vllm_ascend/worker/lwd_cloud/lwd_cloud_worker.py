@@ -180,7 +180,12 @@ class LwdCloudWorker(NPUWorker):
         if item is None:
             return None, None
         future, meta = item
+        from vllm_ascend.distributed import lwd_timing
+        t_wait = lwd_timing.synced_now()
         result = future.wait()
+        lwd_timing.log_duration(
+            f"[Lwd][timing] cloud UP-recv wait seqno={batch_seqno}", t_wait
+        )
         assert result.tensor is not None
         hidden_size = self.model_config.get_hidden_size()
         embeds = result.tensor.view(-1, hidden_size)
@@ -210,6 +215,8 @@ class LwdCloudWorker(NPUWorker):
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
                     seqno, hidden.numel(),
                 )
+                from vllm_ascend.distributed import lwd_timing
+                t_send = lwd_timing.synced_now()
                 get_lwd_comm_service().submit_send(
                     LwdCommRequest(
                         channel=LwdChannelType.DOWN,
@@ -218,6 +225,9 @@ class LwdCloudWorker(NPUWorker):
                         tensor=hidden,
                         seqno=seqno,
                     )
+                )
+                lwd_timing.log_duration(
+                    f"[Lwd][timing] cloud DOWN-send submit seqno={seqno}", t_send
                 )
             meta = self.model_runner.take_lwd_pending_c2e_meta()
             if meta is not None and output is not None:
