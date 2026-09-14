@@ -208,12 +208,18 @@ class LwdCloudWorker(NPUWorker):
         future.wait_for_comm()
         result = future.result()
         assert result.tensor is not None
-        # [Lwd][perf] TTFT 探针:ready_at_take=False = 云侧消费晚于张量到达
-        # (云侧调度/注入在拖 chunk 节奏);True = 边侧发送晚(边是源头)
-        logger.info(
-            "[Lwd][perf] up-recv seqno=%s ready_at_take=%s",
-            batch_seqno, _ready,
-        )
+        # [Lwd][perf] TTFT 探针:ready_at_take=False = 云先挂收在等数据
+        # (慢的是边侧发送/传输,对照边侧 embed submit_send);
+        # True = 数据早到云才来取(慢的是云侧消费)。
+        # UP 广播全员参与、各 rank 都会走到这里——只让 TP rank 0(数据面
+        # 对接卡)打印,避免 8 卡 × 每 chunk 一条的刷屏与重复计数
+        from vllm.distributed import get_tensor_model_parallel_rank
+
+        if get_tensor_model_parallel_rank() == 0:
+            logger.info(
+                "[Lwd][perf] up-recv seqno=%s ready_at_take=%s",
+                batch_seqno, _ready,
+            )
         hidden_size = self.model_config.get_hidden_size()
         embeds = result.tensor.view(-1, hidden_size)
         return embeds, meta
