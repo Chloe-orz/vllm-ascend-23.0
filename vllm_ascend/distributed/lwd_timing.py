@@ -58,7 +58,7 @@ def enabled() -> bool:
     return _ENABLED
 
 
-def synced_now(*, sync: bool = True) -> float:
+def synced_now(*, sync: bool = False) -> float:
     """取当前时间戳(计时起点);关闭时返回 0.0。
 
     sync=True(通信段)先 torch.npu.synchronize() 再取时间;
@@ -71,7 +71,7 @@ def synced_now(*, sync: bool = True) -> float:
     return time.perf_counter()
 
 
-def log_duration(tag: str, t0: float, *, chain: str = "lwd", sync: bool = True) -> None:
+def log_duration(tag: str, t0: float, *, chain: str = "lwd", sync: bool = False) -> None:
     """打印 t0 至今的耗时,以及与同侧上一个计时点的间隔。
 
     输出形如 ``tag: 1.234 ms (+5.678 ms since prev)``;
