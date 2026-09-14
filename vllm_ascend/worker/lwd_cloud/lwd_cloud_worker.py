@@ -210,8 +210,31 @@ class LwdCloudWorker(NPUWorker):
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
-        # token 直传模式:云侧不再经 runner 收集/组 meta——控制面(引擎)
-        # 直接从 ModelRunnerOutput 取 sampled_token_ids 发边。
+        # rank-replay DOWN:发送 hidden 包(通道异步、流内有序);meta 的
+        # pinned 视图+事件挂到输出内层,由引擎侧同步后解码发布。
+        if self.enable_lwd:
+            payload = self.model_runner.take_lwd_pending_down_payload()
+            if payload is not None and output is not None:
+                hidden, pinned, event, req_ids, accepted = payload
+                seqno = self._lwd_next_down_seqno()
+                logger.info(
+                    "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
+                    seqno, hidden.numel(),
+                )
+                get_lwd_comm_service().submit_send(
+                    LwdCommRequest(
+                        channel=LwdChannelType.DOWN,
+                        op="send",
+                        num_elements=hidden.numel(),
+                        tensor=hidden,
+                        seqno=seqno,
+                    )
+                )
+                # async 包装器下挂到内层,否则 get_output() 解包丢失
+                target = getattr(output, "_model_runner_output", output)
+                target.lwd_down_carrier = (
+                    pinned, event, req_ids, accepted, hidden.numel(), seqno
+                )
         return output
 
     # ------------------------------------------------------------------ #

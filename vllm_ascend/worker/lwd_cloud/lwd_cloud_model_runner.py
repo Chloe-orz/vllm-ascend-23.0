@@ -193,176 +193,119 @@ class LwdCloudModelRunner(NPUModelRunner):
         self._lwd_captured_sampler_output = None
         output = super().sample_tokens(grammar_output)
         if captured is not None and self._lwd_captured_sampler_output is not None:
-            self._lwd_collect_probe(
+            self._lwd_pending_down_payload = self._lwd_collect_down_payload(
                 captured[0], captured[1], captured[2],
                 self._lwd_captured_sampler_output,
             )
         return output
 
+    def take_lwd_pending_down_payload(self):
+        """worker 层取走本步 DOWN payload(单槽覆盖写,每步必被取走)。"""
+        payload = getattr(self, "_lwd_pending_down_payload", None)
+        self._lwd_pending_down_payload = None
+        return payload
+
     @torch.inference_mode()
-    def _lwd_collect_probe(
+    def _lwd_collect_down_payload(
         self, sample_hidden_states, logits, spec_decode_metadata, sampler_output,
-    ) -> None:
-        """采集流程耗时探针(结果即弃,协议只回 token_ids)。
+    ):
+        """生产级 DOWN 采集(rank-replay):hidden 组包 + 全局秩 + num_accepted。
 
-        LWD_PROBE_MODE 四种模式(默认 full):
-          off        函数体全跳过(验证成本是否在函数体内)
-          only_tolist  只复现 meta 物化的 D2H 同步(验证同步/流水线放干)
-          no_alloc   保留计算但去掉新分配与物化(bf16 直比/不取材/不 cat/
-                     不 tolist,验证分配器抖动)
-          full       完整流程+连续分段计时
+        廉价计算:bf16 直比(logits 原生 bf16,与 cast 后逐位等价)、
+        批全覆盖时整行直接算(不做高级索引取材)、ranks/counts 拼单个
+        设备张量;物化走 边流 non_blocking -> pinned 缓冲 + event,
+        关键路径零新增同步——host 读取推迟到引擎侧(那里本来就有
+        get_output 的同步点)。返回:
+          (hidden_packet, pinned_view, meta_event, req_ids, rows_per_req)
+        或 None(本步无在途请求)。
         """
-        import os
-
         from vllm_ascend.distributed import lwd_timing
-        if logits is None:
-            return
-        mode = os.environ.get("LWD_PROBE_MODE", "full").lower()
-        if mode == "off":
-            return
 
         sampled = sampler_output.sampled_token_ids
-        if sampled is None or sampled.dim() != 2:
-            return
+        if sampled is None or sampled.dim() != 2 or logits is None:
+            return None
         batch_req_ids = self.input_batch.req_ids
         valid = ~self.discard_request_mask.np[: len(batch_req_ids)]
         is_spec = spec_decode_metadata is not None
-        if is_spec:
-            idx = [i for i in range(len(batch_req_ids)) if valid[i]]
-        else:
-            idx = [i for i, r in enumerate(batch_req_ids) if valid[i]]
 
-        t_total = lwd_timing.synced_now(sync=True)
-
-        # ---------------- only_tolist:只复现 meta 物化的 D2H 同步 ----------------
-        if mode == "only_tolist":
-            fake = torch.zeros(max(1, len(idx)), dtype=torch.int32,
-                               device=logits.device)
-            _ = fake.tolist()  # 与 ranks.tolist() 等价的 D2H 全链放干
-            lwd_timing.log_duration(
-                f"[Lwd][timing] probe TOTAL (only_tolist rows={len(idx)})",
-                t_total, sync=True,
-            )
-            return
-
-        # ---------------- no_alloc:计算保留,去掉新分配与物化 ----------------
-        if mode == "no_alloc":
-            full_cover = idx == list(range(len(batch_req_ids)))
-            # bf16 直接比较,不做 fp32 cast、不做高级索引取材(全覆盖时)
-            lg_sel = logits if full_cover else logits[idx]
-            sm_sel = (sampled[:, 0] if full_cover else sampled[idx][:, 0])
-            if not is_spec:
-                thresh = lg_sel.gather(1, sm_sel.long().unsqueeze(1))
-                ranks = (lg_sel > thresh).sum(dim=1).to(torch.int32)
-                _ = ranks  # 即弃,不 tolist
-            else:
-                counts = (sampled != -1).sum(dim=1).tolist()
-                cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
-                seg_start = 0
-                for i in range(len(batch_req_ids)):
-                    rows = counts[i]
-                    if valid[i] and rows >= 1:
-                        seg_lg = logits[seg_start : seg_start + rows]
-                        thresh = seg_lg.gather(
-                            1, sampled[i, :rows].long().unsqueeze(1))
-                        _ = (seg_lg > thresh).sum(dim=1).to(torch.int32)
-                    seg_start = cu[i]
-            # 不 cat hidden、不 tolist、不物化
-            lwd_timing.log_duration(
-                f"[Lwd][timing] probe TOTAL (no_alloc rows={len(idx)})",
-                t_total, sync=True,
-            )
-            return
-
-        # ---------------- full:完整流程+连续分段 ----------------
-        from vllm.distributed.parallel_state import get_tp_group
-        from vllm_ascend.utils import lmhead_tp_enable
-
-        def _seg(name: str, cur: float) -> float:
-            lwd_timing.log_duration(f"[Lwd][timing] probe {name}", cur, sync=True)
-            return lwd_timing.synced_now(sync=True)
-
-        cur = t_total
-        cur = _seg("s0 mask+meta", cur)
-
-        counts = cu = None
-        if is_spec:
-            counts = (sampled != -1).sum(dim=1)
-            cu = spec_decode_metadata.cu_num_sampled_tokens
-            cur = _seg("s1 spec-counts kernel", cur)
-            counts = counts.tolist()
-            cu = cu.tolist()
-            cur = _seg("s1 spec-counts d2h", cur)
-
-        lg = logits.float()
-        cur = _seg(f"s2 cast fp32 {tuple(logits.shape)}", cur)
-
-        tp = get_tp_group()
-        if tp.world_size > 1 and lmhead_tp_enable():
-            lg = tp.all_gather(lg, dim=-1)
-            cur = _seg(f"s3 lmhead all_gather -> {tuple(lg.shape)}", cur)
-
-        rows_list, ranks_list, accepted_list = [], [], []
+        t0 = lwd_timing.synced_now(sync=False)
+        rows_list, ranks_list, accepted = [], [], []
+        lg = logits  # bf16 原生,直接比较(cast 无精度增益)
+        full_cover = all(valid[: len(batch_req_ids)])
         if not is_spec:
-            lg_sel = lg[idx] if idx else None
-            sm_sel = sampled[idx][:, 0] if idx else None
-            cur = _seg(f"s4 index-select rows={len(idx)}", cur)
-            if idx:
-                ranks_list.append(self._probe_global_ranks(lg_sel, sm_sel))
-                rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
-                accepted_list.extend([1] * len(idx))
-            cur = _seg(f"s5 rank-core rows={len(idx)} vocab={lg.shape[-1]}", cur)
+            idx = [i for i in range(len(batch_req_ids)) if valid[i]]
+            if not idx:
+                return None
+            lg_sel = lg if full_cover else lg[idx]
+            sm_sel = sampled[:, 0] if full_cover else sampled[idx][:, 0]
+            thresh = lg_sel.gather(1, sm_sel.long().unsqueeze(1))
+            ranks_list.append((lg_sel > thresh).sum(dim=1).to(torch.int32))
+            rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
+            accepted.extend([1] * len(idx))
         else:
+            counts = (sampled != -1).sum(dim=1)
+            cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
             seg_start = 0
-            for i, req_id in enumerate(batch_req_ids):
-                rows = counts[i]
+            for i in range(len(batch_req_ids)):
+                rows = int(counts[i])
                 if valid[i] and rows >= 1:
-                    ranks_list.append(self._probe_global_ranks(
-                        lg[seg_start : seg_start + rows], sampled[i, :rows]))
+                    seg_lg = lg[seg_start : seg_start + rows]
+                    thresh = seg_lg.gather(
+                        1, sampled[i, :rows].long().unsqueeze(1))
+                    ranks_list.append((seg_lg > thresh).sum(dim=1).to(torch.int32))
                     rows_list.append(
                         sample_hidden_states[seg_start : seg_start + rows])
-                    accepted_list.append(rows)
+                    accepted.append(rows)
                 seg_start = cu[i]
-            cur = _seg(f"s4s5 spec rank loop rows={len(rows_list)}", cur)
-
         if not rows_list:
-            lwd_timing.log_duration(
-                "[Lwd][timing] probe TOTAL (empty)", t_total, sync=True
-            )
-            return
+            return None
 
         hidden_packet = torch.cat(rows_list)
-        cur = _seg(
-            f"s6 hidden-pack rows={hidden_packet.shape[0]} "
-            f"numel={hidden_packet.numel()}", cur,
+        meta_dev = torch.cat(
+            ranks_list + [torch.tensor(accepted, dtype=torch.int32,
+                                       device=logits.device)]
         )
-
-        top_id_ths = [r.tolist() for r in ranks_list]
-        num_accepted = list(accepted_list)
-        _ = (hidden_packet, top_id_ths, num_accepted)  # 即弃
-        cur = _seg("s7 meta-materialize", cur)
-
+        # 边流 pinned 物化:等主流算完后异步 D2H,记录事件给引擎侧
+        n_meta = meta_dev.numel()
+        pinned = self._lwd_meta_pinned(n_meta)
+        side = self._lwd_meta_side_stream()
+        current = torch.npu.current_stream()
+        with torch.npu.stream(side):
+            side.wait_stream(current)
+            pinned[:n_meta].copy_(meta_dev, non_blocking=True)
+            event = torch.npu.Event()
+            event.record(side)
         lwd_timing.log_duration(
-            f"[Lwd][timing] probe TOTAL (full)", t_total, sync=True
+            f"[Lwd][timing] collect payload rows={hidden_packet.shape[0]} "
+            f"meta={n_meta}", t0, sync=False,
+        )
+        return (
+            hidden_packet,
+            pinned[:n_meta],
+            event,
+            [r for i, r in enumerate(batch_req_ids) if valid[i]],
+            accepted,
         )
 
+    def _lwd_meta_pinned(self, n: int):
+        """轮换 pinned 缓冲(深度 4 > batch_queue 深度 2 + 引擎滞后 1):
+        避免下一/N+2 步的边流拷贝覆盖引擎尚未读完的上一步 meta。"""
+        ring = getattr(self, "_lwd_pinned_ring", None)
+        if ring is None or ring[0].numel() < n:
+            ring = [
+                torch.empty(max(n, 4096), dtype=torch.int32, pin_memory=True)
+                for _ in range(4)
+            ]
+            self._lwd_pinned_ring = ring
+            self._lwd_pinned_ring_idx = 0
+        idx = self._lwd_pinned_ring_idx
+        self._lwd_pinned_ring_idx = (idx + 1) % len(ring)
+        return ring[idx]
 
-    @staticmethod
-    def _probe_full_vocab_logits(logits_rows: torch.Tensor) -> torch.Tensor:
-        """lmhead TP 时按词表维 all_gather 归约出全词表 fp32 logits(否则直通)。"""
-        from vllm.distributed.parallel_state import get_tp_group
-        from vllm_ascend.utils import lmhead_tp_enable
+    def _lwd_meta_side_stream(self):
+        s = getattr(self, "_lwd_side_stream", None)
+        if s is None:
+            s = torch.npu.Stream()
+            self._lwd_side_stream = s
+        return s
 
-        tp = get_tp_group()
-        rows_f32 = logits_rows.float()
-        if tp.world_size > 1 and lmhead_tp_enable():
-            return tp.all_gather(rows_f32, dim=-1)
-        return rows_f32
-
-    @staticmethod
-    def _probe_global_ranks(logits_rows: torch.Tensor,
-                            sampled_ids: torch.Tensor) -> torch.Tensor:
-        """采样 token 的全局秩 = 全词表中严格超过其 logit 的条目数(int32)。"""
-        lg = logits_rows.float()
-        thresh = lg.gather(1, sampled_ids.long().unsqueeze(1))
-        return (lg > thresh).sum(dim=1).to(torch.int32)
