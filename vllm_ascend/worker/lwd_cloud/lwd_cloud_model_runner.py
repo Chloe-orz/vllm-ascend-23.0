@@ -36,22 +36,19 @@ class LwdCloudModelRunner(NPUModelRunner):
     # ------------------------------------------------------------------ #
 
     def _prepare_inputs(self, scheduler_output, num_scheduled_tokens):
-        """Inject the edge-computed prompt embeddings into the native
-        prompt-embeds machinery BEFORE the base fill loop runs.
+        """Device-side embeds injection AFTER the base fill loop.
 
-        The cloud receives no token ids for LWD requests: their whole
-        prompt arrives as embeddings over the UP channel.  Chunks are
-        assembled into a per-request FULL-prompt host buffer (written at
-        the request's ``num_computed_tokens`` offset), so the base
-        runner's native fill loop (global-offset slicing) reads the
-        right rows for every chunk — chunked prefill included.  Buffers
-        whose prompt was fully consumed are released here (draft has
-        already read them during the previous step's sampling).
+        The base fill loop + copy_to_gpu run first (they only see the
+        zero buffer); the received UP embeds are then written straight
+        into ``inputs_embeds.gpu`` on the current stream, ordered after
+        the channel-completion event via ``wait_for_comm()`` — no host
+        wait, no host-side tensor reads anywhere on this path.
         """
+        out = super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
         if self._lwd_enabled():
             self._lwd_release_consumed_prompt_embeds()
-            self._lwd_inject_remote_embeds()
-        return super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
+            self._lwd_inject_remote_embeds(scheduler_output, num_scheduled_tokens)
+        return out
 
     def _lwd_enabled(self) -> bool:
         cfg = getattr(self.vllm_config, "lwd_config", None)
@@ -89,14 +86,22 @@ class LwdCloudModelRunner(NPUModelRunner):
             if computed[idx] >= num_prompt[idx]:
                 embeds_map.pop(idx)
 
-    def _lwd_inject_remote_embeds(self) -> None:
-        """Assemble UP chunks into per-request full-prompt host buffers.
+    def _lwd_inject_remote_embeds(self, scheduler_output, num_scheduled_tokens) -> None:
+        """Device-side inject: write the received UP embeds straight into
+        ``inputs_embeds.gpu`` at each request's scheduled window.
 
-        First chunk allocates ``[prompt_len, H]`` on CPU (zero NPU
-        memory); every chunk copies its rows into its own global window
-        ``[num_computed, num_computed + n)`` — old rows are never
-        rewritten and never re-read, so there is no overwrite hazard.
-        Only the current chunk's ``is_token_ids`` range is cleared.
+        No host wait / no host tensor reads: ``future.result()`` only
+        surfaces channel errors (raises), ``future.wait_for_comm()`` then
+        orders the current stream after the channel-completion event, and
+        all row copies are issued on that stream (non_blocking).  The
+        flattened output offsets reproduce the native fill loop's
+        accumulation (per-request scheduled segment start), so rows land
+        exactly where the prompt-embeds branch expects them.  The CPU
+        assembly buffer is also filled via an on-stream D2H copy — its
+        only downstream consumer (draft first-pass provider) reads it
+        with stream-ordered H2D copies, so no host sync is needed there
+        either.  The base fill loop may have copied stale buffer content
+        earlier; our device write happens after it and is authoritative.
         """
         worker = self.worker
         if worker is None:
@@ -107,41 +112,58 @@ class LwdCloudModelRunner(NPUModelRunner):
         embeds_map = self.input_batch.req_prompt_embeds
         num_prompt = self.input_batch.num_prompt_tokens
         computed = self.input_batch.num_computed_tokens_cpu
+        hidden_size = self.model_config.get_hidden_size()
+        gpu_embeds = self.inputs_embeds.gpu
+
+        # Flattened output offset per request (native fill loop 同款累计):
+        # 每个请求的调度段在扁平 token 序列中的起点。
+        out_offset: dict[str, int] = {}
+        off = 0
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            out_offset[req_id] = off
+            off += int(num_scheduled_tokens[i]) if i < len(num_scheduled_tokens) else 0
+
         for batch_seqno in list(posted.keys()):
-            embeds, meta = worker.take_lwd_up_embeds(batch_seqno)
-            if embeds is None:
+            item = worker._lwd_up_recv_futures.pop(batch_seqno, None)
+            if item is None:
                 continue
+            future, meta = item
+            res = future.result()  # 通道错误在此 fail-fast;数据可仍在途
+            if res.tensor is None:
+                continue
+            embeds = res.tensor.view(-1, hidden_size)
+            # 纯 device 排序:后续 copy 在通道完成事件之后执行,CPU 不阻塞
+            future.wait_for_comm()
             logger.info(
                 "[Lwd][cloud-runner] UP embeds consumed seqno=%s rows=%s "
                 "reqs=%s",
-                batch_seqno, embeds.shape[0] if embeds is not None else 0,
-                meta.req_ids,
+                batch_seqno, embeds.shape[0], meta.req_ids,
             )
-            # Split the concatenated batch rows back per request
-            # (rows follow batch_meta order).
             row = 0
             for req_id, token_ids in zip(meta.req_ids, meta.token_ids):
                 n = len(token_ids)
                 idx = self.input_batch.req_id_to_index.get(req_id)
+                if idx is None:
+                    logger.warning(
+                        "[Lwd][cloud-runner] INJECT DROP req=%s seqno=%s "
+                        "rows=%d: req not in input_batch (batch=%s)",
+                        req_id, batch_seqno, n, self.input_batch.req_ids,
+                    )
                 if idx is not None and n > 0:
+                    start = int(computed[idx])
+                    out = out_offset.get(req_id, 0)
+                    # stream 上直接写 inputs_embeds.gpu 的调度窗口
+                    gpu_embeds[out : out + n].copy_(
+                        embeds[row : row + n], non_blocking=True
+                    )
+                    # CPU 组装缓冲同 stream D2H(供 draft provider 用)
                     prompt_len = int(num_prompt[idx])
                     buf = embeds_map.get(idx)
-                    if buf is not None and buf.shape[0] != prompt_len:
-                        # Stale entry at a recycled index (previous
-                        # occupant preempted/removed): reallocate.
-                        buf = None
-                    if buf is None:
-                        # First chunk: allocate the full-prompt host buffer
-                        buf = torch.empty(
-                            (prompt_len, embeds.shape[-1]),
-                            dtype=embeds.dtype,
+                    if buf is not None and buf.shape[0] == prompt_len:
+                        buf[start : start + n].copy_(
+                            embeds[row : row + n], non_blocking=True
                         )
-                        embeds_map[idx] = buf
-                    start = int(computed[idx])
-                    buf[start : start + n].copy_(embeds[row : row + n])
                     self.input_batch.is_token_ids[idx, start : start + n] = False
-                    LwdDebug.cloud_embeds_injected(req_id, idx, start, n, buf)  # [lwd-debug]
+                    if buf is not None:
+                        LwdDebug.cloud_embeds_injected(req_id, idx, start, n, buf)  # [lwd-debug]
                 row += n
-            # Drop the NPU chunk reference promptly (the recv buffer is
-            # reaped by the comm layer once no future/result holds it).
-            del embeds
