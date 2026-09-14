@@ -4,6 +4,7 @@
 """LWD (layerwise disaggregated) prefill_only mode edge worker."""
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 
 import torch
@@ -173,6 +174,7 @@ class LwdEdgeWorker(NPUWorker):
         if not batch_meta.req_ids:
             return ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[])
 
+        _t0 = time.monotonic()
         recv_future = self.comm_service.submit_recv(
             LwdCommRequest(
                 channel=LwdChannelType.DOWN,
@@ -181,12 +183,15 @@ class LwdEdgeWorker(NPUWorker):
                 seqno=seqno,
             )
         )
+        _t_post = time.monotonic()
         result = recv_future.wait()  # blocks until OK; raises TimeoutError / RuntimeError
+        _t_tensor = time.monotonic()
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
         # lm_head 不允许直接调用(ParallelLMHead.forward 强制经 sampler);
         # compute_logits 是标准接口,包装层/单体模型都有。
         logits = model.compute_logits(hidden_states)       # (rows_total, V)
+        _t_lm = time.monotonic()
         # L5 对拍:首行 top-20,与云侧 sampler 入口的 [layer-trace]
         # top20 逐位对照——排名换位即重放漂移的直接视图。
         try:
@@ -218,6 +223,21 @@ class LwdEdgeWorker(NPUWorker):
             ]
             sampled_token_ids.append(token_ids)
             row_offset += num_rows
+        _t_sel = time.monotonic()
+        # [Lwd][perf] 临时探针:单请求慢的归因分段——
+        # post_recv=挂 irecv;wait_tensor=等张量落卡(网络);lm_head=词表
+        # 前向(权重带宽);select=argsort 取名(.item 同步);total=边尾段全长
+        logger.info(
+            "[Lwd][perf] unembed seqno=%s post_recv=%.2f wait_tensor=%.2f "
+            "lm_head=%.2f select=%.2f total=%.2fms reqs=%d",
+            seqno,
+            (_t_post - _t0) * 1000,
+            (_t_tensor - _t_post) * 1000,
+            (_t_lm - _t_tensor) * 1000,
+            (_t_sel - _t_lm) * 1000,
+            (_t_sel - _t0) * 1000,
+            len(batch_meta.req_ids),
+        )
         req_id_to_index = {
             req_id: index for index, req_id in enumerate(batch_meta.req_ids)
         }

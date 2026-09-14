@@ -363,8 +363,15 @@ class LwdChannel:
         right stream."""
         if not handles:
             return None
+        _t = time.monotonic()
         for handle in handles:
             handle.wait()
+        # [Lwd][perf] 临时探针:测 handle.wait() 是否真如注释所述"CPU 立即
+        # 返回"——dur 大 = 发送/接收 posting 阻塞主机(锁定步判定依据)
+        logger.info(
+            "[Lwd][perf] bridge-wait op=%s ch=%s dur=%.2fms",
+            self.op, self.channel_type, (time.monotonic() - _t) * 1000,
+        )
         logger.debug(
             "[lwd-comm] DONE channel=%s my_rank=%d handles=%d",
             self.channel_type, dist.get_rank(), len(handles),
