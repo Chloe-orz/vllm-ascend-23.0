@@ -221,14 +221,12 @@ class LwdCloudModelRunner(NPUModelRunner):
             spec_decode_metadata, sampler_output,
         )
         if entries:
-            hidden, meta = collector.build_hidden_payload(entries)
-            self._lwd_pending_down_packet = hidden
+            _, meta = collector.build_token_payload(entries)
             self._lwd_pending_c2e_meta = meta
             logger.info(
-                "[Lwd][cloud-runner] DOWN packet built: reqs=%s rows=%d numel=%d",
+                "[Lwd][cloud-runner] c2e packet built: reqs=%s tokens=%d",
                 getattr(meta, "req_ids", None),
-                hidden.shape[0] if hidden is not None else 0,
-                hidden.numel() if hidden is not None else 0,
+                sum(len(t) for t in getattr(meta, "token_ids", None) or []),
             )
         else:
             logger.debug("[Lwd][cloud-runner] collect: no LWD entries this step")
@@ -259,8 +257,10 @@ class LwdCloudModelRunner(NPUModelRunner):
         self, collector, sample_hidden_states, logits,
         spec_decode_metadata, sampler_output,
     ) -> list:
-        """产出 entries: (req_id, hidden_rows, ranks, accepted)，行序 = input_batch 序。
+        """产出 entries: (req_id, token_ids, accepted)，行序 = input_batch 序。
 
+        token_id 直传模式:不产 hidden/不做全词表秩计算(rank-replay 专用),
+        sampled id 原样随 meta 回边。
         accepted 语义 = 本步返回行数:非 spec 每请求 1 行(accepted=1);
         spec verify 每请求 accepted+1 行(rejection 后有效行是该请求
         verify 段的前缀,段界 cu_num_sampled_tokens)。
@@ -280,9 +280,6 @@ class LwdCloudModelRunner(NPUModelRunner):
                    if collector.has_slot(r) and valid[i]]
             if not idx:
                 return []
-            ranks = self._lwd_global_ranks(
-                self._lwd_full_vocab_logits(logits[idx]), sampled[idx][:, 0]
-            )
             logger.info(
                 "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
                 [batch_req_ids[i] for i in idx],
@@ -298,9 +295,8 @@ class LwdCloudModelRunner(NPUModelRunner):
                 )
             return [
                 # num_accepted 语义 = 本步返回行数(非 spec 恒 1 行)
-                (batch_req_ids[i], sample_hidden_states[i : i + 1],
-                 ranks[j : j + 1], 1)
-                for j, i in enumerate(idx)
+                (batch_req_ids[i], [int(sampled[i, 0])], 1)
+                for i in idx
             ]
 
         counts = (sampled != -1).sum(dim=1).tolist()  # accepted+1
@@ -310,10 +306,6 @@ class LwdCloudModelRunner(NPUModelRunner):
             seg_end = cu[i]
             rows = counts[i]
             if collector.has_slot(req_id) and valid[i] and rows >= 1:
-                seg_logits = self._lwd_full_vocab_logits(
-                    logits[seg_start : seg_start + rows]
-                )
-                seg_ranks = self._lwd_global_ranks(seg_logits, sampled[i, :rows])
                 logger.info(
                     "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
                     req_id,
@@ -326,11 +318,10 @@ class LwdCloudModelRunner(NPUModelRunner):
                 )
                 entries.append((
                     req_id,
-                    sample_hidden_states[seg_start : seg_start + rows],
-                    seg_ranks,
+                    sampled[i, :rows].tolist(),
                     # num_accepted 语义 = 本步返回行数(spec verify =
-                    # accepted+1 行,即有效 sampled 数),与 top_id_ths
-                    # 行数恒等,边侧按行数还原 token 不会取错
+                    # accepted+1 行,即有效 sampled 数),与 token_ids
+                    # 行数恒等,边侧按行直出
                     rows,
                 ))
             seg_start = seg_end

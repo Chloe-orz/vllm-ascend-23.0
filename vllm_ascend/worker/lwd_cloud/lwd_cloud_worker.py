@@ -218,43 +218,13 @@ class LwdCloudWorker(NPUWorker):
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
-        # LWD cloud: the DOWN wire carries ONLY the hidden tensor — the
-        # runner built it during sampling; we send it here (all LWD wire
-        # actions live at the worker layer).  The step metadata (ranks /
-        # num_accepted / req_ids) rides back to the scheduler on
-        # output.lwd_c2e_meta; the control plane forwards it to the edge
-        # ahead of the tensor.
+        # LWD cloud (token direct mode): the DOWN wire carries NOTHING —
+        # sampled token ids ride the c2e meta on the ZMQ control plane.
+        # The step metadata (token_ids / num_accepted / req_ids) rides
+        # back to the scheduler on output.lwd_c2e_meta.
         if self.enable_lwd:
-            hidden = self.model_runner.take_lwd_pending_down_packet()
-            seqno = None
-            if hidden is not None:
-                seqno = self._lwd_next_down_seqno()
-                logger.info(
-                    "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
-                    seqno, hidden.numel(),
-                )
-                get_lwd_comm_service().submit_send(
-                    LwdCommRequest(
-                        channel=LwdChannelType.DOWN,
-                        op="send",
-                        num_elements=hidden.numel(),
-                        tensor=hidden,
-                        seqno=seqno,
-                    )
-                )
             meta = self.model_runner.take_lwd_pending_c2e_meta()
             if meta is not None and output is not None:
-                # Carry the DOWN seqno back so the edge can post its
-                # matching irecv (tag-less HCCL pairing).
-                if seqno is not None:
-                    meta.down_seqno = seqno
-                if hidden is not None:
-                    from vllm_ascend.distributed import lwd_wire
-                    lwd_wire.dump_tensor(
-                        f"[Lwd][DUMP][req={meta.req_ids}]"
-                        f"[seqno={seqno}] SEND DOWN hidden",
-                        hidden,
-                    )
                 # async scheduling 下 output 是 AsyncGPUModelRunnerOutput
                 # 包装器,get_output() 返回的是内层 ModelRunnerOutput——
                 # meta 必须挂到内层,否则解包时丢失。
@@ -262,10 +232,9 @@ class LwdCloudWorker(NPUWorker):
                 target.lwd_c2e_meta = meta
                 logger.info(
                     "[Lwd][cloud-worker] c2e_meta attached: reqs=%s "
-                    "down_seqno=%s (hidden_sent=%s)",
+                    "tokens=%d",
                     getattr(meta, "req_ids", None),
-                    getattr(meta, "down_seqno", None),
-                    seqno is not None,
+                    sum(len(t) for t in getattr(meta, "token_ids", None) or []),
                 )
         return output
 
