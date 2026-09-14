@@ -241,59 +241,57 @@ class LwdCloudModelRunner(NPUModelRunner):
             rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
             accepted.extend([1] * len(idx))
         else:
-            # counts/cu 零同步来源:
-            # counts = 框架每步已异步 D2H 的 accepted 计数(CPU tensor);
-            # cu = 按 host 侧 scheduled_spec_decode_tokens 累加(1+draft_len)
-            if self.num_accepted_tokens_event is not None:
-                self.num_accepted_tokens_event.synchronize()
-            counts = (
-                self.input_batch.num_accepted_tokens_cpu_tensor[
-                    : len(batch_req_ids)
-                ].tolist()
-            )
+            # 全零同步 spec 路径:
+            # 段长按 host 侧 scheduled_spec_decode_tokens 推(1+draft_len),
+            # 按完整段打包(含被拒行,边侧按 num_accepted 取有效前缀);
+            # counts 用框架每步已算好的 num_accepted_tokens.gpu(纯 device)
             spec_tokens = getattr(
                 scheduler_output, "scheduled_spec_decode_tokens", None
             ) or {}
-            cu, _acc = [], 0
-            for req_id in batch_req_ids:
-                _acc += 1 + len(spec_tokens.get(req_id, ()))
-                cu.append(_acc)
+            seg_lens = [
+                1 + len(spec_tokens.get(req_id, ()))
+                for req_id in batch_req_ids
+            ]
             seg_start = 0
             for i in range(len(batch_req_ids)):
-                rows = counts[i]
-                if valid[i] and rows >= 1:
-                    seg_lg = lg[seg_start : seg_start + rows]
+                seg_len = seg_lens[i]
+                if valid[i] and seg_len >= 1:
+                    seg_lg = lg[seg_start : seg_start + seg_len]
                     thresh = seg_lg.gather(
-                        1, sampled[i, :rows].long().unsqueeze(1))
+                        1, sampled[i, :seg_len].long().unsqueeze(1))
                     ranks_list.append((seg_lg > thresh).sum(dim=1).to(torch.int32))
                     rows_list.append(
-                        sample_hidden_states[seg_start : seg_start + rows])
-                    accepted.append(rows)
-                seg_start = cu[i]
+                        sample_hidden_states[seg_start : seg_start + seg_len])
+                seg_start += seg_len
+            accepted = None  # 不再 host 读取;counts 直接随 meta_dev 下发
         if not rows_list:
             return None
 
         hidden_packet = torch.cat(rows_list)
-        meta_dev = torch.cat(
-            ranks_list + [torch.tensor(accepted, dtype=torch.int32,
-                                       device=logits.device)]
-        )
-        # 边流 pinned 物化:等主流算完后异步 D2H,记录事件给引擎侧
+        n_req = sum(1 for i in range(len(batch_req_ids)) if valid[i])
+        if is_spec:
+            counts_dev = self.num_accepted_tokens.gpu[:n_req].to(torch.int32)
+            seg_lens_dev = torch.tensor(
+                seg_lens, dtype=torch.int32, device=logits.device
+            )
+            meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
+        else:
+            counts_dev = torch.ones(n_req, dtype=torch.int32,
+                                    device=logits.device)
+            seg_lens_dev = counts_dev
+            meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
+        # pinned 拷贝排主流末尾(异步):引擎侧 get_output 路径本就有
+        # wait_stream(主流) 的同步点,输出到达时 pinned 必然就绪——
+        # 零事件、零新增同步。
         n_meta = meta_dev.numel()
         pinned = self._lwd_meta_pinned(n_meta)
-        side = self._lwd_meta_side_stream()
-        current = torch.npu.current_stream()
-        with torch.npu.stream(side):
-            side.wait_stream(current)
-            pinned[:n_meta].copy_(meta_dev, non_blocking=True)
-            event = torch.npu.Event()
-            event.record(side)
+        pinned[:n_meta].copy_(meta_dev, non_blocking=True)
         return (
             hidden_packet,
             pinned[:n_meta],
-            event,
+            None,
             [r for i, r in enumerate(batch_req_ids) if valid[i]],
-            accepted,
+            None,
         )
 
     def _lwd_meta_pinned(self, n: int):
