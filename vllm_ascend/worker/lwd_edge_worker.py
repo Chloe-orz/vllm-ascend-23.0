@@ -157,12 +157,6 @@ class LwdEdgeWorker(NPUWorker):
         )
         token_ids_tensor = torch.tensor(flat_token_ids, dtype=torch.long, device=device)
         embeds = model.embed_input_ids(token_ids_tensor)      # (total_N, H)
-        from vllm_ascend.distributed import lwd_wire
-        lwd_wire.dump_tensor(
-            f"[Lwd][DUMP][req={batch_meta.req_ids}][seqno={seqno}] "
-            f"SEND UP embeds",
-            embeds,
-        )
         request = LwdCommRequest(
             channel=LwdChannelType.UP,
             op="send",
@@ -190,12 +184,6 @@ class LwdEdgeWorker(NPUWorker):
         result = recv_future.wait()  # blocks until OK; raises TimeoutError / RuntimeError
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
-        from vllm_ascend.distributed import lwd_wire
-        lwd_wire.dump_tensor(
-            f"[Lwd][DUMP][req={batch_meta.req_ids}][seqno={seqno}] "
-            f"RECV DOWN hidden",
-            hidden_states,
-        )
         # lm_head 不允许直接调用(ParallelLMHead.forward 强制经 sampler);
         # compute_logits 是标准接口,包装层/单体模型都有。
         logits = model.compute_logits(hidden_states)       # (rows_total, V)
@@ -230,18 +218,9 @@ class LwdEdgeWorker(NPUWorker):
             ]
             sampled_token_ids.append(token_ids)
             row_offset += num_rows
-        logger.info(
-            "[Lwd][edge-worker] unembed selected token_ids=%s "
-            "(top_id_ths=%s)",
-            sampled_token_ids, batch_meta.top_id_ths,
-        )
         req_id_to_index = {
             req_id: index for index, req_id in enumerate(batch_meta.req_ids)
         }
-        logger.info(
-            "[Lwd][DUMP][req=%s][seqno=%s] RECV DOWN recovered token_ids=%s",
-            batch_meta.req_ids, seqno, sampled_token_ids,
-        )
         return ModelRunnerOutput(
             req_ids=batch_meta.req_ids,
             req_id_to_index=req_id_to_index,

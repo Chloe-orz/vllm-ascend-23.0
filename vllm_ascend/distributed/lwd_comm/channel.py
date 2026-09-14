@@ -313,7 +313,7 @@ class LwdChannel:
             peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
         tensor = req.tensor
         assert tensor is not None
-        logger.info(
+        logger.debug(
             "[lwd-comm] SEND post channel=%s my_rank=%d peer=%s group_ranks=%s "
             "shape=%s dtype=%s op=%s",
             self.channel_type, dist.get_rank(), peer,
@@ -336,7 +336,7 @@ class LwdChannel:
         peer = req.src_dst
         if peer is None:
             peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
-        logger.info(
+        logger.debug(
             "[lwd-comm] RECV post channel=%s my_rank=%d src=%s group_ranks=%s "
             "num_elements=%d op=%s",
             self.channel_type, dist.get_rank(), peer,
@@ -365,7 +365,7 @@ class LwdChannel:
             return None
         for handle in handles:
             handle.wait()
-        logger.info(
+        logger.debug(
             "[lwd-comm] DONE channel=%s my_rank=%d handles=%d",
             self.channel_type, dist.get_rank(), len(handles),
         )

@@ -245,16 +245,6 @@ class LwdCloudModelRunner(NPUModelRunner):
         self._lwd_pending_c2e_meta = None
         return meta
 
-    def _lwd_detokenize(self, token_ids: list[int]) -> str:
-        """调试:把云侧采样 token ids 解码成最终返回用户形态的文本。"""
-        if getattr(self, "_lwd_tokenizer", None) is None:
-            from transformers import AutoTokenizer
-            self._lwd_tokenizer = AutoTokenizer.from_pretrained(
-                self.vllm_config.model_config.model,
-                trust_remote_code=self.vllm_config.model_config.trust_remote_code,
-            )
-        return self._lwd_tokenizer.decode(token_ids)
-
     def _lwd_collect_batch(
         self, collector, sample_hidden_states, logits,
         spec_decode_metadata, sampler_output,
@@ -283,12 +273,6 @@ class LwdCloudModelRunner(NPUModelRunner):
             ranks = self._lwd_global_ranks(
                 self._lwd_full_vocab_logits(logits[idx]), sampled[idx][:, 0]
             )
-            logger.info(
-                "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
-                [batch_req_ids[i] for i in idx],
-                [self._lwd_detokenize(ids)
-                 for ids in sampled[idx][:, 0].tolist()],
-            )
             # 对账锚点(log_analyze_tools/lwd_token_diff.py 优先消费):
             # 每步每请求的完整交付 id,req 级归属,MTP 多 token/步准确。
             for i in idx:
@@ -314,11 +298,6 @@ class LwdCloudModelRunner(NPUModelRunner):
                     logits[seg_start : seg_start + rows]
                 )
                 seg_ranks = self._lwd_global_ranks(seg_logits, sampled[i, :rows])
-                logger.info(
-                    "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
-                    req_id,
-                    self._lwd_detokenize(sampled[i, :rows].tolist()),
-                )
                 # 对账锚点(同上):spec 步含本步全部 accepted+bonus id。
                 logger.info(
                     "[Lwd][cloud-tokens] req=%s ids=%s",
