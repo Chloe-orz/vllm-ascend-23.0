@@ -31,6 +31,7 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed import lwd_wire
 from vllm_ascend.distributed.lwd_comm.future import LwdCommFuture
+from vllm_ascend.distributed.lwd_comm.types import LwdChannelType
 from vllm_ascend.distributed.lwd_comm.types import LwdCommRequest, LwdChannelType
 
 
@@ -312,6 +313,22 @@ class LwdChannel:
             peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
         tensor = req.tensor
         assert tensor is not None
+        logger.info(
+            "[lwd-comm] SEND post channel=%s my_rank=%d peer=%s group_ranks=%s "
+            "shape=%s dtype=%s op=%s",
+            self.channel_type, dist.get_rank(), peer,
+            dist.get_process_group_ranks(group),
+            list(tensor.shape), tensor.dtype,
+            "world_broadcast(src=0)" if self.channel_type == LwdChannelType.UP
+            else "isend",
+        )
+        # UP(边→云)用全 world 广播:embeds 对云侧每个 TP rank 都必须
+        # 可见,广播免去"leader 收完再组内分发",不存在内部 rank 的特殊
+        # 路径;DOWN(云 leader→边)保持点对点。
+        if self.channel_type == LwdChannelType.UP:
+            # async_op=True:通道靠 handle.wait() 做流式桥接;不带此参时
+            # broadcast 同步阻塞执行并返回 None,通道拿到 None 必崩。
+            return [dist.broadcast(tensor.contiguous(), src=0, async_op=True)]
         return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
 
     def _wire_recv(self, req: LwdCommRequest):
@@ -319,11 +336,24 @@ class LwdChannel:
         peer = req.src_dst
         if peer is None:
             peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
+        logger.info(
+            "[lwd-comm] RECV post channel=%s my_rank=%d src=%s group_ranks=%s "
+            "num_elements=%d op=%s",
+            self.channel_type, dist.get_rank(), peer,
+            dist.get_process_group_ranks(group), req.num_elements,
+            "world_broadcast(src=0)" if self.channel_type == LwdChannelType.UP
+            else "irecv",
+        )
         # Exact-size buffer: HCCL P2P requires matching numel on both
         # ends; the size is learned from the control-plane notification.
         buffer = torch.empty(
             req.num_elements, dtype=torch.bfloat16, device="npu"
         )
+        if self.channel_type == LwdChannelType.UP:
+            # 云侧全部 TP rank 参与广播接收(src=边 rank 0),与边的 UP
+            # 广播配对;每个 rank 拿到同份 embeds。async_op=True 同上。
+            return buffer, [dist.broadcast(buffer, src=0, async_op=True)]
+        return buffer, [dist.irecv(buffer, src=peer, group=group)]
         return buffer, [dist.irecv(buffer, src=peer, group=group)]
 
     def _bridge_and_record(self, handles: list[Any]):
@@ -335,6 +365,10 @@ class LwdChannel:
             return None
         for handle in handles:
             handle.wait()
+        logger.info(
+            "[lwd-comm] DONE channel=%s my_rank=%d handles=%d",
+            self.channel_type, dist.get_rank(), len(handles),
+        )
         event = torch.npu.Event()
         event.record()
         return event

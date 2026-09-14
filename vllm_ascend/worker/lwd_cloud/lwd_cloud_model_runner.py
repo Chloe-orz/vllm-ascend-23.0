@@ -16,6 +16,7 @@ from __future__ import annotations
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
+from vllm.v1.lwd_debug import LwdDebug
 from vllm.v1.outputs import ModelRunnerOutput
 
 from vllm_ascend.utils import lmhead_tp_enable
@@ -127,6 +128,12 @@ class LwdCloudModelRunner(NPUModelRunner):
             embeds, meta = worker.take_lwd_up_embeds(batch_seqno)
             if embeds is None:
                 continue
+            logger.info(
+                "[Lwd][cloud-runner] UP embeds consumed seqno=%s rows=%s "
+                "reqs=%s",
+                batch_seqno, embeds.shape[0] if embeds is not None else 0,
+                meta.req_ids,
+            )
             # Split the concatenated batch rows back per request
             # (rows follow batch_meta order).
             row = 0
@@ -150,6 +157,7 @@ class LwdCloudModelRunner(NPUModelRunner):
                     start = int(computed[idx])
                     buf[start : start + n].copy_(embeds[row : row + n])
                     self.input_batch.is_token_ids[idx, start : start + n] = False
+                    LwdDebug.cloud_embeds_injected(req_id, idx, start, n, buf)  # [lwd-debug]
                 row += n
             # Drop the NPU chunk reference promptly (the recv buffer is
             # reaped by the comm layer once no future/result holds it).
@@ -203,6 +211,10 @@ class LwdCloudModelRunner(NPUModelRunner):
         供 worker 层发送；元信息随 ModelRunnerOutput.lwd_c2e_meta 回调度器。"""
         collector = self.lwd_cloud_collector
         if collector.num_live_slots() == 0 or logits is None:
+            logger.debug(
+                "[Lwd][cloud-runner] collect skipped: live_slots=%s logits=%s",
+                collector.num_live_slots(), logits is not None,
+            )
             return
         entries = self._lwd_collect_batch(
             collector, sample_hidden_states, logits,
@@ -212,6 +224,14 @@ class LwdCloudModelRunner(NPUModelRunner):
             hidden, meta = collector.build_hidden_payload(entries)
             self._lwd_pending_down_packet = hidden
             self._lwd_pending_c2e_meta = meta
+            logger.info(
+                "[Lwd][cloud-runner] DOWN packet built: reqs=%s rows=%d numel=%d",
+                getattr(meta, "req_ids", None),
+                hidden.shape[0] if hidden is not None else 0,
+                hidden.numel() if hidden is not None else 0,
+            )
+        else:
+            logger.debug("[Lwd][cloud-runner] collect: no LWD entries this step")
 
     def take_lwd_pending_down_packet(self):
         """worker 层取走本步 DOWN hidden 张量（单槽覆盖写，每步必被取走）。"""
@@ -224,6 +244,16 @@ class LwdCloudModelRunner(NPUModelRunner):
         meta = self._lwd_pending_c2e_meta
         self._lwd_pending_c2e_meta = None
         return meta
+
+    def _lwd_detokenize(self, token_ids: list[int]) -> str:
+        """调试:把云侧采样 token ids 解码成最终返回用户形态的文本。"""
+        if getattr(self, "_lwd_tokenizer", None) is None:
+            from transformers import AutoTokenizer
+            self._lwd_tokenizer = AutoTokenizer.from_pretrained(
+                self.vllm_config.model_config.model,
+                trust_remote_code=self.vllm_config.model_config.trust_remote_code,
+            )
+        return self._lwd_tokenizer.decode(token_ids)
 
     def _lwd_collect_batch(
         self, collector, sample_hidden_states, logits,
@@ -253,6 +283,19 @@ class LwdCloudModelRunner(NPUModelRunner):
             ranks = self._lwd_global_ranks(
                 self._lwd_full_vocab_logits(logits[idx]), sampled[idx][:, 0]
             )
+            logger.info(
+                "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
+                [batch_req_ids[i] for i in idx],
+                [self._lwd_detokenize(ids)
+                 for ids in sampled[idx][:, 0].tolist()],
+            )
+            # 对账锚点(log_analyze_tools/lwd_token_diff.py 优先消费):
+            # 每步每请求的完整交付 id,req 级归属,MTP 多 token/步准确。
+            for i in idx:
+                logger.info(
+                    "[Lwd][cloud-tokens] req=%s ids=%s",
+                    batch_req_ids[i], [int(sampled[i, 0])],
+                )
             return [
                 # num_accepted 语义 = 本步返回行数(非 spec 恒 1 行)
                 (batch_req_ids[i], sample_hidden_states[i : i + 1],
@@ -270,16 +313,30 @@ class LwdCloudModelRunner(NPUModelRunner):
                 seg_logits = self._lwd_full_vocab_logits(
                     logits[seg_start : seg_start + rows]
                 )
+                seg_ranks = self._lwd_global_ranks(seg_logits, sampled[i, :rows])
+                logger.info(
+                    "[Lwd][DUMP][req=%s] SEND DOWN cloud sampled text: %s",
+                    req_id,
+                    self._lwd_detokenize(sampled[i, :rows].tolist()),
+                )
+                # 对账锚点(同上):spec 步含本步全部 accepted+bonus id。
+                logger.info(
+                    "[Lwd][cloud-tokens] req=%s ids=%s",
+                    req_id, sampled[i, :rows].tolist(),
+                )
                 entries.append((
                     req_id,
                     sample_hidden_states[seg_start : seg_start + rows],
-                    self._lwd_global_ranks(seg_logits, sampled[i, :rows]),
+                    seg_ranks,
                     # num_accepted 语义 = 本步返回行数(spec verify =
                     # accepted+1 行,即有效 sampled 数),与 top_id_ths
                     # 行数恒等,边侧按行数还原 token 不会取错
                     rows,
                 ))
             seg_start = seg_end
+        logger.info(
+            "[Lwd][cloud-sample] intended sampled ids=%s", sampled.tolist()
+        )
         return entries
 
     @staticmethod

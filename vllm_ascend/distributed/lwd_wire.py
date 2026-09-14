@@ -33,6 +33,23 @@ _LWD_ENDPOINTS: tuple[int, int] | None = None  # (edge_global_rank, cloud_global
 _INITIALIZED = False
 
 
+def dump_tensor(tag: str, tensor: "torch.Tensor") -> None:
+    """调试:打印数据面张量摘要,供边云两端成对对比数值。
+
+    tag 形如 "[Lwd][DUMP][req=...][seqno=...] SEND/RECV ...";
+    fp32 统一精度,输出 shape/dtype/首尾各 10 个数/sum/mean。
+    """
+    import numpy as np
+
+    flat = tensor.detach().to("cpu", torch.float32).numpy().reshape(-1)
+    with np.printoptions(threshold=np.inf, linewidth=10000, precision=8):
+        logger.info(
+            "%s shape=%s dtype=%s head10=%s tail10=%s sum=%.6f mean=%.8f",
+            tag, tuple(tensor.shape), tensor.dtype,
+            flat[:10], flat[-10:], float(flat.sum()), float(flat.mean()),
+        )
+
+
 def init_lwd_duplex_channels() -> None:
     """Create the two duplex channels for the edge/cloud rank pair.
 
@@ -57,16 +74,21 @@ def init_lwd_duplex_channels() -> None:
         return
     from vllm.config import get_current_vllm_config
 
-    pp_group = get_pp_group()
-    if pp_group.world_size != 2:
-        raise RuntimeError(
-            "prefill_only duplex channels cannot resolve edge/cloud "
-            "endpoint ranks: lwd_config endpoint ranks unset (check "
-            "--edge-npu-count/--cloud-npu-count) and the PP group "
-            "does not span exactly the edge/cloud pair "
-            f"(pp world_size={pp_group.world_size})"
-        )
-    edge_rank, cloud_rank = pp_group.ranks[0], pp_group.ranks[1]
+    lwd_cfg = get_current_vllm_config().parallel_config.lwd_config
+    if lwd_cfg.enable_lwd and lwd_cfg.edge_npu_count > 0:
+        # 连续 edge-first 布局：edge [0, E), cloud [E, E+C)，端点取 (0, E)
+        edge_rank, cloud_rank = 0, lwd_cfg.edge_npu_count
+    else:
+        pp_group = get_pp_group()
+        if pp_group.world_size != 2:
+            raise RuntimeError(
+                "prefill_only duplex channels cannot resolve edge/cloud "
+                "endpoint ranks: lwd_config endpoint ranks unset (check "
+                "--edge-npu-count/--cloud-npu-count) and the PP group "
+                "does not span exactly the edge/cloud pair "
+                f"(pp world_size={pp_group.world_size})"
+            )
+        edge_rank, cloud_rank = pp_group.ranks[0], pp_group.ranks[1]
     ranks = [edge_rank, cloud_rank]
     backend = dist.get_backend(get_world_group().device_group)
     my_rank = dist.get_rank()
@@ -124,10 +146,19 @@ def warmup_lwd_duplex_channels() -> None:
             continue
         payload = torch.zeros(8, dtype=torch.bfloat16, device="npu")
         if am_sender:
+            logger.info(
+                "[lwd-warmup] SEND post channel=%s my_rank=%d peer=%d "
+                "group_ranks=%s", channel, my_rank, peer,
+                dist.get_process_group_ranks(group))
             handle = dist.isend(payload, dst=peer, group=group)
         else:
+            logger.info(
+                "[lwd-warmup] RECV post channel=%s my_rank=%d src=%d "
+                "group_ranks=%s", channel, my_rank, peer,
+                dist.get_process_group_ranks(group))
             handle = dist.irecv(payload, src=peer, group=group)
         handle.wait()
+        logger.info("[lwd-warmup] DONE channel=%s my_rank=%d", channel, my_rank)
     get_world_group().barrier()
     logger.info("[lwd-wire] duplex channels warmed up (UP + DOWN)")
 

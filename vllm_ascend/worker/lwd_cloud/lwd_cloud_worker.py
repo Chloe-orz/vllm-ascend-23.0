@@ -18,9 +18,22 @@ import torch
 from vllm.logger import logger
 from vllm.v1.core.sched.output import GrammarOutput  # noqa: F401  (type)
 from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 
+from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.distributed.lwd_comm.lwd_parallel_init import (
+    init_lwd_ascend_model_parallel,
+)
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
+
+# ops 须先于 model_runner 链初始化，否则 device_op 与 ops 包循环导入
+#（对齐 worker.py 的导入顺序）
+import vllm_ascend.ops  # noqa: F401
 from vllm_ascend.worker.lwd_cloud.lwd_cloud_model_runner import LwdCloudModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
@@ -32,6 +45,31 @@ class LwdCloudWorker(NPUWorker):
     deployment enables LWD on a cloud process, so no role/mode checks
     are needed here — ``self.enable_lwd`` (set by NPUWorker.__init__
     from vllm_config.lwd_config) is the single switch."""
+
+    def _init_worker_distributed_environment(self) -> None:
+        """覆写原生入口(worker.py):ascend 侧并行组按 Lwd 布局构建。
+
+        vllm 侧分组由 parallel_state.initialize_model_parallel 的 Lwd
+        分支完成;ascend 侧原生 init_ascend_model_parallel 按 (dp, pp,
+        pcp, tp) 均匀网格切分,表达不了非对称边云拓扑,故以
+        init_lwd_ascend_model_parallel 替代(构建 MC2 等组后注入)。
+        其余步骤与原生 worker.py 保持一致。"""
+        init_batch_invariance()
+        init_distributed_environment(
+            self.parallel_config.world_size,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+            "hccl",
+        )
+        ensure_model_parallel_initialized(
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size,
+            self.parallel_config.prefill_context_parallel_size,
+            self.parallel_config.decode_context_parallel_size,
+        )
+        init_lwd_ascend_model_parallel(self.parallel_config)
+        ensure_ec_transfer_initialized(self.vllm_config)
 
     def init_device(self):
         super().init_device()
@@ -61,6 +99,29 @@ class LwdCloudWorker(NPUWorker):
 
         lwd_wire.init_lwd_duplex_channels()
         self._register_lwd_prompt_embeds_provider()
+
+    def load_model(self):
+        """加载后打实际切片:层数/首末层名/pp 切层参数,启动期即可裁决
+        半模型嫌疑(全量且从 layer 0 起 = 正常;减半/起始非 0 = pp 切错)。"""
+        super().load_model()
+        model = self.model_runner.get_model()
+        backbone = getattr(model, "model", model)
+        layers = getattr(backbone, "layers", None) or getattr(
+            backbone, "decoder_layers", None
+        )
+        pc = self.vllm_config.parallel_config
+        layer_names = [
+            n for n, _ in model.named_modules()
+            if n.count("layers.") == 1 and n.endswith(tuple("0123456789"))
+        ]
+        logger.info(
+            "[Lwd][cloud-model] loaded layers=%s first=%s last=%s "
+            "(config pp=%d tp=%d, my rank=%d) — 全量应覆盖 layer 0 起的全部层",
+            len(layers) if layers is not None else "?",
+            layer_names[0] if layer_names else "?",
+            layer_names[-1] if layer_names else "?",
+            pc.pipeline_parallel_size, pc.tensor_parallel_size, self.rank,
+        )
 
     # ------------------------------------------------------------------ #
     # Engine step wiring                                                  #
@@ -125,8 +186,8 @@ class LwdCloudWorker(NPUWorker):
             )
         )
         self._lwd_up_recv_futures[batch.seqno] = (future, meta)
-        logger.debug(
-            "[lwd] posted UP recv batch_seqno=%d reqs=%d tokens=%d",
+        logger.info(
+            "[Lwd][cloud-worker] UP recv posted seqno=%d reqs=%d tokens=%d",
             batch.seqno, len(meta.req_ids), num_tokens,
         )
 
@@ -145,7 +206,14 @@ class LwdCloudWorker(NPUWorker):
         result = future.wait()
         assert result.tensor is not None
         hidden_size = self.model_config.get_hidden_size()
-        return result.tensor.view(-1, hidden_size), meta
+        embeds = result.tensor.view(-1, hidden_size)
+        from vllm_ascend.distributed import lwd_wire
+        lwd_wire.dump_tensor(
+            f"[Lwd][DUMP][req={meta.req_ids}][seqno={batch_seqno}] "
+            f"RECV UP embeds",
+            embeds,
+        )
+        return embeds, meta
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
@@ -161,6 +229,10 @@ class LwdCloudWorker(NPUWorker):
             seqno = None
             if hidden is not None:
                 seqno = self._lwd_next_down_seqno()
+                logger.info(
+                    "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
+                    seqno, hidden.numel(),
+                )
                 get_lwd_comm_service().submit_send(
                     LwdCommRequest(
                         channel=LwdChannelType.DOWN,
@@ -176,7 +248,25 @@ class LwdCloudWorker(NPUWorker):
                 # matching irecv (tag-less HCCL pairing).
                 if seqno is not None:
                     meta.down_seqno = seqno
-                output.lwd_c2e_meta = meta
+                if hidden is not None:
+                    from vllm_ascend.distributed import lwd_wire
+                    lwd_wire.dump_tensor(
+                        f"[Lwd][DUMP][req={meta.req_ids}]"
+                        f"[seqno={seqno}] SEND DOWN hidden",
+                        hidden,
+                    )
+                # async scheduling 下 output 是 AsyncGPUModelRunnerOutput
+                # 包装器,get_output() 返回的是内层 ModelRunnerOutput——
+                # meta 必须挂到内层,否则解包时丢失。
+                target = getattr(output, "_model_runner_output", output)
+                target.lwd_c2e_meta = meta
+                logger.info(
+                    "[Lwd][cloud-worker] c2e_meta attached: reqs=%s "
+                    "down_seqno=%s (hidden_sent=%s)",
+                    getattr(meta, "req_ids", None),
+                    getattr(meta, "down_seqno", None),
+                    seqno is not None,
+                )
         return output
 
     # ------------------------------------------------------------------ #
@@ -196,6 +286,9 @@ class LwdCloudWorker(NPUWorker):
         collector = self.model_runner.lwd_cloud_collector
         embeds_map = self.model_runner.input_batch.req_prompt_embeds
         req_id_to_index = self.model_runner.input_batch.req_id_to_index
+        logger.info(
+            "[Lwd][cloud-worker] flush finished reqs=%s", list(finished_req_ids)
+        )
         for req_id in finished_req_ids:
             if collector is not None:
                 collector.drop(req_id)

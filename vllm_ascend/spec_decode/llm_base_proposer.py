@@ -157,7 +157,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     @classmethod
     def set_lwd_prompt_embeds_provider(cls, provider) -> None:
-        cls._lwd_prompt_embeds_provider = provider
+        # A bare function stored on the class binds self when read through an
+        # instance (descriptor protocol), adding a spurious argument at the
+        # call site; staticmethod keeps provider(req_id) as the raw callable.
+        cls._lwd_prompt_embeds_provider = staticmethod(provider)
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
 

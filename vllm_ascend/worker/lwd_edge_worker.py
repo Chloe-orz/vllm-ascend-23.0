@@ -15,6 +15,15 @@ from vllm.v1.core.sched.output import (
     LwdUnembedBatch,
 )
 from vllm.v1.outputs import ModelRunnerOutput
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.distributed.lwd_comm.lwd_parallel_init import (
+    init_lwd_ascend_model_parallel,
+)
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 from vllm_ascend.worker.worker import NPUWorker
@@ -42,6 +51,31 @@ def compute_top_id_th(logits: torch.Tensor, token_id: int) -> int:
 class LwdEdgeWorker(NPUWorker):
     """LWD edge worker: embed (prefill) + unembed (token recovery) only."""
 
+    def _init_worker_distributed_environment(self) -> None:
+        """覆写原生入口(worker.py):ascend 侧并行组按 Lwd 布局构建。
+
+        vllm 侧分组由 parallel_state.initialize_model_parallel 的 Lwd
+        分支完成;ascend 侧原生 init_ascend_model_parallel 按 (dp, pp,
+        pcp, tp) 均匀网格切分,表达不了非对称边云拓扑,故以
+        init_lwd_ascend_model_parallel 替代(构建 MC2 等组后注入)。
+        其余步骤与原生 worker.py 保持一致。"""
+        init_batch_invariance()
+        init_distributed_environment(
+            self.parallel_config.world_size,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+            "hccl",
+        )
+        ensure_model_parallel_initialized(
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size,
+            self.parallel_config.prefill_context_parallel_size,
+            self.parallel_config.decode_context_parallel_size,
+        )
+        init_lwd_ascend_model_parallel(self.parallel_config)
+        ensure_ec_transfer_initialized(self.vllm_config)
+
     def init_device(self):
         # The duplex channels MUST be built here, never in ``__init__``.
         # ``init_lwd_duplex_channels`` creates the two HCCL process groups
@@ -65,6 +99,15 @@ class LwdEdgeWorker(NPUWorker):
             self.rank,
         )
 
+    def compile_or_warm_up_model(self):
+        # LWD 边侧运行期 forward 被 LWD 流程劫持(execute_model 只走
+        # embed/unembed 直调),模型级 warmup 与 cudagraph 捕获均用不到;
+        # 且 0 层拓扑下 full-forward 会在 final norm 解包失败。整体跳过。
+        from vllm.v1.worker.worker_base import CompilationTimes
+
+        logger.info("[lwd-edge] skip model warmup/capture (forward is hijacked by LWD)")
+        return CompilationTimes(language_model=0.0, encoder=0.0)
+
     def get_kv_cache_spec(self) -> dict[str, "KVCacheSpec"]:
         """The LWD edge runs no attention/transformer, so it needs no KV cache."""
         return {}
@@ -77,16 +120,16 @@ class LwdEdgeWorker(NPUWorker):
 
         batch_meta = lwd_batch.batch_meta
         if lwd_batch.batch_type == LwdBatchType.LWD_EMBED:
-            logger.debug(
-                "[lwd-edge] EMBED seqno=%d reqs=%d tokens=%d",
+            logger.info(
+                "[Lwd][edge-worker] EMBED seqno=%d reqs=%d tokens=%d",
                 lwd_batch.seqno,
                 len(batch_meta.req_ids),
                 sum(len(token_ids) for token_ids in batch_meta.token_ids),
             )
             return self._execute_lwd_embed(lwd_batch.seqno, batch_meta)
         if lwd_batch.batch_type == LwdBatchType.LWD_UNEMBED:
-            logger.debug(
-                "[lwd-edge] UNEMBED seqno=%d reqs=%d accepted=%d "
+            logger.info(
+                "[Lwd][edge-worker] UNEMBED seqno=%d reqs=%d accepted=%d "
                 "num_elements=%d",
                 lwd_batch.seqno,
                 len(batch_meta.req_ids),
@@ -109,8 +152,17 @@ class LwdEdgeWorker(NPUWorker):
 
         # Flatten all requests' prompt tokens into one batch (order = req_ids).
         flat_token_ids = [tid for token_ids in batch_meta.token_ids for tid in token_ids]
+        logger.debug(
+            "[Lwd][edge-worker] embed token_ids=%s", flat_token_ids
+        )
         token_ids_tensor = torch.tensor(flat_token_ids, dtype=torch.long, device=device)
         embeds = model.embed_input_ids(token_ids_tensor)      # (total_N, H)
+        from vllm_ascend.distributed import lwd_wire
+        lwd_wire.dump_tensor(
+            f"[Lwd][DUMP][req={batch_meta.req_ids}][seqno={seqno}] "
+            f"SEND UP embeds",
+            embeds,
+        )
         request = LwdCommRequest(
             channel=LwdChannelType.UP,
             op="send",
@@ -138,7 +190,33 @@ class LwdEdgeWorker(NPUWorker):
         result = recv_future.wait()  # blocks until OK; raises TimeoutError / RuntimeError
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
-        logits = model.lm_head(hidden_states)                # (rows_total, V)
+        from vllm_ascend.distributed import lwd_wire
+        lwd_wire.dump_tensor(
+            f"[Lwd][DUMP][req={batch_meta.req_ids}][seqno={seqno}] "
+            f"RECV DOWN hidden",
+            hidden_states,
+        )
+        # lm_head 不允许直接调用(ParallelLMHead.forward 强制经 sampler);
+        # compute_logits 是标准接口,包装层/单体模型都有。
+        logits = model.compute_logits(hidden_states)       # (rows_total, V)
+        # L5 对拍:首行 top-20,与云侧 sampler 入口的 [layer-trace]
+        # top20 逐位对照——排名换位即重放漂移的直接视图。
+        try:
+            from vllm_ascend.worker.lwd_layer_trace import (
+                lwd_layer_trace_enabled,
+            )
+
+            if lwd_layer_trace_enabled() and logits.dim() == 2:
+                row = logits[0].detach().float()
+                vals, tids = torch.topk(row, min(20, row.numel()))
+                logger.info(
+                    "[layer-trace] edge lm_head logits shape=%s row0 l2=%.4f "
+                    "top20=%s",
+                    tuple(logits.shape), row.norm().item(),
+                    list(zip(tids.tolist(), [round(v, 3) for v in vals.tolist()])),
+                )
+        except Exception:  # noqa: BLE001
+            pass
 
         sampled_token_ids: list[list[int]] = []
         row_offset = 0
@@ -152,10 +230,18 @@ class LwdEdgeWorker(NPUWorker):
             ]
             sampled_token_ids.append(token_ids)
             row_offset += num_rows
-
+        logger.info(
+            "[Lwd][edge-worker] unembed selected token_ids=%s "
+            "(top_id_ths=%s)",
+            sampled_token_ids, batch_meta.top_id_ths,
+        )
         req_id_to_index = {
             req_id: index for index, req_id in enumerate(batch_meta.req_ids)
         }
+        logger.info(
+            "[Lwd][DUMP][req=%s][seqno=%s] RECV DOWN recovered token_ids=%s",
+            batch_meta.req_ids, seqno, sampled_token_ids,
+        )
         return ModelRunnerOutput(
             req_ids=batch_meta.req_ids,
             req_id_to_index=req_id_to_index,
