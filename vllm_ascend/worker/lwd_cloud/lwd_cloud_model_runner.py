@@ -167,3 +167,127 @@ class LwdCloudModelRunner(NPUModelRunner):
                     if buf is not None:
                         LwdDebug.cloud_embeds_injected(req_id, idx, start, n, buf)  # [lwd-debug]
                 row += n
+
+    # ------------------------------------------------------------------ #
+    # Collect probe (measurement only; output discarded, protocol        #
+    # still returns token_ids directly)                                   #
+    # ------------------------------------------------------------------ #
+
+    def _sample(self, logits, spec_decode_metadata):
+        """Capture the sampler output for the collect probe
+        (the base sample_tokens clears execute_model_state on return)."""
+        sampler_output = super()._sample(logits, spec_decode_metadata)
+        self._lwd_captured_sampler_output = sampler_output
+        return sampler_output
+
+    @torch.inference_mode()
+    def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
+        captured = None
+        if self.execute_model_state is not None:
+            # ExecuteModelState layout (see model_runner_v1.sample_tokens):
+            # (scheduler_output, logits, spec_decode_metadata,
+            #  spec_decode_common_attn_metadata, hidden_states,
+            #  sample_hidden_states, ...)
+            state = self.execute_model_state
+            captured = (state[5], state[1], state[2])  # sample_hidden, logits, spec_meta
+        self._lwd_captured_sampler_output = None
+        output = super().sample_tokens(grammar_output)
+        if captured is not None and self._lwd_captured_sampler_output is not None:
+            self._lwd_collect_probe(
+                captured[0], captured[1], captured[2],
+                self._lwd_captured_sampler_output,
+            )
+        return output
+
+    @torch.inference_mode()
+    def _lwd_collect_probe(
+        self, sample_hidden_states, logits, spec_decode_metadata, sampler_output,
+    ) -> None:
+        """完整复现旧 rank-replay 采集流程(隐藏组包+全词表秩+num_accept),
+        分段打点分析耗时构成;结果即弃,不下发。
+
+        段 1 ranks:全词表 logits 归约(fp32 转换/lmhead TP all_gather)
+        + 全局秩计算;段 2 hidden pack:行拼接;段 3 meta 物化:
+        ranks.tolist()(host 同步)。内嵌常驻执行,日志由
+        VLLM_ASCEND_LWD_TIMING 控制输出。
+        """
+        from vllm_ascend.distributed import lwd_timing
+        if logits is None:
+            return
+        sampled = sampler_output.sampled_token_ids
+        if sampled is None or sampled.dim() != 2:
+            return
+        batch_req_ids = self.input_batch.req_ids
+        valid = ~self.discard_request_mask.np[: len(batch_req_ids)]
+
+        # ---- 段 1:全词表秩(topk rank)计算 ----
+        t1 = lwd_timing.synced_now(sync=True)
+        rows_list, ranks_list, accepted_list = [], [], []
+        if spec_decode_metadata is None:
+            idx = [i for i, r in enumerate(batch_req_ids) if valid[i]]
+            if idx:
+                ranks = self._probe_global_ranks(
+                    self._probe_full_vocab_logits(logits[idx]),
+                    sampled[idx][:, 0],
+                )
+                rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
+                ranks_list.append(ranks)
+                accepted_list.extend([1] * len(idx))
+        else:
+            counts = (sampled != -1).sum(dim=1).tolist()
+            cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
+            seg_start = 0
+            for i, req_id in enumerate(batch_req_ids):
+                rows = counts[i]
+                if valid[i] and rows >= 1:
+                    ranks_list.append(self._probe_global_ranks(
+                        self._probe_full_vocab_logits(
+                            logits[seg_start : seg_start + rows]),
+                        sampled[i, :rows],
+                    ))
+                    rows_list.append(
+                        sample_hidden_states[seg_start : seg_start + rows])
+                    accepted_list.append(rows)
+                seg_start = cu[i]
+        lwd_timing.log_duration(
+            f"[Lwd][timing] probe ranks rows={len(rows_list)}", t1, sync=True
+        )
+        if not rows_list:
+            return
+
+        # ---- 段 2:hidden 组包 ----
+        t2 = lwd_timing.synced_now(sync=True)
+        hidden_packet = torch.cat(rows_list)
+        lwd_timing.log_duration(
+            f"[Lwd][timing] probe hidden-pack rows={hidden_packet.shape[0]} "
+            f"numel={hidden_packet.numel()}", t2, sync=True,
+        )
+
+        # ---- 段 3:meta 物化(ranks/accepted 转 host) ----
+        t3 = lwd_timing.synced_now(sync=True)
+        top_id_ths = [r.tolist() for r in ranks_list]
+        num_accepted = list(accepted_list)
+        _ = (hidden_packet, top_id_ths, num_accepted)  # 即弃
+        lwd_timing.log_duration(
+            "[Lwd][timing] probe meta-materialize", t3, sync=True
+        )
+
+    @staticmethod
+    def _probe_full_vocab_logits(logits_rows: torch.Tensor) -> torch.Tensor:
+        """lmhead TP 时按词表维 all_gather 归约出全词表 fp32 logits(否则直通)。"""
+        from vllm.distributed.parallel_state import get_tp_group
+        from vllm_ascend.utils import lmhead_tp_enable
+
+        tp = get_tp_group()
+        rows_f32 = logits_rows.float()
+        if tp.world_size > 1 and lmhead_tp_enable():
+            return tp.all_gather(rows_f32, dim=-1)
+        return rows_f32
+
+    @staticmethod
+    def _probe_global_ranks(logits_rows: torch.Tensor,
+                            sampled_ids: torch.Tensor) -> torch.Tensor:
+        """采样 token 的全局秩 = 全词表中严格超过其 logit 的条目数(int32)。"""
+        lg = logits_rows.float()
+        thresh = lg.gather(1, sampled_ids.long().unsqueeze(1))
+        return (lg > thresh).sum(dim=1).to(torch.int32)
