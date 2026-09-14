@@ -14,6 +14,8 @@ Selected via ``parallel_config.worker_cls`` (see platform.py:
 
 from __future__ import annotations
 
+import time
+
 import torch
 from vllm.logger import logger
 from vllm.v1.core.sched.output import GrammarOutput  # noqa: F401  (type)
@@ -242,6 +244,7 @@ class LwdCloudWorker(NPUWorker):
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
                     seqno, hidden.numel(),
                 )
+                _t = time.monotonic()
                 get_lwd_comm_service().submit_send(
                     LwdCommRequest(
                         channel=LwdChannelType.DOWN,
@@ -250,6 +253,12 @@ class LwdCloudWorker(NPUWorker):
                         tensor=hidden,
                         seqno=seqno,
                     )
+                )
+                # [Lwd][perf] 云侧 LWD 税:DOWN 发送提交(快照 clone + isend
+                # + bridge 的 handle.wait——wait 部分另有 bridge-wait 分项)
+                logger.info(
+                    "[Lwd][perf] down-send seqno=%d submit=%.2fms",
+                    seqno, (time.monotonic() - _t) * 1000,
                 )
             meta = self.model_runner.take_lwd_pending_c2e_meta()
             if meta is not None and output is not None:

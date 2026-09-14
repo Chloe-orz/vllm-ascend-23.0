@@ -13,6 +13,8 @@ runner class at init_device when ``lwd_config`` enables prefill_only.
 
 from __future__ import annotations
 
+import time
+
 import torch
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
@@ -223,14 +225,24 @@ class LwdCloudModelRunner(NPUModelRunner):
                 collector.num_live_slots(), logits is not None,
             )
             return
+        _tc = time.monotonic()
         entries = self._lwd_collect_batch(
             collector, sample_hidden_states, logits,
             spec_decode_metadata, sampler_output,
         )
+        _tc_ms = (time.monotonic() - _tc) * 1000
         if entries:
+            _tp = time.monotonic()
             hidden, meta = collector.build_hidden_payload(entries)
             self._lwd_pending_down_packet = hidden
             self._lwd_pending_c2e_meta = meta
+            # [Lwd][perf] 云侧 LWD 税:collect=采样收集(含 rank-calc);
+            # pack=hidden 拼接 + meta 组装
+            logger.info(
+                "[Lwd][perf] step-pack collect=%.2f pack=%.2f rows=%d",
+                _tc_ms, (time.monotonic() - _tp) * 1000,
+                hidden.shape[0] if hidden is not None else 0,
+            )
             logger.info(
                 "[Lwd][cloud-runner] DOWN packet built: reqs=%s rows=%d numel=%d",
                 getattr(meta, "req_ids", None),
@@ -277,8 +289,14 @@ class LwdCloudModelRunner(NPUModelRunner):
                    if collector.has_slot(r) and valid[i]]
             if not idx:
                 return []
+            _t = time.monotonic()
             ranks = self._lwd_global_ranks(
                 self._lwd_full_vocab_logits(logits[idx]), sampled[idx][:, 0]
+            )
+            # [Lwd][perf] 云侧 LWD 税:全词表 all_gather + rank 求和
+            logger.info(
+                "[Lwd][perf] rank-calc rows=%d dur=%.2fms",
+                len(idx), (time.monotonic() - _t) * 1000,
             )
             # 对账锚点(log_analyze_tools/lwd_token_diff.py 优先消费):
             # 每步每请求的完整交付 id,req 级归属,MTP 多 token/步准确。
@@ -297,14 +315,18 @@ class LwdCloudModelRunner(NPUModelRunner):
         counts = (sampled != -1).sum(dim=1).tolist()  # accepted+1
         cu = spec_decode_metadata.cu_num_sampled_tokens.tolist()
         entries, seg_start = [], 0
+        _rank_ms, _rank_rows = 0.0, 0
         for i, req_id in enumerate(batch_req_ids):
             seg_end = cu[i]
             rows = counts[i]
             if collector.has_slot(req_id) and valid[i] and rows >= 1:
+                _t = time.monotonic()
                 seg_logits = self._lwd_full_vocab_logits(
                     logits[seg_start : seg_start + rows]
                 )
                 seg_ranks = self._lwd_global_ranks(seg_logits, sampled[i, :rows])
+                _rank_ms += time.monotonic() - _t
+                _rank_rows += rows
                 # 对账锚点(同上):spec 步含本步全部 accepted+bonus id。
                 logger.info(
                     "[Lwd][cloud-tokens] req=%s ids=%s",
@@ -320,6 +342,11 @@ class LwdCloudModelRunner(NPUModelRunner):
                     rows,
                 ))
             seg_start = seg_end
+        if _rank_rows:
+            logger.info(
+                "[Lwd][perf] rank-calc rows=%d dur=%.2fms",
+                _rank_rows, _rank_ms * 1000,
+            )
         logger.info(
             "[Lwd][cloud-sample] intended sampled ids=%s", sampled.tolist()
         )
