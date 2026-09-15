@@ -210,14 +210,13 @@ class LwdCloudModelRunner(NPUModelRunner):
         self, sample_hidden_states, logits, spec_decode_metadata,
         scheduler_output, sampler_output,
     ):
-        """生产级 DOWN 采集(rank-replay):hidden 组包 + 全局秩 + num_accepted。
+        """生产级 DOWN 采集(rank-replay):hidden 组包 + 元数据设备张量。
 
         廉价计算:bf16 直比(logits 原生 bf16,与 cast 后逐位等价)、
-        批全覆盖时整行直接算(不做高级索引取材)、ranks/counts 拼单个
-        设备张量;物化走 边流 non_blocking -> pinned 缓冲 + event,
-        关键路径零新增同步——host 读取推迟到引擎侧(那里本来就有
-        get_output 的同步点)。返回:
-          (hidden_packet, pinned_view, meta_event, req_ids, rows_per_req)
+        批全覆盖时整行直接算(不做高级索引取材)、ranks/counts/seg_lens
+        拼单个设备张量;张量每步私有,由 async_output 侧线程在 MQ
+        pickle 前 .tolist() 物化(无共享缓冲,无覆盖竞态)。返回:
+          (hidden_packet, meta_dev, req_ids, rows_per_req)
         或 None(本步无在途请求)。
         """
         sampled = sampler_output.sampled_token_ids
@@ -290,36 +289,15 @@ class LwdCloudModelRunner(NPUModelRunner):
                                     device=logits.device)
             seg_lens_dev = counts_dev
             meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
-        # pinned 拷贝排主流末尾(异步),完成事件随 payload 返回:物化方
-        # (async_output 侧线程,或非 async 调度的兜底路径)在 MQ pickle
-        # 之前等它再读值——与上游 sampled_token_ids 的
-        # async_copy_ready_event 同款不变量,RPC 忙等线程全程不等待。
-        n_meta = meta_dev.numel()
-        pinned = self._lwd_meta_pinned(n_meta)
-        pinned[:n_meta].copy_(meta_dev, non_blocking=True)
-        meta_ev = torch.npu.Event()
-        meta_ev.record()
+        # meta_dev(设备张量)直接随 payload 返回,不做 pinned 落地:
+        # 物化方(async_output 侧线程,或非 async 兜底)对其 .tolist()
+        # 自带 D2H 同步,彼时步尾已过、cat 早已执行完。每步私有张量,
+        # 无共享缓冲——"下一步覆盖未解析的上一步"在构造上不可能,
+        # pinned 环的竞态类别整体消灭(环深赌时序余量的方案废弃)。
         return (
             hidden_packet,
-            pinned[:n_meta],
-            meta_ev,
+            meta_dev,
             [r for i, r in enumerate(batch_req_ids) if valid[i]],
             None,
         )
-
-    def _lwd_meta_pinned(self, n: int):
-        """轮换 pinned 缓冲(深度 16:解析点在 async_output 侧线程,高负载
-        下物化滞后可达数步,深度须覆盖,否则下一步拷贝覆盖未解析的上上步)——
-        旧深度 4 是按"worker 返回前解析"的滞后预算,侧线程化后已不足。"""
-        ring = getattr(self, "_lwd_pinned_ring", None)
-        if ring is None or ring[0].numel() < n:
-            ring = [
-                torch.empty(max(n, 4096), dtype=torch.int32, pin_memory=True)
-                for _ in range(16)
-            ]
-            self._lwd_pinned_ring = ring
-            self._lwd_pinned_ring_idx = 0
-        idx = self._lwd_pinned_ring_idx
-        self._lwd_pinned_ring_idx = (idx + 1) % len(ring)
-        return ring[idx]
 

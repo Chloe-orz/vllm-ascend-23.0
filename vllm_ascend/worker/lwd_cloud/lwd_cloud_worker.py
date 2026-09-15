@@ -197,7 +197,7 @@ class LwdCloudWorker(NPUWorker):
         if self.enable_lwd:
             payload = self.model_runner.take_lwd_pending_down_payload()
             if payload is not None and output is not None:
-                hidden, pinned, meta_ev, req_ids, _accepted = payload
+                hidden, meta_dev, req_ids, _accepted = payload
                 seqno = self._lwd_next_down_seqno()
                 logger.info(
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
@@ -215,28 +215,28 @@ class LwdCloudWorker(NPUWorker):
                 target = getattr(output, "_model_runner_output", output)
 
                 def _lwd_finalize_meta(
-                    _target=target, _ev=meta_ev, _pinned=pinned,
+                    _target=target, _meta=meta_dev,
                     _req_ids=req_ids, _seqno=seqno, _numel=hidden.numel(),
                 ):
-                    """meta 物化:等 pinned D2H 落地后解析挂载。
+                    """meta 物化:对每步私有的 meta_dev 设备张量 tolist。
 
                     多进程架构下输出经 MQ pickle 时会拷贝张量数据,必须
-                    保证 pickle 之前 D2H 已落(否则序列化旧值)——本函数
-                    只能被 MQ 发送路径调用:
+                    保证 pickle 之前已物化为纯数值——本函数只能被 MQ
+                    发送路径调用:
                     - async 调度:get_output 覆写,物化在
                       async_output_busy_loop 侧线程(pickle 之前);
                     - 非 async 调度:本线程兜底(等同旧行为)。
-                    事件只等到拷贝为止,不等全流;比 sampled tokens 的
-                    async_copy_ready_event 晚约 ranks 计算时长(亚毫秒)。
-                    pinned 环深度 4 覆盖侧线程 1-2 步的物化滞后。"""
-                    _ev.synchronize()
+                    .tolist() 自带 D2H 同步,彼时步尾已过(cat 早已执行
+                    完),读到的必然是本步真值;张量每步私有、无共享
+                    缓冲——共享 pinned 环的覆盖竞态类别整体消灭。"""
                     from vllm.v1.outputs import LwdC2eMeta
 
                     n = len(_req_ids)
-                    total = _pinned.numel()
-                    seg_lens = _pinned[total - n :].tolist()
-                    counts = _pinned[total - 2 * n : total - n].tolist()
-                    ranks_flat = _pinned[: total - 2 * n].tolist()
+                    meta_host = _meta.tolist()
+                    total = len(meta_host)
+                    seg_lens = meta_host[total - n :]
+                    counts = meta_host[total - 2 * n : total - n]
+                    ranks_flat = meta_host[: total - 2 * n]
                     top_id_ths, off = [], 0
                     for s in seg_lens:
                         top_id_ths.append(ranks_flat[off : off + s])
