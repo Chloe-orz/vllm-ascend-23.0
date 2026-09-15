@@ -168,8 +168,11 @@ def warmup_lwd_duplex_channels() -> None:
             handle = dist.irecv(payload, src=peer, group=group)
         handle.wait()
         logger.info("[lwd-warmup] DONE channel=%s my_rank=%d", channel, my_rank)
-    # 云内扇出组预热一次(仅云 rank;边跳过),首 chunk 不付建链成本
-    if _LWD_CLOUD_UP_GROUP is not None and my_rank >= get_lwd_cloud_up_leader():
+    # 云内扇出组预热一次(仅云 rank;边跳过),首 chunk 不付建链成本。
+    # 单人组(1E1C 回退布局)无扇出需求,跳过——避免单成员广播行为未定义
+    if (_LWD_CLOUD_UP_GROUP is not None
+            and my_rank >= get_lwd_cloud_up_leader()
+            and dist.get_world_size(_LWD_CLOUD_UP_GROUP) > 1):
         probe = torch.zeros(8, dtype=torch.bfloat16, device="npu")
         dist.broadcast(probe, src=0, group=_LWD_CLOUD_UP_GROUP)
         logger.info("[lwd-warmup] cloud fanout group ready (rank=%d)", my_rank)

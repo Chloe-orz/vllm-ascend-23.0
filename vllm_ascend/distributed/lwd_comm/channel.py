@@ -356,7 +356,8 @@ class LwdChannel:
             cloud_group = lwd_wire.get_lwd_cloud_up_group()
             if dist.get_rank() == lwd_wire.get_lwd_cloud_up_leader():
                 handles = [dist.irecv(buffer, src=peer, group=group)]
-                if cloud_group is not None:
+                if (cloud_group is not None
+                        and dist.get_world_size(cloud_group) > 1):
                     handles.append(dist.broadcast(
                         buffer, src=0, group=cloud_group, async_op=True))
                 return buffer, handles
