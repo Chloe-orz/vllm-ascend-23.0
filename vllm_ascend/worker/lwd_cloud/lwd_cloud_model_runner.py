@@ -289,16 +289,20 @@ class LwdCloudModelRunner(NPUModelRunner):
                                     device=logits.device)
             seg_lens_dev = counts_dev
             meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
-        # meta_dev(设备张量)+ cat 完成事件随 payload 返回,无共享缓冲
-        # ("下一步覆盖未解析的上一步"在构造上不可能)。物化方在专用
-        # 拷贝流上 wait_event(cat) 后 tolist:D2H 只依赖 cat 完成点,
-        # 不落默认流队尾——否则异步调度下会被下一步已入队的前缀算子
-        # 压住,notify 出发延迟(单请求 +2ms 的时序回归即源于此)。
+        # collect 时即入队 D2H(默认流、步中位置,随步尾一起执行——
+        # 环版实测 17ms 的快路径),但目标缓冲为【每步私有】pinned 张量
+        # 而非共享环:闭包独占引用,"下一步覆盖未解析的上一步"在构造
+        # 上不可能;释放后由 CachingHostAllocator 回收复用(稳态零分配)。
+        # 不用 tolist(设备张量)方案:torch_npu 的 tolist 内部拷贝/同步
+        # 路径不受 Python 控制,实测单请求 +2ms(专用流定序也救不回)。
+        n_meta = meta_dev.numel()
+        meta_host = torch.empty(n_meta, dtype=torch.int32, pin_memory=True)
+        meta_host.copy_(meta_dev, non_blocking=True)
         meta_ev = torch.npu.Event()
         meta_ev.record()
         return (
             hidden_packet,
-            meta_dev,
+            meta_host,
             meta_ev,
             [r for i, r in enumerate(batch_req_ids) if valid[i]],
             None,
