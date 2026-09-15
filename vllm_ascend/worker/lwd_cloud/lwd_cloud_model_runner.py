@@ -109,13 +109,10 @@ class LwdCloudModelRunner(NPUModelRunner):
                 embeds_map.pop(idx)
 
     def _lwd_inject_remote_embeds(self) -> None:
-        """Assemble UP chunks into per-request full-prompt buffers.
+        """Assemble UP chunks into per-request full-prompt host buffers.
 
-        First chunk allocates ``[prompt_len, H]`` **on NPU**: the chunk
-        copy is device-to-device on the current stream, ordered after
-        the arrival event by ``wait_for_comm`` (same thread) — the whole
-        injection path stays on-device, no host crossing per chunk.
-        Every chunk copies its rows into its own global window
+        First chunk allocates ``[prompt_len, H]`` on CPU (zero NPU
+        memory); every chunk copies its rows into its own global window
         ``[num_computed, num_computed + n)`` — old rows are never
         rewritten and never re-read, so there is no overwrite hazard.
         Only the current chunk's ``is_token_ids`` range is cleared.
@@ -153,14 +150,10 @@ class LwdCloudModelRunner(NPUModelRunner):
                         # occupant preempted/removed): reallocate.
                         buf = None
                     if buf is None:
-                        # First chunk: allocate the full-prompt buffer on
-                        # NPU — injection is D2D on-stream (wait_for_comm
-                        # ordered); cost: prompt_len × H × 2B device memory
-                        # per live prefill request (released on consume).
+                        # First chunk: allocate the full-prompt host buffer
                         buf = torch.empty(
                             (prompt_len, embeds.shape[-1]),
                             dtype=embeds.dtype,
-                            device=embeds.device,
                         )
                         embeds_map[idx] = buf
                     start = int(computed[idx])
