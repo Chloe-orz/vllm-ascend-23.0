@@ -30,6 +30,9 @@ from vllm_ascend.distributed.lwd_comm.types import LwdChannelType
 _LWD_CHANNEL_GROUPS: dict[LwdChannelType, tuple[dist.ProcessGroup, int]] = {}
 _LWD_CHANNEL_STREAMS: dict[LwdChannelType, "torch.npu.Stream"] = {}
 _LWD_ENDPOINTS: tuple[int, int] | None = None  # (edge_global_rank, cloud_global_rank)
+# 云侧扇出组(UP 数据面):边 isend 到云 leader 后,leader 在此组内
+# broadcast 扇出——边退出集体,扇出走云内卡间互联
+_LWD_CLOUD_UP_GROUP: dist.ProcessGroup | None = None
 _INITIALIZED = False
 
 
@@ -108,6 +111,12 @@ def init_lwd_duplex_channels() -> None:
             peer = -1
         _LWD_CHANNEL_GROUPS[channel] = (group, peer)
         _LWD_CHANNEL_STREAMS[channel] = torch.npu.Stream()
+    global _LWD_CLOUD_UP_GROUP
+    # UP 扇出组 = 云侧全部 rank(leader 为组内 rank0)。new_group 是
+    # world 集体,所有 rank(含边)按同序参与创建,非成员拿到不可用
+    # 句柄即可。edge-first 布局下云 rank 连续 [cloud_rank, world)。
+    cloud_ranks = list(range(cloud_rank, dist.get_world_size()))
+    _LWD_CLOUD_UP_GROUP = dist.new_group(cloud_ranks, backend=backend)
     _LWD_ENDPOINTS = (edge_rank, cloud_rank)
     _INITIALIZED = True
     logger.info(
@@ -159,12 +168,28 @@ def warmup_lwd_duplex_channels() -> None:
             handle = dist.irecv(payload, src=peer, group=group)
         handle.wait()
         logger.info("[lwd-warmup] DONE channel=%s my_rank=%d", channel, my_rank)
+    # 云内扇出组预热一次(仅云 rank;边跳过),首 chunk 不付建链成本
+    if _LWD_CLOUD_UP_GROUP is not None and my_rank >= get_lwd_cloud_up_leader():
+        probe = torch.zeros(8, dtype=torch.bfloat16, device="npu")
+        dist.broadcast(probe, src=0, group=_LWD_CLOUD_UP_GROUP)
+        logger.info("[lwd-warmup] cloud fanout group ready (rank=%d)", my_rank)
     get_world_group().barrier()
     logger.info("[lwd-wire] duplex channels warmed up (UP + DOWN)")
 
 
 def lwd_channels_initialized() -> bool:
     return _INITIALIZED
+
+
+def get_lwd_cloud_up_group() -> "dist.ProcessGroup | None":
+    """UP 云内扇出组(仅云 rank 成员;边拿到的是不可用句柄)。"""
+    return _LWD_CLOUD_UP_GROUP
+
+
+def get_lwd_cloud_up_leader() -> int:
+    """云侧 UP leader(= UP 通道端点 rank,扇出组内 rank0)。"""
+    assert _LWD_ENDPOINTS is not None
+    return _LWD_ENDPOINTS[1]
 
 
 def get_lwd_channel_device_group(channel: LwdChannelType) -> dist.ProcessGroup:
