@@ -39,9 +39,9 @@ class LwdCloudModelRunner(NPUModelRunner):
 
         The base fill loop + copy_to_gpu run first (they only see the
         zero buffer); the received UP embeds are then written straight
-        into ``inputs_embeds.gpu`` on the current stream after a
-        host-side ``future.wait()`` — the recv wait is a visible segment,
-        not hidden inside device kernel time.
+        into ``inputs_embeds.gpu`` on the current stream, ordered after
+        the channel-completion event via ``future.wait_for_comm()`` —
+        non-blocking, recv 等待另有 [Lwd][perf] up-recv-wait 计时可见。
         """
         out = super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
         if self._lwd_enabled():
@@ -89,11 +89,9 @@ class LwdCloudModelRunner(NPUModelRunner):
         """Device-side inject: write the received UP embeds straight into
         ``inputs_embeds.gpu`` at each request's scheduled window.
 
-        The recv uses ``future.wait()`` — host blocks until the data
-        lands (channel errors raise here too), so the recv wait shows up
-        as its own segment instead of being hidden in device-side kernel
-        time.  Row copies are then issued on the current stream
-        (non_blocking).  The
+        The recv uses ``future.wait_for_comm()`` (non-blocking device
+        ordering; channel errors surface via ``future.result()``), with
+        row copies issued on the current stream (non_blocking) after it.  The
         flattened output offsets reproduce the native fill loop's
         accumulation (per-request scheduled segment start), so rows land
         exactly where the prompt-embeds branch expects them.  The CPU
@@ -129,8 +127,8 @@ class LwdCloudModelRunner(NPUModelRunner):
                 continue
             future, meta = item
             _t_wait = time.monotonic()
-            res = future.wait()  # host 同步等数据落地(通道错误一并抛出);
-            # recv 等待显性成段,不再经 device 排序混进计算时长
+            res = future.result()  # 非阻塞取结果(通道错误一并抛出)
+            future.wait_for_comm()  # device 序:后续 copy 排在通道事件之后
             logger.info(
                 "[Lwd][perf] cloud up-recv-wait seqno=%s dur=%.2fms",
                 batch_seqno, (time.monotonic() - _t_wait) * 1000,

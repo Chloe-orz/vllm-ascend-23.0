@@ -204,9 +204,9 @@ class LwdEdgeWorker(NPUWorker):
             )
         )
         _t_post = time.monotonic()
-        # wait:host 同步等数据落地,超时/通道错误一并抛出;
-        # recv 等待显性成段,不经 device 排序混进计算时长
-        result = recv_future.wait()
+        # wait_for_comm:device 序等待,主机不阻塞
+        recv_future.wait_for_comm()
+        result = recv_future.result()
         _t_tensor = time.monotonic()
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
