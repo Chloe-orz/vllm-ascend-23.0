@@ -198,7 +198,7 @@ class LwdCloudWorker(NPUWorker):
         if self.enable_lwd:
             payload = self.model_runner.take_lwd_pending_down_payload()
             if payload is not None and output is not None:
-                hidden, meta_host, meta_ev, req_ids, _accepted = payload
+                hidden, meta_buf, n_meta, meta_ev, req_ids, _accepted = payload
                 seqno = self._lwd_next_down_seqno()
                 logger.info(
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
@@ -216,21 +216,21 @@ class LwdCloudWorker(NPUWorker):
                 target = getattr(output, "_model_runner_output", output)
 
                 def _lwd_finalize_meta(
-                    _target=target, _buf=meta_host, _ev=meta_ev,
+                    _target=target, _buf=meta_buf, _n=n_meta, _ev=meta_ev,
                     _req_ids=req_ids, _seqno=seqno, _numel=hidden.numel(),
                 ):
-                    """meta 物化:等 D2H 落地后读主机内存。
+                    """meta 物化:等 D2H 落地后读主机内存,读完归还池。
 
                     D2H 已在 collect 时随步入队(默认流,环版同款快路径);
-                    _buf 是每步私有 pinned 张量,无共享缓冲。本函数只能
-                    被 MQ 发送路径调用(async:get_output 侧线程;
-                    非 async:本线程兜底),pickle 之前物化为纯数值。"""
+                    _buf 从池借出、本步独占(借用期间无第二个写入者)。
+                    本函数只能被 MQ 发送路径调用(async:get_output 侧
+                    线程;非 async:本线程兜底),pickle 之前物化为纯数值。"""
                     from vllm.v1.outputs import LwdC2eMeta
 
                     _ev.synchronize()
                     n = len(_req_ids)
-                    meta_host = _buf.tolist()
-                    total = len(meta_host)
+                    meta_host = _buf[:_n].tolist()
+                    total = _n
                     seg_lens = meta_host[total - n :]
                     counts = meta_host[total - 2 * n : total - n]
                     ranks_flat = meta_host[: total - 2 * n]
@@ -253,6 +253,7 @@ class LwdCloudWorker(NPUWorker):
                         req_ids=_req_ids,
                         down_seqno=_seqno,
                     )
+                    self.model_runner._lwd_release_meta_buf(_buf)
 
                 if isinstance(output, AsyncModelRunnerOutput):
                     # async 调度:覆写实例 get_output,enqueue_output 在

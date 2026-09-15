@@ -13,6 +13,8 @@ runner class at init_device when ``lwd_config`` enables prefill_only.
 
 from __future__ import annotations
 
+import threading
+
 import torch
 from vllm.logger import logger
 
@@ -25,6 +27,11 @@ class LwdCloudModelRunner(NPUModelRunner):
     def __init__(self, vllm_config, device, worker=None):
         super().__init__(vllm_config, device)
         self.worker = worker  # LwdCloudWorker ref (UP recv futures live there)
+        # meta 主机缓冲池:借出(RPC线程,collect)/归还(侧线程,物化后)
+        # 按步独占,零竞态;分配一次循环复用,稳态零 pinned 分配
+        # (torch_npu 的 per-step pin 分配实测昂贵且在 RPC 线程上)
+        self._lwd_meta_pool: list = []
+        self._lwd_meta_pool_lock = threading.Lock()
         self._lwd_pending_down_payload = None
 
     # ------------------------------------------------------------------ #
@@ -205,6 +212,20 @@ class LwdCloudModelRunner(NPUModelRunner):
         self._lwd_pending_down_payload = None
         return payload
 
+    def _lwd_acquire_meta_buf(self, n: int):
+        """借出一块 >= n 的 pinned 缓冲(池空则新分配,最小 4096)。"""
+        with self._lwd_meta_pool_lock:
+            for i, t in enumerate(self._lwd_meta_pool):
+                if t.numel() >= n:
+                    return self._lwd_meta_pool.pop(i)
+        return torch.empty(max(n, 4096), dtype=torch.int32, pin_memory=True)
+
+    def _lwd_release_meta_buf(self, buf) -> None:
+        """物化完成后归还;池满(>32)则丢弃,交引用计数回收。"""
+        with self._lwd_meta_pool_lock:
+            if len(self._lwd_meta_pool) < 32:
+                self._lwd_meta_pool.append(buf)
+
     @torch.inference_mode()
     def _lwd_collect_down_payload(
         self, sample_hidden_states, logits, spec_decode_metadata,
@@ -290,19 +311,20 @@ class LwdCloudModelRunner(NPUModelRunner):
             seg_lens_dev = counts_dev
             meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
         # collect 时即入队 D2H(默认流、步中位置,随步尾一起执行——
-        # 环版实测 17ms 的快路径),但目标缓冲为【每步私有】pinned 张量
-        # 而非共享环:闭包独占引用,"下一步覆盖未解析的上一步"在构造
-        # 上不可能;释放后由 CachingHostAllocator 回收复用(稳态零分配)。
-        # 不用 tolist(设备张量)方案:torch_npu 的 tolist 内部拷贝/同步
-        # 路径不受 Python 控制,实测单请求 +2ms(专用流定序也救不回)。
+        # 环版实测 17ms 的快路径)。缓冲从池借出、按步独占(借用期间
+        # 无第二个写入者,零竞态),物化后归还复用——不 per-step 分配
+        # (torch_npu 的 pin 分配实测昂贵且落在 RPC 线程),也不盲目
+        # 轮转(环版竞态根源)。不用 tolist(设备张量):其内部拷贝/
+        # 同步路径不受 Python 控制,实测 +2ms。
         n_meta = meta_dev.numel()
-        meta_host = torch.empty(n_meta, dtype=torch.int32, pin_memory=True)
-        meta_host.copy_(meta_dev, non_blocking=True)
+        meta_buf = self._lwd_acquire_meta_buf(n_meta)
+        meta_buf[:n_meta].copy_(meta_dev, non_blocking=True)
         meta_ev = torch.npu.Event()
         meta_ev.record()
         return (
             hidden_packet,
-            meta_host,
+            meta_buf,
+            n_meta,
             meta_ev,
             [r for i, r in enumerate(batch_req_ids) if valid[i]],
             None,
