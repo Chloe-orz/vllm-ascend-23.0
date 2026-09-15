@@ -1,7 +1,11 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
-"""LWD (layerwise disaggregated) prefill_only mode edge worker."""
+"""LWD (layerwise disaggregated) prefill_only mode edge worker.
+
+token_id 版:边 worker 只做 EMBED(prompt 嵌入 + UP 发送);云侧采样
+token ids 经控制面直回边引擎,无 DOWN 张量、无 unembed/lm_head 恢复。
+"""
 from __future__ import annotations
 
 import time
@@ -13,9 +17,7 @@ from vllm.logger import logger
 from vllm.v1.core.sched.output import (
     LwdBatchType,
     LwdEmbedBatch,
-    LwdUnembedBatch,
 )
-from vllm.v1.outputs import ModelRunnerOutput
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -34,30 +36,9 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheSpec
 
 
-# ---- token recovery / logit-rank lookup ----
-def select_token_batch(
-    logits: torch.Tensor, ranks: list[int]
-) -> list[int]:
-    """Batched rank→token lookup: one sort, one D2H sync for all rows.
-
-    logits [R,V] rows sorted together (NPU sorts rows in parallel);
-    sorted_idx[i, ranks[i]] is the token id at rank ranks[i] for row i.
-    """
-    _, sorted_idx = torch.sort(logits, dim=-1, descending=True)
-    row = torch.arange(len(ranks), device=logits.device)
-    return sorted_idx[row, torch.tensor(ranks, device=logits.device)].tolist()
-
-
-def compute_top_id_th(logits: torch.Tensor, token_id: int) -> int:
-    """Look up the descending-logits ordinal of ``token_id`` (cloud side)."""
-    logits = logits.reshape(-1)
-    order = torch.argsort(logits, descending=True)
-    return int((order == token_id).nonzero()[0].item())
-
-
 # ---- edge worker ----
 class LwdEdgeWorker(NPUWorker):
-    """LWD edge worker: embed (prefill) + unembed (token recovery) only."""
+    """LWD edge worker (token_id 版): embed (prefill) only."""
 
     def _init_worker_distributed_environment(self) -> None:
         """覆写原生入口(worker.py):ascend 侧并行组按 Lwd 布局构建。
@@ -109,7 +90,7 @@ class LwdEdgeWorker(NPUWorker):
 
     def compile_or_warm_up_model(self):
         # LWD 边侧运行期 forward 被 LWD 流程劫持(execute_model 只走
-        # embed/unembed 直调),模型级 warmup 与 cudagraph 捕获均用不到;
+        # embed 直调),模型级 warmup 与 cudagraph 捕获均用不到;
         # 且 0 层拓扑下 full-forward 会在 final norm 解包失败。整体跳过。
         from vllm.v1.worker.worker_base import CompilationTimes
 
@@ -135,17 +116,6 @@ class LwdEdgeWorker(NPUWorker):
                 sum(len(token_ids) for token_ids in batch_meta.token_ids),
             )
             return self._execute_lwd_embed(lwd_batch.seqno, batch_meta)
-        if lwd_batch.batch_type == LwdBatchType.LWD_UNEMBED:
-            logger.info(
-                "[Lwd][edge-worker] UNEMBED seqno=%d reqs=%d accepted=%d "
-                "num_elements=%d",
-                lwd_batch.seqno,
-                len(batch_meta.req_ids),
-                sum(batch_meta.num_accept_tokens),
-                batch_meta.recv_num_elements,
-            )
-            return self._execute_lwd_unembed(lwd_batch.seqno, batch_meta)
-
         logger.debug(
             "[lwd-edge] unknown LWD batch type %r; nothing to do",
             lwd_batch.batch_type,
@@ -187,82 +157,3 @@ class LwdEdgeWorker(NPUWorker):
             len(flat_token_ids),
         )
 
-    def _execute_lwd_unembed(
-        self, seqno: int, batch_meta: LwdUnembedBatch
-    ) -> ModelRunnerOutput:
-        model = self.model_runner.get_model()
-        if not batch_meta.req_ids:
-            return ModelRunnerOutput(req_ids=[], req_id_to_index={}, sampled_token_ids=[])
-
-        _t0 = time.monotonic()
-        recv_future = self.comm_service.submit_recv(
-            LwdCommRequest(
-                channel=LwdChannelType.DOWN,
-                op="recv",
-                num_elements=batch_meta.recv_num_elements,  # int = rows_total * hidden_size
-                seqno=seqno,
-            )
-        )
-        _t_post = time.monotonic()
-        # wait_for_comm:设备序等待(替代 wait 的 50ms 轮询 tick),主机不阻塞
-        recv_future.wait_for_comm()
-        result = recv_future.result()
-        _t_tensor = time.monotonic()
-        hidden_size = self.model_config.get_hidden_size()
-        hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
-        # lm_head 不允许直接调用(ParallelLMHead.forward 强制经 sampler);
-        # compute_logits 是标准接口,包装层/单体模型都有。
-        logits = model.compute_logits(hidden_states)       # (rows_total, V)
-        _t_lm = time.monotonic()
-        # L5 对拍:首行 top-20,与云侧 sampler 入口的 [layer-trace]
-        # top20 逐位对照——排名换位即重放漂移的直接视图。
-        try:
-            from vllm_ascend.worker.lwd_layer_trace import (
-                lwd_layer_trace_enabled,
-            )
-
-            if lwd_layer_trace_enabled() and logits.dim() == 2:
-                row = logits[0].detach().float()
-                vals, tids = torch.topk(row, min(20, row.numel()))
-                logger.info(
-                    "[layer-trace] edge lm_head logits shape=%s row0 l2=%.4f "
-                    "top20=%s",
-                    tuple(logits.shape), row.norm().item(),
-                    list(zip(tids.tolist(), [round(v, 3) for v in vals.tolist()])),
-                )
-        except Exception:  # noqa: BLE001
-            pass
-
-        flat_ids = select_token_batch(
-            logits, [r for ths in batch_meta.top_id_ths for r in ths]
-        )
-        sampled_token_ids: list[list[int]] = []
-        off = 0
-        for accept, ths in zip(
-            batch_meta.num_accept_tokens, batch_meta.top_id_ths
-        ):
-            sampled_token_ids.append(flat_ids[off : off + accept])
-            off += len(ths)
-        _t_sel = time.monotonic()
-        # [Lwd][perf] 临时探针:单请求慢的归因分段——
-        # post_recv=挂 irecv;wait_tensor=等张量落卡(网络);lm_head=词表
-        # 前向(权重带宽);select=argsort 取名(.item 同步);total=边尾段全长
-        logger.info(
-            "[Lwd][perf] unembed seqno=%s post_recv=%.2f wait_tensor=%.2f "
-            "lm_head=%.2f select=%.2f total=%.2fms reqs=%d",
-            seqno,
-            (_t_post - _t0) * 1000,
-            (_t_tensor - _t_post) * 1000,
-            (_t_lm - _t_tensor) * 1000,
-            (_t_sel - _t_lm) * 1000,
-            (_t_sel - _t0) * 1000,
-            len(batch_meta.req_ids),
-        )
-        req_id_to_index = {
-            req_id: index for index, req_id in enumerate(batch_meta.req_ids)
-        }
-        return ModelRunnerOutput(
-            req_ids=batch_meta.req_ids,
-            req_id_to_index=req_id_to_index,
-            sampled_token_ids=sampled_token_ids,
-        )
