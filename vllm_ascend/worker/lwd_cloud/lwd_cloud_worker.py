@@ -14,8 +14,6 @@ Selected via ``parallel_config.worker_cls`` (see platform.py:
 
 from __future__ import annotations
 
-import time
-
 import torch
 from vllm.logger import logger
 from vllm.v1.core.sched.output import GrammarOutput  # noqa: F401  (type)
@@ -188,19 +186,20 @@ class LwdCloudWorker(NPUWorker):
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
-        # rank-replay DOWN:发送 hidden 包(通道异步、流内有序);pinned 视图
-        # 挂输出内层(就绪由 get_output 的 wait_stream(主流) 保证),
-        # 引擎侧解码发布 meta。
+        # rank-replay DOWN:hidden 包通道异步发送;meta 的物化(等事件+
+        # 读值)不在此处做——RPC 忙等线程必须即刻返回,否则下一步
+        # execute_model 派发被推迟,设备步间出现空泡(单请求 +3ms 的
+        # 根源)。物化挂到 async_output 侧线程的 get_output 钩子上,
+        # 与上游 sampled_token_ids 同款时序。
         if self.enable_lwd:
             payload = self.model_runner.take_lwd_pending_down_payload()
             if payload is not None and output is not None:
-                hidden, pinned, _event, req_ids, _accepted = payload
+                hidden, pinned, meta_ev, req_ids, _accepted = payload
                 seqno = self._lwd_next_down_seqno()
                 logger.info(
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
                     seqno, hidden.numel(),
                 )
-                _t = time.monotonic()
                 get_lwd_comm_service().submit_send(
                     LwdCommRequest(
                         channel=LwdChannelType.DOWN,
@@ -210,30 +209,59 @@ class LwdCloudWorker(NPUWorker):
                         seqno=seqno,
                     )
                 )
-                # 多进程架构:pinned 引用经 MQ pickle 时会拷贝数据,
-                # 必须在此保证 D2H 已落(否则序列化旧值)。同步只等
-                # rank 计算尾部(~5ms),引擎本就在等回包,不加墙钟。
-                # 布局 [ranks(rows), counts(n), seg_lens(n)]。
-                torch.npu.current_stream().synchronize()
-                from vllm.v1.outputs import LwdC2eMeta
-
-                n = len(req_ids)
-                total = pinned.numel()
-                seg_lens = pinned[total - n :].tolist()
-                counts = pinned[total - 2 * n : total - n].tolist()
-                ranks_flat = pinned[: total - 2 * n].tolist()
-                top_id_ths, off = [], 0
-                for s in seg_lens:
-                    top_id_ths.append(ranks_flat[off : off + s])
-                    off += s
                 target = getattr(output, "_model_runner_output", output)
-                target.lwd_c2e_meta = LwdC2eMeta(
-                    hidden_num_elements=hidden.numel(),
-                    top_id_ths=top_id_ths,
-                    num_accepted_tokens=counts,
-                    req_ids=req_ids,
-                    down_seqno=seqno,
-                )
+
+                def _lwd_finalize_meta(
+                    _target=target, _ev=meta_ev, _pinned=pinned,
+                    _req_ids=req_ids, _seqno=seqno, _numel=hidden.numel(),
+                ):
+                    """meta 物化:等 pinned D2H 落地后解析挂载。
+
+                    多进程架构下输出经 MQ pickle 时会拷贝张量数据,必须
+                    保证 pickle 之前 D2H 已落(否则序列化旧值)——本函数
+                    只能被 MQ 发送路径调用:
+                    - async 调度:get_output 覆写,物化在
+                      async_output_busy_loop 侧线程(pickle 之前);
+                    - 非 async 调度:本线程兜底(等同旧行为)。
+                    事件只等到拷贝为止,不等全流;比 sampled tokens 的
+                    async_copy_ready_event 晚约 ranks 计算时长(亚毫秒)。
+                    pinned 环深度 4 覆盖侧线程 1-2 步的物化滞后。"""
+                    _ev.synchronize()
+                    from vllm.v1.outputs import LwdC2eMeta
+
+                    n = len(_req_ids)
+                    total = _pinned.numel()
+                    seg_lens = _pinned[total - n :].tolist()
+                    counts = _pinned[total - 2 * n : total - n].tolist()
+                    ranks_flat = _pinned[: total - 2 * n].tolist()
+                    top_id_ths, off = [], 0
+                    for s in seg_lens:
+                        top_id_ths.append(ranks_flat[off : off + s])
+                        off += s
+                    _target.lwd_c2e_meta = LwdC2eMeta(
+                        hidden_num_elements=_numel,
+                        top_id_ths=top_id_ths,
+                        num_accepted_tokens=counts,
+                        req_ids=_req_ids,
+                        down_seqno=_seqno,
+                    )
+
+                if isinstance(output, AsyncModelRunnerOutput):
+                    # async 调度:覆写实例 get_output,enqueue_output 在
+                    # 侧线程调用它——先物化上游输出,再挂 meta,之后才
+                    # 进 MQ pickle。RPC 忙等线程不参与任何设备等待。
+                    _orig_get_output = output.get_output
+
+                    def _get_output_with_meta(_orig=_orig_get_output):
+                        inner = _orig()
+                        _lwd_finalize_meta()
+                        return inner
+
+                    output.get_output = _get_output_with_meta
+                else:
+                    # 非 async 调度兜底:enqueue_output 前无侧线程可用,
+                    # 在本线程物化(正确性与旧同步版一致)
+                    _lwd_finalize_meta()
         return output
 
     # ------------------------------------------------------------------ #

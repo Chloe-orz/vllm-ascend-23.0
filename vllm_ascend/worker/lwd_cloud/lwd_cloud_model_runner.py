@@ -280,16 +280,19 @@ class LwdCloudModelRunner(NPUModelRunner):
                                     device=logits.device)
             seg_lens_dev = counts_dev
             meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
-        # pinned 拷贝排主流末尾(异步):引擎侧 get_output 路径本就有
-        # wait_stream(主流) 的同步点,输出到达时 pinned 必然就绪——
-        # 零事件、零新增同步。
+        # pinned 拷贝排主流末尾(异步),完成事件随 payload 返回:物化方
+        # (async_output 侧线程,或非 async 调度的兜底路径)在 MQ pickle
+        # 之前等它再读值——与上游 sampled_token_ids 的
+        # async_copy_ready_event 同款不变量,RPC 忙等线程全程不等待。
         n_meta = meta_dev.numel()
         pinned = self._lwd_meta_pinned(n_meta)
         pinned[:n_meta].copy_(meta_dev, non_blocking=True)
+        meta_ev = torch.npu.Event()
+        meta_ev.record()
         return (
             hidden_packet,
             pinned[:n_meta],
-            None,
+            meta_ev,
             [r for i, r in enumerate(batch_req_ids) if valid[i]],
             None,
         )
