@@ -289,14 +289,17 @@ class LwdCloudModelRunner(NPUModelRunner):
                                     device=logits.device)
             seg_lens_dev = counts_dev
             meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
-        # meta_dev(设备张量)直接随 payload 返回,不做 pinned 落地:
-        # 物化方(async_output 侧线程,或非 async 兜底)对其 .tolist()
-        # 自带 D2H 同步,彼时步尾已过、cat 早已执行完。每步私有张量,
-        # 无共享缓冲——"下一步覆盖未解析的上一步"在构造上不可能,
-        # pinned 环的竞态类别整体消灭(环深赌时序余量的方案废弃)。
+        # meta_dev(设备张量)+ cat 完成事件随 payload 返回,无共享缓冲
+        # ("下一步覆盖未解析的上一步"在构造上不可能)。物化方在专用
+        # 拷贝流上 wait_event(cat) 后 tolist:D2H 只依赖 cat 完成点,
+        # 不落默认流队尾——否则异步调度下会被下一步已入队的前缀算子
+        # 压住,notify 出发延迟(单请求 +2ms 的时序回归即源于此)。
+        meta_ev = torch.npu.Event()
+        meta_ev.record()
         return (
             hidden_packet,
             meta_dev,
+            meta_ev,
             [r for i, r in enumerate(batch_req_ids) if valid[i]],
             None,
         )

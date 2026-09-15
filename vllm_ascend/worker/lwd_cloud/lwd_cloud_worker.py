@@ -77,6 +77,9 @@ class LwdCloudWorker(NPUWorker):
         self._lwd_down_next_seqno = 0
         # req_id -> posted UP recv futures (consumed by the runner's device-side inject)
         self._lwd_up_recv_futures: dict[str, list] = {}
+        # meta 物化专用拷贝流:物化的 D2H 在此流上 wait_event(cat) 后
+        # 执行,只依赖 cat 完成点,不被默认流队尾(下一步前缀)压住
+        self._lwd_meta_copy_stream = torch.npu.Stream()
         if not self.enable_lwd:
             return
         if self.use_v2_model_runner:
@@ -197,7 +200,7 @@ class LwdCloudWorker(NPUWorker):
         if self.enable_lwd:
             payload = self.model_runner.take_lwd_pending_down_payload()
             if payload is not None and output is not None:
-                hidden, meta_dev, req_ids, _accepted = payload
+                hidden, meta_dev, meta_ev, req_ids, _accepted = payload
                 seqno = self._lwd_next_down_seqno()
                 logger.info(
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
@@ -215,10 +218,10 @@ class LwdCloudWorker(NPUWorker):
                 target = getattr(output, "_model_runner_output", output)
 
                 def _lwd_finalize_meta(
-                    _target=target, _meta=meta_dev,
+                    _target=target, _meta=meta_dev, _ev=meta_ev,
                     _req_ids=req_ids, _seqno=seqno, _numel=hidden.numel(),
                 ):
-                    """meta 物化:对每步私有的 meta_dev 设备张量 tolist。
+                    """meta 物化:专用拷贝流上 wait_event(cat) 后 tolist。
 
                     多进程架构下输出经 MQ pickle 时会拷贝张量数据,必须
                     保证 pickle 之前已物化为纯数值——本函数只能被 MQ
@@ -226,13 +229,16 @@ class LwdCloudWorker(NPUWorker):
                     - async 调度:get_output 覆写,物化在
                       async_output_busy_loop 侧线程(pickle 之前);
                     - 非 async 调度:本线程兜底(等同旧行为)。
-                    .tolist() 自带 D2H 同步,彼时步尾已过(cat 早已执行
-                    完),读到的必然是本步真值;张量每步私有、无共享
-                    缓冲——共享 pinned 环的覆盖竞态类别整体消灭。"""
+                    D2H 排在专用流且只依赖 cat 完成事件:既保住每步
+                    私有张量的零共享正确性,又不落默认流队尾(否则被
+                    下一步已入队的前缀算子压住,notify 延迟出发)。"""
                     from vllm.v1.outputs import LwdC2eMeta
 
+                    stream = self._lwd_meta_copy_stream
+                    with torch.npu.stream(stream):
+                        stream.wait_event(_ev)
+                        meta_host = _meta.tolist()
                     n = len(_req_ids)
-                    meta_host = _meta.tolist()
                     total = len(meta_host)
                     seg_lens = meta_host[total - n :]
                     counts = meta_host[total - 2 * n : total - n]
