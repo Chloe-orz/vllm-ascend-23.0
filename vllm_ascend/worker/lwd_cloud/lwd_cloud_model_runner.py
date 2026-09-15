@@ -220,11 +220,12 @@ class LwdCloudModelRunner(NPUModelRunner):
         """生产级 DOWN 采集(rank-replay):hidden 组包 + 全局秩 + num_accepted。
 
         廉价计算:bf16 直比(logits 原生 bf16,与 cast 后逐位等价)、
-        批全覆盖时整行直接算(不做高级索引取材)、ranks/counts 拼单个
-        设备张量;物化走 边流 non_blocking -> pinned 缓冲 + event,
-        关键路径零新增同步——host 读取推迟到引擎侧(那里本来就有
-        get_output 的同步点)。返回:
-          (hidden_packet, pinned_view, meta_event, req_ids, rows_per_req)
+        批全覆盖时整行直接算(不做高级索引取材)、ranks/counts/seg_lens
+        拼单个设备张量;meta 经 pinned(4 轮换)在主流末尾异步拷贝,
+        worker 属性上紧随记录就绪事件,由响应入队处 synchronize 后
+        引擎侧解码——计算关键路径零新增同步。批序/掩码取捕获时刻
+        快照(防 batch queue 重叠重排)。返回:
+          (hidden_packet, pinned_view, None, req_ids, None)
         或 None(本步无在途请求)。
         """
         sampled = sampler_output.sampled_token_ids
