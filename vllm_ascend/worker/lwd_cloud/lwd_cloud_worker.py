@@ -77,7 +77,7 @@ class LwdCloudWorker(NPUWorker):
         super().init_device()
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
         self._lwd_down_next_seqno = 0
-        # req_id -> posted UP recv futures (consumed by take_lwd_up_embeds)
+        # req_id -> posted UP recv futures (consumed by the runner's device-side inject)
         self._lwd_up_recv_futures: dict[str, list] = {}
         if not self.enable_lwd:
             return
@@ -131,14 +131,6 @@ class LwdCloudWorker(NPUWorker):
 
     def execute_model(self, scheduler_output):
         if self.enable_lwd:
-            # Auto-register newly scheduled LWD requests into the
-            # collector (so their rows are collected into DOWN packets
-            # from the first sampled step).  No control-plane glue
-            # needed: scheduled_new_reqs is itself the admission signal.
-            collector = self.model_runner.lwd_cloud_collector
-            if collector is not None:
-                for req_data in scheduler_output.scheduled_new_reqs:
-                    collector.open_request(req_data.req_id, 0)
             # cloud: post the exact-size UP irecv for every incoming
             # LWD_EMBED batch (control info rides scheduler_output.lwd_batch).
             self._lwd_up_post_recvs(scheduler_output)
@@ -193,52 +185,16 @@ class LwdCloudWorker(NPUWorker):
             batch.seqno, len(meta.req_ids), num_tokens,
         )
 
-    def take_lwd_up_embeds(self, batch_seqno: int):
-        """Wait for and return one LWD_EMBED batch's UP embeds.
-
-        Returns ``(embeds, meta)`` where ``embeds`` is the concatenated
-        ``[total_tokens, H]`` tensor and ``meta`` is the batch's
-        ``LwdEmbedBatch`` (per-request token lists, used by the runner
-        to split rows back to requests).  Returns ``(None, None)`` when
-        nothing was posted for this seqno."""
-        item = self._lwd_up_recv_futures.pop(batch_seqno, None)
-        if item is None:
-            return None, None
-        future, meta = item
-        # wait_for_comm:设备序等待(替代 wait 的 50ms 轮询 tick),主机不阻塞
-        _ready = future.done()  # 纯 CPU 查询:取用时张量是否早已到达
-        future.wait_for_comm()
-        result = future.result()
-        assert result.tensor is not None
-        # [Lwd][perf] TTFT 探针:ready_at_take=False = 云先挂收在等数据
-        # (慢的是边侧发送/传输,对照边侧 embed submit_send);
-        # True = 数据早到云才来取(慢的是云侧消费)。
-        # UP 广播全员参与、各 rank 都会走到这里——只让 TP rank 0(数据面
-        # 对接卡)打印,避免 8 卡 × 每 chunk 一条的刷屏与重复计数
-        from vllm.distributed import get_tensor_model_parallel_rank
-
-        if get_tensor_model_parallel_rank() == 0:
-            logger.info(
-                "[Lwd][perf] up-recv seqno=%s ready_at_take=%s",
-                batch_seqno, _ready,
-            )
-        hidden_size = self.model_config.get_hidden_size()
-        embeds = result.tensor.view(-1, hidden_size)
-        return embeds, meta
-
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         output = self.model_runner.sample_tokens(grammar_output)
-        # LWD cloud: the DOWN wire carries ONLY the hidden tensor — the
-        # runner built it during sampling; we send it here (all LWD wire
-        # actions live at the worker layer).  The step metadata (ranks /
-        # num_accepted / req_ids) rides back to the scheduler on
-        # output.lwd_c2e_meta; the control plane forwards it to the edge
-        # ahead of the tensor.
+        # rank-replay DOWN:发送 hidden 包(通道异步、流内有序);pinned 视图
+        # 挂输出内层(就绪由 get_output 的 wait_stream(主流) 保证),
+        # 引擎侧解码发布 meta。
         if self.enable_lwd:
-            hidden = self.model_runner.take_lwd_pending_down_packet()
-            seqno = None
-            if hidden is not None:
+            payload = self.model_runner.take_lwd_pending_down_payload()
+            if payload is not None and output is not None:
+                hidden, pinned, _event, req_ids, _accepted = payload
                 seqno = self._lwd_next_down_seqno()
                 logger.info(
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
@@ -254,29 +210,10 @@ class LwdCloudWorker(NPUWorker):
                         seqno=seqno,
                     )
                 )
-                # [Lwd][perf] 云侧 LWD 税:DOWN 发送提交(快照 clone + isend
-                # + bridge 的 handle.wait——wait 部分另有 bridge-wait 分项)
-                logger.info(
-                    "[Lwd][perf] down-send seqno=%d submit=%.2fms",
-                    seqno, (time.monotonic() - _t) * 1000,
-                )
-            meta = self.model_runner.take_lwd_pending_c2e_meta()
-            if meta is not None and output is not None:
-                # Carry the DOWN seqno back so the edge can post its
-                # matching irecv (tag-less HCCL pairing).
-                if seqno is not None:
-                    meta.down_seqno = seqno
-                # async scheduling 下 output 是 AsyncGPUModelRunnerOutput
-                # 包装器,get_output() 返回的是内层 ModelRunnerOutput——
-                # meta 必须挂到内层,否则解包时丢失。
+                # async 包装器下挂到内层,否则 get_output() 解包丢失
                 target = getattr(output, "_model_runner_output", output)
-                target.lwd_c2e_meta = meta
-                logger.info(
-                    "[Lwd][cloud-worker] c2e_meta attached: reqs=%s "
-                    "down_seqno=%s (hidden_sent=%s)",
-                    getattr(meta, "req_ids", None),
-                    getattr(meta, "down_seqno", None),
-                    seqno is not None,
+                target.lwd_down_carrier = (
+                    pinned, req_ids, hidden.numel(), seqno
                 )
         return output
 
@@ -294,15 +231,12 @@ class LwdCloudWorker(NPUWorker):
         request's prompt-embeds assembly buffer (backstop for abort
         mid-prefill; normal prefill completion frees it in the runner's
         ``_lwd_release_consumed_prompt_embeds``)."""
-        collector = self.model_runner.lwd_cloud_collector
         embeds_map = self.model_runner.input_batch.req_prompt_embeds
         req_id_to_index = self.model_runner.input_batch.req_id_to_index
         logger.info(
             "[Lwd][cloud-worker] flush finished reqs=%s", list(finished_req_ids)
         )
         for req_id in finished_req_ids:
-            if collector is not None:
-                collector.drop(req_id)
             idx = req_id_to_index.get(req_id)
             if idx is not None:
                 embeds_map.pop(idx, None)
