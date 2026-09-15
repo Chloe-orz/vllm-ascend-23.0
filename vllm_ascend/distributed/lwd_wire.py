@@ -30,9 +30,8 @@ from vllm_ascend.distributed.lwd_comm.types import LwdChannelType
 _LWD_CHANNEL_GROUPS: dict[LwdChannelType, tuple[dist.ProcessGroup, int]] = {}
 _LWD_CHANNEL_STREAMS: dict[LwdChannelType, "torch.npu.Stream"] = {}
 _LWD_ENDPOINTS: tuple[int, int] | None = None  # (edge_global_rank, cloud_global_rank)
-# 云侧扇出组(UP 数据面):边 isend 到云 leader 后,leader 在此组内
-# broadcast 扇出——边退出集体,扇出走云内卡间互联
-_LWD_CLOUD_UP_GROUP: dist.ProcessGroup | None = None
+# UP 直发目标:云侧全部 rank(边对每张卡各发一路 isend,默认组)
+_LWD_CLOUD_RANKS: list[int] | None = None
 _INITIALIZED = False
 
 
@@ -111,12 +110,9 @@ def init_lwd_duplex_channels() -> None:
             peer = -1
         _LWD_CHANNEL_GROUPS[channel] = (group, peer)
         _LWD_CHANNEL_STREAMS[channel] = torch.npu.Stream()
-    global _LWD_CLOUD_UP_GROUP
-    # UP 扇出组 = 云侧全部 rank(leader 为组内 rank0)。new_group 是
-    # world 集体,所有 rank(含边)按同序参与创建,非成员拿到不可用
-    # 句柄即可。edge-first 布局下云 rank 连续 [cloud_rank, world)。
-    cloud_ranks = list(range(cloud_rank, dist.get_world_size()))
-    _LWD_CLOUD_UP_GROUP = dist.new_group(cloud_ranks, backend=backend)
+    global _LWD_CLOUD_RANKS
+    # UP 直发目标 = 云侧全部 rank(edge-first 布局下连续 [cloud_rank, world))
+    _LWD_CLOUD_RANKS = list(range(cloud_rank, dist.get_world_size()))
     _LWD_ENDPOINTS = (edge_rank, cloud_rank)
     _INITIALIZED = True
     logger.info(
@@ -154,32 +150,19 @@ def warmup_lwd_duplex_channels() -> None:
         if not (am_sender or am_receiver):
             continue
         payload = torch.zeros(8, dtype=torch.bfloat16, device="npu")
-        if am_sender:
-            logger.info(
-                "[lwd-warmup] SEND post channel=%s my_rank=%d peer=%d "
-                "group_ranks=%s", channel, my_rank, peer,
-                dist.get_process_group_ranks(group))
+        # UP 运行期走默认组直发(边→云各卡),warmup 与运行期同组;
+        # DOWN 运行期用专用 2-rank 组,warmup 保持同组。
+        if channel is LwdChannelType.UP:
+            if am_sender:
+                handle = dist.isend(payload, dst=peer)
+            else:
+                handle = dist.irecv(payload, src=peer)
+        elif am_sender:
             handle = dist.isend(payload, dst=peer, group=group)
         else:
-            logger.info(
-                "[lwd-warmup] RECV post channel=%s my_rank=%d src=%d "
-                "group_ranks=%s", channel, my_rank, peer,
-                dist.get_process_group_ranks(group))
             handle = dist.irecv(payload, src=peer, group=group)
         handle.wait()
         logger.info("[lwd-warmup] DONE channel=%s my_rank=%d", channel, my_rank)
-    # 云内扇出组预热一次(仅云 rank;边跳过),首 chunk 不付建链成本。
-    # 单人组(1E1C 回退布局)无扇出需求,跳过——避免单成员广播行为未定义
-    if (_LWD_CLOUD_UP_GROUP is not None
-            and my_rank >= get_lwd_cloud_up_leader()
-            and dist.get_world_size(_LWD_CLOUD_UP_GROUP) > 1):
-        probe = torch.zeros(8, dtype=torch.bfloat16, device="npu")
-        # torch 集合通信的 src 是【全局】rank(与 P2P 的 src/dst 同约定,
-        # 参见 pynccl.py 传 ranks[0])——必须传 leader 的全局 rank,
-        # 传 0 会指向不在组内的边,直接 "not part of group"
-        dist.broadcast(
-            probe, src=get_lwd_cloud_up_leader(), group=_LWD_CLOUD_UP_GROUP)
-        logger.info("[lwd-warmup] cloud fanout group ready (rank=%d)", my_rank)
     get_world_group().barrier()
     logger.info("[lwd-wire] duplex channels warmed up (UP + DOWN)")
 
@@ -188,15 +171,16 @@ def lwd_channels_initialized() -> bool:
     return _INITIALIZED
 
 
-def get_lwd_cloud_up_group() -> "dist.ProcessGroup | None":
-    """UP 云内扇出组(仅云 rank 成员;边拿到的是不可用句柄)。"""
-    return _LWD_CLOUD_UP_GROUP
+def get_lwd_cloud_up_ranks() -> list[int]:
+    """UP 直发目标(云侧全部 rank;边按此逐卡 isend)。"""
+    assert _LWD_CLOUD_RANKS is not None
+    return _LWD_CLOUD_RANKS
 
 
-def get_lwd_cloud_up_leader() -> int:
-    """云侧 UP leader(= UP 通道端点 rank,扇出组内 rank0)。"""
+def get_lwd_edge_rank() -> int:
+    """边全局 rank(云各卡 irecv 的 src)。"""
     assert _LWD_ENDPOINTS is not None
-    return _LWD_ENDPOINTS[1]
+    return _LWD_ENDPOINTS[0]
 
 
 def get_lwd_channel_device_group(channel: LwdChannelType) -> dist.ProcessGroup:

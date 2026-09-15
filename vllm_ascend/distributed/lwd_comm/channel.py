@@ -319,14 +319,18 @@ class LwdChannel:
             self.channel_type, dist.get_rank(), peer,
             dist.get_process_group_ranks(group),
             list(tensor.shape), tensor.dtype,
-            "isend(+cloud fanout)" if self.channel_type == LwdChannelType.UP
+            "isend_x%d" % len(lwd_wire.get_lwd_cloud_up_ranks()) if self.channel_type == LwdChannelType.UP
             else "isend",
         )
-        # UP(边→云)与 DOWN 同为点对点 isend(专用 2-rank 组):边的
-        # 发送完成只依赖云 leader 挂收,不再进 9 人 world 广播——原
-        # 写法把边的发送与"8 卡全部排程到场"焊死(chunk 级锁步根源),
-        # 且不需要数据的 rank 也被强制陪跑。云内扇出由 leader 在专用
-        # 组内 broadcast 完成(见 _wire_recv),数据只过外网一份。
+        if self.channel_type == LwdChannelType.UP:
+            # UP 直发:边对每张云卡各发一路 isend(默认组)——不进
+            # world 集体(锁步根源解除不变),也【不做 leader 中转+组内
+            # 扇出】:中转要求 irecv(P2P)→broadcast(集合)的跨原语流序,
+            # HCCL 不保证,扇出可能读到 irecv 落地前的缓冲,7/8 卡拿到
+            # 垃圾 embeds(并发下精度劣化根因)。直发只依赖 DOWN 已验证
+            # 的 P2P 配对语义,零顺序假设;8 路全部投递完成才算发完。
+            return [dist.isend(tensor.contiguous(), dst=r)
+                    for r in lwd_wire.get_lwd_cloud_up_ranks()]
         return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
 
     def _wire_recv(self, req: LwdCommRequest):
@@ -339,7 +343,7 @@ class LwdChannel:
             "num_elements=%d op=%s",
             self.channel_type, dist.get_rank(), peer,
             dist.get_process_group_ranks(group), req.num_elements,
-            "irecv(+cloud fanout)" if self.channel_type == LwdChannelType.UP
+            "irecv(direct)" if self.channel_type == LwdChannelType.UP
             else "irecv",
         )
         # Exact-size buffer: HCCL P2P requires matching numel on both
@@ -348,24 +352,10 @@ class LwdChannel:
             req.num_elements, dtype=torch.bfloat16, device="npu"
         )
         if self.channel_type == LwdChannelType.UP:
-            # UP 接收分两角:leader 从边 irecv(点对点),随后在云内
-            # 扇出组 broadcast(src=组内 rank0)分发——两个 async op 同
-            # 通道流顺序执行,irecv 落地先于扇出;非 leader 云 rank 只
-            # 进组广播。全部走 async_op=True:通道靠 handle.wait() 做
-            # 流式桥接,同步版返回 None 通道必崩。
-            cloud_group = lwd_wire.get_lwd_cloud_up_group()
-            if dist.get_rank() == lwd_wire.get_lwd_cloud_up_leader():
-                handles = [dist.irecv(buffer, src=peer, group=group)]
-                if (cloud_group is not None
-                        and dist.get_world_size(cloud_group) > 1):
-                    handles.append(dist.broadcast(
-                        buffer, src=lwd_wire.get_lwd_cloud_up_leader(),
-                        group=cloud_group, async_op=True))
-                return buffer, handles
-            assert cloud_group is not None, "non-leader cloud rank needs fanout group"
-            return buffer, [dist.broadcast(
-                buffer, src=lwd_wire.get_lwd_cloud_up_leader(),
-                group=cloud_group, async_op=True)]
+            # 每张云卡从边直接 irecv(默认组,与边侧多发 isend 逐对
+            # 配对)——无 leader 中转、无集合扇出,理由见 _wire_send。
+            return buffer, [
+                dist.irecv(buffer, src=lwd_wire.get_lwd_edge_rank())]
         return buffer, [dist.irecv(buffer, src=peer, group=group)]
         return buffer, [dist.irecv(buffer, src=peer, group=group)]
 

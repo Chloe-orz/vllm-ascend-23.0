@@ -154,12 +154,11 @@ class LwdCloudWorker(NPUWorker):
             the batch's hidden rows are the concatenation of these
             prompts, so the recv size is ``sum(len) x H``.
 
-        Posting roles split by rank (channel._wire_recv): the cloud
-        leader irecvs from the edge (point-to-point) and fans the data
-        out inside the cloud-only group; non-leader cloud ranks join the
-        group broadcast only.  HCCL rendezvous makes the edge's isend
-        wait for the leader's post, so no separate notification is
-        needed.  A mismatched/missing batch is skipped (non-LWD step or
+        Every cloud rank irecvs its own copy directly from the edge
+        (channel._wire_recv UP = plain P2P pairing, no leader relay /
+        no collective fanout).  HCCL rendezvous makes the edge's isends
+        wait for these posts, so no separate notification is needed.
+        A mismatched/missing batch is skipped (non-LWD step or
         control-plane error)."""
         from vllm.v1.core.sched.output import LwdBatchType
 

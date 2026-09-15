@@ -176,7 +176,7 @@ class LwdEdgeWorker(NPUWorker):
         )
         self.comm_service.submit_send(request)
         # [Lwd][perf] TTFT 探针:forward=embed 前向;submit_send=快照clone+
-        # 点对点提交(含 bridge 的 handle.wait)——若 isend 在等云 leader
+        # 点对点提交(含 bridge 的 handle.wait)——若 isend 在等云卡
         # 挂收,此段会显著变大(chunk 级锁步的直接证据)
         logger.info(
             "[Lwd][perf] embed seqno=%s forward=%.2f submit_send=%.2f "
