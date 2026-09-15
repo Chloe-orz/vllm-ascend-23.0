@@ -110,6 +110,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # LWD (edge-cloud) per-layer trace instrumentation: when set to "1",
+    # vllm_ascend/worker/lwd_layer_trace.py installs forward hooks that
+    # log per-layer tensor checksums for the first few model forwards
+    # (edge-cloud vs centralized diff debugging). Default: off, zero cost.
+    "VLLM_ASCEND_LWD_LAYER_TRACE": lambda: os.getenv("VLLM_ASCEND_LWD_LAYER_TRACE", ""),
 }
 
 # end-env-vars-definition

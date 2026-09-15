@@ -93,9 +93,9 @@ class LwdCloudModelRunner(NPUModelRunner):
 
         The base fill loop + copy_to_gpu run first (they only see the
         zero buffer); the received UP embeds are then written straight
-        into ``inputs_embeds.gpu`` on the current stream, ordered after
-        the channel-completion event via ``future.wait_for_comm()`` —
-        non-blocking, recv 等待另有 [Lwd][perf] up-recv-wait 计时可见。
+        into ``inputs_embeds.gpu`` on the current stream after the endpoint
+        waits for the UP recv and the cloud TP broadcast completes.
+        Recv/broadcast 等待另有 [Lwd][perf] up-recv-wait 计时可见。
         """
         out = super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
         if self._lwd_enabled():
@@ -264,16 +264,17 @@ class LwdCloudModelRunner(NPUModelRunner):
         """Device-side inject: write the received UP embeds straight into
         ``inputs_embeds.gpu`` at each request's scheduled window.
 
-        The recv uses ``future.wait_for_comm()`` (non-blocking device
-        ordering; channel errors surface via ``future.result()``), with
-        row copies issued on the current stream (non_blocking) after it.  The
-        flattened output offsets reproduce the native fill loop's
+        The endpoint waits for the UP recv via ``future.wait(timeout=60.0)``.
+        When TP spans multiple ranks, all cloud TP ranks then broadcast the
+        payload with launch and ``work.wait()`` on the current compute stream.
+        Row copies are issued on that stream with ``non_blocking=True``.
+        The flattened output offsets reproduce the native fill loop's
         accumulation (per-request scheduled segment start), so rows land
         exactly where the prompt-embeds branch expects them.  The CPU
         assembly buffer is also filled via an on-stream D2H copy — its
         only downstream consumer (draft first-pass provider) reads it
-        with stream-ordered H2D copies, so no host sync is needed there
-        either.  The base fill loop may have copied stale buffer content
+        with stream-ordered H2D copies, so that copy adds no host sync.
+        The base fill loop may have copied stale buffer content
         earlier; our device write happens after it and is authoritative.
         """
         worker = self.worker

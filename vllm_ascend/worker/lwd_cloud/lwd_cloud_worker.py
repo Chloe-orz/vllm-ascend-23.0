@@ -78,8 +78,9 @@ class LwdCloudWorker(NPUWorker):
         super().init_device()
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
         self._lwd_down_next_seqno = 0
-        # req_id -> posted UP recv futures (consumed by the runner's device-side inject)
-        self._lwd_up_recv_futures: dict[str, list] = {}
+        # seqno -> (posted UP recv future or None, batch meta);
+        # consumed by the model runner's device-side injection.
+        self._lwd_up_recv_futures: dict[int, tuple] = {}
         if not self.enable_lwd:
             return
         if self.use_v2_model_runner:
@@ -173,7 +174,10 @@ class LwdCloudWorker(NPUWorker):
 
         All control info rides the SchedulerOutput (edge -> cloud
         control plane fills it in):batch.seqno 为边侧派发号(跨机段
-        配对键),recv 尺寸包含 embedding 及可选的 Hash 专家 ID。"""
+        配对键),recv 尺寸包含 embedding 及可选的 Hash 专家 ID。
+        非端点不触碰跨机 wire,但仍登记 ``(None, meta)`` 占位,
+        以驱动所有云 TP rank 在 model runner 注入阶段参与同一次
+        TP broadcast。"""
         from vllm.v1.core.sched.output import LwdBatchType
 
         batch = getattr(scheduler_output, "lwd_batch", None)

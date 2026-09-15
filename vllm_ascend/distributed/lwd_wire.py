@@ -33,6 +33,22 @@ _LWD_ENDPOINTS: tuple[int, int] | None = None  # (edge_global_rank, cloud_global
 _INITIALIZED = False
 
 
+def _get_lwd_bootstrap_world_group():
+    """取 LWD 建组/warmup 用的引导世界组。
+
+    vllm 侧 LWD 分支会把原 9-rank 世界组存为
+    ``parallel_state._LWD_BOOTSTRAP_WORLD`` 并提供
+    ``get_lwd_bootstrap_world()`` 访问器(此后 ``_WORLD`` 被替换为
+    实例 TP 组);旧版 vllm 无该访问器时回退 ``get_world_group()``。
+    """
+    from vllm.distributed import parallel_state
+
+    accessor = getattr(parallel_state, "get_lwd_bootstrap_world", None)
+    if accessor is not None:
+        return accessor()
+    return get_world_group()
+
+
 def dump_tensor(tag: str, tensor: "torch.Tensor") -> None:
     """调试:打印数据面张量摘要,供边云两端成对对比数值。
 
@@ -90,7 +106,7 @@ def init_lwd_duplex_channels() -> None:
             )
         edge_rank, cloud_rank = pp_group.ranks[0], pp_group.ranks[1]
     ranks = [edge_rank, cloud_rank]
-    backend = dist.get_backend(get_world_group().device_group)
+    backend = dist.get_backend(_get_lwd_bootstrap_world_group().device_group)
     my_rank = dist.get_rank()
     for channel in LwdChannelType:
         # Both channels span the same rank pair; direction is given by
@@ -163,7 +179,7 @@ def warmup_lwd_duplex_channels() -> None:
             handle = dist.irecv(payload, src=peer, group=group)
         handle.wait()
         logger.info("[lwd-warmup] DONE channel=%s my_rank=%d", channel, my_rank)
-    get_world_group().barrier()
+    _get_lwd_bootstrap_world_group().barrier()
     logger.info("[lwd-wire] duplex channels warmed up (UP + DOWN)")
 
 

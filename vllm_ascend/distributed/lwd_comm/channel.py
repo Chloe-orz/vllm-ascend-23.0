@@ -315,18 +315,13 @@ class LwdChannel:
         assert tensor is not None
         logger.debug(
             "[lwd-comm] SEND post channel=%s my_rank=%d peer=%s group_ranks=%s "
-            "shape=%s dtype=%s op=%s",
+            "shape=%s dtype=%s op=isend",
             self.channel_type, dist.get_rank(), peer,
             dist.get_process_group_ranks(group),
             list(tensor.shape), tensor.dtype,
-            "world_broadcast(src=0)" if self.channel_type == LwdChannelType.UP
-            else "isend",
         )
-        # UP(边→云)两层通信:第一段边→云端点 P2P(只等端点 join,
-        # 不再被 8 卡 join 拖住);第二段端点在云 TP 组内 broadcast
-        # (见 _wire_recv)。DOWN(云 leader→边)保持点对点。
-        if self.channel_type == LwdChannelType.UP:
-            return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
+        # UP/DOWN 跨机段均在 LWD 端点组上走 P2P isend/irecv;
+        # UP 云内第二段 TP broadcast 由 cloud model runner 在注入阶段完成。
         return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
 
     def _wire_recv(self, req: LwdCommRequest):
@@ -336,11 +331,9 @@ class LwdChannel:
             peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
         logger.debug(
             "[lwd-comm] RECV post channel=%s my_rank=%d src=%s group_ranks=%s "
-            "num_elements=%d op=%s",
+            "num_elements=%d op=irecv",
             self.channel_type, dist.get_rank(), peer,
             dist.get_process_group_ranks(group), req.num_elements,
-            "world_broadcast(src=0)" if self.channel_type == LwdChannelType.UP
-            else "irecv",
         )
         # Exact-size buffer: HCCL P2P requires matching numel on both
         # ends; the size is learned from the control-plane notification.
