@@ -127,15 +127,44 @@ class LwdCloudModelRunner(NPUModelRunner):
                 continue
             future, meta = item
             _t_wait = time.monotonic()
-            res = future.result()  # 非阻塞取结果(通道错误一并抛出)
-            future.wait_for_comm()  # device 序:后续 copy 排在通道事件之后
+            import torch.distributed as dist
+            _lwd_cfg = worker.parallel_config.lwd_config
+            _is_endpoint = worker.rank == _lwd_cfg.edge_npu_count
+            numel = sum(len(t) for t in meta.token_ids) * hidden_size
+            # UP 第二段(TP 组内广播)按 prefill_only_demo_br 范式在消费
+            # 时刻、本卡计算流上原子完成:launch + handle.wait() 同一流
+            # 上下文(torch_npu 的 wait 桥接到调用时当前流),不依赖两个
+            # HCCL op 之间的跨流排序——那是此前广播段交付残缺的根因。
+            if _is_endpoint:
+                # 端点:先过 host 就绪门(demo 的 wait gate):done_event
+                # 轮询通过即 P2P 数据已完整落 buffer;超时显式报错而非
+                # 静默乱码。门通过后再广播,广播读到的必然是完整数据。
+                res = future.wait(timeout=60.0)
+                up_flat = res.tensor
+                if up_flat is None:
+                    continue
+            else:
+                # 非端点:现场分配接收 buffer,等端点广播转发。
+                up_flat = torch.empty(
+                    numel, dtype=torch.bfloat16, device="npu"
+                )
+            from vllm.distributed.parallel_state import get_tp_group
+            _tp = get_tp_group()
+            if _tp.world_size > 1:
+                # demo 同款:直接用框架 TP 通信域(建组顺序由框架保证,
+                # PD 分离路径已验证),不再使用自建 _LWD_EMBED_BCAST_GROUP。
+                work = dist.broadcast(
+                    up_flat,
+                    src=_tp.ranks[0],
+                    group=_tp.device_group,
+                    async_op=True,
+                )
+                work.wait()  # 桥接广播完成到当前(计算)流,后续 copy 有序
             logger.info(
                 "[Lwd][perf] cloud up-recv-wait seqno=%s dur=%.2fms",
                 batch_seqno, (time.monotonic() - _t_wait) * 1000,
             )
-            if res.tensor is None:
-                continue
-            embeds = res.tensor.view(-1, hidden_size)
+            embeds = up_flat.view(-1, hidden_size)
             logger.info(
                 "[Lwd][cloud-runner] UP embeds consumed seqno=%s rows=%s "
                 "reqs=%s",
@@ -146,12 +175,32 @@ class LwdCloudModelRunner(NPUModelRunner):
                 n = len(token_ids)
                 idx = self.input_batch.req_id_to_index.get(req_id)
                 if idx is None:
-                    logger.warning(
-                        "[Lwd][cloud-runner] INJECT DROP req=%s seqno=%s "
-                        "rows=%d: req not in input_batch (batch=%s)",
-                        req_id, batch_seqno, n, self.input_batch.req_ids,
+                    # fail-fast:embeds 已收齐但请求不在本步 batch——继续
+                    # 走下去该请求将用未注入的脏 embeds 解码(静默乱码),
+                    # 必须当场暴露而非丢弃。出现即调度/数据面时序契约
+                    # 被破坏,需要修的是上游而不是这里。
+                    raise RuntimeError(
+                        f"[Lwd][cloud-runner] INJECT req={req_id} seqno="
+                        f"{batch_seqno} rows={n}: req not in input_batch "
+                        f"(batch={self.input_batch.req_ids})"
                     )
-                if idx is not None and n > 0:
+                if n > 0:
+                    # fail-fast:本 chunk 行数必须恰等于该请求本步调度 token
+                    # 数。不等(调度窗口 ≠ 边侧 chunk,如预算挤压截断)时
+                    # 注入会越窗踩邻请求行/留下未注入尾巴——静默乱码源,
+                    # 直接暴露。
+                    scheduled = (
+                        int(num_scheduled_tokens[idx])
+                        if idx < len(num_scheduled_tokens) else 0
+                    )
+                    if n != scheduled:
+                        raise RuntimeError(
+                            f"[Lwd][cloud-runner] INJECT window mismatch "
+                            f"req={req_id} seqno={batch_seqno}: chunk rows="
+                            f"{n} != scheduled={scheduled} (computed="
+                            f"{int(computed[idx])} prompt="
+                            f"{int(num_prompt[idx])})"
+                        )
                     start = int(computed[idx])
                     out = out_offset.get(req_id, 0)
                     # stream 上直接写 inputs_embeds.gpu 的调度窗口
@@ -167,6 +216,12 @@ class LwdCloudModelRunner(NPUModelRunner):
                         )
                     self.input_batch.is_token_ids[idx, start : start + n] = False
                 row += n
+            # 跨流生命周期登记:端点 recv buffer 由通道流分配与复用
+            # (同尺寸 chunk 下分配器几乎总给同一块),本步 copy 在计算流。
+            # 不登记 record_stream,分配器可在本批 copy 尚未执行时把块交给
+            # 下一 seqno 的 irecv 覆写——深异步队列下表现为跨 seqno 串
+            # 数据(多请求乱码)。登记后复用即被正确排序。
+            up_flat.record_stream(torch.npu.current_stream())
 
     # ------------------------------------------------------------------ #
     # Collect probe (measurement only; output discarded, protocol        #

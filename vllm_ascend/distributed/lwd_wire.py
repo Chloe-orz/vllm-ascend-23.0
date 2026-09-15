@@ -109,6 +109,10 @@ def init_lwd_duplex_channels() -> None:
         _LWD_CHANNEL_GROUPS[channel] = (group, peer)
         _LWD_CHANNEL_STREAMS[channel] = torch.npu.Stream()
     _LWD_ENDPOINTS = (edge_rank, cloud_rank)
+    # embeds 组内广播不再自建通信域(自建 new_group 在 torch_npu 下实测
+    # 零交付,疑建组顺序错位),改用框架 TP device_group(demo 同款,
+    # 建组顺序由框架保证);广播在注入时刻于计算流上发起,与前向 TP
+    # 集合同流 FIFO,天然不串台。
     _INITIALIZED = True
     logger.info(
         "[lwd-wire] duplex channels created over ranks=%s (my_rank=%d)",
@@ -195,3 +199,17 @@ def destroy_lwd_duplex_channels() -> None:
     _LWD_CHANNEL_STREAMS.clear()
     _LWD_ENDPOINTS = None
     _INITIALIZED = False
+
+
+def dump_tensor(tag: str, tensor: "torch.Tensor") -> None:
+    """调试:张量摘要打印(head10/tail10/sum/mean/shape/dtype),
+    供边云两端成对对比数值。"""
+    import numpy as np
+
+    flat = tensor.detach().to("cpu", torch.float32).numpy().reshape(-1)
+    with np.printoptions(threshold=np.inf, linewidth=10000, precision=8):
+        logger.info(
+            "%s shape=%s dtype=%s head10=%s tail10=%s sum=%.6f mean=%.8f",
+            tag, tuple(tensor.shape), tensor.dtype,
+            flat[:10], flat[-10:], float(flat.sum()), float(flat.mean()),
+        )

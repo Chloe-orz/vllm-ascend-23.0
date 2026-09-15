@@ -130,6 +130,12 @@ class LwdCloudWorker(NPUWorker):
     # ------------------------------------------------------------------ #
 
     def execute_model(self, scheduler_output):
+        # [Lwd][perf] worker 开工时刻(与引擎 rpc-enqueue ts 对减 =
+        # 下达-开工延迟;各卡开工离散 = 集合对齐成本)
+        logger.info(
+            "[Lwd][perf] worker-exec-start rank=%d ts=%.3f",
+            self.rank, time.monotonic(),
+        )
         if self.enable_lwd:
             # cloud: post the exact-size UP irecv for every incoming
             # LWD_EMBED batch (control info rides scheduler_output.lwd_batch).
@@ -153,20 +159,20 @@ class LwdCloudWorker(NPUWorker):
         return output
 
     def _lwd_up_post_recvs(self, scheduler_output) -> None:
-        """Post the UP irecv for an incoming LWD_EMBED batch.
+        """Post the UP recv for an incoming LWD_EMBED batch.
+
+        UP 两段通信按 prefill_only_demo_br 范式拆到两个时刻:
+          * post 时刻(本函数):仅端点 rank 经通道 P2P posted recv
+            (尽早 posted 以匹配边侧 isend);非端点只登记 meta 占位;
+          * 消费时刻(runner 注入侧):各卡在*自己的计算流上*现场发起
+            TP 组内 broadcast 并紧随 work.wait()——torch_npu 下两个
+            HCCL op 之间的跨流排序不可依赖(实测 post 时刻发起的广播
+            抢跑 irecv、交付残缺),launch+wait 同流上下文原子对才是
+            demo 验证过的可靠形态。
 
         All control info rides the SchedulerOutput (edge -> cloud
-        control plane fills it in):
-          * ``scheduler_output.lwd_batch.batch_type == LWD_EMBED``
-          * ``batch.seqno`` — the edge dispatch seqno of THIS batch
-            (one UP hidden message per dispatch)
-          * ``batch.batch_meta.token_ids`` — per-request token lists;
-            the batch's hidden rows are the concatenation of these
-            prompts, so the recv size is ``sum(len) x H``.
-
-        HCCL rendezvous makes the edge's isend wait for this post, so
-        no separate notification is needed.  A mismatched/missing batch
-        is skipped (non-LWD step or control-plane error)."""
+        control plane fills it in):batch.seqno 为边侧派发号(跨机段
+        配对键),recv 尺寸 = sum(len(token_ids)) x H。"""
         from vllm.v1.core.sched.output import LwdBatchType
 
         batch = getattr(scheduler_output, "lwd_batch", None)
@@ -179,18 +185,27 @@ class LwdCloudWorker(NPUWorker):
         num_tokens = sum(len(t) for t in meta.token_ids)
         if num_tokens <= 0:
             return
-        future = get_lwd_comm_service().submit_recv(
-            LwdCommRequest(
-                channel=LwdChannelType.UP,
-                op="recv",
-                num_elements=num_tokens * hidden_size,
-                seqno=batch.seqno,
+
+        lwd = self.parallel_config.lwd_config
+        is_endpoint = self.rank == lwd.edge_npu_count
+        if is_endpoint:
+            future = get_lwd_comm_service().submit_recv(
+                LwdCommRequest(
+                    channel=LwdChannelType.UP,
+                    op="recv",
+                    num_elements=num_tokens * hidden_size,
+                    seqno=batch.seqno,
+                )
             )
-        )
+        else:
+            # 非端点:不碰跨机通道;广播接收推迟到注入时刻现场发起,
+            # None 即"消费时现场广播"标记。
+            future = None
         self._lwd_up_recv_futures[batch.seqno] = (future, meta)
         logger.info(
-            "[Lwd][cloud-worker] UP recv posted seqno=%d reqs=%d tokens=%d",
-            batch.seqno, len(meta.req_ids), num_tokens,
+            "[Lwd][cloud-worker] UP recv posted seqno=%d reqs=%d tokens=%d "
+            "endpoint=%s",
+            batch.seqno, len(meta.req_ids), num_tokens, is_endpoint,
         )
 
     @torch.inference_mode()

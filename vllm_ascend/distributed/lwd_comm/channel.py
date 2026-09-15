@@ -322,13 +322,11 @@ class LwdChannel:
             "world_broadcast(src=0)" if self.channel_type == LwdChannelType.UP
             else "isend",
         )
-        # UP(边→云)用全 world 广播:embeds 对云侧每个 TP rank 都必须
-        # 可见,广播免去"leader 收完再组内分发",不存在内部 rank 的特殊
-        # 路径;DOWN(云 leader→边)保持点对点。
+        # UP(边→云)两层通信:第一段边→云端点 P2P(只等端点 join,
+        # 不再被 8 卡 join 拖住);第二段端点在云 TP 组内 broadcast
+        # (见 _wire_recv)。DOWN(云 leader→边)保持点对点。
         if self.channel_type == LwdChannelType.UP:
-            # async_op=True:通道靠 handle.wait() 做流式桥接;不带此参时
-            # broadcast 同步阻塞执行并返回 None,通道拿到 None 必崩。
-            return [dist.broadcast(tensor.contiguous(), src=0, async_op=True)]
+            return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
         return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
 
     def _wire_recv(self, req: LwdCommRequest):
@@ -349,11 +347,6 @@ class LwdChannel:
         buffer = torch.empty(
             req.num_elements, dtype=torch.bfloat16, device="npu"
         )
-        if self.channel_type == LwdChannelType.UP:
-            # 云侧全部 TP rank 参与广播接收(src=边 rank 0),与边的 UP
-            # 广播配对;每个 rank 拿到同份 embeds。async_op=True 同上。
-            return buffer, [dist.broadcast(buffer, src=0, async_op=True)]
-        return buffer, [dist.irecv(buffer, src=peer, group=group)]
         return buffer, [dist.irecv(buffer, src=peer, group=group)]
 
     def _bridge_and_record(self, handles: list[Any]):
