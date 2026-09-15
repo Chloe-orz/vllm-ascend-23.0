@@ -183,6 +183,7 @@ class LwdCloudWorker(NPUWorker):
                 op="recv",
                 num_elements=num_tokens * hidden_size,
                 seqno=batch.seqno,
+                aux_num_elements=num_tokens * 3 if meta.has_mrope else 0,
             )
         )
         self._lwd_up_recv_futures[batch.seqno] = (future, meta)
@@ -192,28 +193,36 @@ class LwdCloudWorker(NPUWorker):
         )
 
     def take_lwd_up_embeds(self, batch_seqno: int):
-        """Wait for and return one LWD_EMBED batch's UP embeds.
+        """Wait for and return one LWD_EMBED batch's UP payload.
 
-        Returns ``(embeds, meta)`` where ``embeds`` is the concatenated
-        ``[total_tokens, H]`` tensor and ``meta`` is the batch's
-        ``LwdEmbedBatch`` (per-request token lists, used by the runner
-        to split rows back to requests).  Returns ``(None, None)`` when
-        nothing was posted for this seqno."""
+        Returns ``(embeds, mrope_positions, meta)`` where ``embeds`` is
+        the concatenated ``[total_tokens, H]`` tensor,
+        ``mrope_positions`` is the optional ``[total_tokens, 3]`` int64
+        tensor (None when the batch carried no mrope frame), and
+        ``meta`` is the batch's ``LwdEmbedBatch`` (per-request token
+        lists, used by the runner to split rows back to requests).
+        Returns ``(None, None, None)`` when nothing was posted for this
+        seqno."""
         item = self._lwd_up_recv_futures.pop(batch_seqno, None)
         if item is None:
-            return None, None
+            return None, None, None
         future, meta = item
         result = future.wait()
         assert result.tensor is not None
         hidden_size = self.model_config.get_hidden_size()
         embeds = result.tensor.view(-1, hidden_size)
+        mrope_positions = (
+            result.aux_tensor.view(-1, 3)
+            if result.aux_tensor is not None
+            else None
+        )
         from vllm_ascend.distributed import lwd_wire
         lwd_wire.dump_tensor(
             f"[Lwd][DUMP][req={meta.req_ids}][seqno={batch_seqno}] "
             f"RECV UP embeds",
             embeds,
         )
-        return embeds, meta
+        return embeds, mrope_positions, meta
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:

@@ -114,7 +114,14 @@ class LwdCloudModelRunner(NPUModelRunner):
         ``[num_computed, num_computed + n)`` — old rows are never
         rewritten and never re-read, so there is no overwrite hazard.
         Only the current chunk's ``is_token_ids`` range is cleared.
-        """
+
+        Chunks stamped ``has_mrope`` carry a second frame of mrope
+        positions ``[n, 3]`` (int64): the rows are written into the
+        request's ``req_state.mrope_positions`` window (overwriting the
+        pure-text passthrough initialization) so the native
+        ``_calc_mrope_positions`` consumes wire positions unchanged;
+        when the last chunk lands, ``mrope_position_delta`` is derived
+        locally (max+1-N) for the decode phase."""
         worker = self.worker
         if worker is None:
             return
@@ -125,14 +132,21 @@ class LwdCloudModelRunner(NPUModelRunner):
         num_prompt = self.input_batch.num_prompt_tokens
         computed = self.input_batch.num_computed_tokens_cpu
         for batch_seqno in list(posted.keys()):
-            embeds, meta = worker.take_lwd_up_embeds(batch_seqno)
+            embeds, mrope_positions, meta = worker.take_lwd_up_embeds(
+                batch_seqno
+            )
             if embeds is None:
-                continue
+                raise RuntimeError(
+                    f"[Lwd] UP embeds missing for seqno={batch_seqno}: "
+                    "scheduled prefill chunk has no posted recv "
+                    "(notify/channel desync); refusing to run a "
+                    "zero-filled prompt"
+                )
             logger.info(
                 "[Lwd][cloud-runner] UP embeds consumed seqno=%s rows=%s "
-                "reqs=%s",
+                "reqs=%s has_mrope=%s",
                 batch_seqno, embeds.shape[0] if embeds is not None else 0,
-                meta.req_ids,
+                meta.req_ids, mrope_positions is not None,
             )
             # Split the concatenated batch rows back per request
             # (rows follow batch_meta order).
@@ -140,6 +154,15 @@ class LwdCloudModelRunner(NPUModelRunner):
             for req_id, token_ids in zip(meta.req_ids, meta.token_ids):
                 n = len(token_ids)
                 idx = self.input_batch.req_id_to_index.get(req_id)
+                if idx is None and n > 0:
+                    # 结构不变量(被调度的请求必在批内):继续执行 =
+                    # prompt 全零产出错误,fail-fast。
+                    raise RuntimeError(
+                        f"[Lwd] inject failed: req={req_id} not in "
+                        f"input_batch at its prefill step (seqno="
+                        f"{batch_seqno}, n={n}); refusing to run a "
+                        "zero-filled prompt"
+                    )
                 if idx is not None and n > 0:
                     prompt_len = int(num_prompt[idx])
                     buf = embeds_map.get(idx)
@@ -157,11 +180,51 @@ class LwdCloudModelRunner(NPUModelRunner):
                     start = int(computed[idx])
                     buf[start : start + n].copy_(embeds[row : row + n])
                     self.input_batch.is_token_ids[idx, start : start + n] = False
+                    if mrope_positions is not None:
+                        self._lwd_inject_mrope_positions(
+                            req_id, start, n,
+                            mrope_positions[row : row + n], prompt_len,
+                        )
                     LwdDebug.cloud_embeds_injected(req_id, idx, start, n, buf)  # [lwd-debug]
                 row += n
             # Drop the NPU chunk reference promptly (the recv buffer is
             # reaped by the comm layer once no future/result holds it).
             del embeds
+
+    def _lwd_inject_mrope_positions(
+        self,
+        req_id: str,
+        start: int,
+        n: int,
+        chunk_positions: torch.Tensor,
+        prompt_len: int,
+    ) -> None:
+        """写入一个 chunk 的线 mrope positions([n,3] int64,NPU)到请求
+        缓存的 [3, prompt] 窗口;末 chunk 落地时自推 delta(=
+        positions.max()+1-prompt_len,与边侧逐值一致)供 decode 期
+        原生 _calc_mrope_positions 现算 completion 段位置。
+
+        req_state.mrope_positions 由 ids=None 直通初始化(arange 纯文
+        本位置)——多模态请求的窗口被逐 chunk 覆盖,纯文本请求永不走
+        本路径(边侧不给它发 mrope 帧)。"""
+        req_state = self.requests.get(req_id)
+        assert chunk_positions.shape == (n, 3), (
+            f"mrope frame shape {tuple(chunk_positions.shape)} != "
+            f"({n}, 3) (req={req_id})"
+        )
+        req_state.mrope_positions[:, start : start + n] = (
+            chunk_positions.t().cpu()
+        )
+        if start + n >= prompt_len:
+            positions = req_state.mrope_positions[:, :prompt_len]
+            req_state.mrope_position_delta = (
+                int(positions.max().item()) + 1 - prompt_len
+            )
+            logger.info(
+                "[Lwd][cloud-runner] mrope complete: req=%s prompt=%d "
+                "delta=%d",
+                req_id, prompt_len, req_state.mrope_position_delta,
+            )
 
     def _sample(self, logits, spec_decode_metadata):
         """Capture the sampler output for the post-sample collection
