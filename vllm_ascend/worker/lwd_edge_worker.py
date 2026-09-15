@@ -35,12 +35,17 @@ if TYPE_CHECKING:
 
 
 # ---- token recovery / logit-rank lookup ----
-def select_token(logits: torch.Tensor, top_id_th: int) -> int:
-    """Map ``top_id_th`` (0-based ordinal in descending logits) back to a token id."""
-    logits = logits.reshape(-1)
-    # topk(r+1) 取第 r 大的下标 = 降序第 r 名,等价于 argsort 但 O(V·k)
-    # 代替 O(V·logV) 的全排序
-    return int(torch.topk(logits, top_id_th + 1).indices[-1].item())
+def select_token_batch(
+    logits: torch.Tensor, ranks: list[int]
+) -> list[int]:
+    """Batched rank→token lookup: one sort, one D2H sync for all rows.
+
+    logits [R,V] rows sorted together (NPU sorts rows in parallel);
+    sorted_idx[i, ranks[i]] is the token id at rank ranks[i] for row i.
+    """
+    _, sorted_idx = torch.sort(logits, dim=-1, descending=True)
+    row = torch.arange(len(ranks), device=logits.device)
+    return sorted_idx[row, torch.tensor(ranks, device=logits.device)].tolist()
 
 
 def compute_top_id_th(logits: torch.Tensor, token_id: int) -> int:
@@ -228,18 +233,16 @@ class LwdEdgeWorker(NPUWorker):
         except Exception:  # noqa: BLE001
             pass
 
+        flat_ids = select_token_batch(
+            logits, [r for ths in batch_meta.top_id_ths for r in ths]
+        )
         sampled_token_ids: list[list[int]] = []
-        row_offset = 0
-        for num_accept_tokens, top_id_ths in zip(
+        off = 0
+        for accept, ths in zip(
             batch_meta.num_accept_tokens, batch_meta.top_id_ths
         ):
-            num_rows = len(top_id_ths)
-            token_ids = [
-                select_token(logits[row_offset + row], top_id_ths[row])
-                for row in range(num_accept_tokens)
-            ]
-            sampled_token_ids.append(token_ids)
-            row_offset += num_rows
+            sampled_token_ids.append(flat_ids[off : off + accept])
+            off += len(ths)
         _t_sel = time.monotonic()
         # [Lwd][perf] 临时探针:单请求慢的归因分段——
         # post_recv=挂 irecv;wait_tensor=等张量落卡(网络);lm_head=词表
