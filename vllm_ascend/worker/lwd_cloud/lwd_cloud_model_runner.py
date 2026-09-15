@@ -182,8 +182,13 @@ class LwdCloudModelRunner(NPUModelRunner):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
+        from vllm.distributed.parallel_state import get_tp_group
+
+        # 只有云 TP 组首卡(= DOWN 通道端点 rank)采集/发送;
+        # 其余 rank 无通道 peer,采集即弃也一并省掉(8 卡冗余)。
+        wire_endpoint = get_tp_group().is_first_rank
         captured = None
-        if self.execute_model_state is not None:
+        if wire_endpoint and self.execute_model_state is not None:
             # ExecuteModelState layout (see model_runner_v1.sample_tokens):
             # (scheduler_output, logits, spec_decode_metadata,
             #  spec_decode_common_attn_metadata, hidden_states,
