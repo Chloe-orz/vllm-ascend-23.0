@@ -242,6 +242,14 @@ class LwdCloudWorker(NPUWorker):
                     for s in seg_lens:
                         top_id_ths.append(ranks_flat[off : off + s])
                         off += s
+                    if off != len(ranks_flat) or any(c == 0 for c in counts):
+                        # 布局错位自检(修复后不应出现;出现即三块未对齐或
+                        # 环被覆盖,直接证据链锚点)
+                        logger.warning(
+                            "[Lwd][meta-mismatch] seqno=%s ranks=%d "
+                            "consumed=%d counts=%s seg_lens=%s",
+                            _seqno, len(ranks_flat), off, counts, seg_lens,
+                        )
                     _target.lwd_c2e_meta = LwdC2eMeta(
                         hidden_num_elements=_numel,
                         top_id_ths=top_id_ths,

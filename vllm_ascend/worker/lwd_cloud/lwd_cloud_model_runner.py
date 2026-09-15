@@ -268,11 +268,21 @@ class LwdCloudModelRunner(NPUModelRunner):
             return None
 
         hidden_packet = torch.cat(rows_list)
-        n_req = sum(1 for i in range(len(batch_req_ids)) if valid[i])
+        # 三块一律按 valid 对齐:counts 按 valid 位 gather(num_accepted_tokens
+        # .gpu 按批序布局,直接切前 n 个在有 discard 的步会取到错位子集);
+        # seg_lens 只打包 valid 请求——原写法装了批内全部请求,而解析侧
+        # 按 [ranks|counts(n)|seg_lens(n)] 切分,批内一有 discard 即整体
+        # 错位 → 空行 → 边侧 ERROR 截断(并发下请求完结步必触发)。
+        idx = [i for i in range(len(batch_req_ids)) if valid[i]]
+        n_req = len(idx)
         if is_spec:
-            counts_dev = self.num_accepted_tokens.gpu[:n_req].to(torch.int32)
+            valid_idx = torch.tensor(idx, device=logits.device)
+            counts_dev = (
+                self.num_accepted_tokens.gpu[valid_idx].to(torch.int32)
+            )
             seg_lens_dev = torch.tensor(
-                seg_lens, dtype=torch.int32, device=logits.device
+                [seg_lens[i] for i in idx], dtype=torch.int32,
+                device=logits.device,
             )
             meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
         else:
@@ -298,13 +308,14 @@ class LwdCloudModelRunner(NPUModelRunner):
         )
 
     def _lwd_meta_pinned(self, n: int):
-        """轮换 pinned 缓冲(深度 4 > batch_queue 深度 2 + 引擎滞后 1):
-        避免下一/N+2 步的边流拷贝覆盖引擎尚未读完的上一步 meta。"""
+        """轮换 pinned 缓冲(深度 16:解析点在 async_output 侧线程,高负载
+        下物化滞后可达数步,深度须覆盖,否则下一步拷贝覆盖未解析的上上步)——
+        旧深度 4 是按"worker 返回前解析"的滞后预算,侧线程化后已不足。"""
         ring = getattr(self, "_lwd_pinned_ring", None)
         if ring is None or ring[0].numel() < n:
             ring = [
                 torch.empty(max(n, 4096), dtype=torch.int32, pin_memory=True)
-                for _ in range(4)
+                for _ in range(16)
             ]
             self._lwd_pinned_ring = ring
             self._lwd_pinned_ring_idx = 0
