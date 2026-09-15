@@ -174,7 +174,11 @@ def warmup_lwd_duplex_channels() -> None:
             and my_rank >= get_lwd_cloud_up_leader()
             and dist.get_world_size(_LWD_CLOUD_UP_GROUP) > 1):
         probe = torch.zeros(8, dtype=torch.bfloat16, device="npu")
-        dist.broadcast(probe, src=0, group=_LWD_CLOUD_UP_GROUP)
+        # torch 集合通信的 src 是【全局】rank(与 P2P 的 src/dst 同约定,
+        # 参见 pynccl.py 传 ranks[0])——必须传 leader 的全局 rank,
+        # 传 0 会指向不在组内的边,直接 "not part of group"
+        dist.broadcast(
+            probe, src=get_lwd_cloud_up_leader(), group=_LWD_CLOUD_UP_GROUP)
         logger.info("[lwd-warmup] cloud fanout group ready (rank=%d)", my_rank)
     get_world_group().barrier()
     logger.info("[lwd-wire] duplex channels warmed up (UP + DOWN)")

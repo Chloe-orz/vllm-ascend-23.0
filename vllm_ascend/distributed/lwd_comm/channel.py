@@ -359,11 +359,13 @@ class LwdChannel:
                 if (cloud_group is not None
                         and dist.get_world_size(cloud_group) > 1):
                     handles.append(dist.broadcast(
-                        buffer, src=0, group=cloud_group, async_op=True))
+                        buffer, src=lwd_wire.get_lwd_cloud_up_leader(),
+                        group=cloud_group, async_op=True))
                 return buffer, handles
             assert cloud_group is not None, "non-leader cloud rank needs fanout group"
             return buffer, [dist.broadcast(
-                buffer, src=0, group=cloud_group, async_op=True)]
+                buffer, src=lwd_wire.get_lwd_cloud_up_leader(),
+                group=cloud_group, async_op=True)]
         return buffer, [dist.irecv(buffer, src=peer, group=group)]
         return buffer, [dist.irecv(buffer, src=peer, group=group)]
 
