@@ -194,13 +194,20 @@ class LwdCloudModelRunner(NPUModelRunner):
             #  spec_decode_common_attn_metadata, hidden_states,
             #  sample_hidden_states, ...)
             state = self.execute_model_state
-            captured = (state[5], state[1], state[2], state[0])  # +scheduler_output
+            # 批序/掩码也一并快照:batch queue 重叠时,下一步的
+            # _prepare_inputs 可能在 collect 前重排 input_batch,
+            # 现读会拿到批序B去切批序A的张量(高并发错位根因)
+            captured = (
+                state[5], state[1], state[2], state[0],
+                list(self.input_batch.req_ids),
+                self.discard_request_mask.np.copy(),
+            )
         self._lwd_captured_sampler_output = None
         output = super().sample_tokens(grammar_output)
         if captured is not None and self._lwd_captured_sampler_output is not None:
             self._lwd_pending_down_payload = self._lwd_collect_down_payload(
                 captured[0], captured[1], captured[2], captured[3],
-                self._lwd_captured_sampler_output,
+                captured[4], captured[5], self._lwd_captured_sampler_output,
             )
         return output
 
@@ -213,7 +220,7 @@ class LwdCloudModelRunner(NPUModelRunner):
     @torch.inference_mode()
     def _lwd_collect_down_payload(
         self, sample_hidden_states, logits, spec_decode_metadata,
-        scheduler_output, sampler_output,
+        scheduler_output, batch_req_ids, discard_mask_np, sampler_output,
     ):
         """生产级 DOWN 采集(rank-replay):hidden 组包 + 全局秩 + num_accepted。
 
@@ -228,8 +235,9 @@ class LwdCloudModelRunner(NPUModelRunner):
         sampled = sampler_output.sampled_token_ids
         if sampled is None or sampled.dim() != 2 or logits is None:
             return None
-        batch_req_ids = self.input_batch.req_ids
-        valid = ~self.discard_request_mask.np[: len(batch_req_ids)]
+        # batch_req_ids/discard_mask 来自捕获时刻快照(与 logits/hidden
+        # 同批序),不读活的 input_batch
+        valid = ~discard_mask_np[: len(batch_req_ids)]
         is_spec = spec_decode_metadata is not None
 
         rows_list, ranks_list, accepted = [], [], []
@@ -250,23 +258,36 @@ class LwdCloudModelRunner(NPUModelRunner):
             # 段长按 host 侧 scheduled_spec_decode_tokens 推(1+draft_len),
             # 按完整段打包(含被拒行,边侧按 num_accepted 取有效前缀);
             # counts 用框架每步已算好的 num_accepted_tokens.gpu(纯 device)
-            spec_tokens = getattr(
-                scheduler_output, "scheduled_spec_decode_tokens", None
-            ) or {}
+            # 段长取 spec_decode_metadata.num_draft_tokens(host list,
+            # 运行期真实布局,与 sample_hidden_states 段结构一致);
+            # 不用 scheduler_output.scheduled_spec_decode_tokens
+            # (调度输入,可能与实际运行不一致)
             seg_lens = [
-                1 + len(spec_tokens.get(req_id, ()))
-                for req_id in batch_req_ids
+                d + 1 for d in spec_decode_metadata.num_draft_tokens
             ]
+            # counts 从同一个 sampled 张量 device 推导(与秩/行同源,
+            # 天然按批位对齐);seg_lens/counts 只收 valid 请求,
+            # 保证 [ranks|counts|seg_lens] 三段长度一致
+            counts_all = (sampled != -1).sum(dim=1)
+            counts_list = []
+            seg_lens_list = []
             seg_start = 0
             for i in range(len(batch_req_ids)):
                 seg_len = seg_lens[i]
-                if valid[i] and seg_len >= 1:
-                    seg_lg = lg[seg_start : seg_start + seg_len]
-                    thresh = seg_lg.gather(
-                        1, sampled[i, :seg_len].long().unsqueeze(1))
+                seg_lg = lg[seg_start : seg_start + seg_len]
+                seg_hidden = sample_hidden_states[seg_start : seg_start + seg_len]
+                rows_i = seg_hidden.shape[0]
+                if valid[i] and rows_i >= 1:
+                    # 过期 sampled 位(spec 未运行的请求可能残留上个
+                    # spec 步的 token):accepted/秩/段长一律按实际
+                    # hidden 行数封顶——行数才是真实采样位置的真相
+                    seg_sm = sampled[i, :rows_i]
+                    thresh = seg_lg.gather(1, seg_sm.long().unsqueeze(1))
                     ranks_list.append((seg_lg > thresh).sum(dim=1).to(torch.int32))
-                    rows_list.append(
-                        sample_hidden_states[seg_start : seg_start + seg_len])
+                    rows_list.append(seg_hidden)
+                    counts_list.append(
+                        torch.clamp(counts_all[i : i + 1], max=rows_i))
+                    seg_lens_list.append(rows_i)
                 seg_start += seg_len
             accepted = None  # 不再 host 读取;counts 直接随 meta_dev 下发
         if not rows_list:
@@ -275,9 +296,9 @@ class LwdCloudModelRunner(NPUModelRunner):
         hidden_packet = torch.cat(rows_list)
         n_req = sum(1 for i in range(len(batch_req_ids)) if valid[i])
         if is_spec:
-            counts_dev = self.num_accepted_tokens.gpu[:n_req].to(torch.int32)
+            counts_dev = torch.cat(counts_list).to(torch.int32)
             seg_lens_dev = torch.tensor(
-                seg_lens, dtype=torch.int32, device=logits.device
+                seg_lens_list, dtype=torch.int32, device=logits.device
             )
             meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
         else:
@@ -285,12 +306,15 @@ class LwdCloudModelRunner(NPUModelRunner):
                                     device=logits.device)
             seg_lens_dev = counts_dev
             meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
-        # pinned 拷贝排主流末尾(异步):引擎侧 get_output 路径本就有
-        # wait_stream(主流) 的同步点,输出到达时 pinned 必然就绪——
-        # 零事件、零新增同步。
+        # pinned 拷贝排主流末尾(异步),紧随记录就绪事件;
+        # 由 worker 响应入队处在发送前 synchronize——
+        # "响应发出 ⟹ pinned 就绪"成为硬保证(同步在输出线程,
+        # 不在计算关键路径)。
         n_meta = meta_dev.numel()
         pinned = self._lwd_meta_pinned(n_meta)
         pinned[:n_meta].copy_(meta_dev, non_blocking=True)
+        self.worker._lwd_meta_ready_event = torch.npu.Event()
+        self.worker._lwd_meta_ready_event.record()
         return (
             hidden_packet,
             pinned[:n_meta],
