@@ -210,12 +210,29 @@ class LwdCloudWorker(NPUWorker):
                         seqno=seqno,
                     )
                 )
-                # async 包装器下挂到内层,否则 get_output() 解包丢失。
-                # 只传引用不读值——pinned 数据由引擎侧(有 get_output
-                # 的 wait_stream 同步点)读取重建 LwdC2eMeta。
+                # 多进程架构:pinned 引用经 MQ pickle 时会拷贝数据,
+                # 必须在此保证 D2H 已落(否则序列化旧值)。同步只等
+                # rank 计算尾部(~5ms),引擎本就在等回包,不加墙钟。
+                # 布局 [ranks(rows), counts(n), seg_lens(n)]。
+                torch.npu.current_stream().synchronize()
+                from vllm.v1.outputs import LwdC2eMeta
+
+                n = len(req_ids)
+                total = pinned.numel()
+                seg_lens = pinned[total - n :].tolist()
+                counts = pinned[total - 2 * n : total - n].tolist()
+                ranks_flat = pinned[: total - 2 * n].tolist()
+                top_id_ths, off = [], 0
+                for s in seg_lens:
+                    top_id_ths.append(ranks_flat[off : off + s])
+                    off += s
                 target = getattr(output, "_model_runner_output", output)
-                target.lwd_down_carrier = (
-                    pinned, req_ids, hidden.numel(), seqno
+                target.lwd_c2e_meta = LwdC2eMeta(
+                    hidden_num_elements=hidden.numel(),
+                    top_id_ths=top_id_ths,
+                    num_accepted_tokens=counts,
+                    req_ids=req_ids,
+                    down_seqno=seqno,
                 )
         return output
 
