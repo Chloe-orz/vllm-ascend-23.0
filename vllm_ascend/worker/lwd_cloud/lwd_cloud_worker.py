@@ -142,7 +142,15 @@ class LwdCloudWorker(NPUWorker):
             self._lwd_cloud_flush_finished(scheduler_output.finished_req_ids)
 
         get_lwd_comm_service().poll_completions()  # lazy keepalive reap
-        return super().execute_model(scheduler_output)
+        _t0 = time.monotonic()
+        output = super().execute_model(scheduler_output)
+        # [Lwd][perf] 云侧每步 exec_model 计时:total=前向全程
+        # (forward 主段,sample/collect 在 sample_tokens 另有分项)
+        logger.info(
+            "[Lwd][perf] cloud-exec total=%.2fms",
+            (time.monotonic() - _t0) * 1000,
+        )
+        return output
 
     def _lwd_up_post_recvs(self, scheduler_output) -> None:
         """Post the UP irecv for an incoming LWD_EMBED batch.
@@ -187,7 +195,9 @@ class LwdCloudWorker(NPUWorker):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        _t0 = time.monotonic()
         output = self.model_runner.sample_tokens(grammar_output)
+        _t_sample = time.monotonic()
         # rank-replay DOWN:发送 hidden 包(通道异步、流内有序);pinned 视图
         # 挂输出内层(就绪由 get_output 的 wait_stream(主流) 保证),
         # 引擎侧解码发布 meta。
@@ -200,7 +210,6 @@ class LwdCloudWorker(NPUWorker):
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
                     seqno, hidden.numel(),
                 )
-                _t = time.monotonic()
                 get_lwd_comm_service().submit_send(
                     LwdCommRequest(
                         channel=LwdChannelType.DOWN,
@@ -214,6 +223,17 @@ class LwdCloudWorker(NPUWorker):
                 target = getattr(output, "_model_runner_output", output)
                 target.lwd_down_carrier = (
                     pinned, req_ids, hidden.numel(), seqno
+                )
+                # [Lwd][perf] 云侧每步计时:sample=采样+采集(含秩计算);
+                # send=DOWN 提交(快照clone+isend+bridge wait);total=全步
+                logger.info(
+                    "[Lwd][perf] cloud-step seqno=%d sample=%.2f send=%.2f "
+                    "total=%.2fms rows=%d",
+                    seqno,
+                    (_t_sample - _t0) * 1000,
+                    (time.monotonic() - _t_sample) * 1000,
+                    (time.monotonic() - _t0) * 1000,
+                    hidden.shape[0] if hidden is not None else 0,
                 )
         return output
 

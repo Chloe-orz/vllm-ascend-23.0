@@ -13,6 +13,8 @@ runner class at init_device when ``lwd_config`` enables prefill_only.
 
 from __future__ import annotations
 
+import time
+
 import torch
 from vllm.logger import logger
 
@@ -228,6 +230,7 @@ class LwdCloudModelRunner(NPUModelRunner):
           (hidden_packet, pinned_view, None, req_ids, None)
         或 None(本步无在途请求)。
         """
+        _t0 = time.monotonic()
         sampled = sampler_output.sampled_token_ids
         if sampled is None or sampled.dim() != 2 or logits is None:
             return None
@@ -306,11 +309,20 @@ class LwdCloudModelRunner(NPUModelRunner):
         # 由 worker 响应入队处在发送前 synchronize——
         # "响应发出 ⟹ pinned 就绪"成为硬保证(同步在输出线程,
         # 不在计算关键路径)。
+        _t_pack = time.monotonic()
         n_meta = meta_dev.numel()
         pinned = self._lwd_meta_pinned(n_meta)
         pinned[:n_meta].copy_(meta_dev, non_blocking=True)
         self.worker._lwd_meta_ready_event = torch.npu.Event()
         self.worker._lwd_meta_ready_event.record()
+        # [Lwd][perf] 采集分段:rank=秩+行收集;pinned=meta 拼包+拷贝
+        logger.info(
+            "[Lwd][perf] collect rows=%d rank=%.2f pinned=%.2f total=%.2fms",
+            hidden_packet.shape[0],
+            (_t_pack - _t0) * 1000,
+            (time.monotonic() - _t_pack) * 1000,
+            (time.monotonic() - _t0) * 1000,
+        )
         return (
             hidden_packet,
             pinned[:n_meta],
