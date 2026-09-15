@@ -128,8 +128,13 @@ class LwdCloudModelRunner(NPUModelRunner):
             if item is None:
                 continue
             future, meta = item
+            _t_wait = time.monotonic()
             res = future.wait()  # host 同步等数据落地(通道错误一并抛出);
             # recv 等待显性成段,不再经 device 排序混进计算时长
+            logger.info(
+                "[Lwd][perf] cloud up-recv-wait seqno=%s dur=%.2fms",
+                batch_seqno, (time.monotonic() - _t_wait) * 1000,
+            )
             if res.tensor is None:
                 continue
             embeds = res.tensor.view(-1, hidden_size)
