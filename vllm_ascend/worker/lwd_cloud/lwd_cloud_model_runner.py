@@ -39,9 +39,9 @@ class LwdCloudModelRunner(NPUModelRunner):
 
         The base fill loop + copy_to_gpu run first (they only see the
         zero buffer); the received UP embeds are then written straight
-        into ``inputs_embeds.gpu`` on the current stream, ordered after
-        the channel-completion event via ``wait_for_comm()`` — no host
-        wait, no host-side tensor reads anywhere on this path.
+        into ``inputs_embeds.gpu`` on the current stream after a
+        host-side ``future.wait()`` — the recv wait is a visible segment,
+        not hidden inside device kernel time.
         """
         out = super()._prepare_inputs(scheduler_output, num_scheduled_tokens)
         if self._lwd_enabled():
@@ -89,10 +89,11 @@ class LwdCloudModelRunner(NPUModelRunner):
         """Device-side inject: write the received UP embeds straight into
         ``inputs_embeds.gpu`` at each request's scheduled window.
 
-        No host wait / no host tensor reads: ``future.result()`` only
-        surfaces channel errors (raises), ``future.wait_for_comm()`` then
-        orders the current stream after the channel-completion event, and
-        all row copies are issued on that stream (non_blocking).  The
+        The recv uses ``future.wait()`` — host blocks until the data
+        lands (channel errors raise here too), so the recv wait shows up
+        as its own segment instead of being hidden in device-side kernel
+        time.  Row copies are then issued on the current stream
+        (non_blocking).  The
         flattened output offsets reproduce the native fill loop's
         accumulation (per-request scheduled segment start), so rows land
         exactly where the prompt-embeds branch expects them.  The CPU
@@ -127,12 +128,11 @@ class LwdCloudModelRunner(NPUModelRunner):
             if item is None:
                 continue
             future, meta = item
-            res = future.result()  # 通道错误在此 fail-fast;数据可仍在途
+            res = future.wait()  # host 同步等数据落地(通道错误一并抛出);
+            # recv 等待显性成段,不再经 device 排序混进计算时长
             if res.tensor is None:
                 continue
             embeds = res.tensor.view(-1, hidden_size)
-            # 纯 device 排序:后续 copy 在通道完成事件之后执行,CPU 不阻塞
-            future.wait_for_comm()
             logger.info(
                 "[Lwd][cloud-runner] UP embeds consumed seqno=%s rows=%s "
                 "reqs=%s",
