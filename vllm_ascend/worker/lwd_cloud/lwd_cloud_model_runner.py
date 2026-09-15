@@ -16,6 +16,7 @@ from __future__ import annotations
 import time
 
 import torch
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.outputs import ModelRunnerOutput
@@ -103,9 +104,20 @@ class LwdCloudModelRunner(NPUModelRunner):
 
     def _model_forward(self, num_tokens_padded, input_ids=None, positions=None,
                        intermediate_tensors=None, inputs_embeds=None, **model_kwargs):
-        """将当前批次的 token ID、远端专家 ID 和 prompt 掩码写入前向上下文。"""
+        """按 SP 布局切分 embedding，并将完整 Hash 路由数据写入前向上下文。"""
+        context = get_forward_context()
+        if (inputs_embeds is not None and intermediate_tensors is None
+                and context.flash_comm_v1_enabled and not self.supports_mm_inputs):
+            # 直接传入 embedding 会绕过原生嵌入层，需要在此补上序列切分。
+            tp_group = get_tp_group()
+            if tp_group.world_size > 1:
+                if inputs_embeds.shape[0] != num_tokens_padded:
+                    raise ValueError("LWD SP expects full-token inputs_embeds before slicing")
+                if context.pad_size:
+                    inputs_embeds = torch.nn.functional.pad(inputs_embeds, (0, 0, 0, context.pad_size))
+                inputs_embeds = inputs_embeds.chunk(tp_group.world_size, dim=0)[tp_group.rank_in_group]
+            # 位置、注意力元数据和 Hash 路由表保持完整 token 布局。
         if self.lwd_hash_state is not None:
-            context = get_forward_context()
             # 先初始化路由索引缓存，确保补齐行使用合法零索引。
             self._lwd_hash_token_ids.zero_()
             if self._lwd_hash_step_tokens is None:
