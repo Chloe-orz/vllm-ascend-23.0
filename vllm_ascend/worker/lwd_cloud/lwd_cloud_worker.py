@@ -75,10 +75,11 @@ class LwdCloudWorker(NPUWorker):
 
     def init_device(self):
         super().init_device()
-        # channel-global DOWN seqno counter (worker layer, send-time alloc)
-        self._lwd_down_next_seqno = 0
-        # req_id -> posted UP recv futures (consumed by the runner's device-side inject)
-        self._lwd_up_recv_futures: dict[str, list] = {}
+        # per-edge DOWN seqno counter (worker layer, send-time alloc);
+        # 多边各边独立 seqno 流。
+        self._lwd_down_next_seqno: dict[int, int] = {}
+        # (edge_id, seqno) -> (posted UP recv future, batch meta)
+        self._lwd_up_recv_futures: dict[tuple[int, int], tuple] = {}
         if not self.enable_lwd:
             return
         if self.use_v2_model_runner:
@@ -186,8 +187,12 @@ class LwdCloudWorker(NPUWorker):
         if num_tokens <= 0:
             return
 
-        lwd = self.parallel_config.lwd_config
-        is_endpoint = self.rank == lwd.edge_npu_count
+        from vllm_ascend.distributed import lwd_wire
+
+        edge_id = meta.edge_id
+        is_endpoint = lwd_wire.is_lwd_channel_endpoint(
+            LwdChannelType.UP, edge_id=edge_id, cloud_id=None
+        )
         if is_endpoint:
             future = get_lwd_comm_service().submit_recv(
                 LwdCommRequest(
@@ -195,17 +200,19 @@ class LwdCloudWorker(NPUWorker):
                     op="recv",
                     num_elements=num_tokens * hidden_size,
                     seqno=batch.seqno,
+                    edge_id=edge_id,
                 )
             )
         else:
             # 非端点:不碰跨机通道;广播接收推迟到注入时刻现场发起,
             # None 即"消费时现场广播"标记。
             future = None
-        self._lwd_up_recv_futures[batch.seqno] = (future, meta)
+        # per-(edge, seqno) 分桶:多边 seqno 各自独立从 0 起,不能按 seqno 合并。
+        self._lwd_up_recv_futures[(edge_id, batch.seqno)] = (future, meta)
         logger.info(
-            "[Lwd][cloud-worker] UP recv posted seqno=%d reqs=%d tokens=%d "
-            "endpoint=%s",
-            batch.seqno, len(meta.req_ids), num_tokens, is_endpoint,
+            "[Lwd][cloud-worker] UP recv posted edge=%d seqno=%d reqs=%d "
+            "tokens=%d endpoint=%s",
+            edge_id, batch.seqno, len(meta.req_ids), num_tokens, is_endpoint,
         )
 
     @torch.inference_mode()
@@ -217,38 +224,40 @@ class LwdCloudWorker(NPUWorker):
         # 挂输出内层(就绪由 get_output 的 wait_stream(主流) 保证),
         # 引擎侧解码发布 meta。
         if self.enable_lwd:
-            payload = self.model_runner.take_lwd_pending_down_payload()
-            if payload is not None and output is not None:
-                hidden, pinned, _event, req_ids, _accepted = payload
-                seqno = self._lwd_next_down_seqno()
-                logger.info(
-                    "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
-                    seqno, hidden.numel(),
-                )
-                get_lwd_comm_service().submit_send(
-                    LwdCommRequest(
-                        channel=LwdChannelType.DOWN,
-                        op="send",
-                        num_elements=hidden.numel(),
-                        tensor=hidden,
-                        seqno=seqno,
+            payloads = self.model_runner.take_lwd_pending_down_payload()
+            if payloads and output is not None:
+                carriers = []
+                for edge_id, hidden, pinned, _event, req_ids, _accepted in payloads:
+                    seqno = self._lwd_next_down_seqno(edge_id)
+                    logger.info(
+                        "[Lwd][cloud-worker] DOWN send edge=%d seqno=%d numel=%d",
+                        edge_id, seqno, hidden.numel(),
                     )
-                )
+                    get_lwd_comm_service().submit_send(
+                        LwdCommRequest(
+                            channel=LwdChannelType.DOWN,
+                            op="send",
+                            num_elements=hidden.numel(),
+                            tensor=hidden,
+                            seqno=seqno,
+                            edge_id=edge_id,
+                        )
+                    )
+                    carriers.append(
+                        (edge_id, pinned, req_ids, hidden.numel(), seqno)
+                    )
                 # async 包装器下挂到内层,否则 get_output() 解包丢失
                 target = getattr(output, "_model_runner_output", output)
-                target.lwd_down_carrier = (
-                    pinned, req_ids, hidden.numel(), seqno
-                )
+                target.lwd_down_carrier = carriers
                 # [Lwd][perf] 云侧每步计时:sample=采样+采集(含秩计算);
                 # send=DOWN 提交(快照clone+isend+bridge wait);total=全步
                 logger.info(
-                    "[Lwd][perf] cloud-step seqno=%d sample=%.2f send=%.2f "
-                    "total=%.2fms rows=%d",
-                    seqno,
+                    "[Lwd][perf] cloud-step edges=%d sample=%.2f send=%.2f "
+                    "total=%.2fms",
+                    len(carriers),
                     (_t_sample - _t0) * 1000,
                     (time.monotonic() - _t_sample) * 1000,
                     (time.monotonic() - _t0) * 1000,
-                    hidden.shape[0] if hidden is not None else 0,
                 )
         return output
 
@@ -301,7 +310,7 @@ class LwdCloudWorker(NPUWorker):
             _lwd_prompt_embeds_provider
         )
 
-    def _lwd_next_down_seqno(self) -> int:
-        seqno = self._lwd_down_next_seqno
-        self._lwd_down_next_seqno += 1
+    def _lwd_next_down_seqno(self, edge_id: int = 0) -> int:
+        seqno = self._lwd_down_next_seqno.get(edge_id, 0)
+        self._lwd_down_next_seqno[edge_id] = seqno + 1
         return seqno

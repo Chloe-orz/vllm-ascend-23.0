@@ -38,9 +38,17 @@ from vllm_ascend.distributed.lwd_comm.types import LwdCommRequest, LwdChannelTyp
 class LwdChannel:
     """One FIFO of pending requests for a physical channel/peer wire."""
 
-    def __init__(self, channel_type: LwdChannelType, op: str) -> None:
+    def __init__(
+        self,
+        channel_type: LwdChannelType,
+        op: str,
+        edge_id: int | None = None,
+        cloud_id: int | None = None,
+    ) -> None:
         self.channel_type = channel_type
         self.op = op  # one FIFO carries exactly one direction's seqno stream
+        self.edge_id = edge_id
+        self.cloud_id = cloud_id
         self._pending: deque[LwdCommFuture] = deque()
         self._lock = threading.Lock()
         # The pending-queue lock alone cannot prevent two host threads
@@ -297,7 +305,9 @@ class LwdChannel:
         return into
 
     def _stream(self):
-        return lwd_wire.get_lwd_channel_stream(self.channel_type)
+        return lwd_wire.get_lwd_channel_stream(
+            self.channel_type, self.edge_id, self.cloud_id
+        )
 
     def _order_after(self, predecessor: LwdCommFuture | None) -> None:
         if predecessor is None:
@@ -307,10 +317,14 @@ class LwdChannel:
             self._stream().wait_event(event)
 
     def _wire_send(self, req: LwdCommRequest) -> list[Any]:
-        group = lwd_wire.get_lwd_channel_device_group(self.channel_type)
+        group = lwd_wire.get_lwd_channel_device_group(
+            self.channel_type, self.edge_id, self.cloud_id
+        )
         peer = req.src_dst
         if peer is None:
-            peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
+            peer = lwd_wire.get_lwd_channel_peer(
+                self.channel_type, self.edge_id, self.cloud_id
+            )
         tensor = req.tensor
         assert tensor is not None
         logger.debug(
@@ -330,10 +344,14 @@ class LwdChannel:
         return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
 
     def _wire_recv(self, req: LwdCommRequest):
-        group = lwd_wire.get_lwd_channel_device_group(self.channel_type)
+        group = lwd_wire.get_lwd_channel_device_group(
+            self.channel_type, self.edge_id, self.cloud_id
+        )
         peer = req.src_dst
         if peer is None:
-            peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
+            peer = lwd_wire.get_lwd_channel_peer(
+                self.channel_type, self.edge_id, self.cloud_id
+            )
         logger.debug(
             "[lwd-comm] RECV post channel=%s my_rank=%d src=%s group_ranks=%s "
             "num_elements=%d op=%s",

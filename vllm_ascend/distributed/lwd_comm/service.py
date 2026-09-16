@@ -40,7 +40,9 @@ class LwdCommService:
         # match the other side's recv-post order), so the FIFO key is
         # (channel, op) — merging them would make a process's sends and
         # recvs on one channel collide on a shared seqno counter.
-        self._channels: dict[tuple[LwdChannelType, str], LwdChannel] = {}
+        self._channels: dict[
+            tuple[int | None, int | None, LwdChannelType, str], LwdChannel
+        ] = {}
         self._lock = threading.Lock()
         self._shutting_down = False
 
@@ -74,14 +76,19 @@ class LwdCommService:
         return completed
 
     def skip_seqno(
-        self, channel_type: LwdChannelType, seqno: int, op: str = "recv"
+        self,
+        channel_type: LwdChannelType,
+        seqno: int,
+        op: str = "recv",
+        edge_id: int | None = None,
+        cloud_id: int | None = None,
     ) -> None:
         """Mark a seqno as never-to-arrive (aborted request) on the given
         channel+direction FIFO.  Recv managers' drop path passes
         op="recv"; the sender-side abort glue passes op="send".  Both
         peers must skip the same seqnos."""
         with self._lock:
-            channel = self._channels.get((channel_type, op))
+            channel = self._channels.get((edge_id, cloud_id, channel_type, op))
         if channel is not None:
             channel.skip_seqno(seqno)
 
@@ -112,10 +119,15 @@ class LwdCommService:
         with self._lock:
             if self._shutting_down:
                 raise RuntimeError("lwd-comm service is shutting down")
-            key = (request.channel, request.op)
+            key = (request.edge_id, request.cloud_id, request.channel, request.op)
             channel = self._channels.get(key)
             if channel is None:
-                channel = LwdChannel(request.channel, request.op)
+                channel = LwdChannel(
+                    request.channel,
+                    request.op,
+                    edge_id=request.edge_id,
+                    cloud_id=request.cloud_id,
+                )
                 self._channels[key] = channel
         return channel.submit(request)
 

@@ -173,6 +173,7 @@ class LwdEdgeWorker(NPUWorker):
             num_elements=embeds.numel(),                     # total_N * H
             tensor=embeds,
             seqno=seqno,
+            cloud_id=batch_meta.cloud_id,
         )
         self.comm_service.submit_send(request)
         # [Lwd][perf] TTFT 探针:forward=embed 前向;submit_send=快照clone+
@@ -201,6 +202,7 @@ class LwdEdgeWorker(NPUWorker):
                 op="recv",
                 num_elements=batch_meta.recv_num_elements,  # int = rows_total * hidden_size
                 seqno=seqno,
+                cloud_id=batch_meta.cloud_id,
             )
         )
         _t_post = time.monotonic()
