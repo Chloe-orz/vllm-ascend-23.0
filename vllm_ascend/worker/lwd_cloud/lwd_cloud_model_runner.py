@@ -157,11 +157,14 @@ class LwdCloudModelRunner(NPUModelRunner):
             from vllm.distributed.parallel_state import get_tp_group
             _tp = get_tp_group()
             if _tp.world_size > 1:
-                # demo 同款:直接用框架 TP 通信域(建组顺序由框架保证,
-                # PD 分离路径已验证),不再使用自建 _LWD_EMBED_BCAST_GROUP。
+                # 端点随 edge_id 轮转:广播源 = 本通信域的云端点 rank,
+                # 而非固定 TP0(不同边对应不同端点卡,见 lwd_wire 建组)。
+                _, cloud_endpoint = lwd_wire.get_lwd_channel_endpoint_rank(
+                    edge_id=edge_id, cloud_id=None
+                )
                 work = dist.broadcast(
                     up_flat,
-                    src=_tp.ranks[0],
+                    src=cloud_endpoint,
                     group=_tp.device_group,
                     async_op=True,
                 )
@@ -243,13 +246,11 @@ class LwdCloudModelRunner(NPUModelRunner):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
-        from vllm.distributed.parallel_state import get_tp_group
-
-        # 只有云 TP 组首卡(= DOWN 通道端点 rank)采集/发送;
-        # 其余 rank 无通道 peer,采集即弃也一并省掉(8 卡冗余)。
-        wire_endpoint = get_tp_group().is_first_rank
+        # 端点随 edge_id 轮转后,不同 edge 的 DOWN 端点落在不同云 rank,
+        # 因此每卡都可能是某些 edge 的端点——采集改在全部 TP rank 上进行,
+        # 发送侧再按 edge_id 过滤到对应端点(见 LwdCloudWorker.sample_tokens)。
         captured = None
-        if wire_endpoint and self.execute_model_state is not None:
+        if self.execute_model_state is not None:
             # ExecuteModelState layout (see model_runner_v1.sample_tokens):
             # (scheduler_output, logits, spec_decode_metadata,
             #  spec_decode_common_attn_metadata, hidden_states,

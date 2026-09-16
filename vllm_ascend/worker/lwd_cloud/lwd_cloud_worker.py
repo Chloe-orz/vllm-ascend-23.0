@@ -225,40 +225,55 @@ class LwdCloudWorker(NPUWorker):
         # 引擎侧解码发布 meta。
         if self.enable_lwd:
             payloads = self.model_runner.take_lwd_pending_down_payload()
-            if payloads and output is not None:
+            if payloads:
+                from vllm.distributed.parallel_state import get_tp_group
+                from vllm_ascend.distributed import lwd_wire
+
+                # 只有 driver(云 TP0)的输出会回传引擎,carrier 只在 driver
+                # 上挂载;但 seqno 必须在所有 rank 上按同一顺序分配,保证
+                # 各卡 per-edge 计数一致(端点轮转后不同 edge 由不同卡发)。
+                is_driver = get_tp_group().is_first_rank
                 carriers = []
                 for edge_id, hidden, pinned, _event, req_ids, _accepted in payloads:
+                    # 全 rank 同序递增,保持 seqno 全局一致(与端点卡对齐)
                     seqno = self._lwd_next_down_seqno(edge_id)
-                    logger.info(
-                        "[Lwd][cloud-worker] DOWN send edge=%d seqno=%d numel=%d",
-                        edge_id, seqno, hidden.numel(),
-                    )
-                    get_lwd_comm_service().submit_send(
-                        LwdCommRequest(
-                            channel=LwdChannelType.DOWN,
-                            op="send",
-                            num_elements=hidden.numel(),
-                            tensor=hidden,
-                            seqno=seqno,
-                            edge_id=edge_id,
+                    # 端点随 edge_id 轮转:仅本卡是该 edge 的 DOWN 端点才发送
+                    if lwd_wire.is_lwd_channel_endpoint(
+                        LwdChannelType.DOWN, edge_id=edge_id, cloud_id=None
+                    ):
+                        logger.info(
+                            "[Lwd][cloud-worker] DOWN send edge=%d seqno=%d "
+                            "numel=%d",
+                            edge_id, seqno, hidden.numel(),
                         )
+                        get_lwd_comm_service().submit_send(
+                            LwdCommRequest(
+                                channel=LwdChannelType.DOWN,
+                                op="send",
+                                num_elements=hidden.numel(),
+                                tensor=hidden,
+                                seqno=seqno,
+                                edge_id=edge_id,
+                            )
+                        )
+                    if is_driver:
+                        carriers.append(
+                            (edge_id, pinned, req_ids, hidden.numel(), seqno)
+                        )
+                if is_driver and output is not None:
+                    # async 包装器下挂到内层,否则 get_output() 解包丢失
+                    target = getattr(output, "_model_runner_output", output)
+                    target.lwd_down_carrier = carriers
+                    # [Lwd][perf] 云侧每步计时:sample=采样+采集(含秩计算);
+                    # send=DOWN 提交(快照clone+isend+bridge wait);total=全步
+                    logger.info(
+                        "[Lwd][perf] cloud-step edges=%d sample=%.2f send=%.2f "
+                        "total=%.2fms",
+                        len(carriers),
+                        (_t_sample - _t0) * 1000,
+                        (time.monotonic() - _t_sample) * 1000,
+                        (time.monotonic() - _t0) * 1000,
                     )
-                    carriers.append(
-                        (edge_id, pinned, req_ids, hidden.numel(), seqno)
-                    )
-                # async 包装器下挂到内层,否则 get_output() 解包丢失
-                target = getattr(output, "_model_runner_output", output)
-                target.lwd_down_carrier = carriers
-                # [Lwd][perf] 云侧每步计时:sample=采样+采集(含秩计算);
-                # send=DOWN 提交(快照clone+isend+bridge wait);total=全步
-                logger.info(
-                    "[Lwd][perf] cloud-step edges=%d sample=%.2f send=%.2f "
-                    "total=%.2fms",
-                    len(carriers),
-                    (_t_sample - _t0) * 1000,
-                    (time.monotonic() - _t_sample) * 1000,
-                    (time.monotonic() - _t0) * 1000,
-                )
         return output
 
     # ------------------------------------------------------------------ #

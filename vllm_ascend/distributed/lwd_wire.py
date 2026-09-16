@@ -122,7 +122,9 @@ def init_lwd_duplex_channels() -> None:
     _LWD_PAIRS[:] = pairs
     for edge_id, cloud_id in pairs:
         edge_rank = registry.edge_rank(edge_id)
-        cloud_rank = registry.cloud_rank(cloud_id)
+        # 端点随 edge_id 在该云各 rank 间轮转(分摊跨机 P2P 压力),
+        # 而非固定取云 TP0 首卡。
+        cloud_rank = registry.cloud_endpoint_rank(edge_id, cloud_id)
         _LWD_ENDPOINTS[(edge_id, cloud_id)] = (edge_rank, cloud_rank)
         ranks = [edge_rank, cloud_rank]
         for channel in LwdChannelType:
@@ -227,6 +229,19 @@ def get_lwd_channel_peer(
     pair = _resolve_pair(edge_id, cloud_id)
     _, peer = _LWD_CHANNEL_GROUPS[(pair[0], pair[1], channel)]
     return peer
+
+
+def get_lwd_channel_endpoint_rank(
+    edge_id: int | None = None,
+    cloud_id: int | None = None,
+) -> tuple[int, int]:
+    """该 (edge, cloud) 通信域两端端点的全局 rank (edge_rank, cloud_rank)。
+
+    cloud_rank 已随 edge_id 轮转(见 LwdRoleRegistry.cloud_endpoint_rank),
+    供 UP 的 TP 广播选源等需要明确端点 rank 的上层使用。
+    """
+    pair = _resolve_pair(edge_id, cloud_id)
+    return _LWD_ENDPOINTS[(pair[0], pair[1])]
 
 
 def get_lwd_channel_stream(
