@@ -60,13 +60,19 @@ def _load_registry():
     """加载角色注册表;未配置/加载失败退化单边一云域。
 
     单边一云端点 rank 沿用 prefill_only 原有推导:连续 edge-first 布局
-    edge [0, E), cloud [E, E+C),端点取 (0, E)。"""
+    edge [0, E), cloud [E, E+C),端点取 (0, E)。
+
+    云侧复用 registry 路径两处来源:CLI ``--role-registry``(镜像在
+    ``parallel_config.lwd_config.role_registry``)与 additional_config
+    的 ``lwd_config.role_registry_path``;命中即复用控制面装配期的
+    进程级单例(保证全场同一份)。"""
     from vllm.config import get_current_vllm_config
 
     vllm_cfg = get_current_vllm_config()
     lwd_cfg = vllm_cfg.parallel_config.lwd_config
     from vllm.v1.lwd_control.control_communication.lwd_role_registry import (
         LwdRoleRegistry,
+        get_role_registry,
         load_role_registry,
     )
 
@@ -83,10 +89,20 @@ def _load_registry():
             )
         edge_rank, cloud_rank = pp_group.ranks[0], pp_group.ranks[1]
     fallback = LwdRoleRegistry.single_pair(edge_rank, cloud_rank)
-    registry_path = getattr(vllm_cfg.lwd_config, "role_registry_path", "") or ""
-    if registry_path:
-        return load_role_registry(registry_path, fallback)
-    return fallback
+    registry_path = (
+        getattr(vllm_cfg.lwd_config, "role_registry_path", "") or ""
+    ) or (
+        getattr(
+            vllm_cfg.parallel_config.lwd_config, "role_registry", ""
+        ) or ""
+    )
+    if not registry_path:
+        return fallback
+    # 控制面已加载则复用单例(全场同一份);worker 进程首载走 load
+    singleton = get_role_registry()
+    if singleton is not None:
+        return singleton
+    return load_role_registry(registry_path, fallback)
 
 
 def _compute_self_ids(registry) -> None:
