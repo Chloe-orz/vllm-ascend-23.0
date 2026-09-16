@@ -96,6 +96,29 @@ class LwdCloudModelRunner(NPUModelRunner):
             self._lwd_hash_prompt_mask[:mask.shape[0]].copy_(mask)
         return out
 
+    def _preprocess(self, scheduler_output, num_input_tokens, intermediate_tensors=None):
+        """在异步投机位置修正后刷新 decode 掩码，再准备模型输入。"""
+        if (self.use_async_spec_decode and self.enable_prompt_embeds
+                and intermediate_tensors is None and self.pcp_size == 1):
+            self._lwd_refresh_decode_embedding_mask(scheduler_output)
+        return super()._preprocess(scheduler_output, num_input_tokens, intermediate_tensors)
+
+    def _lwd_refresh_decode_embedding_mask(self, scheduler_output):
+        """根据设备上的实际位置重建掩码，避免 decode 行复用旧 embedding。
+
+        异步投机接受或拒绝后，CPU token 表可能滞后于设备上的输入和位置。
+        保留远端 prompt embedding，仅标记 decode 行需要重新计算 embedding。
+        此处主动同步读取设备位置，以保证掩码与本次模型输入一致。
+        """
+        count = scheduler_output.total_num_scheduled_tokens
+        positions = self.positions[:count].detach().cpu().numpy()
+        start = 0
+        for idx, req_id in enumerate(self.input_batch.req_ids):
+            end = start + scheduler_output.num_scheduled_tokens[req_id]
+            self.is_token_ids.np[start:end] = positions[start:end] >= self.input_batch.num_prompt_tokens[idx]
+            start = end
+        self.is_token_ids.copy_to_gpu(count)
+
     # 在云侧模拟前向前清除真实批次标记，防止复用上次请求路由。
     def _dummy_run(self, *args, **kwargs):
         """清除真实批次的 Hash 路由标记，再执行模拟前向。"""
