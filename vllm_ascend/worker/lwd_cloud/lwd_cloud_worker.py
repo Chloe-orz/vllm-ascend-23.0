@@ -100,7 +100,6 @@ class LwdCloudWorker(NPUWorker):
         from vllm_ascend.distributed import lwd_wire
 
         lwd_wire.init_lwd_duplex_channels()
-        self._register_lwd_prompt_embeds_provider()
 
     def load_model(self):
         """加载后打实际切片:层数/首末层名/pp 切层参数,启动期即可裁决
@@ -262,43 +261,9 @@ class LwdCloudWorker(NPUWorker):
         No FIN packet -- request termination is signaled by the control
         plane (v2.6).  Here we drop the collector bookkeeping —
         finished_req_ids is the engine's own liveness signal, so this
-        cleanup does not depend on the control plane.  Also releases the
-        request's prompt-embeds assembly buffer (backstop for abort
-        mid-prefill; normal prefill completion frees it in the runner's
-        ``_lwd_release_consumed_prompt_embeds``)."""
-        embeds_map = self.model_runner.input_batch.req_prompt_embeds
-        req_id_to_index = self.model_runner.input_batch.req_id_to_index
+        cleanup does not depend on the control plane."""
         logger.info(
             "[Lwd][cloud-worker] flush finished reqs=%s", list(finished_req_ids)
-        )
-        for req_id in finished_req_ids:
-            idx = req_id_to_index.get(req_id)
-            if idx is not None:
-                embeds_map.pop(idx, None)
-
-    def _register_lwd_prompt_embeds_provider(self) -> None:
-        """Wire the draft proposer's first-pass prompt-embeds provider.
-
-        The provider resolves the request's prompt embeds from the
-        runner's ``input_batch.req_prompt_embeds`` (already injected by
-        ``_lwd_inject_remote_embeds`` during prefill); a missing entry
-        (not scheduled / not LWD) returns None and the proposer falls
-        back to the token-id path.
-        """
-        from vllm_ascend.spec_decode.llm_base_proposer import (
-            AscendSpecDecodeBaseProposer,
-        )
-
-        runner = self.model_runner
-
-        def _lwd_prompt_embeds_provider(req_id: str):
-            idx = runner.input_batch.req_id_to_index.get(req_id)
-            if idx is None:
-                return None
-            return runner.input_batch.req_prompt_embeds.get(idx)
-
-        AscendSpecDecodeBaseProposer.set_lwd_prompt_embeds_provider(
-            _lwd_prompt_embeds_provider
         )
 
     def _lwd_next_down_seqno(self) -> int:

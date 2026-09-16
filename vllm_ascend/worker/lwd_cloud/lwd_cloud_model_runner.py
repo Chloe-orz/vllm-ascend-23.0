@@ -89,17 +89,17 @@ class LwdCloudModelRunner(NPUModelRunner):
         """Device-side inject: write the received UP embeds straight into
         ``inputs_embeds.gpu`` at each request's scheduled window.
 
-        The recv uses ``future.wait_for_comm()`` (non-blocking device
-        ordering; channel errors surface via ``future.result()``), with
-        row copies issued on the current stream (non_blocking) after it.  The
-        flattened output offsets reproduce the native fill loop's
-        accumulation (per-request scheduled segment start), so rows land
-        exactly where the prompt-embeds branch expects them.  The CPU
-        assembly buffer is also filled via an on-stream D2H copy — its
-        only downstream consumer (draft first-pass provider) reads it
-        with stream-ordered H2D copies, so no host sync is needed there
-        either.  The base fill loop may have copied stale buffer content
-        earlier; our device write happens after it and is authoritative.
+        The endpoint gates on the channel future (host readiness gate,
+        channel errors surface via ``future.wait()``), then all ranks
+        broadcast/consume on the current stream.  The flattened output
+        offsets reproduce the native fill loop's accumulation
+        (per-request scheduled segment start), so rows land exactly
+        where the prompt-embeds branch expects them.  No CPU assembly
+        buffer is maintained: the draft first pass reads this same NPU
+        staging buffer directly (chunk-lockstep slice, see
+        ``llm_base_proposer._lwd_build_first_pass_embeds``).  The base
+        fill loop may have copied stale buffer content earlier; our
+        device write happens after it and is authoritative.
         """
         worker = self.worker
         if worker is None:
@@ -107,7 +107,6 @@ class LwdCloudModelRunner(NPUModelRunner):
         posted = getattr(worker, "_lwd_up_recv_futures", None)
         if not posted:
             return
-        embeds_map = self.input_batch.req_prompt_embeds
         num_prompt = self.input_batch.num_prompt_tokens
         computed = self.input_batch.num_computed_tokens_cpu
         hidden_size = self.model_config.get_hidden_size()
@@ -203,17 +202,13 @@ class LwdCloudModelRunner(NPUModelRunner):
                         )
                     start = int(computed[idx])
                     out = out_offset.get(req_id, 0)
-                    # stream 上直接写 inputs_embeds.gpu 的调度窗口
+                    # stream 上直接写 inputs_embeds.gpu 的调度窗口。
+                    # 不再维护 CPU 组装缓冲(已随占位 buffer 一并移除):
+                    # draft 首轮直接读本 NPU staging(同 chunk 锁步,
+                    # 见 llm_base_proposer 的 staging 切片)。
                     gpu_embeds[out : out + n].copy_(
                         embeds[row : row + n], non_blocking=True
                     )
-                    # CPU 组装缓冲同 stream D2H(供 draft provider 用)
-                    prompt_len = int(num_prompt[idx])
-                    buf = embeds_map.get(idx)
-                    if buf is not None and buf.shape[0] == prompt_len:
-                        buf[start : start + n].copy_(
-                            embeds[row : row + n], non_blocking=True
-                        )
                     self.input_batch.is_token_ids[idx, start : start + n] = False
                 row += n
             # 跨流生命周期登记:端点 recv buffer 由通道流分配与复用

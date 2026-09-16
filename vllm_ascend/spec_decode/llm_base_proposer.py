@@ -150,17 +150,6 @@ def _is_glm_model(model_config) -> bool:
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
-    # prefill_only LWD: provider of edge-computed prompt embeddings for the
-    # draft model's first pass (set by the worker at bring-up on the cloud).
-    # provider(req_id) -> Tensor [N, H] | None.
-    _lwd_prompt_embeds_provider = None
-
-    @classmethod
-    def set_lwd_prompt_embeds_provider(cls, provider) -> None:
-        # A bare function stored on the class binds self when read through an
-        # instance (descriptor protocol), adding a spurious argument at the
-        # call site; staticmethod keeps provider(req_id) as the raw callable.
-        cls._lwd_prompt_embeds_provider = staticmethod(provider)
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
 
@@ -1371,15 +1360,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft model itself (its own embed table — only the prompt span is
         replaced by the received embeddings).
 
-        Returns None (caller falls back to the token-id path) when no
-        provider is configured, any request lacks received embeds, the
-        chunk's rows are not yet fully assembled, the draft model does
-        not consume ``inputs_embeds``, or a CP (pcp) manager rewrites
-        first-pass inputs (different layout).
+        Returns None (caller falls back to the token-id path) when the
+        draft model does not consume ``inputs_embeds``, a CP (pcp)
+        manager rewrites first-pass inputs (different layout), or the
+        NPU staging buffer is unavailable.
         """
-        provider = self._lwd_prompt_embeds_provider
         runner = self.runner
-        if provider is None or runner is None:
+        if runner is None:
             return None
         # The draft model must actually consume inputs_embeds (checked
         # once); otherwise the token-id path stays authoritative.
@@ -1404,29 +1391,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         req_ids = list(runner.input_batch.req_ids)
         if not req_ids:
             return None
-        # Chunk base per request: the draft runs every chunk in lockstep
-        # with the main model; slot j of the segment holds prompt token
-        # base+j+1 after the right shift, so the draft window is
-        # buf[base+1 : base+seg_len] — the SAME rows the main model
-        # consumes this chunk (buf[base : base+seg_len)), one position
-        # ahead, from the SAME assembly buffer.
-        computed = getattr(runner.input_batch, "num_computed_tokens_cpu", None)
-        if computed is None:
-            return None
+        # 对齐关系:draft 与主模型同 chunk 锁步,段内第 j 槽在右移
+        # 一位后对应 prompt token base+j+1,而主模型本 chunk 的 embeds
+        # 此刻正在 NPU staging 的 [s:e] 行——draft 窗口即 staging
+        # [s+1:e](同一数据源、整体提前一行,无需任何组装存档)。
         qsl = (cad.query_start_loc_cpu.tolist()
                if getattr(cad, "query_start_loc_cpu", None) is not None
                else cad.query_start_loc.tolist())
         out = self.inputs_embeds  # persistent buffer (graph-safe)
+        # NPU staging 直读(替代原 CPU 组装缓冲):draft 与主模型同
+        # chunk 锁步,本 chunk 的 prompt embeds 此刻就在主模型自己的
+        # inputs_embeds staging 里(注入已先于前向完成)。请求 i 的段
+        # 占 staging[s:e],draft 窗口是整体右移一行 → staging[s+1:e],
+        # 纯 D2D 切片,无任何额外 buffer。
+        staging = getattr(runner, "inputs_embeds", None)
+        staging = getattr(staging, "gpu", None)
+        if staging is None:
+            return None
         wrote_any = False
         for i, req_id in enumerate(req_ids):
             s, e = int(qsl[i]), int(qsl[i + 1])
             seg_len = e - s
-            base = int(computed[i]) if i < len(computed) else 0
-            prompt_embeds = provider(req_id)  # [prompt_len, H] or None
-            if prompt_embeds is None or prompt_embeds.shape[0] < base + seg_len:
-                return None  # chunk rows not fully assembled -> token-id path
+            if seg_len < 1 or e > staging.shape[0]:
+                return None
             # positions s..e-2 hold prompt tokens base+1..base+seg_len-1
-            out[s: e - 1] = prompt_embeds[base + 1: base + seg_len]
+            out[s: e - 1] = staging[s + 1: e]
             wrote_any = True
         if not wrote_any:
             return None
