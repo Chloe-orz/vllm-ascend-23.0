@@ -43,6 +43,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -458,6 +459,10 @@ class DeepseekV4MoE(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor, input_ids=None) -> torch.Tensor:
+        if self.hash:
+            # The selector is invoked inside FusedMoE; identify the table's layer
+            # without forwarding prompt token IDs or changing the quant API.
+            get_forward_context().lwd_hash_layer_idx = self.layer_idx
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
