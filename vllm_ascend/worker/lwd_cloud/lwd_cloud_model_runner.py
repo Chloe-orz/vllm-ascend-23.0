@@ -22,6 +22,7 @@ from vllm.logger import logger
 from vllm.v1.lwd_control.control_communication.lwd_id_adapter import parse_edge_id
 from vllm.v1.outputs import ModelRunnerOutput
 
+from vllm_ascend.worker.lwd_cloud.lwd_mtp_proposer import LwdMTPProposer
 from vllm_ascend.worker.lwd_hash.lwd_hash_routing import (
     LwdHashRoutingState,
     hash_layer_count,
@@ -62,6 +63,19 @@ class LwdCloudModelRunner(NPUModelRunner):
             )
             self._lwd_hash_prompt_mask = torch.zeros(self.max_num_tokens, dtype=torch.bool, device=device)
             self._lwd_hash_token_ids = torch.zeros(self.max_num_tokens, dtype=torch.int64, device=device)
+
+    def _get_drafter(self):
+        """Use the LWD MTP embedding adapter only in prefill_only mode."""
+        lwd_config = getattr(self.vllm_config, "lwd_config", None)
+        if (
+            lwd_config is not None
+            and lwd_config.enabled
+            and lwd_config.mode == "prefill_only"
+            and self.speculative_config.method == "mtp"
+            and not self.speculative_config.use_step3p5_mtp()
+        ):
+            return LwdMTPProposer(self.vllm_config, self.device, self)
+        return super()._get_drafter()
 
     # ------------------------------------------------------------------ #
     # Remote embeds injection (cloud input has NO token ids — the prompt   #
