@@ -209,6 +209,10 @@ class LwdEdgeWorker(NPUWorker):
         # wait_for_comm:device 序等待,主机不阻塞
         recv_future.wait_for_comm()
         result = recv_future.result()
+        # 跨流生命周期登记:DOWN recv buffer 在通道流分配/写入,计算流读取。
+        # 不登记 record_stream,缓存分配器可能在 compute_logits 尚未读完时
+        # 把该块交给下一 seqno 的 irecv 覆写(与 UP 侧同源的跨 seqno 串数据)。
+        result.tensor.record_stream(torch.npu.current_stream())
         _t_tensor = time.monotonic()
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
