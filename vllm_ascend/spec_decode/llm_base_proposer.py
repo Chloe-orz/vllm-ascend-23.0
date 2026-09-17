@@ -552,7 +552,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         return attn_metadata
 
     @torch.inference_mode()
-    def dummy_run(
+    def dummy_run(self, *args, **kwargs):
+        """draft 执行入口统一包 TP 补丁上下文(draft 不切分时为单卡组,
+        否则 nullcontext 零开销)。
+
+        模型构建与权重加载在 runner 的 load_model 处已包
+        ``get_tp_context``;执行侧不包则环境 TP 组的切分语义会让按
+        全量权重构建的 draft 前向 shape 错位(如 5120 vs 1280)。
+        """
+        with self.tp_group_context:
+            return self._dummy_run_impl(*args, **kwargs)
+
+    def _dummy_run_impl(
         self,
         num_tokens: int,
         with_prefill: bool = False,
@@ -734,7 +745,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
-    def _propose(
+    def _propose(self, *args, **kwargs):
+        """同 dummy_run:draft 执行全程包 TP 补丁上下文(含
+        set_inputs_first_pass / draft 前向 / compute_draft_token_ids 的
+        logits 计算——draft_tp=1 时这些路径里的 TP 集合通信都必须是
+        单卡 no-op)。"""
+        with self.tp_group_context:
+            return self._propose_impl(*args, **kwargs)
+
+    def _propose_impl(
         self,
         # [num_tokens]
         target_token_ids: torch.Tensor,
