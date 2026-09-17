@@ -243,7 +243,9 @@ def graph_capture(device: torch.device):
 
 
 def get_tp_context(drafter):
-    return getattr(drafter, "tp_group_context", nullcontext())
+    # tp_group_context 是 CM 工厂(@contextmanager 产物一次性,
+    # 不可重入),每次调用现取新实例
+    return getattr(drafter, "tp_group_context", nullcontext)()
 
 
 class ExecuteModelState(NamedTuple):

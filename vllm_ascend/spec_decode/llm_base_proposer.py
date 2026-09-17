@@ -219,9 +219,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 use_message_queue_broadcaster=True,
                 group_name="tp",
             )
-            self.tp_group_context: AbstractContextManager[Any] = patch_tensor_parallel_group(tp_group)
+            # 存工厂而非 CM 实例:@contextmanager 产物是一次性的,
+            # load_model / dummy_run / _propose 多处进入须每次新建
+            self.tp_group_context: Callable[[], AbstractContextManager[Any]] = (
+                lambda: patch_tensor_parallel_group(tp_group)
+            )
         else:
-            self.tp_group_context = nullcontext()
+            self.tp_group_context = nullcontext
 
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
         self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
@@ -560,7 +564,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         ``get_tp_context``;执行侧不包则环境 TP 组的切分语义会让按
         全量权重构建的 draft 前向 shape 错位(如 5120 vs 1280)。
         """
-        with self.tp_group_context:
+        with self.tp_group_context():
             return self._dummy_run_impl(*args, **kwargs)
 
     def _dummy_run_impl(
@@ -750,7 +754,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         set_inputs_first_pass / draft 前向 / compute_draft_token_ids 的
         logits 计算——draft_tp=1 时这些路径里的 TP 集合通信都必须是
         单卡 no-op)。"""
-        with self.tp_group_context:
+        with self.tp_group_context():
             return self._propose_impl(*args, **kwargs)
 
     def _propose_impl(
