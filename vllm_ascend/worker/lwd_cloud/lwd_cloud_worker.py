@@ -72,8 +72,19 @@ class LwdCloudWorker(NPUWorker):
         )
         init_lwd_ascend_model_parallel(self.parallel_config)
         ensure_ec_transfer_initialized(self.vllm_config)
+        # wire 建组+warmup 必须在所有"全员对称"建组完成之后、任何角色
+        # 专属初始化(如云侧 MTP drafter 的私有 TP 组)之前:new_group
+        # 按调用序号配对,角色不对称的建组插队会让边云两侧的 HCCL comm
+        # 序列错位(warmup 首次 P2P 时 rootinfo 对不上,表现为一端超
+        # 时卡死)。本 hook 是两个 LWD worker 共同的、且唯一全员同序的
+        # 初始化点。
+        from vllm_ascend.distributed import lwd_wire
+        if self.enable_lwd:
+            lwd_wire.init_lwd_duplex_channels()
 
     def init_device(self):
+        # 数据面通道已在 _init_worker_distributed_environment 末尾建好
+        # 并 warmup(见该处注释,须在 MTP drafter 等角色专属建组之前)。
         super().init_device()
         # per-edge DOWN seqno counter (worker layer, send-time alloc);
         # 多边各边独立 seqno 流。
@@ -98,9 +109,6 @@ class LwdCloudWorker(NPUWorker):
         self.model_runner = LwdCloudModelRunner(
             self.vllm_config, self.device, worker=self
         )
-        from vllm_ascend.distributed import lwd_wire
-
-        lwd_wire.init_lwd_duplex_channels()
         self._register_lwd_prompt_embeds_provider()
 
     def load_model(self):

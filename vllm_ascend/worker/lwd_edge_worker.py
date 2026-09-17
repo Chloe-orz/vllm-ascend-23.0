@@ -83,24 +83,20 @@ class LwdEdgeWorker(NPUWorker):
         )
         init_lwd_ascend_model_parallel(self.parallel_config)
         ensure_ec_transfer_initialized(self.vllm_config)
-
-    def init_device(self):
-        # The duplex channels MUST be built here, never in ``__init__``.
-        # ``init_lwd_duplex_channels`` creates the two HCCL process groups
-        # (``dist.new_group``) and then warms them up with a two-sided P2P
-        # exchange (world barrier plus the edge/cloud isend/irecv pair), so it
-        # needs the distributed environment -- world group and PP group --
-        # which ``NPUWorker._init_worker_distributed_environment`` only builds
-        # inside ``init_device``.  The executor constructs the worker first and
-        # calls ``init_device`` afterwards, so running it from ``__init__``
-        # would trip the "group is not initialized" assertions; the two-sided
-        # warmup additionally requires both peers to reach it in the same fixed
-        # order, which only holds once every rank is past its distributed init.
-        super().init_device()
-        self.comm_service = get_lwd_comm_service()
-
+        # wire 建组+warmup 必须在所有"全员对称"建组完成之后、任何角色
+        # 专属初始化(如云侧 MTP drafter 的私有 TP 组)之前:new_group
+        # 按调用序号配对,角色不对称的建组插队会让边云两侧的 HCCL comm
+        # 序列错位(warmup 首次 P2P 时 rootinfo 对不上,表现为一端超
+        # 时卡死)。本 hook 是两个 LWD worker 共同的、且唯一全员同序的
+        # 初始化点。
         from vllm_ascend.distributed import lwd_wire
         lwd_wire.init_lwd_duplex_channels()
+
+    def init_device(self):
+        # 数据面通道已在 _init_worker_distributed_environment 末尾建好
+        # 并 warmup(见该处注释);这里只剩通信服务句柄。
+        super().init_device()
+        self.comm_service = get_lwd_comm_service()
         logger.info(
             "[lwd-edge] worker ready: duplex channels (UP/DOWN) initialized "
             "on global rank=%d",
