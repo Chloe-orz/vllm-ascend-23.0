@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 
 import torch
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.v1.outputs import ModelRunnerOutput
@@ -38,6 +38,13 @@ class LwdCloudModelRunner(NPUModelRunner):
         super().__init__(vllm_config, device)
         self.worker = worker  # LwdCloudWorker ref (UP recv futures live there)
         self._lwd_pending_down_payload = None
+        # Stage per-request prompt lengths for device-side mask refresh.
+        if self.use_async_spec_decode and self.enable_prompt_embeds:
+            self._lwd_prompt_lens_gpu = torch.zeros(
+                self.max_num_reqs, dtype=torch.int32, device=self.device
+            )
+        else:
+            self._lwd_prompt_lens_gpu = None
         self.lwd_hash_state = None
         # 用空值表示尚未准备真实批次，区分 dummy 前向。
         self._lwd_hash_step_tokens = None
@@ -114,23 +121,61 @@ class LwdCloudModelRunner(NPUModelRunner):
         if (self.use_async_spec_decode and self.enable_prompt_embeds
                 and intermediate_tensors is None and self.pcp_size == 1):
             self._lwd_refresh_decode_embedding_mask(scheduler_output)
+            if (get_pp_group().is_first_rank
+                    and not self.model_config.is_encoder_decoder
+                    and (not self.supports_mm_inputs or self.input_batch.req_prompt_embeds)):
+                return self._lwd_preprocess_prompt_embeds(scheduler_output, num_input_tokens)
+            # Other model paths keep the parent's preprocessing, which may
+            # still consume the CPU mask (for example encoder-decoder models).
+            count = scheduler_output.total_num_scheduled_tokens
+            self.is_token_ids.np[:count] = self.is_token_ids.gpu[:count].cpu().numpy()
         return super()._preprocess(scheduler_output, num_input_tokens, intermediate_tensors)
+
+    def _lwd_preprocess_prompt_embeds(self, scheduler_output, num_input_tokens):
+        """Consume the corrected device mask on the LWD cloud decoder path."""
+        count = scheduler_output.total_num_scheduled_tokens
+        is_token_ids = self.is_token_ids.gpu[:count]
+        # Remote prompt rows do not carry meaningful token IDs.
+        token_ids = self.input_ids.gpu[:count].masked_fill(~is_token_ids, 0)
+        tokens_to_embeds = self.model.embed_input_ids(input_ids=token_ids)
+        embeds = self.inputs_embeds.gpu[:count]
+        embeds.copy_(torch.where(is_token_ids.unsqueeze(-1), tokens_to_embeds, embeds))
+
+        # Match the parent's position layout and clear padding for graph replay.
+        if self.uses_mrope:
+            positions = self.mrope_positions.gpu[:, :num_input_tokens]
+        elif self.uses_xdrope_dim > 0:
+            positions = self.xdrope_positions.gpu[:, :num_input_tokens]
+        else:
+            positions = self.positions[:num_input_tokens]
+            if num_input_tokens > count:
+                self.positions[count:num_input_tokens].zero_()
+        return (
+            None,
+            self.inputs_embeds.gpu[:num_input_tokens],
+            positions,
+            None,
+            self._init_model_kwargs(),
+            None,
+        )
 
     def _lwd_refresh_decode_embedding_mask(self, scheduler_output):
         """根据设备上的实际位置重建掩码，避免 decode 行复用旧 embedding。
 
-        异步投机接受或拒绝后，CPU token 表可能滞后于设备上的输入和位置。
-        保留远端 prompt embedding，仅标记 decode 行需要重新计算 embedding。
-        此处主动同步读取设备位置，以保证掩码与本次模型输入一致。
+        异步上传各请求的 prompt 长度，复用设备上的请求索引展开到 token 行。
+        掩码直接写入设备缓冲区，由 LWD prompt-embeds 路径在设备上消费；
+        不回传 positions，也不刷新 CPU 掩码。
         """
+        num_reqs = len(self.input_batch.req_ids)
         count = scheduler_output.total_num_scheduled_tokens
-        positions = self.positions[:count].detach().cpu().numpy()
-        start = 0
-        for idx, req_id in enumerate(self.input_batch.req_ids):
-            end = start + scheduler_output.num_scheduled_tokens[req_id]
-            self.is_token_ids.np[start:end] = positions[start:end] >= self.input_batch.num_prompt_tokens[idx]
-            start = end
-        self.is_token_ids.copy_to_gpu(count)
+        prompt_lens_gpu = self._lwd_prompt_lens_gpu
+        assert prompt_lens_gpu is not None
+        prompt_lens_gpu[:num_reqs].copy_(
+            self.input_batch.num_prompt_tokens_cpu_tensor[:num_reqs],
+            non_blocking=True,
+        )
+        prompt_lens_rows = prompt_lens_gpu[self.req_indices.gpu[:count]]
+        self.is_token_ids.gpu[:count] = self.positions[:count] >= prompt_lens_rows
 
     # 在云侧模拟前向前清除真实批次标记，防止复用上次请求路由。
     def _dummy_run(self, *args, **kwargs):
@@ -561,4 +606,3 @@ class LwdCloudModelRunner(NPUModelRunner):
         idx = self._lwd_pinned_ring_idx
         self._lwd_pinned_ring_idx = (idx + 1) % len(ring)
         return ring[idx]
-
