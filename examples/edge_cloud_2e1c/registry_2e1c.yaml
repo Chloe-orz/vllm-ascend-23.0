@@ -1,0 +1,35 @@
+# =============================================================================
+# prefill-only 云侧复用（多边多云）静态角色注册表 —— 两边一云（2E1C）实例
+#
+# 三个实例（边0 / 边1 / 云0）挂载同一份本文件；修改需全员重启。
+#
+# 填写说明：
+#   * 将 <EDGE0_IP> / <EDGE1_IP> / <CLOUD_IP> 替换为三台机器的真实 IP，
+#     并与三个启动脚本顶部的同名变量保持一致。
+#   * ranks 是【全局 rank】（torch/HCCL 世界组建组用），不是物理 NPU 号；
+#     物理选卡在各启动脚本里用 ASCEND_RT_VISIBLE_DEVICES 指定。
+#     本示例布局：边占 [0,1)，云占 [2,6)（TP=4），共 6 个全局 rank。
+#   * 改卡数时同步改：clouds[0].ranks 数量、云脚本 ASCEND_RT_VISIBLE_DEVICES、
+#     以及三个脚本的 --edge-npu-count（边 ranks 总数）/ --cloud-npu-count
+#     （云 ranks 数量）。多边时 edges 各自一条目，每边 1 卡（ranks 单值）。
+# =============================================================================
+
+world:
+  master_addr: "<EDGE0_IP>"   # torch rendezvous 锚点：全局 rank0 所在机 = 边0。
+                              # 优先级 yaml > CLI(--master-addr/port) > 默认值,
+                              # 启动脚本不再传 CLI,以本处为全场唯一事实源
+  master_port: 29600
+
+edges:
+  - id: 0                     # 对应 start_edge0.sh 的 --edge-id 0
+    addr: "<EDGE0_IP>"        # 仅诊断用（边不 bind 端口）
+    ranks: [0]
+  - id: 1                     # 对应 start_edge1.sh 的 --edge-id 1
+    addr: "<EDGE1_IP>"
+    ranks: [1]
+
+clouds:
+  - id: 0                     # 对应 start_cloud.sh 的 --cloud-id 0
+    addr: "<CLOUD_IP>"        # 边侧 connect 该地址（控制面端点公式用）
+    ranks: [2, 3, 4, 5]       # TP=4：云内 4 卡的 4 个全局 rank
+    zmq_port: 5700            # 控制面 ROUTER bind 端口（只有云 bind，边 connect）
