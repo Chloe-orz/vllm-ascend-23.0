@@ -1,9 +1,11 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-"""prefill_only LWD model runner subclass (cloud side, token_id 版).
+"""prefill_only LWD model runner subclass (cloud side).
 
-token_id 回传版:采样 token 经 c2e 通告直付边侧,云侧无 DOWN 采集
-(原 collect/rank-replay 代码整体退场)。runner 仅保留远端 prompt
-embeds 的设备侧注入(UP 通道消费,prefill 前向仍需)。
+All LWD runner-side logic lives here (moved out of
+``model_runner_v1.py``): the per-step cloud-side collection of the
+DOWN payload (hidden-only tensor) plus the step metadata (global ranks
+/ num_accepted / req_ids) that rides back to the scheduler on
+``ModelRunnerOutput.lwd_c2e_meta``.
 
 Selected via ``LwdCloudWorker`` (worker_cls), which swaps the model
 runner class at init_device when ``lwd_config`` enables prefill_only.
@@ -25,6 +27,7 @@ class LwdCloudModelRunner(NPUModelRunner):
     def __init__(self, vllm_config, device, worker=None):
         super().__init__(vllm_config, device)
         self.worker = worker  # LwdCloudWorker ref (UP recv futures live there)
+        self._lwd_pending_down_payload = None
 
     # ------------------------------------------------------------------ #
     # Remote embeds injection (cloud input has NO token ids — the prompt   #
@@ -219,4 +222,192 @@ class LwdCloudModelRunner(NPUModelRunner):
             # 下一 seqno 的 irecv 覆写——深异步队列下表现为跨 seqno 串
             # 数据(多请求乱码)。登记后复用即被正确排序。
             up_flat.record_stream(torch.npu.current_stream())
+
+    # ------------------------------------------------------------------ #
+    # Collect probe (measurement only; output discarded, protocol        #
+    # still returns token_ids directly)                                   #
+    # ------------------------------------------------------------------ #
+
+    def _sample(self, logits, spec_decode_metadata):
+        """Capture the sampler output for the collect probe
+        (the base sample_tokens clears execute_model_state on return)."""
+        sampler_output = super()._sample(logits, spec_decode_metadata)
+        self._lwd_captured_sampler_output = sampler_output
+        return sampler_output
+
+    @torch.inference_mode()
+    def sample_tokens(self, grammar_output) -> ModelRunnerOutput:
+        from vllm.distributed.parallel_state import get_tp_group
+
+        # 只有云 TP 组首卡(= DOWN 通道端点 rank)采集/发送;
+        # 其余 rank 无通道 peer,采集即弃也一并省掉(8 卡冗余)。
+        wire_endpoint = get_tp_group().is_first_rank
+        captured = None
+        if wire_endpoint and self.execute_model_state is not None:
+            # ExecuteModelState layout (see model_runner_v1.sample_tokens):
+            # (scheduler_output, logits, spec_decode_metadata,
+            #  spec_decode_common_attn_metadata, hidden_states,
+            #  sample_hidden_states, ...)
+            state = self.execute_model_state
+            # 批序/掩码也一并快照:batch queue 重叠时,下一步的
+            # _prepare_inputs 可能在 collect 前重排 input_batch,
+            # 现读会拿到批序B去切批序A的张量(高并发错位根因)
+            captured = (
+                state[5], state[1], state[2], state[0],
+                list(self.input_batch.req_ids),
+                self.discard_request_mask.np.copy(),
+            )
+        self._lwd_captured_sampler_output = None
+        output = super().sample_tokens(grammar_output)
+        if captured is not None and self._lwd_captured_sampler_output is not None:
+            self._lwd_pending_down_payload = self._lwd_collect_down_payload(
+                captured[0], captured[1], captured[2], captured[3],
+                captured[4], captured[5], self._lwd_captured_sampler_output,
+            )
+        return output
+
+    def take_lwd_pending_down_payload(self):
+        """worker 层取走本步 DOWN payload(单槽覆盖写,每步必被取走)。"""
+        payload = getattr(self, "_lwd_pending_down_payload", None)
+        self._lwd_pending_down_payload = None
+        return payload
+
+    @torch.inference_mode()
+    def _lwd_collect_down_payload(
+        self, sample_hidden_states, logits, spec_decode_metadata,
+        scheduler_output, batch_req_ids, discard_mask_np, sampler_output,
+    ):
+        """生产级 DOWN 采集(rank-replay):hidden 组包 + 全局秩 + num_accepted。
+
+        廉价计算:bf16 直比(logits 原生 bf16,与 cast 后逐位等价)、
+        批全覆盖时整行直接算(不做高级索引取材)、ranks/counts/seg_lens
+        拼单个设备张量;meta 经 pinned(4 轮换)在主流末尾异步拷贝,
+        worker 属性上紧随记录就绪事件,由响应入队处 synchronize 后
+        引擎侧解码——计算关键路径零新增同步。批序/掩码取捕获时刻
+        快照(防 batch queue 重叠重排)。返回:
+          (hidden_packet, pinned_view, None, req_ids, None)
+        或 None(本步无在途请求)。
+        """
+        _t0 = time.monotonic()
+        sampled = sampler_output.sampled_token_ids
+        if sampled is None or sampled.dim() != 2 or logits is None:
+            return None
+        # batch_req_ids/discard_mask 来自捕获时刻快照(与 logits/hidden
+        # 同批序),不读活的 input_batch
+        valid = ~discard_mask_np[: len(batch_req_ids)]
+        is_spec = spec_decode_metadata is not None
+
+        rows_list, ranks_list, accepted = [], [], []
+        lg = logits  # bf16 原生,直接比较(cast 无精度增益)
+        full_cover = all(valid[: len(batch_req_ids)])
+        if not is_spec:
+            idx = [i for i in range(len(batch_req_ids)) if valid[i]]
+            if not idx:
+                return None
+            lg_sel = lg if full_cover else lg[idx]
+            sm_sel = sampled[:, 0] if full_cover else sampled[idx][:, 0]
+            thresh = lg_sel.gather(1, sm_sel.long().unsqueeze(1))
+            ranks_list.append((lg_sel > thresh).sum(dim=1).to(torch.int32))
+            rows_list.extend(sample_hidden_states[i : i + 1] for i in idx)
+            accepted.extend([1] * len(idx))
+        else:
+            # 全零同步 spec 路径:
+            # 段长按 host 侧 scheduled_spec_decode_tokens 推(1+draft_len),
+            # 按完整段打包(含被拒行,边侧按 num_accepted 取有效前缀);
+            # counts 用框架每步已算好的 num_accepted_tokens.gpu(纯 device)
+            # 段长取 spec_decode_metadata.num_draft_tokens(host list,
+            # 运行期真实布局,与 sample_hidden_states 段结构一致);
+            # 不用 scheduler_output.scheduled_spec_decode_tokens
+            # (调度输入,可能与实际运行不一致)
+            seg_lens = [
+                d + 1 for d in spec_decode_metadata.num_draft_tokens
+            ]
+            # counts 从同一个 sampled 张量 device 推导(与秩/行同源,
+            # 天然按批位对齐);seg_lens/counts 只收 valid 请求,
+            # 保证 [ranks|counts|seg_lens] 三段长度一致
+            counts_all = (sampled != -1).sum(dim=1)
+            counts_list = []
+            seg_lens_list = []
+            seg_start = 0
+            for i in range(len(batch_req_ids)):
+                seg_len = seg_lens[i]
+                seg_lg = lg[seg_start : seg_start + seg_len]
+                seg_hidden = sample_hidden_states[seg_start : seg_start + seg_len]
+                rows_i = seg_hidden.shape[0]
+                if valid[i] and rows_i >= 1:
+                    # 过期 sampled 位(spec 未运行的请求可能残留上个
+                    # spec 步的 token):accepted/秩/段长一律按实际
+                    # hidden 行数封顶——行数才是真实采样位置的真相
+                    seg_sm = sampled[i, :rows_i]
+                    thresh = seg_lg.gather(1, seg_sm.long().unsqueeze(1))
+                    ranks_list.append((seg_lg > thresh).sum(dim=1).to(torch.int32))
+                    rows_list.append(seg_hidden)
+                    counts_list.append(
+                        torch.clamp(counts_all[i : i + 1], max=rows_i))
+                    seg_lens_list.append(rows_i)
+                seg_start += seg_len
+            accepted = None  # 不再 host 读取;counts 直接随 meta_dev 下发
+        if not rows_list:
+            return None
+
+        hidden_packet = torch.cat(rows_list)
+        n_req = sum(1 for i in range(len(batch_req_ids)) if valid[i])
+        seg_lens_host: list[int] | None = None
+        if is_spec:
+            counts_dev = torch.cat(counts_list).to(torch.int32)
+            meta_dev = torch.cat(ranks_list + [counts_dev])
+            # seg_lens 不上设备:torch.tensor(list, device=...) 是同步
+            # H2D,会在主流上等设备排空——MTP 下等到的恰好是 draft
+            # propose 尾巴(实测 collect rank 段 ~6ms)。改为 host 直写
+            # pinned 尾段:与 D2H 前缀区域不相交,且引擎读 pinned 发生
+            # 在 ready_event 同步(更晚)之后,无竞态。
+            seg_lens_host = seg_lens_list
+        else:
+            counts_dev = torch.ones(n_req, dtype=torch.int32,
+                                    device=logits.device)
+            seg_lens_dev = counts_dev
+            meta_dev = torch.cat(ranks_list + [counts_dev, seg_lens_dev])
+        # pinned 拷贝排主流末尾(异步),紧随记录就绪事件;
+        # 由 worker 响应入队处在发送前 synchronize——
+        # "响应发出 ⟹ pinned 就绪"成为硬保证(同步在输出线程,
+        # 不在计算关键路径)。
+        _t_pack = time.monotonic()
+        n_dev = meta_dev.numel()
+        n_meta = n_dev + (len(seg_lens_host) if seg_lens_host is not None else 0)
+        pinned = self._lwd_meta_pinned(n_meta)
+        pinned[:n_dev].copy_(meta_dev, non_blocking=True)
+        if seg_lens_host is not None:
+            pinned.numpy()[n_dev:n_meta] = seg_lens_host
+        self.worker._lwd_meta_ready_event = torch.npu.Event()
+        self.worker._lwd_meta_ready_event.record()
+        # [Lwd][perf] 采集分段:rank=秩+行收集;pinned=meta 拼包+拷贝
+        logger.info(
+            "[Lwd][perf] collect rows=%d rank=%.2f pinned=%.2f total=%.2fms",
+            hidden_packet.shape[0],
+            (_t_pack - _t0) * 1000,
+            (time.monotonic() - _t_pack) * 1000,
+            (time.monotonic() - _t0) * 1000,
+        )
+        return (
+            hidden_packet,
+            pinned[:n_meta],
+            None,
+            [r for i, r in enumerate(batch_req_ids) if valid[i]],
+            None,
+        )
+
+    def _lwd_meta_pinned(self, n: int):
+        """轮换 pinned 缓冲(深度 4 > batch_queue 深度 2 + 引擎滞后 1):
+        避免下一/N+2 步的边流拷贝覆盖引擎尚未读完的上一步 meta。"""
+        ring = getattr(self, "_lwd_pinned_ring", None)
+        if ring is None or ring[0].numel() < n:
+            ring = [
+                torch.empty(max(n, 4096), dtype=torch.int32, pin_memory=True)
+                for _ in range(4)
+            ]
+            self._lwd_pinned_ring = ring
+            self._lwd_pinned_ring_idx = 0
+        idx = self._lwd_pinned_ring_idx
+        self._lwd_pinned_ring_idx = (idx + 1) % len(ring)
+        return ring[idx]
 
