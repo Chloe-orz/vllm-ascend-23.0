@@ -220,38 +220,25 @@ class LwdCloudWorker(NPUWorker):
             payload = self.model_runner.take_lwd_pending_down_payload()
             if payload is not None and output is not None:
                 hidden, pinned, _event, req_ids, _accepted = payload
-                from vllm_ascend import envs
-
-                if envs.VLLM_ASCEND_LWD_EDGE_SKIP_SAMPLE:
-                    # token_id 回传版:token 经 c2e 通告直付边侧,
-                    # DOWN 张量不发送(边侧无配对 recv,发必积压);
-                    # 通道/秩重放代码全量保留,开关关闭即恢复
-                    seqno = -1
-                    logger.info(
-                        "[Lwd][cloud-worker] token-id mode: DOWN send "
-                        "skipped (payload dropped, rows=%d)",
-                        hidden.shape[0],
+                seqno = self._lwd_next_down_seqno()
+                logger.info(
+                    "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
+                    seqno, hidden.numel(),
+                )
+                get_lwd_comm_service().submit_send(
+                    LwdCommRequest(
+                        channel=LwdChannelType.DOWN,
+                        op="send",
+                        num_elements=hidden.numel(),
+                        tensor=hidden,
+                        seqno=seqno,
                     )
-                else:
-                    seqno = self._lwd_next_down_seqno()
-                    logger.info(
-                        "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
-                        seqno, hidden.numel(),
-                    )
-                    get_lwd_comm_service().submit_send(
-                        LwdCommRequest(
-                            channel=LwdChannelType.DOWN,
-                            op="send",
-                            num_elements=hidden.numel(),
-                            tensor=hidden,
-                            seqno=seqno,
-                        )
-                    )
-                    # async 包装器下挂到内层,否则 get_output() 解包丢失
-                    target = getattr(output, "_model_runner_output", output)
-                    target.lwd_down_carrier = (
-                        pinned, req_ids, hidden.numel(), seqno
-                    )
+                )
+                # async 包装器下挂到内层,否则 get_output() 解包丢失
+                target = getattr(output, "_model_runner_output", output)
+                target.lwd_down_carrier = (
+                    pinned, req_ids, hidden.numel(), seqno
+                )
                 # [Lwd][perf] 云侧每步计时:sample=采样+采集(含秩计算);
                 # send=DOWN 提交(快照clone+isend+bridge wait);total=全步
                 logger.info(
