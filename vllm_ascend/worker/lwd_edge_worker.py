@@ -204,15 +204,19 @@ class LwdEdgeWorker(NPUWorker):
             )
         )
         _t_post = time.monotonic()
-        # wait_for_comm:device 序等待,主机不阻塞
+        # wait_for_comm:device 序等待,主机不阻塞;边界补 npu.synchronize
+        # 阻塞到张量真正落卡,否则网络迟到会顺延到 select 段的
+        # .tolist() 同步才显现,wait_tensor/lm_head 读数失真
         recv_future.wait_for_comm()
         result = recv_future.result()
+        torch.npu.synchronize()
         _t_tensor = time.monotonic()
         hidden_size = self.model_config.get_hidden_size()
         hidden_states = result.tensor.view(-1, hidden_size)  # (rows_total, H)
         # lm_head 不允许直接调用(ParallelLMHead.forward 强制经 sampler);
         # compute_logits 是标准接口,包装层/单体模型都有。
         logits = model.compute_logits(hidden_states)       # (rows_total, V)
+        torch.npu.synchronize()
         _t_lm = time.monotonic()
         # L5 对拍:首行 top-20,与云侧 sampler 入口的 [layer-trace]
         # top20 逐位对照——排名换位即重放漂移的直接视图。
@@ -244,12 +248,14 @@ class LwdEdgeWorker(NPUWorker):
             sampled_token_ids.append(flat_ids[off : off + accept])
             off += len(ths)
         _t_sel = time.monotonic()
-        # [Lwd][perf] 临时探针:单请求慢的归因分段——
+        # [Lwd][perf] 临时探针(sync 版):wait_tensor/lm_head 边界已补
+        # npu.synchronize,主机时间戳即设备完成时刻;select 的 .tolist
+        # 自带 D2H 同步,无需补——
         # post_recv=挂 irecv;wait_tensor=等张量落卡(网络);lm_head=词表
         # 前向(权重带宽);select=argsort 取名(.item 同步);total=边尾段全长
         logger.info(
             "[Lwd][perf] unembed seqno=%s post_recv=%.2f wait_tensor=%.2f "
-            "lm_head=%.2f select=%.2f total=%.2fms reqs=%d",
+            "lm_head=%.2f select=%.2f total=%.2fms reqs=%d sync=1",
             seqno,
             (_t_post - _t0) * 1000,
             (_t_tensor - _t_post) * 1000,
