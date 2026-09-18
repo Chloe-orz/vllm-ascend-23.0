@@ -3,9 +3,9 @@
 
 All LWD worker-side logic lives here (moved out of ``worker.py``):
 init bring-up of the duplex channels + recv managers, the EDGE_EMBED
-dispatch hook, the cloud finished-flush, and the
-DOWN send (draining the runner's per-step hidden payload + attaching
-``lwd_c2e_meta`` to the ModelRunnerOutput).
+dispatch hook, and the cloud finished-flush. token_id 回传版:采样
+token 经 c2e 通告直付边侧,无 DOWN 发送/DOWN 采集(sample_tokens
+覆写与 DOWN 载荷链整体退场,UP 通道照常)。
 
 Selected via ``parallel_config.worker_cls`` (see platform.py:
 ``vllm_ascend.worker.lwd_cloud_worker.LwdCloudWorker``) when
@@ -18,8 +18,6 @@ import time
 
 import torch
 from vllm.logger import logger
-from vllm.v1.core.sched.output import GrammarOutput  # noqa: F401  (type)
-from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -76,7 +74,6 @@ class LwdCloudWorker(NPUWorker):
     def init_device(self):
         super().init_device()
         # channel-global DOWN seqno counter (worker layer, send-time alloc)
-        self._lwd_down_next_seqno = 0
         # req_id -> posted UP recv futures (consumed by the runner's device-side inject)
         self._lwd_up_recv_futures: dict[str, list] = {}
         if not self.enable_lwd:
@@ -151,7 +148,7 @@ class LwdCloudWorker(NPUWorker):
         _t0 = time.monotonic()
         output = super().execute_model(scheduler_output)
         # [Lwd][perf] 云侧每步 exec_model 计时:total=前向全程
-        # (forward 主段,sample/collect 在 sample_tokens 另有分项)
+        # (forward 主段;token_id 版无 DOWN 采集/发送附加段)
         logger.info(
             "[Lwd][perf] cloud-exec total=%.2fms",
             (time.monotonic() - _t0) * 1000,
@@ -208,62 +205,6 @@ class LwdCloudWorker(NPUWorker):
             batch.seqno, len(meta.req_ids), num_tokens, is_endpoint,
         )
 
-    @torch.inference_mode()
-    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        _t0 = time.monotonic()
-        output = self.model_runner.sample_tokens(grammar_output)
-        _t_sample = time.monotonic()
-        # rank-replay DOWN:发送 hidden 包(通道异步、流内有序);pinned 视图
-        # 挂输出内层(就绪由 get_output 的 wait_stream(主流) 保证),
-        # 引擎侧解码发布 meta。
-        if self.enable_lwd:
-            payload = self.model_runner.take_lwd_pending_down_payload()
-            if payload is not None and output is not None:
-                hidden, pinned, _event, req_ids, _accepted = payload
-                from vllm_ascend import envs
-
-                if envs.VLLM_ASCEND_LWD_EDGE_SKIP_SAMPLE:
-                    # token_id 回传版:token 经 c2e 通告直付边侧,
-                    # DOWN 张量不发送(边侧无配对 recv,发必积压);
-                    # 通道/秩重放代码全量保留,开关关闭即恢复
-                    seqno = -1
-                    logger.info(
-                        "[Lwd][cloud-worker] token-id mode: DOWN send "
-                        "skipped (payload dropped, rows=%d)",
-                        hidden.shape[0],
-                    )
-                else:
-                    seqno = self._lwd_next_down_seqno()
-                    logger.info(
-                        "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
-                        seqno, hidden.numel(),
-                    )
-                    get_lwd_comm_service().submit_send(
-                        LwdCommRequest(
-                            channel=LwdChannelType.DOWN,
-                            op="send",
-                            num_elements=hidden.numel(),
-                            tensor=hidden,
-                            seqno=seqno,
-                        )
-                    )
-                    # async 包装器下挂到内层,否则 get_output() 解包丢失
-                    target = getattr(output, "_model_runner_output", output)
-                    target.lwd_down_carrier = (
-                        pinned, req_ids, hidden.numel(), seqno
-                    )
-                # [Lwd][perf] 云侧每步计时:sample=采样+采集(含秩计算);
-                # send=DOWN 提交(快照clone+isend+bridge wait);total=全步
-                logger.info(
-                    "[Lwd][perf] cloud-step seqno=%d sample=%.2f send=%.2f "
-                    "total=%.2fms rows=%d",
-                    seqno,
-                    (_t_sample - _t0) * 1000,
-                    (time.monotonic() - _t_sample) * 1000,
-                    (time.monotonic() - _t0) * 1000,
-                    hidden.shape[0] if hidden is not None else 0,
-                )
-        return output
 
     # ------------------------------------------------------------------ #
     # LWD housekeeping (control-plane glue)                               #
@@ -314,7 +255,3 @@ class LwdCloudWorker(NPUWorker):
             _lwd_prompt_embeds_provider
         )
 
-    def _lwd_next_down_seqno(self) -> int:
-        seqno = self._lwd_down_next_seqno
-        self._lwd_down_next_seqno += 1
-        return seqno

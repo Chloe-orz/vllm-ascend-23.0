@@ -32,19 +32,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
-    # LWD diagnostic: when set to 1, the full token_id-return mode is on
-    # (adapted from the prefill_only_token_id_0915 delivery design):
-    # the cloud piggybacks per-request accepted token ids on the c2e
-    # notify and publishes it every step (no DOWN-payload dependency),
-    # and skips the DOWN tensor send (channel code retained for the
-    # normal mode); the edge delivers tokens synchronously at c2e
-    # consumption (no UNEMBED batches, batch queue carries embeds only).
-    # Used to attribute ITL/throughput regression between edge unembed
-    # and cloud. Default 0 (normal rank-replay). Never enable in
-    # production -- token ids must not cross the wire outside diagnostics.
-    "VLLM_ASCEND_LWD_EDGE_SKIP_SAMPLE": lambda: int(
-        os.getenv("VLLM_ASCEND_LWD_EDGE_SKIP_SAMPLE", 0)
-    ),
     # The build type of the package. It can be one of the following values:
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),
