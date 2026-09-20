@@ -58,9 +58,19 @@ def compute_top_id_th(logits: torch.Tensor, token_id: int) -> int:
     return int((order == token_id).nonzero()[0].item())
 
 
+def _lwd_empty_runner_output() -> "ModelRunnerOutput":
+    """空步出账值:原生对空步直接消费 execute future 的值(None 即判失败)。"""
+    return ModelRunnerOutput(
+        req_ids=[], req_id_to_index={}, sampled_token_ids=[]
+    )
+
+
 # ---- edge worker ----
 class LwdEdgeWorker(NPUWorker):
     """LWD edge worker: embed (prefill) + unembed (token recovery) only."""
+
+    # execute→sample 转交暂存:原生出账走 sample_tokens future,边侧真值经此转交
+    _lwd_pending_output: "ModelRunnerOutput | None" = None
 
     def load_model(self) -> None:
         """加载边侧模型，并为 DeepSeek V4 从权重文件读取 CPU Hash 路由表。"""
@@ -153,11 +163,14 @@ class LwdEdgeWorker(NPUWorker):
         """The LWD edge runs no attention/transformer, so it needs no KV cache."""
         return {}
 
-    def execute_model(self, scheduler_output: "SchedulerOutput"):
+    def execute_model(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> "ModelRunnerOutput | None":
+        """边侧执行:token 产出自本批;空步返回空输出,带批返回 None(出账走随后的 sample_tokens)。"""
         lwd_batch = scheduler_output.lwd_batch
         if lwd_batch is None:
             logger.debug("[lwd-edge] step carries no LWD batch; nothing to do")
-            return None
+            return _lwd_empty_runner_output()
 
         batch_meta = lwd_batch.batch_meta
         if lwd_batch.batch_type == LwdBatchType.LWD_EMBED:
@@ -167,7 +180,9 @@ class LwdEdgeWorker(NPUWorker):
                 len(batch_meta.req_ids),
                 sum(len(token_ids) for token_ids in batch_meta.token_ids),
             )
-            return self._execute_lwd_embed(lwd_batch.seqno, batch_meta)
+            self._execute_lwd_embed(lwd_batch.seqno, batch_meta)
+            self._lwd_pending_output = _lwd_empty_runner_output()
+            return None
         if lwd_batch.batch_type == LwdBatchType.LWD_UNEMBED:
             logger.info(
                 "[Lwd][edge-worker] UNEMBED seqno=%d reqs=%d accepted=%d "
@@ -177,13 +192,22 @@ class LwdEdgeWorker(NPUWorker):
                 sum(batch_meta.num_accept_tokens),
                 batch_meta.recv_num_elements,
             )
-            return self._execute_lwd_unembed(lwd_batch.seqno, batch_meta)
+            self._lwd_pending_output = self._execute_lwd_unembed(
+                lwd_batch.seqno, batch_meta
+            )
+            return None
 
         logger.debug(
             "[lwd-edge] unknown LWD batch type %r; nothing to do",
             lwd_batch.batch_type,
         )
-        return None
+        return _lwd_empty_runner_output()
+
+    def sample_tokens(self, grammar_output=None) -> "ModelRunnerOutput":
+        """原生步进出账口(覆写 NPUWorker):采样在云侧,转交暂存的批输出。"""
+        output = self._lwd_pending_output or _lwd_empty_runner_output()
+        self._lwd_pending_output = None
+        return output
 
     def _execute_lwd_embed(self, seqno: int, batch_meta: LwdEmbedBatch) -> None:
         model = self.model_runner.get_model()
