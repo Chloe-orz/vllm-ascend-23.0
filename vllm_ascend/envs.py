@@ -41,6 +41,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_LWD_EDGE_SKIP_SAMPLE": lambda: int(
         os.getenv("VLLM_ASCEND_LWD_EDGE_SKIP_SAMPLE", 0)
     ),
+    # LWD MTP diagnostic: when 1, the cloud runner logs per-request
+    # accepted-token counts each decode step ([Lwd][mtp-dbg] verify ...).
+    # Paired with the phase log, lwd_mtp_dbg_probe classifies draft
+    # quality by generation context (after-prefill vs after-decode) and
+    # consumption lag (fresh vs aged-across-prefill) to discriminate
+    # draft-corruption mechanisms. Default 0. Diagnostic only.
+    "VLLM_ASCEND_LWD_MTP_DBG": lambda: int(
+        os.getenv("VLLM_ASCEND_LWD_MTP_DBG", 0)
+    ),
     # The build type of the package. It can be one of the following values:
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),

@@ -2715,6 +2715,17 @@ class NPUModelRunner(GPUModelRunner):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
+        if (envs.VLLM_ASCEND_LWD_MTP_DBG and spec_decode_metadata is not None
+                and not self.use_async_scheduling):
+            # [Lwd][mtp-dbg] 逐请求接受数(env 门控诊断):配对相位日志,
+            # lwd_mtp_dbg_probe 按草稿生成环境(after-prefill/after-decode)
+            # × 消费时滞(fresh/aged)分桶,判决草稿污染机制
+            for req_idx in range(min(num_sampled_tokens, len(req_ids))):
+                _acc = len(valid_sampled_token_ids[req_idx] or [])
+                logger.info(
+                    "[Lwd][mtp-dbg] verify req=%s accepted=%d",
+                    req_ids[req_idx], _acc,
+                )
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
