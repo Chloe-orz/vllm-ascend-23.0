@@ -41,14 +41,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_LWD_EDGE_SKIP_SAMPLE": lambda: int(
         os.getenv("VLLM_ASCEND_LWD_EDGE_SKIP_SAMPLE", 0)
     ),
-    # LWD MTP diagnostic: when 1, the cloud runner logs per-request
-    # accepted-token counts each decode step ([Lwd][mtp-dbg] verify ...).
-    # Paired with the phase log, lwd_mtp_dbg_probe classifies draft
-    # quality by generation context (after-prefill vs after-decode) and
-    # consumption lag (fresh vs aged-across-prefill) to discriminate
-    # draft-corruption mechanisms. Default 0. Diagnostic only.
+    # LWD MTP diagnostic: per-request accepted-token counts each decode
+    # step ([Lwd][mtp-dbg] verify ...). Paired with the phase log,
+    # lwd_mtp_dbg_probe classifies draft quality by generation context
+    # (after-prefill vs after-decode) and consumption lag (fresh vs
+    # aged-across-prefill). Default ON (this branch is probe-style);
+    # set 0 to silence on very high concurrency.
     "VLLM_ASCEND_LWD_MTP_DBG": lambda: int(
-        os.getenv("VLLM_ASCEND_LWD_MTP_DBG", 0)
+        os.getenv("VLLM_ASCEND_LWD_MTP_DBG", 1)
     ),
     # The build type of the package. It can be one of the following values:
     # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
