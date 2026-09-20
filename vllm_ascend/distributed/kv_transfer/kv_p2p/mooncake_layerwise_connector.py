@@ -754,6 +754,11 @@ class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         self.requests: dict[str, ReqMeta] = {}
         self.send_task: SendTask = SendTask()
+        # Worker-local progress belongs to this target batch, not the worker.
+        # An independently scheduled MTP forward can run after another target
+        # has installed its metadata. None also distinguishes an unprepared
+        # transfer plan from a resumed target slice / draft chain.
+        self.current_layer: int | None = None
 
     def add_new_req(
         self,
@@ -1355,10 +1360,6 @@ class MooncakeLayerwiseConnectorWorker:
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
-        # start_load_kv resets this to zero for each new model batch.  Keep an
-        # explicit pre-batch value so diagnostics and lifecycle checks are
-        # valid before the first request arrives.
-        self.current_layer = -1
         self.use_mla = self.vllm_config.model_config.use_mla
         self.request_map = dict[str, str]()
         self.use_attn_mamba_hybrid = False
@@ -1901,8 +1902,8 @@ class MooncakeLayerwiseConnectorWorker:
 
     def start_load_kv(self, metadata: MooncakeLayerwiseConnectorMetadata):
         """Start loading KV blocks from remote engine."""
-        self.current_layer = 0
         if self.vllm_config.kv_transfer_config.is_kv_consumer:
+            metadata.current_layer = 0
             for req_id, meta in metadata.requests.items():
                 if meta.do_virtual:
                     self.virtual_request.add(req_id)
@@ -1928,6 +1929,10 @@ class MooncakeLayerwiseConnectorWorker:
                     len(self.request_map),
                 )
         elif self.vllm_config.kv_transfer_config.is_kv_producer:
+            if metadata.current_layer is not None:
+                # Target layer slices reuse the same metadata. Rebuilding the
+                # plan would expand kernel block ids twice and reset progress.
+                return
             # update trans info
             update_metadata = {}
             for req_idx, (req_id, req_meta) in enumerate(metadata.requests.items()):
@@ -2028,6 +2033,7 @@ class MooncakeLayerwiseConnectorWorker:
                         [send_task.group_num_tokens[i]], dtype=torch.int32, device=device
                     )
                     send_task.group_seq_start_tensor[i] = torch.tensor([0], dtype=torch.int32, device=device)
+            metadata.current_layer = 0
 
     def save_kv_layer(
         self,
@@ -2039,12 +2045,15 @@ class MooncakeLayerwiseConnectorWorker:
     ) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
         if self.vllm_config.kv_transfer_config.is_kv_producer and connector_metadata.requests.keys():
-            if self.current_layer >= self.total_layers:
-                self.current_layer += 1
+            current_layer = connector_metadata.current_layer
+            if current_layer is None:
+                raise RuntimeError("Cannot save KV before preparing this batch's transfer metadata")
+            if current_layer >= self.total_layers:
+                connector_metadata.current_layer = current_layer + 1
                 return
             # get reshape and cache event
             if layer_name == "":
-                layer_name = self.index_to_name[self.current_layer][0]
+                layer_name = self.index_to_name[current_layer][0]
             if (
                 isinstance(attn_metadata, dict)
                 and hasattr(attn_metadata[layer_name], "reshape_cache_event")
@@ -2072,8 +2081,8 @@ class MooncakeLayerwiseConnectorWorker:
                     and (isinstance(self.kv_cache_specs[layer_group_idx], (FullAttentionSpec, SlidingWindowSpec)))
                     and send_task.group_num_blocks[layer_group_idx] > 0
                 )
-                or (self.enable_c8_quant and self.current_layer in self.vllm_config.quant_config.c8_quant_layers)
-                or (self.enable_kv_quant and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers)
+                or (self.enable_c8_quant and current_layer in self.vllm_config.quant_config.c8_quant_layers)
+                or (self.enable_kv_quant and current_layer in self.vllm_config.quant_config.kvcache_quant_layers)
             ):
                 assert self.resharding_stream is not None
                 with npu_stream_switch(self.resharding_stream):
@@ -2138,7 +2147,7 @@ class MooncakeLayerwiseConnectorWorker:
                         quant_values = self.get_nz_cache(quant_values, layer_group_idx)
                     if (
                         self.enable_kv_quant
-                        and self.current_layer in self.vllm_config.quant_config.kvcache_quant_layers
+                        and current_layer in self.vllm_config.quant_config.kvcache_quant_layers
                     ):
                         layer = self.vllm_config.compilation_config.static_forward_context[layer_name]
                         keys = torch.ops.vllm.quantize(
@@ -2155,7 +2164,7 @@ class MooncakeLayerwiseConnectorWorker:
                 v_cache=values,
                 k_quant_cache=quant_keys,
                 v_quant_cache=quant_values,
-                layer_idx=self.current_layer,
+                layer_idx=current_layer,
                 layer_name=layer_name,
                 group_rearrange_block_ids=send_task.group_rearrange_block_ids,
             )
@@ -2167,7 +2176,7 @@ class MooncakeLayerwiseConnectorWorker:
                         PD_TRACE_PREFIX,
                         get_external_request_id(req_id),
                         self.engine_id,
-                        self.current_layer,
+                        current_layer,
                         layer_name,
                         layer_group_idx,
                     )
@@ -2181,12 +2190,12 @@ class MooncakeLayerwiseConnectorWorker:
                         PD_TRACE_PREFIX,
                         get_external_request_id(req_id),
                         self.engine_id,
-                        self.current_layer,
+                        current_layer,
                         layer_name,
                         e,
                     )
                     continue
-                if self.current_layer == 0:
+                if current_layer == 0:
                     logger.info(
                         "%s request_id=%s stage=p_worker event=layerwise_write_started "
                         "engine_id=%s remote_engine_id=%s destination=%s:%s total_layers=%d",
@@ -2205,7 +2214,7 @@ class MooncakeLayerwiseConnectorWorker:
                     PD_TRACE_PREFIX,
                     get_external_request_id(req_id),
                     self.engine_id,
-                    self.current_layer,
+                    current_layer,
                     layer_name,
                     _block_counts(req_meta_update.local_block_ids),
                     _block_counts(req_meta_update.remote_block_ids),
@@ -2213,7 +2222,18 @@ class MooncakeLayerwiseConnectorWorker:
                 layer_send_task.send_request[req_id] = req_meta_update
 
             self.kv_send_layer_thread.send_queue.put(layer_send_task)
-            self.current_layer += 1
+            connector_metadata.current_layer = current_layer + 1
+            if current_layer == self.total_layers - 1:
+                for req_id in layer_send_task.send_request:
+                    logger.info(
+                        "%s request_id=%s stage=p_worker event=terminal_layer_queued "
+                        "engine_id=%s layer_idx=%d layer_name=%s",
+                        PD_TRACE_PREFIX,
+                        get_external_request_id(req_id),
+                        self.engine_id,
+                        current_layer,
+                        layer_name,
+                    )
 
     # NOTE: Due to the FIA operator constraints, the expected kv cache is ND format, NZ shape,
     # while the npu_format_cast method only modifies the memory layout, we manually convert it to NZ shape here

@@ -675,6 +675,14 @@ class MockRequest:
 
 
 class TestMooncakeLayerwiseConnectorMetadata(unittest.TestCase):
+    def test_layer_cursor_is_initialized_and_batch_local(self):
+        first = MooncakeLayerwiseConnectorMetadata()
+        second = MooncakeLayerwiseConnectorMetadata()
+        self.assertIsNone(first.current_layer)
+        self.assertIsNone(second.current_layer)
+        first.current_layer = 64
+        self.assertIsNone(second.current_layer)
+
     def test_add_new_req(self):
         meta = MooncakeLayerwiseConnectorMetadata()
         self.assertEqual(len(meta.requests), 0)
@@ -1198,15 +1206,6 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:
             p.stop()  # type: ignore
-
-    def test_current_layer_is_initialized_before_first_batch(self):
-        worker = MooncakeLayerwiseConnectorWorker(
-            self.vllm_config,
-            self.kv_cache_config,
-            self.engine_id,
-        )
-
-        self.assertEqual(worker.current_layer, -1)
 
     def test_register_kv_caches_producer(self):
         self.vllm_config.kv_transfer_config.is_kv_producer = True

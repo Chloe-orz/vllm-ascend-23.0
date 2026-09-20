@@ -154,6 +154,14 @@ python examples/edge_cloud_pd_disaggregated_qwen3_5/smoke_test.py \
   `edge_recv_attached`、`edge_tail_returned` 都包含 task、step、parent request 和 seqno。
   `recv_attached` 只说明取得接收 future，不能作为接收完成证据；`tail_returned`
   说明 Python 尾段执行返回，也不额外强制设备同步。设备接收完成仍看 `early-irecv`。
+- `[PD-KV-CONTEXT]`：P-cloud 每个 draft step 的 `draft_bind/draft_unbind`
+  记录 task、step、请求归属及该 target 的 `current_layer`。KV metadata 与层进度
+  按 target 保存，A/B target 和 draft 交错时不会沿用另一个请求的计数。
+  对当前 64 层 target + 1 层 MTP，step 0 应从 64 推进到 65，后续 MTP step
+  不再生成重复的终层发送任务；target 分层续算也不会重置计数或重复展开 block IDs。
+- P-cloud 的 `event=terminal_layer_queued`：该请求的终层发送任务已入队，
+  **不代表** KV 写入或完成信号已经送达。仍须按同一请求、同一 TP rank 核对后续
+  `kv_write_complete`、`completion_signal_start` 和 `completion_signal_acked`。
 - D 的 `[PD-TRACE] event=kv_signal_progress`：当前 TP worker 已收到的唯一发送端
   信号数与期望值。`event=kv_receive_wait` 每个 worker 最多每 30 秒记录一次长等待，
   包括总量、接收线程存活状态、最早 3 个请求的等待时长及信号状态。

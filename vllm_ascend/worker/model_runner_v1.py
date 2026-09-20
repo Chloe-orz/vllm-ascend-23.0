@@ -23,7 +23,7 @@ import os
 import sys
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, nullcontext
 from copy import copy, deepcopy
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -6801,6 +6801,9 @@ class NPUModelRunner(GPUModelRunner):
         # Freeze the verify step's scheduler_output alongside the metadata.
         # The draft task that consumes it is scheduled independently, so the
         # global _last_scheduler_output may already have moved on.
+        # Deliberately retain the KV metadata object: start_load_kv prepares
+        # its transfer plan after this snapshot, and the matching cloud MTP
+        # must continue that same plan/cursor rather than a pre-forward copy.
         self._cloud_scheduler_output_by_task[task_id] = replace(
             scheduler_output
         )
@@ -7337,6 +7340,57 @@ class NPUModelRunner(GPUModelRunner):
                 recorded += 1
         return recorded
 
+    @contextmanager
+    def _cloud_draft_kv_context(self, scheduler_output: "SchedulerOutput") -> Iterator[None]:
+        """Bind the draft's target KV plan across independent scheduling.
+
+        The latest connector binding may belong to a different target batch.
+        Use the same task-keyed snapshot as draft attention, including its
+        worker-prepared transfer plan and layer cursor. Do not call start_load_kv
+        here: a draft continues the target's transfer, it does not start one.
+        """
+        kv_config = self.vllm_config.kv_transfer_config
+        if (
+            not has_kv_transfer_group()
+            or kv_config is None
+            or not kv_config.is_kv_producer
+            or not self._uses_scheduled_edge_cloud_draft()
+        ):
+            yield
+            return
+
+        task_id = scheduler_output.draft_task_id
+        target = self._cloud_scheduler_output_by_task.get(task_id)
+        if target is None or target.kv_connector_metadata is None:
+            raise RuntimeError(
+                "Cloud draft has no matching target KV metadata: "
+                f"task_id={task_id}, step={scheduler_output.draft_step_idx}"
+            )
+        metadata = target.kv_connector_metadata
+        connector = get_kv_transfer_group()
+        connector.bind_connector_metadata(metadata)
+        logger.info(
+            "[PD-KV-CONTEXT] event=draft_bind task_id=%s step=%s "
+            "request_ids=%s current_layer=%s",
+            task_id,
+            scheduler_output.draft_step_idx,
+            list(getattr(metadata, "requests", {})),
+            getattr(metadata, "current_layer", None),
+        )
+        try:
+            yield
+        finally:
+            # Clearing the active binding must not discard another task's
+            # snapshot, nor the metadata held by already queued send tasks.
+            connector.clear_connector_metadata()
+            logger.info(
+                "[PD-KV-CONTEXT] event=draft_unbind task_id=%s step=%s "
+                "current_layer=%s",
+                task_id,
+                scheduler_output.draft_step_idx,
+                getattr(metadata, "current_layer", None),
+            )
+
     def _finalize_cloud_draft_kv_connector(
         self, spec_step_idx: int
     ) -> bool:
@@ -7457,24 +7511,26 @@ class NPUModelRunner(GPUModelRunner):
             batch_descriptor = BatchDescriptor(num_tokens)
             num_actual_tokens = num_tokens
 
-        with set_ascend_forward_context(
-            attn_metadata=draft_attn_metadata,
-            vllm_config=self.vllm_config,
-            num_tokens=num_tokens,
-            num_actual_tokens=num_actual_tokens,
-            batch_descriptor=batch_descriptor,
-            aclgraph_runtime_mode=cudagraph_runtime_mode,
-            is_draft_model=True,
+        with (
+            self._cloud_draft_kv_context(scheduler_output),
+            set_ascend_forward_context(
+                attn_metadata=draft_attn_metadata,
+                vllm_config=self.vllm_config,
+                num_tokens=num_tokens,
+                num_actual_tokens=num_actual_tokens,
+                batch_descriptor=batch_descriptor,
+                aclgraph_runtime_mode=cudagraph_runtime_mode,
+                is_draft_model=True,
+            ),
         ):
             output = self._edge_cloud_draft_segments["c"](**model_kwargs)
-        if not isinstance(output, IntermediateTensors):
-            raise RuntimeError(
-                "Edge-cloud draft middle segment returned no intermediates"
+            if not isinstance(output, IntermediateTensors):
+                raise RuntimeError(
+                    "Edge-cloud draft middle segment returned no intermediates"
+                )
+            is_final_draft_step = self._finalize_cloud_draft_kv_connector(
+                spec_step_idx
             )
-
-        is_final_draft_step = self._finalize_cloud_draft_kv_connector(
-            spec_step_idx
-        )
 
         if (
             scheduler_output.draft_task_id is not None
