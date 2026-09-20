@@ -605,6 +605,25 @@ class NPUModelRunner(GPUModelRunner):
                 block_size=self.block_size, device=self.device, vllm_config=self.vllm_config,
                 parallel_config=self.parallel_config, dtype=self.dtype)
 
+        # LWD spec passthrough(phase-alternation fix):纯 P 步会把 decode 请求
+        # 藏出批一拍,原生 async spec 的 GPU 直通(_draft_token_ids /
+        # prev_sampled_token_ids 按上一步批行号 scatter)随之断链。此开关
+        # 让直通值跨相位步存活:影子行保留旧值 + scatter 位置回退一代。
+        # 非 LWD 部署行为 bit-for-bit 不变。
+        self._lwd_spec_passthrough = bool(
+            self.num_spec_tokens
+            and self.parallel_config.lwd_config.enable_lwd
+        )
+        # 直通值张量当前行布局对应的 req_id 序(condense 后据此重排)
+        self._lwd_buf_req_ids: list[str] | None = None
+        # prev_req_id_to_index 的两代滚动快照(gen1=上一步,gen2=上上步),
+        # value 已随 condense 重排到当前 input_batch 布局
+        self._lwd_prev_map_gen1: dict[str, int] | None = None
+        self._lwd_prev_map_gen2: dict[str, int] | None = None
+        self._lwd_scatter_positions_np = np.full(self.max_num_reqs, -1, dtype=np.int32)
+        # 本步派工单行掩码(_prepare_inputs 构造,gen2 回退的护栏)
+        self._lwd_cur_sched_mask: np.ndarray | None = None
+
     @property
     def use_cp(self) -> bool:
         return self.pcp_size * self.dcp_size > 1
@@ -741,7 +760,116 @@ class NPUModelRunner(GPUModelRunner):
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
 
-        return super()._update_states(scheduler_output)
+        out = super()._update_states(scheduler_output)
+        # condense 可能搬动了批布局:跨步存活的直通值张量与 gen 行号表
+        # 必须跟着重排,行号语义(= input_batch 当前行)才在相位步之间恒成立
+        self._lwd_reorder_passthrough_after_condense()
+        return out
+
+    # ------------------------------------------------------------------ #
+    # LWD spec passthrough(phase-alternation fix)                        #
+    # ------------------------------------------------------------------ #
+    def _lwd_keep_shadow_passthrough(
+        self,
+        old_draft: torch.Tensor | None,
+        old_sampled: torch.Tensor | None,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        """propose 整批覆写后,恢复"本步未被调度"的影子行的直通值。
+
+        纯 P 步里 decode 影子(段 0)的 draft/采样落在错位行上,propose
+        会把它们的行写成垃圾、并把 D 步产出的有效 draft 冲掉。此处把
+        影子行恢复为上一步的值,使下一个 D 步的 scatter 仍能取到停拍前
+        的有效接力棒(停拍期间上下文未变,旧 draft/采样语义仍正确)。
+        正常步(全员被调度)走 mask.all() 快路径,仅多一次 numpy 比较。"""
+        self._lwd_buf_req_ids = list(self.input_batch.req_ids)
+        if old_draft is None or not self.use_async_scheduling:
+            return
+        num_reqs = self.input_batch.num_reqs
+        if num_reqs == 0:
+            return
+        # 行掩码来自派工单(SO),不用 num_scheduled_tokens.np——后者不清
+        # 尾部,P 步的影子行残留上一步的非零值
+        sched = scheduler_output.num_scheduled_tokens
+        mask = np.array(
+            [sched.get(r, 0) > 0 for r in self.input_batch.req_ids[:num_reqs]]
+        )
+        if mask.all():
+            return
+        sel = torch.from_numpy(mask).to(self.device)
+        new_draft = self._draft_token_ids
+        if (
+            torch.is_tensor(new_draft) and torch.is_tensor(old_draft)
+            and new_draft.shape == old_draft.shape
+            and new_draft.dtype == old_draft.dtype
+        ):
+            self._draft_token_ids = torch.where(
+                sel.unsqueeze(1), new_draft, old_draft
+            )
+        new_sampled = self.input_batch.prev_sampled_token_ids
+        if (
+            new_sampled is not None and torch.is_tensor(new_sampled)
+            and old_sampled is not None and torch.is_tensor(old_sampled)
+            and new_sampled.shape == old_sampled.shape
+            and new_sampled.dtype == old_sampled.dtype
+        ):
+            self.input_batch.prev_sampled_token_ids = torch.where(
+                sel, new_sampled, old_sampled
+            )
+
+    def _lwd_reorder_passthrough_after_condense(self) -> None:
+        """condense 搬动批布局后,重排直通值张量与 gen 行号表。
+
+        condense 是原地 swap 且只搬 input_batch 自己的字段;跨步存活的
+        _draft_token_ids / prev_sampled_token_ids / 两代 gen 快照若不跟
+        着搬,行号语义失效(高并发请求频繁 finish 时必现行错位)。新加
+        入的请求行取第 0 行占位(其值随后被 merge/propose 覆写)。"""
+        if not self._lwd_spec_passthrough or self._lwd_buf_req_ids is None:
+            return
+        req_ids = list(self.input_batch.req_ids)
+        old_map = {r: i for i, r in enumerate(self._lwd_buf_req_ids)}
+        new_map = self.input_batch.req_id_to_index
+        if len(old_map) == len(req_ids) and all(
+            old_map.get(r) == new_map.get(r) for r in req_ids
+        ):
+            return  # 布局未变,零开销快路径
+        gather = [old_map.get(r, 0) for r in req_ids]
+        draft = self._draft_token_ids
+        if draft is not None and torch.is_tensor(draft):
+            idx = torch.tensor(gather, dtype=torch.long, device=draft.device)
+            self._draft_token_ids = draft[idx]
+        prev = self.input_batch.prev_sampled_token_ids
+        if prev is not None and torch.is_tensor(prev):
+            idx = torch.tensor(gather, dtype=torch.long, device=prev.device)
+            self.input_batch.prev_sampled_token_ids = prev[idx]
+        self._lwd_buf_req_ids = req_ids
+        for name in ("_lwd_prev_map_gen1", "_lwd_prev_map_gen2"):
+            mapping = getattr(self, name, None)
+            if mapping is not None:
+                setattr(self, name, {
+                    r: new_map[r] for r in mapping if r in new_map
+                })
+
+    def _get_scatter_prev_positions(self, num_reqs: int) -> np.ndarray:
+        """scatter 专用位置表:gen1(上一步批)未命中的请求回退 gen2
+        (上上步批)——即纯 P 步之前的那个 D 步的行号,配合影子行保留的
+        直通值,接力棒跨相位步不断。回退仅对"本步真排了行"的请求生效
+        (_lwd_cur_sched_mask 护栏):段 0 影子的 scatter 写入位置会落到
+        前一请求段末行、覆盖他人输入,必须挡住。账本消费者(校正 kernel
+        等)仍读 self.prev_positions(仅 gen1),语义不受影响。"""
+        out = self._lwd_scatter_positions_np[:num_reqs]
+        out[:] = self.prev_positions.np[:num_reqs]
+        if (
+            self._lwd_spec_passthrough
+            and self._lwd_prev_map_gen2 is not None
+            and self._lwd_cur_sched_mask is not None
+        ):
+            gen2 = self._lwd_prev_map_gen2
+            mask = self._lwd_cur_sched_mask[:num_reqs]
+            for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+                if out[i] < 0 and mask[i]:
+                    out[i] = gen2.get(req_id, -1)
+        return out
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -879,6 +1007,15 @@ class NPUModelRunner(GPUModelRunner):
         # PCP can repair async sampled/draft ids with device-side index math.
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
+        if self._lwd_spec_passthrough:
+            # 本步"真排了行"的行掩码(SO 派工单为准,不用 num_scheduled_
+            # tokens.np——其尾部不清零,残留上一步值)。gen2 回退的护栏:
+            # 段 0 影子绝不参与 scatter,否则写入位置落到前一请求段末行,
+            # 覆盖他人输入(原生靠"段 0 必 discard → 不进地址簿"挡住)。
+            _sched = scheduler_output.num_scheduled_tokens
+            self._lwd_cur_sched_mask = np.array(
+                [_sched.get(r, 0) > 0 for r in self.input_batch.req_ids[:num_reqs]]
+            )
         prev_positions_gpu = None
         if (
             self.use_async_scheduling
@@ -1070,6 +1207,15 @@ class NPUModelRunner(GPUModelRunner):
             discard_requests_mask = original_seq_lens_np < num_tokens_np
         else:
             discard_requests_mask = self.optimistic_seq_lens_cpu[:num_reqs].numpy() < num_tokens_np
+            if self._lwd_spec_passthrough:
+                # 纯 P 步的段 0 影子请求:采样位置落到他人行上,必须确定性
+                # 丢弃(computed<num_tokens 的原生条件依赖 async 输出回流
+                # 时序,不保证命中;命中也属巧合)。确定性 discard 同时让
+                # next_token_ids 的 backup 兜底正确工作。
+                _sched = scheduler_output.num_scheduled_tokens
+                discard_requests_mask |= np.array(
+                    [_sched.get(r, 0) == 0 for r in self.input_batch.req_ids[:num_reqs]]
+                )
 
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
@@ -2450,6 +2596,21 @@ class NPUModelRunner(GPUModelRunner):
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
+            # LWD passthrough:propose 前保存直通值旧样(影子行恢复用;
+            # propose 内部会整批覆写 _draft_token_ids / prev_sampled)
+            _old_draft = (
+                self._draft_token_ids
+                if (self._lwd_spec_passthrough
+                    and torch.is_tensor(self._draft_token_ids))
+                else None
+            )
+            _old_sampled = (
+                self.input_batch.prev_sampled_token_ids
+                if (self._lwd_spec_passthrough
+                    and self.input_batch.prev_sampled_token_ids is not None
+                    and torch.is_tensor(self.input_batch.prev_sampled_token_ids))
+                else None
+            )
             self._draft_token_ids = self.propose_draft_token_ids(
                 sampled_token_ids,
                 self.input_batch.sampling_metadata,
@@ -2464,6 +2625,9 @@ class NPUModelRunner(GPUModelRunner):
                 batch_desc,
             )
             self._copy_draft_token_ids_to_cpu(scheduler_output)
+            self._lwd_keep_shadow_passthrough(
+                _old_draft, _old_sampled, scheduler_output
+            )
 
         (
             logprobs_lists,
@@ -2709,6 +2873,11 @@ class NPUModelRunner(GPUModelRunner):
             self.input_batch.prev_req_id_to_index = {
                 req_id: i for i, req_id in enumerate(self.input_batch.req_ids) if i not in invalid_req_indices_set
             }
+            if self._lwd_spec_passthrough:
+                # 两代滚动:gen1=上一步批,gen2=上上步批(纯 P 步之前的
+                # D 步)。value 行号已随 condense 重排到当前布局。
+                self._lwd_prev_map_gen2 = self._lwd_prev_map_gen1
+                self._lwd_prev_map_gen1 = dict(self.input_batch.prev_req_id_to_index)
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
