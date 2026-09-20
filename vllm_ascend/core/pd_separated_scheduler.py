@@ -206,6 +206,14 @@ class PDSeparatedScheduler(Scheduler):
         # soon as the parent is published; DRF steps consume
         # base + draft_step_idx at pick time.
         self._reserved_draft_seqno_base: dict[str, int] = {}
+        # Reservation order, not ready-queue arrival order, owns each wire.
+        # Keep a chain here even when its next dynamic step has not been
+        # created yet. Otherwise B/0 can consume the remote credit while
+        # its send waits for the missing A/1 and A/2 on the same channel.
+        self._draft_seqno_order: dict[bool, deque[str]] = {
+            True: deque(),  # PREFILL_DRAFT pair
+            False: deque(),  # DECODE pair
+        }
 
         # Buffer queue: requests whose P-first segment is done but P-last
         # segment has not yet returned from the cloud.  Not eligible for
@@ -898,7 +906,8 @@ class PDSeparatedScheduler(Scheduler):
             "queues: pl_last=%d df_ph=%d dl_last=%d p_drf=%d p_drl=%d "
             "d_drf=%d d_drl=%d | "
             "tail_ready: pl=%s dl=%s p_drl=%s d_drl=%s | "
-            "placeholder_parent=%s publish_pending=%d",
+            "placeholder_parent=%s publish_pending=%d | "
+            "draft_order: p_owner=%s p_ready=%s d_owner=%s d_ready=%s",
             self._prefill_state(),
             len(self.waiting),
             len(self.chunk_prefill_first),
@@ -926,6 +935,10 @@ class PDSeparatedScheduler(Scheduler):
             self._has_actionable_decode_draft_tail(),
             self._decode_first_placeholder_parent is not None,
             len(self._draft_publish_pending),
+            next(iter(self._draft_seqno_order[True]), None),
+            (self.prefill_drafts_first_ready[0].draft_task_id if self.prefill_drafts_first_ready else None),
+            next(iter(self._draft_seqno_order[False]), None),
+            (self.decode_drafts_first_ready[0].draft_task_id if self.decode_drafts_first_ready else None),
         )
 
     def _decode_or_draft_first_only_active(self) -> bool:
@@ -1238,10 +1251,31 @@ class PDSeparatedScheduler(Scheduler):
             )
         )
 
+    def _next_draft_first_index(self, prefill_phase: bool) -> int | None:
+        """Find the next wire owner's step, including dynamic continuations.
+
+        An earlier reservation can exist without any ready step (parent
+        tail or previous draft tail still in flight). In that case do not
+        admit a later chain, even if it has pre-generated lookahead credit.
+        The two physical channel pairs remain independent.
+        """
+        ready = self.prefill_drafts_first_ready if prefill_phase else self.decode_drafts_first_ready
+        if not ready:
+            return None
+        order = self._draft_seqno_order[prefill_phase]
+        if not order:
+            # Legacy, non-reserved drafts receive seqnos at pick time.
+            return 0
+        for index, output in enumerate(ready):
+            if output.draft_task_id == order[0]:
+                return index
+        return None
+
     def _can_schedule_prefill_draft_first(self) -> bool:
-        if not self.prefill_drafts_first_ready:
+        index = self._next_draft_first_index(prefill_phase=True)
+        if index is None:
             return False
-        next_output = self.prefill_drafts_first_ready[0]
+        next_output = self.prefill_drafts_first_ready[index]
         is_pregenerated = (
             next_output.draft_task_id in self._pregenerated_draft_task_ids
         )
@@ -1271,9 +1305,10 @@ class PDSeparatedScheduler(Scheduler):
         )
 
     def _can_schedule_decode_draft_first(self) -> bool:
-        if not self.decode_drafts_first_ready:
+        index = self._next_draft_first_index(prefill_phase=False)
+        if index is None:
             return False
-        next_output = self.decode_drafts_first_ready[0]
+        next_output = self.decode_drafts_first_ready[index]
         is_pregenerated = (
             next_output.draft_task_id in self._pregenerated_draft_task_ids
         )
@@ -1766,45 +1801,48 @@ class PDSeparatedScheduler(Scheduler):
         else:
             first_ready = self.decode_drafts_first_ready
             last_ready = self.decode_drafts_last_ready
-        while first_ready:
-            scheduler_output = first_ready.popleft()
-            if self._is_stale_draft_output(scheduler_output):
-                # Never drop a stale DRAFT_FIRST: its comm seqno was
-                # reserved and its recvs were pre-posted when the parent
-                # batch was published, so dropping it would leave a hole
-                # on the channel and stall every later chain.  Drain the
-                # chain with dummy payloads instead (draft_chain_dead):
-                # the draft context is gone, but zeros need no context.
-                scheduler_output.draft_chain_dead = True
-                if scheduler_output.draft_task_id:
-                    self._dead_draft_task_ids.add(
-                        scheduler_output.draft_task_id
-                    )
-                    # Its step-0 cloud control may sit in the deferred
-                    # pre-out queue waiting for scalars that a dead parent
-                    # never produces — release it (engine core drains this
-                    # list and publishes immediately).
-                    self._dead_chain_publish_to_release.append(
-                        scheduler_output.draft_task_id
-                    )
-                task_id = scheduler_output.draft_task_id
-                if (
-                    task_id is not None
-                    and self._draft_publish_pending.get(task_id)
-                    is scheduler_output
-                ):
-                    self._draft_publish_pending.pop(task_id, None)
-                    self._draft_publish_scalars_patched.discard(task_id)
-                    self._draft_publish_dispatched.discard(task_id)
-                logger.info(
-                    "[PD] stale DRAFT_FIRST drains as dummy: task_id=%s "
-                    "step=%s",
-                    scheduler_output.draft_task_id,
-                    scheduler_output.draft_step_idx,
-                )
-            break
-        else:
+        index = self._next_draft_first_index(prefill_phase)
+        if index is None:
             return self._make_empty_batch()
+        # Do not compare SchedulerOutputs for equality: some fields can
+        # contain tensors. Remove the selected entry by its deque index.
+        if index:
+            logger.info(
+                "[PD-DRAFT-ORDER] event=ready_reordered prefill_phase=%s "
+                "selected_task=%s selected_step=%s bypassed_task=%s "
+                "reserved_base=%s",
+                prefill_phase,
+                first_ready[index].draft_task_id,
+                first_ready[index].draft_step_idx,
+                first_ready[0].draft_task_id,
+                self._reserved_draft_seqno_base.get(first_ready[index].draft_task_id),
+            )
+        scheduler_output = first_ready[index]
+        del first_ready[index]
+        if self._is_stale_draft_output(scheduler_output):
+            # Never drop a stale DRAFT_FIRST: its comm seqno was
+            # reserved and its recvs were pre-posted when the parent
+            # batch was published, so dropping it would leave a hole
+            # on the channel and stall every later chain. Drain with
+            # dummy payloads instead: zeros need no draft context.
+            scheduler_output.draft_chain_dead = True
+            if scheduler_output.draft_task_id:
+                self._dead_draft_task_ids.add(
+                    scheduler_output.draft_task_id,
+                )
+                # Release step-0 cloud control waiting for scalars that
+                # a dead parent will never produce.
+                self._dead_chain_publish_to_release.append(scheduler_output.draft_task_id)
+            task_id = scheduler_output.draft_task_id
+            if task_id is not None and self._draft_publish_pending.get(task_id) is scheduler_output:
+                self._draft_publish_pending.pop(task_id, None)
+                self._draft_publish_scalars_patched.discard(task_id)
+                self._draft_publish_dispatched.discard(task_id)
+            logger.info(
+                "[PD] stale DRAFT_FIRST drains as dummy: task_id=%s step=%s",
+                scheduler_output.draft_task_id,
+                scheduler_output.draft_step_idx,
+            )
 
         task_id = scheduler_output.draft_task_id
         if (
@@ -1840,6 +1878,9 @@ class PDSeparatedScheduler(Scheduler):
         if base is not None:
             scheduler_output.comm_seqno = base + step_idx
             if step_idx >= self.num_spec_tokens - 1:
+                order = self._draft_seqno_order[prefill_phase]
+                assert order and order[0] == task_id
+                order.popleft()
                 self._reserved_draft_seqno_base.pop(task_id, None)
         elif scheduler_output.draft_prefill_phase:
             scheduler_output.comm_seqno = self._prefill_draft_comm_seqno
@@ -1890,6 +1931,7 @@ class PDSeparatedScheduler(Scheduler):
         logger.info(
             "[MTP-DEBUG] scheduler picked DRAFT_FIRST: task_id=%s, "
             "parent_req_id=%s, draft_step_idx=%s, head_token=%s, "
+            "comm_seqno=%s, reserved_base=%s, chain_dead=%s, "
             "prefill_phase=%s, remaining_ready=%d, "
             "decode_or_draft_inflight=%d, prefill_draft_remote_pending=%d, "
             "decode_draft_remote_pending=%d",
@@ -1897,6 +1939,9 @@ class PDSeparatedScheduler(Scheduler):
             scheduler_output.parent_req_id,
             scheduler_output.draft_step_idx,
             scheduler_output.head_token,
+            scheduler_output.comm_seqno,
+            base,
+            scheduler_output.draft_chain_dead,
             prefill_phase,
             len(first_ready),
             self.decode_or_draft_inflight_count,
@@ -1926,14 +1971,26 @@ class PDSeparatedScheduler(Scheduler):
         head_token = scheduler_output.head_token
         if not head_token:
             return
-        if scheduler_output.batch_type == BatchType.PREFILL_FIRST:
+        prefill_phase = scheduler_output.batch_type == BatchType.PREFILL_FIRST
+        if prefill_phase:
             base = self._prefill_draft_comm_seqno
             self._prefill_draft_comm_seqno += self.num_spec_tokens
         else:
             base = self._decode_comm_seqno
             self._decode_comm_seqno += self.num_spec_tokens
         self._reserved_draft_seqno_base[head_token] = base
+        self._draft_seqno_order[prefill_phase].append(head_token)
         scheduler_output.draft_seqno_base = base
+        logger.info(
+            "[PD-DRAFT-ORDER] event=reserved task_id=%s request_ids=%s "
+            "prefill_phase=%s seqno_base=%d steps=%d channel_head=%s",
+            head_token,
+            list(scheduler_output.num_scheduled_tokens),
+            prefill_phase,
+            base,
+            self.num_spec_tokens,
+            self._draft_seqno_order[prefill_phase][0],
+        )
 
     def _uses_async_scheduled_mtp_placeholders(self) -> bool:
         """Whether scheduled MTP can use native async placeholder semantics."""

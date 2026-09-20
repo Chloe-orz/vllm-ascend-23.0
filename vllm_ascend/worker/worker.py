@@ -1680,8 +1680,13 @@ class NPUWorker(WorkerBase):
                     draft_meta=send_tensor_meta,
                 ))
             logger.info(
-                "Send intermediate tensors to edge, "
-                f"hidden_channel: {channel_for_direction(_kind, up=False).value}"
+                "[PD-DRAFT-PROGRESS] event=cloud_send_submitted "
+                "channel=%s seqno=%s task_id=%s step=%s parent_req_id=%s",
+                channel_for_direction(_kind, up=False).value,
+                _seqno,
+                scheduler_output.draft_task_id,
+                scheduler_output.draft_step_idx,
+                scheduler_output.parent_req_id,
             )
         logger.info(
             f"Execute model, batch_type: {scheduler_output.batch_type}, after."
@@ -1813,9 +1818,12 @@ class NPUWorker(WorkerBase):
                     draft_meta=send_tensor_meta,
                 ))
             logger.info(
-                "Send intermediate tensors to cloud, "
-                f"hidden_channel: "
-                f"{channel_for(scheduler_output.batch_type, _kind).value}"
+                "[PD-DRAFT-PROGRESS] event=edge_send_submitted channel=%s seqno=%s task_id=%s step=%s parent_req_id=%s",
+                channel_for(scheduler_output.batch_type, _kind).value,
+                scheduler_output.comm_seqno,
+                scheduler_output.draft_task_id,
+                scheduler_output.draft_step_idx,
+                scheduler_output.parent_req_id,
             )
 
     def _resume_deferred_edge_draft_head(
@@ -1863,14 +1871,25 @@ class NPUWorker(WorkerBase):
                 draft_meta=recv_tensor_meta,
             ))
         logger.info(
-            "Receive intermediate tensors from cloud after, "
-            f"hidden_channel: "
-            f"{channel_for(scheduler_output.batch_type, _kind).value}"
+            "[PD-DRAFT-PROGRESS] event=edge_recv_attached channel=%s seqno=%s task_id=%s step=%s parent_req_id=%s",
+            channel_for(scheduler_output.batch_type, _kind).value,
+            scheduler_output.comm_seqno,
+            scheduler_output.draft_task_id,
+            scheduler_output.draft_step_idx,
+            scheduler_output.parent_req_id,
         )
         # Lazy consumption: wait_event ordering + postprocess run on first
         # .tensors access inside the last segment.
         output = self.model_runner._run_edge_cloud_draft_last_segment(
             scheduler_output, recv_future.as_intermediate_tensors()
+        )
+        logger.info(
+            "[PD-DRAFT-PROGRESS] event=edge_tail_returned channel=%s seqno=%s task_id=%s step=%s parent_req_id=%s",
+            channel_for(scheduler_output.batch_type, _kind).value,
+            scheduler_output.comm_seqno,
+            scheduler_output.draft_task_id,
+            scheduler_output.draft_step_idx,
+            scheduler_output.parent_req_id,
         )
         self._resume_deferred_edge_draft_head(scheduler_output)
         return output

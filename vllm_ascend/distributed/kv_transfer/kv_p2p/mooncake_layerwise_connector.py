@@ -83,6 +83,8 @@ if TYPE_CHECKING:
 DONE_SENDING_MSG = b"done_sending_msg"
 FAILED_SENDING_MSG = b"failed_sending_msg"
 PD_TRACE_PREFIX = "[PD-TRACE]"
+KV_RECV_WAIT_LOG_INTERVAL_S = 30.0
+KV_RECV_WAIT_LOG_SAMPLE_SIZE = 3
 
 
 def _block_counts(block_ids) -> list[int]:
@@ -615,6 +617,17 @@ class KVCacheRecvingLayerThread(threading.Thread):
             self.failed_requests = set()
         return failed_requests
 
+    def get_receive_progress(self, req_ids: list[str]) -> dict[str, dict[str, int | bool]]:
+        """Bounded snapshot; the receiver thread owns the signal sets."""
+        with self.lock:
+            return {
+                req_id: {
+                    "received_signals": len(self.task_tracker.get(req_id, ())),
+                    "ready_for_collection": req_id in self.done_requests,
+                }
+                for req_id in req_ids
+            }
+
     def update_failed_task(self, req_id: str) -> None:
         """
         Handle a failed task by adding it to the failed_requests set and removing it from the task tracker.
@@ -637,6 +650,16 @@ class KVCacheRecvingLayerThread(threading.Thread):
             if req_id not in self.task_tracker:
                 self.task_tracker[req_id] = set()
             self.task_tracker[req_id].add(side_channel_path)
+            logger.info(
+                "%s request_id=%s stage=d_worker event=kv_signal_progress "
+                "engine_id=%s tp_rank=%d received_signals=%d expected_signals=%d",
+                PD_TRACE_PREFIX,
+                req_id,
+                self.local_engine_id,
+                self.tp_rank,
+                len(self.task_tracker[req_id]),
+                trans_count,
+            )
             if len(self.task_tracker[req_id]) == trans_count:
                 self.task_tracker.pop(req_id)
                 self.done_requests.add(req_id)
@@ -1415,6 +1438,8 @@ class MooncakeLayerwiseConnectorWorker:
         self.virtual_request: set[str] = set()
         self._invalid_block_ids: set[int] = set()
         self._recving_metadata: dict[str, ReqMeta] = {}
+        self._recv_started_at: dict[str, float] = {}
+        self._last_recv_wait_log_ts = 0.0
 
     def create_kv_buffer(self, first_kv_cache_tuple):
         alignment = 2 * 1024 * 1024
@@ -1637,6 +1662,7 @@ class MooncakeLayerwiseConnectorWorker:
             org_req_id = req_id[:-9]
             self.request_map.pop(org_req_id, None)
             self._recving_metadata.pop(req_id, None)
+            self._recv_started_at.pop(req_id, None)
         if done_recving:
             logger.info(
                 "%s request_ids=%s internal_request_ids=%s stage=d_worker "
@@ -1657,7 +1683,48 @@ class MooncakeLayerwiseConnectorWorker:
                 self.engine_id,
                 len(self._invalid_block_ids),
             )
+        self._log_pending_kv_receives()
         return set(), done_recving
+
+    def _log_pending_kv_receives(self) -> None:
+        """Report prolonged KV waits without changing readiness or timing out.
+
+        Called by normal connector polling, not a watchdog thread. A missing
+        report therefore does not establish that the worker is still polling.
+        """
+        if not self._recv_started_at:
+            return
+        now = time.monotonic()
+        if now - self._last_recv_wait_log_ts < KV_RECV_WAIT_LOG_INTERVAL_S:
+            return
+        self._last_recv_wait_log_ts = now
+        # Dict insertion order retains the oldest registered waits. Limit
+        # both log size and receiver-thread lock work under a large backlog.
+        oldest = list(self._recv_started_at)[:KV_RECV_WAIT_LOG_SAMPLE_SIZE]
+        if now - self._recv_started_at[oldest[0]] < KV_RECV_WAIT_LOG_INTERVAL_S:
+            return
+        external_ids = [get_external_request_id(req_id) for req_id in oldest]
+        receiver = self.kv_recv_layer_thread
+        progress = receiver.get_receive_progress(external_ids) if receiver is not None else {}
+        samples = [
+            {
+                "request_id": external_id,
+                "internal_request_id": req_id,
+                "wait_s": round(now - self._recv_started_at[req_id], 1),
+                **progress.get(external_id, {}),
+            }
+            for req_id, external_id in zip(oldest, external_ids)
+        ]
+        logger.warning(
+            "%s stage=d_worker event=kv_receive_wait engine_id=%s tp_rank=%d "
+            "pending_count=%d receiver_alive=%s samples=%s",
+            PD_TRACE_PREFIX,
+            self.engine_id,
+            self.tp_rank,
+            len(self._recv_started_at),
+            receiver is not None and receiver.is_alive(),
+            samples,
+        )
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
@@ -1850,6 +1917,7 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.kv_recv_layer_thread is not None
                 self.request_map[external_req_id] = req_id
                 self._recving_metadata[req_id] = meta
+                self._recv_started_at.setdefault(req_id, time.monotonic())
                 logger.info(
                     "%s request_id=%s stage=d_worker event=waiting_for_kv "
                     "engine_id=%s local_block_counts=%s request_map_size=%d",

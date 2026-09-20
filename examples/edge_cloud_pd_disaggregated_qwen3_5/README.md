@@ -133,6 +133,40 @@ python examples/edge_cloud_pd_disaggregated_qwen3_5/smoke_test.py \
 
 建议在正式压测前完成三组硬件用例：单请求（覆盖 D 首轮 graph capture）、4 个并发请求（覆盖 P/D 交错和 Proxy 幂等）、长 prompt + MTP（覆盖 GDN/attention 多 cache group 与 draft 通道）。再与同权重、同采样参数的非 PD TP=2 基线比较输出 token；性能测试需排除 D 首次 ACLGraph capture 的预热请求。
 
+## Benchmark 卡住时的定位
+
+`Waiting: 20, Deferred: 20` 表示同一批 20 个等待请求全部暂缓调度，不是 40 个请求。
+如果 benchmark 最大并发为 20，它们未完成时不会释放发请求的槽位。必须继续确认
+这些请求在等待 P 的 KV，还是 D 已收到 KV 却没有恢复；不要单凭 Deferred 或
+共享内存广播告警判断根因。跨机器时间可能有偏差，应按 request ID、task ID 和
+每个物理通道的 seqno 对齐，不直接相减两台机器的日志时间。
+
+新增的日志提供以下定位点（不需要开启 DEBUG）：
+
+- `[PD-DRAFT-ORDER] event=reserved`：记录 task/request ID、通道阶段和预留序号范围。
+  同一通道必须按范围顺序派发完整的 draft 链；动态续接尚未生成时，后链也不能抢先。
+  `event=ready_reordered` 表示调度器优先选中了较早预留的链，不是通信错误。
+- `[PD-STALL]` 的 `p_owner/p_ready/d_owner/d_ready`：比较各通道最早未派发完的
+  预留链与就绪队列首项。链内远端待完成计数和已有 tail-ready 字段仍保留。
+- `[PD-COMM-ORDER] event=send_gap`：发送已提交但因缺少 `expected_seqno` 而暂存。
+  `send_gap_released` 表示缺号补齐后已向通信层继续提交，不表示设备传输已完成。
+- `[PD-DRAFT-PROGRESS]`：`edge_send_submitted`、`cloud_send_submitted`、
+  `edge_recv_attached`、`edge_tail_returned` 都包含 task、step、parent request 和 seqno。
+  `recv_attached` 只说明取得接收 future，不能作为接收完成证据；`tail_returned`
+  说明 Python 尾段执行返回，也不额外强制设备同步。设备接收完成仍看 `early-irecv`。
+- D 的 `[PD-TRACE] event=kv_signal_progress`：当前 TP worker 已收到的唯一发送端
+  信号数与期望值。`event=kv_receive_wait` 每个 worker 最多每 30 秒记录一次长等待，
+  包括总量、接收线程存活状态、最早 3 个请求的等待时长及信号状态。
+  该日志由正常 connector 轮询触发；没有日志不能证明轮询仍正常运行。
+
+对同一个请求核对两个 TP rank 的 `completion_signal_acked` → `kv_ready` →
+`decode_resume` → `remote_kv_ready`。新增日志不会强行解除 Deferred，也不会跳过
+缺失序号或在 KV 尚未齐备时启动 decode。
+
+升级后需重启 P-edge、P-cloud 和 D，并保持 P 全局 eager、D 原有 ACLGraph 配置。
+先跑单请求，再复测最大并发 20 的原 benchmark，确认所有请求完成、D 等待数回落，
+并核对输出正确性。CPU 时序回归通过不能替代这组 NPU 验证。
+
 ## 失败即停的约束
 
 - `pd_separation` 打开但 connector 不是 `MooncakeLayerwiseConnector/kv_producer` 时，P 启动失败。

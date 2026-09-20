@@ -130,6 +130,13 @@ class CommChannel:
             )
         if seqno > self._next_seqno:
             future = CommFuture.deferred(request)
+            if request.op == "send" and not self._held:
+                logger.warning(
+                    "[PD-COMM-ORDER] event=send_gap channel=%s seqno=%d expected_seqno=%d",
+                    self.channel_type.value,
+                    seqno,
+                    self._next_seqno,
+                )
             self._held[seqno] = (request, future)
             logger.debug(
                 "[edge-cloud-comm] held out-of-order %s %s seqno=%d "
@@ -144,10 +151,20 @@ class CommChannel:
         self._next_seqno += 1
         # Drain consecutive held requests now that their predecessors
         # exist.  Held futures bind in place and join the pending queue.
+        released_sends = 0
         while self._next_seqno in self._held:
             held_request, held_future = self._held.pop(self._next_seqno)
             self._execute_next(held_request, into=held_future)
+            released_sends += held_request.op == "send"
             self._next_seqno += 1
+        if released_sends:
+            logger.info(
+                "[PD-COMM-ORDER] event=send_gap_released channel=%s released=%d expected_seqno=%d held_count=%d",
+                self.channel_type.value,
+                released_sends,
+                self._next_seqno,
+                len(self._held),
+            )
         return future
 
     def _execute_next(
