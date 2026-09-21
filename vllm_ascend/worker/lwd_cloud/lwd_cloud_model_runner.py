@@ -19,7 +19,6 @@ import torch
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.v1.lwd_debug import LwdDebug
 from vllm.v1.outputs import ModelRunnerOutput
 
 from vllm_ascend.worker.lwd_cloud.lwd_mtp_proposer import LwdMTPProposer
@@ -458,7 +457,6 @@ class LwdCloudModelRunner(NPUModelRunner):
                             req_id, start, n,
                             mrope_flat[row : row + n], prompt_len,
                         )
-                    LwdDebug.cloud_embeds_injected(req_id, idx, start, n, buf)  # [lwd-debug]
                 row += n
             # 跨流生命周期登记:端点 recv buffer 由通道流分配与复用
             # (同尺寸 chunk 下分配器几乎总给同一块),本步 copy 在计算流。
