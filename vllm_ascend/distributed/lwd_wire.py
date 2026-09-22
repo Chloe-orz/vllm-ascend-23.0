@@ -73,9 +73,8 @@ def init_lwd_duplex_channels() -> None:
     Idempotent.
 
     Endpoint ranks are resolved from existing deployment info, in order:
-      1. ``lwd_config.edge_global_rank`` / ``cloud_global_rank`` —
-         derived in ``VllmConfig.__post_init__`` from the
-         ``--edge-npu-count`` / ``--cloud-npu-count`` CLI counts
+      1. ``parallel_config.lwd_config`` edge/cloud NPU counts —
+         derived in ``VllmConfig.__post_init__`` from the topology YAML
          (contiguous edge-first layout: edge [0, E), cloud [E, E + C),
          endpoints (0, E));
       2. PP-group convention: a 2-rank PP group spans exactly the
@@ -99,8 +98,8 @@ def init_lwd_duplex_channels() -> None:
         if pp_group.world_size != 2:
             raise RuntimeError(
                 "prefill_only duplex channels cannot resolve edge/cloud "
-                "endpoint ranks: lwd_config endpoint ranks unset (check "
-                "--edge-npu-count/--cloud-npu-count) and the PP group "
+                "endpoint ranks: topology counts unset (check "
+                "lwd_config.path and YAML edges/clouds ranks) and the PP group "
                 "does not span exactly the edge/cloud pair "
                 f"(pp world_size={pp_group.world_size})"
             )
