@@ -27,10 +27,16 @@ from vllm.distributed import (
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.distributed import lwd_wire
 from vllm_ascend.distributed.lwd_comm.lwd_parallel_init import (
     init_lwd_ascend_model_parallel,
 )
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
+from vllm_ascend.distributed.lwd_comm.topology import (
+    LwdConnectionKey,
+    bind_lwd_worker_connections,
+    resolve_lwd_batch_connection,
+)
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 
 # ops 须先于 model_runner 链初始化，否则 device_op 与 ops 包循环导入
@@ -76,13 +82,14 @@ class LwdCloudWorker(NPUWorker):
 
     def init_device(self):
         super().init_device()
-        # channel-global DOWN seqno counter (worker layer, send-time alloc)
-        self._lwd_down_next_seqno = 0
-        # seqno -> (posted UP recv future or None, batch meta);
+        # Per-connection DOWN seqno counters (worker layer, send-time alloc).
+        self._lwd_down_next_seqno: dict[LwdConnectionKey, int] = {}
+        # (connection, seqno) -> (posted UP recv future or None, batch meta);
         # consumed by the model runner's device-side injection.
-        self._lwd_up_recv_futures: dict[int, tuple] = {}
+        self._lwd_up_recv_futures: dict[tuple[LwdConnectionKey, int], tuple] = {}
         if not self.enable_lwd:
             return
+        self._lwd_connections = bind_lwd_worker_connections(self.vllm_config, self.rank)
         if self.use_v2_model_runner:
             # The LWD hooks live on the V1 model runner; the V2 runner
             # (separate class) lacks them entirely — fail fast at bring-up
@@ -99,8 +106,6 @@ class LwdCloudWorker(NPUWorker):
         self.model_runner = LwdCloudModelRunner(
             self.vllm_config, self.device, worker=self
         )
-        from vllm_ascend.distributed import lwd_wire
-
         lwd_wire.init_lwd_duplex_channels()
         self._register_lwd_prompt_embeds_provider()
 
@@ -160,7 +165,9 @@ class LwdCloudWorker(NPUWorker):
         )
         return output
 
-    def _lwd_up_post_recvs(self, scheduler_output) -> None:
+    def _lwd_up_post_recvs(
+        self, scheduler_output, *, connection_key: LwdConnectionKey | None = None,
+    ) -> None:
         """Post the UP recv for an incoming LWD_EMBED batch.
 
         UP 两段通信按 prefill_only_demo_br 范式拆到两个时刻:
@@ -190,8 +197,16 @@ class LwdCloudWorker(NPUWorker):
         num_tokens = sum(len(t) for t in meta.token_ids)
         if num_tokens <= 0:
             return
-        lwd = self.parallel_config.lwd_config
-        is_endpoint = self.rank == lwd.edge_npu_count
+        batch_key = resolve_lwd_batch_connection(batch, self._lwd_connections)
+        if connection_key is not None and connection_key != batch_key:
+            raise ValueError("[LWD] UP receive key differs from the scheduled connection")
+        connection_key = batch_key
+        connection = lwd_wire.get_lwd_wire_connection(connection_key)
+        lwd_wire.get_lwd_cloud_tp_group(connection.key)
+        recv_key = (connection.key, batch.seqno)
+        if recv_key in self._lwd_up_recv_futures:
+            raise ValueError(f"[LWD] Duplicate pending UP batch: {recv_key}")
+        is_endpoint = self.rank == connection.cloud_leader_rank
         if is_endpoint:
             future = get_lwd_comm_service().submit_recv(
                 LwdCommRequest(
@@ -202,6 +217,7 @@ class LwdCloudWorker(NPUWorker):
                         getattr(self.model_config.hf_config, "num_experts_per_tok", 0),
                     ),
                     seqno=batch.seqno,
+                    connection_key=connection.key,
                     # aux 帧(mrope positions [n,3] int64)仅端点预挂;
                     # 云 TP 组内扩散由 runner 在消费时刻现场广播补发。
                     aux_num_elements=num_tokens * 3 if meta.has_mrope else 0,
@@ -211,7 +227,7 @@ class LwdCloudWorker(NPUWorker):
             # 非端点:不碰跨机通道;广播接收推迟到注入时刻现场发起,
             # None 即"消费时现场广播"标记。
             future = None
-        self._lwd_up_recv_futures[batch.seqno] = (future, meta)
+        self._lwd_up_recv_futures[recv_key] = (future, meta)
         logger.info(
             "[Lwd][cloud-worker] UP recv posted seqno=%d reqs=%d tokens=%d "
             "endpoint=%s",
@@ -234,7 +250,18 @@ class LwdCloudWorker(NPUWorker):
             payload = self.model_runner.take_lwd_pending_down_payload()
             if payload is not None and output is not None:
                 hidden, pinned, _event, req_ids, _accepted = payload
-                seqno = self._lwd_next_down_seqno()
+                # Runtime is restricted to one connection. Do not mistake
+                # control-message splitting for data-plane fan-in support.
+                if len(self._lwd_connections) != 1:
+                    raise NotImplementedError(
+                        "[LWD] Cloud reuse requires per-connection DOWN row splitting"
+                    )
+                connection_key = next(iter(self._lwd_connections.values()))
+                for req_id in req_ids:
+                    source = req_id.split("#", 2)
+                    if source[:2] != [str(connection_key.edge_id), str(connection_key.dp_idx)]:
+                        raise ValueError("[LWD] DOWN rows do not belong to the bound connection")
+                seqno = self._lwd_next_down_seqno(connection_key)
                 logger.info(
                     "[Lwd][cloud-worker] DOWN send seqno=%d numel=%d",
                     seqno, hidden.numel(),
@@ -246,12 +273,14 @@ class LwdCloudWorker(NPUWorker):
                         num_elements=hidden.numel(),
                         tensor=hidden,
                         seqno=seqno,
+                        connection_key=connection_key,
                     )
                 )
                 # async 包装器下挂到内层,否则 get_output() 解包丢失
                 target = getattr(output, "_model_runner_output", output)
                 target.lwd_down_carrier = (
-                    pinned, req_ids, hidden.numel(), seqno
+                    pinned, req_ids, hidden.numel(), seqno,
+                    (connection_key.edge_id, connection_key.cloud_id, connection_key.dp_idx),
                 )
                 # [Lwd][perf] 云侧每步计时:sample=采样+采集(含秩计算);
                 # send=DOWN 提交(快照clone+isend+bridge wait);total=全步
@@ -317,7 +346,8 @@ class LwdCloudWorker(NPUWorker):
             _lwd_prompt_embeds_provider
         )
 
-    def _lwd_next_down_seqno(self) -> int:
-        seqno = self._lwd_down_next_seqno
-        self._lwd_down_next_seqno += 1
+    def _lwd_next_down_seqno(self, connection_key: LwdConnectionKey | None = None) -> int:
+        key = lwd_wire.resolve_lwd_channel_operation(LwdChannelType.DOWN, "send", connection_key)
+        seqno = self._lwd_down_next_seqno.get(key, 0)
+        self._lwd_down_next_seqno[key] = seqno + 1
         return seqno

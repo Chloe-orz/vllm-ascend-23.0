@@ -31,16 +31,20 @@ from vllm.logger import logger
 
 from vllm_ascend.distributed import lwd_wire
 from vllm_ascend.distributed.lwd_comm.future import LwdCommFuture
-from vllm_ascend.distributed.lwd_comm.types import LwdChannelType
-from vllm_ascend.distributed.lwd_comm.types import LwdCommRequest, LwdChannelType
+from vllm_ascend.distributed.lwd_comm.topology import LwdConnectionKey
+from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 
 
 class LwdChannel:
     """One FIFO of pending requests for a physical channel/peer wire."""
 
-    def __init__(self, channel_type: LwdChannelType, op: str) -> None:
+    def __init__(
+        self, channel_type: LwdChannelType, op: str,
+        connection_key: LwdConnectionKey | None = None,
+    ) -> None:
         self.channel_type = channel_type
         self.op = op  # one FIFO carries exactly one direction's seqno stream
+        self.connection_key = lwd_wire.resolve_lwd_channel_operation(channel_type, op, connection_key)
         self._pending: deque[LwdCommFuture] = deque()
         self._lock = threading.Lock()
         # The pending-queue lock alone cannot prevent two host threads
@@ -62,6 +66,8 @@ class LwdChannel:
         past it.  Both peers must skip the same seqno (driven by the
         control-plane abort on both sides) — skipping a seqno the peer
         later submits is a pairing error and raises at submission."""
+        if type(seqno) is not int or seqno < 0:
+            raise ValueError("[LWD] seqno must be a non-negative integer")
         with self._submission_lock:
             if self._next_seqno is None:
                 self._next_seqno = 0
@@ -97,6 +103,15 @@ class LwdChannel:
 
     def submit(self, request: LwdCommRequest) -> LwdCommFuture:
         """Execute the wire op and enqueue the future."""
+        if request.seqno is not None and (type(request.seqno) is not int or request.seqno < 0):
+            raise ValueError("[LWD] seqno must be a non-negative integer")
+        resolved = lwd_wire.resolve_lwd_channel_operation(request.channel, request.op, request.connection_key)
+        if request.channel != self.channel_type or resolved != self.connection_key:
+            raise ValueError("[LWD] Request does not belong to this link/DP/channel FIFO")
+        expected_peer = lwd_wire.get_lwd_channel_peer(self.channel_type, self.connection_key)
+        if request.src_dst is not None and request.src_dst != expected_peer:
+            raise ValueError("[LWD] Explicit peer does not match the connection endpoints")
+        request = replace(request, connection_key=resolved)
         if request.op != self.op:
             raise RuntimeError(
                 f"op mismatch on {self.channel_type.value} FIFO: "
@@ -305,7 +320,7 @@ class LwdChannel:
         return into
 
     def _stream(self):
-        return lwd_wire.get_lwd_channel_stream(self.channel_type)
+        return lwd_wire.get_lwd_channel_stream(self.channel_type, self.connection_key)
 
     def _order_after(self, predecessor: LwdCommFuture | None) -> None:
         if predecessor is None:
@@ -315,10 +330,10 @@ class LwdChannel:
             self._stream().wait_event(event)
 
     def _wire_send(self, req: LwdCommRequest) -> list[Any]:
-        group = lwd_wire.get_lwd_channel_device_group(self.channel_type)
+        group = lwd_wire.get_lwd_channel_device_group(self.channel_type, self.connection_key)
         peer = req.src_dst
         if peer is None:
-            peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
+            peer = lwd_wire.get_lwd_channel_peer(self.channel_type, self.connection_key)
         tensor = req.tensor
         assert tensor is not None
         logger.debug(
@@ -330,7 +345,7 @@ class LwdChannel:
         )
         # UP(边→云)两层通信:第一段边→云端点 P2P(只等端点 join,
         # 不再被 8 卡 join 拖住);第二段端点在云 TP 组内 broadcast
-        # (见 _wire_recv)。DOWN(云 leader→边)保持点对点。
+        # (在云 model runner 注入时执行)。DOWN(云 leader→边)保持点对点。
         # aux 帧(mrope positions)为紧跟主帧的第二条 P2P op——同
         # seqno 管两帧,skip/drain 语义不变;第二段(云 TP 组内广播)
         # 由云 runner 在消费时刻对 aux 同样补发(见 lwd_cloud_model_runner)。
@@ -350,10 +365,10 @@ class LwdChannel:
         return [dist.isend(tensor.contiguous(), dst=peer, group=group)]
 
     def _wire_recv(self, req: LwdCommRequest):
-        group = lwd_wire.get_lwd_channel_device_group(self.channel_type)
+        group = lwd_wire.get_lwd_channel_device_group(self.channel_type, self.connection_key)
         peer = req.src_dst
         if peer is None:
-            peer = lwd_wire.get_lwd_channel_peer(self.channel_type)
+            peer = lwd_wire.get_lwd_channel_peer(self.channel_type, self.connection_key)
         logger.debug(
             "[lwd-comm] RECV post channel=%s my_rank=%d src=%s group_ranks=%s "
             "num_elements=%d aux_elements=%d op=%s",

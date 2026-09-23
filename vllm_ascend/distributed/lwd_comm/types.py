@@ -7,11 +7,13 @@ import enum
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from vllm_ascend.distributed.lwd_comm.topology import LwdConnectionKey
+
 
 class LwdChannelType(enum.Enum):
     """The two physical data-plane channels, direction-only.
 
-    Each channel maps 1:1 to a dedicated HCCL communicator + NPU stream
+    Each (connection, channel) maps to a dedicated HCCL communicator + NPU stream
     (see ``vllm_ascend.distributed.lwd_wire``).  HCCL P2P matching order
     per (communicator, peer) is exactly the per-channel ``seqno``
     submission order — HCCL does not support tags.
@@ -45,8 +47,8 @@ class LwdCommRequest:
     # send: payload tensor (snapshotted into a communication-owned buffer
     # at submit time).  recv: None.
     tensor: Any | None = None
-    # Per-channel request-level sequence number.  Contract: each
-    # channel's counter starts at 0 and increments by one per request on
+    # Per-connection/channel request-level sequence number. Contract: each
+    # FIFO's counter starts at 0 and increments by one per request on
     # both peers; ops are posted to HCCL only once all lower seqnos have
     # been submitted, so send order and the peer's recv-post order always
     # agree.  Do not mix sequenced and unsequenced requests on one
@@ -73,6 +75,9 @@ class LwdCommRequest:
     # 收端据此分配精确缓冲;后续其他载荷(如 bf16 的 deepstack 帧)
     # 显式指定即可,无需改通道结构。
     aux_dtype: Any | None = None
+    # Explicit logical link + DP. Omission is supported only on a rank
+    # with exactly one connection; never silently route to the first peer.
+    connection_key: LwdConnectionKey | None = None
 
 
 @dataclass

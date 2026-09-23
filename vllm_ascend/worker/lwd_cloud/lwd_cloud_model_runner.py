@@ -19,8 +19,11 @@ import torch
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.v1.core.sched.output import LwdBatchType
 from vllm.v1.outputs import ModelRunnerOutput
 
+from vllm_ascend.distributed import lwd_wire
+from vllm_ascend.distributed.lwd_comm.topology import resolve_lwd_batch_connection
 from vllm_ascend.worker.lwd_cloud.lwd_mtp_proposer import LwdMTPProposer
 from vllm_ascend.worker.lwd_hash.lwd_hash_routing import (
     LwdHashRoutingState,
@@ -289,9 +292,16 @@ class LwdCloudModelRunner(NPUModelRunner):
         worker = self.worker
         if worker is None:
             return
-        posted = getattr(worker, "_lwd_up_recv_futures", None)
-        if not posted:
+        batch = scheduler_output.lwd_batch
+        if batch is None or batch.batch_type is not LwdBatchType.LWD_EMBED:
             return
+        if batch.batch_meta is None or not batch.batch_meta.req_ids:
+            return
+        connection_key = resolve_lwd_batch_connection(batch, worker._lwd_connections)
+        expected_key = (connection_key, batch.seqno)
+        posted = getattr(worker, "_lwd_up_recv_futures", None)
+        if not posted or expected_key not in posted:
+            raise RuntimeError(f"[LWD] No UP receive posted for scheduled batch {expected_key}")
         embeds_map = self.input_batch.req_prompt_embeds
         num_prompt = self.input_batch.num_prompt_tokens
         computed = self.input_batch.num_computed_tokens_cpu
@@ -306,15 +316,18 @@ class LwdCloudModelRunner(NPUModelRunner):
             out_offset[req_id] = off
             off += int(num_scheduled_tokens[i]) if i < len(num_scheduled_tokens) else 0
 
-        for batch_seqno in list(posted.keys()):
-            item = worker._lwd_up_recv_futures.pop(batch_seqno, None)
+        # Only consume the packet authorized by this scheduler step, rather
+        # than draining every pending receive from earlier/later steps.
+        for recv_key in (expected_key,):
+            connection_key, batch_seqno = recv_key
+            item = worker._lwd_up_recv_futures.pop(recv_key, None)
             if item is None:
                 continue
             future, meta = item
             _t_wait = time.monotonic()
             import torch.distributed as dist
-            _lwd_cfg = worker.parallel_config.lwd_config
-            _is_endpoint = worker.rank == _lwd_cfg.edge_npu_count
+            connection = lwd_wire.get_lwd_wire_connection(connection_key)
+            _is_endpoint = worker.rank == connection.cloud_leader_rank
             num_tokens = sum(len(t) for t in meta.token_ids)
             config = self.model_config.hf_config
             num_hash_layers = hash_layer_count(config)
@@ -343,8 +356,7 @@ class LwdCloudModelRunner(NPUModelRunner):
                     numel, dtype=torch.bfloat16, device="npu"
                 )
                 aux_flat = None
-            from vllm.distributed.parallel_state import get_tp_group
-            _tp = get_tp_group()
+            _tp = lwd_wire.get_lwd_cloud_tp_group(connection_key)
             if _tp.world_size > 1:
                 # demo 同款:直接用框架 TP 通信域(建组顺序由框架保证,
                 # PD 分离路径已验证),不再使用自建 _LWD_EMBED_BCAST_GROUP。

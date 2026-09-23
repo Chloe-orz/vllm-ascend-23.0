@@ -27,6 +27,11 @@ from vllm_ascend.distributed.lwd_comm.lwd_parallel_init import (
     init_lwd_ascend_model_parallel,
 )
 from vllm_ascend.distributed.lwd_comm.service import get_lwd_comm_service
+from vllm_ascend.distributed.lwd_comm.topology import (
+    LwdConnectionKey,
+    bind_lwd_worker_connections,
+    resolve_lwd_batch_connection,
+)
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 from vllm_ascend.worker.lwd_hash.lwd_hash_routing import pack_hash_payload
 from vllm_ascend.worker.lwd_hash.lwd_hash_tables import load_tid2eid_tables
@@ -130,6 +135,7 @@ class LwdEdgeWorker(NPUWorker):
         # warmup additionally requires both peers to reach it in the same fixed
         # order, which only holds once every rank is past its distributed init.
         super().init_device()
+        self._lwd_connections = bind_lwd_worker_connections(self.vllm_config, self.rank)
         self.comm_service = get_lwd_comm_service()
         # 多模态请求级缓存:req_id -> mm_features(带 data,首 chunk 随
         # scheduled_new_reqs 到达时登记) / req_id -> [(mm_position,
@@ -173,6 +179,7 @@ class LwdEdgeWorker(NPUWorker):
             return None
 
         batch_meta = lwd_batch.batch_meta
+        connection_key = resolve_lwd_batch_connection(lwd_batch, self._lwd_connections)
         if lwd_batch.batch_type == LwdBatchType.LWD_EMBED:
             logger.info(
                 "[Lwd][edge-worker] EMBED seqno=%d reqs=%d tokens=%d "
@@ -183,7 +190,7 @@ class LwdEdgeWorker(NPUWorker):
                 batch_meta.has_mrope,
             )
             return self._execute_lwd_embed(
-                lwd_batch.seqno, batch_meta, scheduler_output
+                lwd_batch.seqno, batch_meta, scheduler_output, connection_key
             )
         if lwd_batch.batch_type == LwdBatchType.LWD_UNEMBED:
             logger.info(
@@ -194,7 +201,7 @@ class LwdEdgeWorker(NPUWorker):
                 sum(batch_meta.num_accept_tokens),
                 batch_meta.recv_num_elements,
             )
-            return self._execute_lwd_unembed(lwd_batch.seqno, batch_meta)
+            return self._execute_lwd_unembed(lwd_batch.seqno, batch_meta, connection_key)
 
         logger.debug(
             "[lwd-edge] unknown LWD batch type %r; nothing to do",
@@ -207,6 +214,7 @@ class LwdEdgeWorker(NPUWorker):
         seqno: int,
         batch_meta: LwdEmbedBatch,
         scheduler_output: "SchedulerOutput",
+        connection_key: LwdConnectionKey,
     ) -> None:
         model = self.model_runner.get_model()
         device = self.model_runner.device
@@ -285,6 +293,7 @@ class LwdEdgeWorker(NPUWorker):
             num_elements=payload.numel(),
             tensor=payload,
             seqno=seqno,
+            connection_key=connection_key,
             aux_tensor=aux_tensor,
             aux_num_elements=(
                 aux_tensor.numel() if aux_tensor is not None else 0
@@ -408,7 +417,8 @@ class LwdEdgeWorker(NPUWorker):
         return mm_embeds, is_mm
 
     def _execute_lwd_unembed(
-        self, seqno: int, batch_meta: LwdUnembedBatch
+        self, seqno: int, batch_meta: LwdUnembedBatch,
+        connection_key: LwdConnectionKey,
     ) -> ModelRunnerOutput:
         model = self.model_runner.get_model()
         if not batch_meta.req_ids:
@@ -421,6 +431,7 @@ class LwdEdgeWorker(NPUWorker):
                 op="recv",
                 num_elements=batch_meta.recv_num_elements,  # int = rows_total * hidden_size
                 seqno=seqno,
+                connection_key=connection_key,
             )
         )
         _t_post = time.monotonic()

@@ -12,12 +12,14 @@ Ported (simplified) from the demo branch's ``lwd_comm/service.py``.
 from __future__ import annotations
 
 import threading
-import time
+from dataclasses import replace
 
 from vllm.logger import logger
 
+from vllm_ascend.distributed import lwd_wire
 from vllm_ascend.distributed.lwd_comm.channel import LwdChannel
 from vllm_ascend.distributed.lwd_comm.future import LwdCommFuture
+from vllm_ascend.distributed.lwd_comm.topology import LwdConnectionKey
 from vllm_ascend.distributed.lwd_comm.types import LwdChannelType, LwdCommRequest
 
 
@@ -35,12 +37,10 @@ class LwdCommService:
             return cls._instance
 
     def __init__(self) -> None:
-        # HCCL ordering is per physical (channel, direction): send and
-        # recv have INDEPENDENT seqno streams (each peer's send order must
-        # match the other side's recv-post order), so the FIFO key is
-        # (channel, op) — merging them would make a process's sends and
-        # recvs on one channel collide on a shared seqno counter.
-        self._channels: dict[tuple[LwdChannelType, str], LwdChannel] = {}
+        # Independent sequence domains for each logical link, DP and
+        # channel/direction. Shared-rank scheduling is a separate layer;
+        # a sparse rank-global sequence MUST NOT be used as a FIFO seqno.
+        self._channels: dict[tuple[LwdConnectionKey, LwdChannelType, str], LwdChannel] = {}
         self._lock = threading.Lock()
         self._shutting_down = False
 
@@ -74,16 +74,17 @@ class LwdCommService:
         return completed
 
     def skip_seqno(
-        self, channel_type: LwdChannelType, seqno: int, op: str = "recv"
+        self, channel_type: LwdChannelType, seqno: int, op: str = "recv",
+        *, connection_key: LwdConnectionKey | None = None,
     ) -> None:
         """Mark a seqno as never-to-arrive (aborted request) on the given
         channel+direction FIFO.  Recv managers' drop path passes
         op="recv"; the sender-side abort glue passes op="send".  Both
         peers must skip the same seqnos."""
-        with self._lock:
-            channel = self._channels.get((channel_type, op))
-        if channel is not None:
-            channel.skip_seqno(seqno)
+        resolved = lwd_wire.resolve_lwd_channel_operation(channel_type, op, connection_key)
+        # Remember an abort even if it arrives before the first submit.
+        channel = self._get_channel(channel_type, op, resolved)
+        channel.skip_seqno(seqno)
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                           #
@@ -109,15 +110,27 @@ class LwdCommService:
     # ------------------------------------------------------------------ #
 
     def _submit(self, request: LwdCommRequest) -> LwdCommFuture:
+        resolved = lwd_wire.resolve_lwd_channel_operation(request.channel, request.op, request.connection_key)
+        expected_peer = lwd_wire.get_lwd_channel_peer(request.channel, resolved)
+        if request.src_dst is not None and request.src_dst != expected_peer:
+            raise ValueError(
+                f"[LWD] src_dst={request.src_dst} does not match "
+                f"{resolved} peer={expected_peer}"
+            )
+        request = replace(request, connection_key=resolved)
+        channel = self._get_channel(request.channel, request.op, resolved)
+        return channel.submit(request)
+
+    def _get_channel(self, channel_type: LwdChannelType, op: str, connection_key: LwdConnectionKey) -> LwdChannel:
         with self._lock:
             if self._shutting_down:
                 raise RuntimeError("lwd-comm service is shutting down")
-            key = (request.channel, request.op)
+            key = (connection_key, channel_type, op)
             channel = self._channels.get(key)
             if channel is None:
-                channel = LwdChannel(request.channel, request.op)
+                channel = LwdChannel(channel_type, op, connection_key)
                 self._channels[key] = channel
-        return channel.submit(request)
+        return channel
 
 
 def get_lwd_comm_service() -> LwdCommService:
