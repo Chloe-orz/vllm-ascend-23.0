@@ -52,8 +52,7 @@ def _get_lwd_bootstrap_world_group():
 def init_lwd_duplex_channels() -> None:
     """Build the global YAML group plan after framework parallel groups.
 
-    Only single-instance, single-DP execution is supported. Other layouts
-    can be inspected as pure configuration plans, but must not create groups.
+    Check the actual bootstrap world and TP domains before creating groups.
     """
     global _INITIALIZED, _LWD_ENDPOINTS
     if _INITIALIZED:
@@ -65,7 +64,7 @@ def init_lwd_duplex_channels() -> None:
     config = get_current_vllm_config().lwd_config
     if config is None or config.topology is None:
         raise ValueError("[LWD] Data-plane initialization requires the parsed topology YAML")
-    config.topology.validate_single_dp_runtime()
+    config.topology.validate_single_dp_layout()
     plan = build_lwd_wire_plan(config.topology)
     bootstrap = _get_lwd_bootstrap_world_group()
     expected_world = config.topology.deployment.hccl_world_size

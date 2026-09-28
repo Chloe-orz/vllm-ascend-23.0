@@ -82,13 +82,9 @@ def build_lwd_wire_plan(topology: LwdTopology) -> tuple[LwdWireConnection, ...]:
 
 
 def bind_lwd_worker_connections(config, rank: int) -> dict[tuple[int, int, int], LwdConnectionKey]:
-    """Bind logical identity once, before accepting scheduled work.
-
-    This runtime binding is restricted to single-instance, single-DP use.
-    The pure topology plan above remains available for configuration checks.
-    """
+    """Bind logical identity once, before accepting scheduled work."""
     effective = config.lwd_config
-    effective.topology.validate_single_dp_runtime()
+    effective.topology.validate_single_dp_layout()
     dp_idx = effective.dp.dp_idx
     bindings = {}
     for item in effective.connections:
