@@ -1,0 +1,690 @@
+INFO 10-19 12:46:26 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 10-19 12:46:26 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 10-19 12:46:26 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-19 12:46:26 [__init__.py:238] Platform plugin ascend is activated
+INFO 10-19 12:46:26 [platform.py:62] Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet.
+2026-10-19 12:46:32,602 - 66161 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.23.0+empty: default 1
+INFO 10-19 12:46:33 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 10-19 12:46:33 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=66161) INFO 10-19 12:46:33 [api_utils.py:339]
+(APIServer pid=66161) INFO 10-19 12:46:33 [api_utils.py:339]        █     █     █▄   ▄█
+(APIServer pid=66161) INFO 10-19 12:46:33 [api_utils.py:339]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.23.0
+(APIServer pid=66161) INFO 10-19 12:46:33 [api_utils.py:339]   █▄█▀ █     █     █     █  model   /weight/Qwen3.6-27B/
+(APIServer pid=66161) INFO 10-19 12:46:33 [api_utils.py:339]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=66161) INFO 10-19 12:46:33 [api_utils.py:339]
+(APIServer pid=66161) INFO 10-19 12:46:33 [api_utils.py:273] non-default args: {'model_tag': '/weight/Qwen3.6-27B/', 'model': '/weight/Qwen3.6-27B/', 'trust_remote_code': True, 'max_model_len': 262144, 'served_model_name': ['qwen3.6'], 'pipeline_parallel_size': 2, 'master_addr': '76.76.26.18', 'master_port': 23657, 'nnodes': 2, 'node_rank': 1, 'tensor_parallel_size': 4, 'edge_npu_count': 1, 'cloud_npu_count': 8, 'instance_parallel_size': 2, 'instance_parallel_start_rank': 1, 'max_num_batched_tokens': 8192, 'max_num_seqs': 230, 'async_scheduling': True, 'speculative_config': {'num_speculative_tokens': 3, 'method': 'mtp'}, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': [], 'ir_enable_torch_wrap': None, 'splitting_ops': None, 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_DECODE_ONLY: (2, 0)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 260, 264, 268, 272, 276, 280, 284, 288, 292, 296, 300, 304, 308, 312, 316, 320, 324, 328, 332, 336, 340, 344, 348, 352, 356, 360, 364, 368, 372, 376, 380, 384, 388, 392, 396, 400, 404, 408, 412, 416, 420, 424, 428, 432, 436, 440, 444, 448, 452, 456, 460, 464, 468, 472, 476, 480, 484, 488, 492, 496, 500, 504, 508, 512, 516, 520, 524, 528, 532, 536, 540, 544, 548, 552, 556, 560, 564, 568, 572, 576, 580, 584, 588, 592, 596, 600, 604, 608, 612, 616, 620, 624, 628, 632, 636, 640, 644, 648, 652, 656, 660, 664, 668, 672, 676, 680, 684, 688, 692, 696, 700, 704, 708, 712, 716, 720, 724, 728, 732, 736, 740, 744, 748, 752, 756, 760, 764, 768, 772, 776, 780, 784, 788, 792, 796, 800, 804, 808, 812, 816, 820, 824, 828, 832, 836, 840, 844, 848, 852, 856, 860, 864, 868, 872, 876, 880, 884, 888, 892, 896, 900, 904, 908, 912, 916, 920, 924, 928, 932, 936, 940, 944, 948, 952, 956, 960, 964, 968, 972, 976, 980, 984, 988, 992, 996, 1000], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}, 'additional_config': {'enable_cpu_binding': True, 'enable_weight_nz_layout': True, 'lwd_config': {'enabled': True, 'role': 'cloud', 'mode': 'prefill_only', 'edge_head_tail_layers': [0, 0]}}}
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_LWD_HELLO_TIMEOUT_S
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_GDN_MAX_H_OVERALLOC_RATIO
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_ENABLE_NZ
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_GDN_FAST_PATH
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_ENABLE_PREFETCH_MLP
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_ENABLE_FUSED_MC2
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_LWD_PRE_OUT_HOST
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_LWD_POST_OUT_PORT
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_GDN_MAX_PADDING_RATIO
+(APIServer pid=66161) WARNING 10-19 12:46:33 [envs.py:2088] Unknown vLLM environment variable detected: VLLM_ASCEND_LWD_PRE_OUT_PORT
+(APIServer pid=66161) INFO 10-19 12:46:33 [model.py:611] Resolved architecture: Qwen3_5ForConditionalGeneration
+(APIServer pid=66161) INFO 10-19 12:46:33 [model.py:1745] Using max model len 262144
+(APIServer pid=66161) INFO 10-19 12:46:33 [arg_utils.py:1949] Inferred data_parallel_rank 0 from node_rank 1
+(APIServer pid=66161) INFO 10-19 12:46:33 [model.py:611] Resolved architecture: Qwen3_5MTP
+(APIServer pid=66161) INFO 10-19 12:46:33 [model.py:1745] Using max model len 262144
+(APIServer pid=66161) WARNING 10-19 12:46:33 [speculative.py:722] Enabling num_speculative_tokens > 1 will run multiple times of forward on same MTP layer,which may result in lower acceptance rate
+(APIServer pid=66161) WARNING 10-19 12:46:33 [patch_pp_mtp.py:63] Validating local Eagle/MTP drafter with pipeline_parallel_size=1 because it is loaded locally on the last pipeline stage.
+(APIServer pid=66161) INFO 10-19 12:46:33 [scheduler.py:239] Chunked prefill is enabled with max_num_batched_tokens=8192.
+(APIServer pid=66161) WARNING 10-19 12:46:33 [patch_pp_mtp.py:63] Validating local Eagle/MTP drafter with pipeline_parallel_size=1 because it is loaded locally on the last pipeline stage.
+(APIServer pid=66161) WARNING 10-19 12:46:33 [vllm.py:893] Lwd edge-cloud mode derives parallel sizes from the topology; ignoring CLI tp=4 pp=2.
+(APIServer pid=66161) `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+(APIServer pid=66161) INFO 10-19 12:46:33 [patch_mamba_config.py:104] Setting attention block size to 1536 tokens to ensure that attention page size is >= mamba page size.
+(APIServer pid=66161) INFO 10-19 12:46:33 [patch_mamba_config.py:119] Padding mamba page size by 1.92% to ensure that mamba page size and attention page size are exactly equal.
+(APIServer pid=66161) INFO 10-19 12:46:33 [vllm.py:1055] Asynchronous scheduling is enabled.
+(APIServer pid=66161) INFO 10-19 12:46:33 [kernel.py:270] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(APIServer pid=66161) INFO 10-19 12:46:33 [utils.py:174] No quantization signature detected from model files for "/weight/Qwen3.6-27B/". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(APIServer pid=66161) WARNING 10-19 12:46:33 [platform.py:1074] GPU-specific parameter is not supported on Ascend. parameter=disable_cascade_attn, value=True, action: resetting to False.
+(APIServer pid=66161) INFO 10-19 12:46:33 [platform.py:1284] The timeout interval of the HCCL operator is 1836s. Timeout in seconds for execute_model RPC calls in multiprocessing must be greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+(APIServer pid=66161) INFO 10-19 12:46:33 [ascend_config.py:874] Dynamic EPLB is False
+(APIServer pid=66161) INFO 10-19 12:46:33 [ascend_config.py:875] The number of redundant experts is 0
+(APIServer pid=66161) INFO 10-19 12:46:33 [ascend_config.py:341] AscendConfig.enable_fused_mc2 falls back to environment variable VLLM_ASCEND_ENABLE_FUSED_MC2 with value 1. Please use additional_config.enable_fused_mc2 instead, because VLLM_ASCEND_ENABLE_FUSED_MC2 will be removed in the next release.
+(APIServer pid=66161) INFO 10-19 12:46:33 [ascend_config.py:341] AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 1. Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed in the next release.
+(APIServer pid=66161) INFO 10-19 12:46:33 [platform.py:797] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(APIServer pid=66161) INFO 10-19 12:46:33 [compilation.py:321] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=66161) The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+INFO 10-19 12:46:45 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 10-19 12:46:45 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 10-19 12:46:45 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-19 12:46:45 [__init__.py:238] Platform plugin ascend is activated
+INFO 10-19 12:46:45 [platform.py:62] Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet.
+(EngineCore pid=66220) INFO 10-19 12:46:52 [__init__.py:33] [Lwd] prefill_only cloud: engine class selected (LwdCloudEngineCore)
+(EngineCore pid=66220) 2026-10-19 12:46:52,597 - 66220 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.23.0+empty: default 1
+(EngineCore pid=66220) INFO 10-19 12:46:52 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+(EngineCore pid=66220) INFO 10-19 12:46:52 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(EngineCore pid=66220) INFO 10-19 12:46:52 [core.py:113] Initializing a V1 LLM engine (v0.23.0) with config: model='/weight/Qwen3.6-27B/', speculative_config=SpeculativeConfig(method='mtp', model='/weight/Qwen3.6-27B/', num_spec_tokens=3), tokenizer='/weight/Qwen3.6-27B/', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=262144, download_dir=None, load_format=auto, tensor_parallel_size=4, pipeline_parallel_size=2, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=npu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=qwen3.6, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': [], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': [], 'compile_ranges_endpoints': [8192], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_DECODE_ONLY: (2, 0)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 260, 264, 268, 272, 276, 280, 284, 288, 292, 296, 300, 304, 308, 312, 316, 320, 324, 328, 332, 336, 340, 344, 348, 352, 356, 360, 364, 368, 372, 376, 380, 384, 388, 392, 396, 400, 404, 408, 412, 416, 420, 424, 428, 432, 436, 440, 444, 448, 452, 456, 460, 464, 468, 472, 476, 480, 484, 488, 492, 496, 500, 504, 508, 512, 516, 520, 524, 528, 532, 536, 540, 544, 548, 552, 556, 560, 564, 568, 572, 576, 580, 584, 588, 592, 596, 600, 604, 608, 612, 616, 620, 624, 628, 632, 636, 640, 644, 648, 652, 656, 660, 664, 668, 672, 676, 680, 684, 688, 692, 696, 700, 704, 708, 712, 716, 720, 724, 728, 732, 736, 740, 744, 748, 752, 756, 760, 764, 768, 772, 776, 780, 784, 788, 792, 796, 800, 804, 808, 812, 816, 820, 824, 828, 832, 836, 840, 844, 848, 852, 856, 860, 864, 868, 872, 876, 880, 884, 888, 892, 896, 900, 904, 908, 912, 916, 920, 924, 928, 932, 936, 940, 944, 948, 952, 956, 960, 964, 968, 972, 976, 980, 984, 988, 992, 996, 1000], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': 1000, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': False, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, moe_backend='auto', linear_backend='auto')
+(EngineCore pid=66220) INFO 10-19 12:46:52 [multiproc_executor.py:147] DP group leader: node_rank=1, node_rank_within_dp=1, master_addr=76.76.26.18, mq_connect_ip=76.76.26.234 (local), world_size=9, local_world_size=4
+INFO 10-19 12:46:59 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 10-19 12:46:59 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 10-19 12:46:59 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-19 12:46:59 [__init__.py:238] Platform plugin ascend is activated
+INFO 10-19 12:46:59 [platform.py:62] Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet.
+INFO 10-19 12:46:59 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 10-19 12:46:59 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 10-19 12:46:59 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-19 12:46:59 [__init__.py:238] Platform plugin ascend is activated
+INFO 10-19 12:46:59 [platform.py:62] Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet.
+INFO 10-19 12:46:59 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 10-19 12:46:59 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 10-19 12:46:59 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-19 12:46:59 [__init__.py:238] Platform plugin ascend is activated
+INFO 10-19 12:46:59 [platform.py:62] Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet.
+INFO 10-19 12:46:59 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 10-19 12:46:59 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 10-19 12:46:59 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 10-19 12:46:59 [__init__.py:238] Platform plugin ascend is activated
+INFO 10-19 12:46:59 [platform.py:62] Breakable cudagraph is force disabled on Ascend because DeepSeek V4 PIECEWISE cudagraph is not supported yet.
+2026-10-19 12:47:05,471 - 66319 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.23.0+empty: default 1
+INFO 10-19 12:47:05 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 10-19 12:47:05 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+2026-10-19 12:47:05,707 - 66318 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.23.0+empty: default 1
+2026-10-19 12:47:05,710 - 66317 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.23.0+empty: default 1
+INFO 10-19 12:47:05 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 10-19 12:47:05 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 10-19 12:47:05 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+INFO 10-19 12:47:05 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+2026-10-19 12:47:06,053 - 66320 - ServiceProfiler - INFO - VLLM_USE_V1 not set, auto-detected via vLLM 0.23.0+empty: default 1
+INFO 10-19 12:47:06 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 10-19 12:47:06 [__init__.py:115] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+`Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+`Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+`Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+`Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+INFO 10-19 12:47:07 [ascend_config.py:874] Dynamic EPLB is False
+INFO 10-19 12:47:07 [ascend_config.py:875] The number of redundant experts is 0
+INFO 10-19 12:47:07 [ascend_config.py:341] AscendConfig.enable_fused_mc2 falls back to environment variable VLLM_ASCEND_ENABLE_FUSED_MC2 with value 1. Please use additional_config.enable_fused_mc2 instead, because VLLM_ASCEND_ENABLE_FUSED_MC2 will be removed in the next release.
+INFO 10-19 12:47:07 [ascend_config.py:341] AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 1. Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed in the next release.
+INFO 10-19 12:47:07 [ascend_config.py:874] Dynamic EPLB is False
+INFO 10-19 12:47:07 [ascend_config.py:875] The number of redundant experts is 0
+INFO 10-19 12:47:07 [ascend_config.py:341] AscendConfig.enable_fused_mc2 falls back to environment variable VLLM_ASCEND_ENABLE_FUSED_MC2 with value 1. Please use additional_config.enable_fused_mc2 instead, because VLLM_ASCEND_ENABLE_FUSED_MC2 will be removed in the next release.
+INFO 10-19 12:47:07 [ascend_config.py:341] AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 1. Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed in the next release.
+INFO 10-19 12:47:07 [ascend_config.py:874] Dynamic EPLB is False
+INFO 10-19 12:47:07 [ascend_config.py:875] The number of redundant experts is 0
+INFO 10-19 12:47:07 [ascend_config.py:341] AscendConfig.enable_fused_mc2 falls back to environment variable VLLM_ASCEND_ENABLE_FUSED_MC2 with value 1. Please use additional_config.enable_fused_mc2 instead, because VLLM_ASCEND_ENABLE_FUSED_MC2 will be removed in the next release.
+INFO 10-19 12:47:07 [ascend_config.py:341] AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 1. Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed in the next release.
+INFO 10-19 12:47:08 [ascend_config.py:874] Dynamic EPLB is False
+INFO 10-19 12:47:08 [ascend_config.py:875] The number of redundant experts is 0
+INFO 10-19 12:47:08 [ascend_config.py:341] AscendConfig.enable_fused_mc2 falls back to environment variable VLLM_ASCEND_ENABLE_FUSED_MC2 with value 1. Please use additional_config.enable_fused_mc2 instead, because VLLM_ASCEND_ENABLE_FUSED_MC2 will be removed in the next release.
+INFO 10-19 12:47:08 [ascend_config.py:341] AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 1. Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed in the next release.
+[W1019 12:47:29.838971700 socket.cpp:207] [c10d] The hostname of the client socket cannot be retrieved. err=-3
+[W1019 12:47:29.149121580 socket.cpp:207] [c10d] The hostname of the client socket cannot be retrieved. err=-3
+[W1019 12:47:29.155302710 socket.cpp:207] [c10d] The hostname of the client socket cannot be retrieved. err=-3
+[W1019 12:47:30.600070770 socket.cpp:207] [c10d] The hostname of the client socket cannot be retrieved. err=-3
+(Worker pid=66318) INFO 10-19 12:47:47 [parallel_state.py:1625] world_size=9 rank=6 local_rank=1 distributed_init_method=tcp://76.76.26.18:23657 backend=hccl
+(Worker pid=66317) INFO 10-19 12:47:48 [parallel_state.py:1625] world_size=9 rank=5 local_rank=0 distributed_init_method=tcp://76.76.26.18:23657 backend=hccl
+(Worker pid=66319) INFO 10-19 12:47:49 [parallel_state.py:1625] world_size=9 rank=7 local_rank=2 distributed_init_method=tcp://76.76.26.18:23657 backend=hccl
+(Worker pid=66320) INFO 10-19 12:47:51 [parallel_state.py:1625] world_size=9 rank=8 local_rank=3 distributed_init_method=tcp://76.76.26.18:23657 backend=hccl
+[Gloo] Rank 5 is connected to 8 peer ranks. Expected number of connected peer ranks is : 8
+[Gloo] Rank 7 is connected to 8 peer ranks. Expected number of connected peer ranks is : 8
+[Gloo] Rank 6 is connected to 8 peer ranks. Expected number of connected peer ranks is : 8
+[Gloo] Rank 8 is connected to 8 peer ranks. Expected number of connected peer ranks is : 8
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(Worker pid=66320) INFO 10-19 12:48:01 [parallel_state.py:1987] Lwd edge-cloud mode initialized: rank 8, is_edge=False, instances=2, edge_npu_count=1, cloud_npu_count=8, world_size=9, TP groups=[[0], [1, 2, 3, 4], [5, 6, 7, 8]], PP groups=[[0, 1], [0, 5], [2], [3], [4], [6], [7], [8]], DP groups=[[0], [1], [2], [3], [4], [5], [6], [7], [8]]
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(Worker pid=66318) INFO 10-19 12:48:01 [parallel_state.py:1987] Lwd edge-cloud mode initialized: rank 6, is_edge=False, instances=2, edge_npu_count=1, cloud_npu_count=8, world_size=9, TP groups=[[0], [1, 2, 3, 4], [5, 6, 7, 8]], PP groups=[[0, 1], [0, 5], [2], [3], [4], [6], [7], [8]], DP groups=[[0], [1], [2], [3], [4], [5], [6], [7], [8]]
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(Worker pid=66319) INFO 10-19 12:48:01 [parallel_state.py:1987] Lwd edge-cloud mode initialized: rank 7, is_edge=False, instances=2, edge_npu_count=1, cloud_npu_count=8, world_size=9, TP groups=[[0], [1, 2, 3, 4], [5, 6, 7, 8]], PP groups=[[0, 1], [0, 5], [2], [3], [4], [6], [7], [8]], DP groups=[[0], [1], [2], [3], [4], [5], [6], [7], [8]]
+[Gloo] Rank 1 is connected to 1 peer ranks. Expected number of connected peer ranks is : 1
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(Worker pid=66317) INFO 10-19 12:48:01 [parallel_state.py:1987] Lwd edge-cloud mode initialized: rank 5, is_edge=False, instances=2, edge_npu_count=1, cloud_npu_count=8, world_size=9, TP groups=[[0], [1, 2, 3, 4], [5, 6, 7, 8]], PP groups=[[0, 1], [0, 5], [2], [3], [4], [6], [7], [8]], DP groups=[[0], [1], [2], [3], [4], [5], [6], [7], [8]]
+[Gloo] Rank 0 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 3 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 2 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+[Gloo] Rank 1 is connected to 3 peer ranks. Expected number of connected peer ranks is : 3
+(Worker pid=66320) WARNING 10-19 12:48:02 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66319) WARNING 10-19 12:48:02 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66317) WARNING 10-19 12:48:02 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66318) WARNING 10-19 12:48:02 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66317) The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker pid=66320) The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker pid=66319) The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker pid=66318) The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(Worker pid=66317) WARNING 10-19 12:48:05 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66317) WARNING 10-19 12:48:05 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66317) WARNING 10-19 12:48:05 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66319) WARNING 10-19 12:48:05 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66317) INFO 10-19 12:48:05 [lwd_wire.py:165] [lwd-wire] duplex channels created over 2 (instance, dp) pair(s) (my_rank=5 my_dp=0, owned_records=2)
+(Worker pid=66317) INFO 10-19 12:48:05 [lwd_wire.py:213] [lwd-warmup] RECV post channel=LwdChannelType.UP instance=1 my_rank=5 src=0 group_ranks=[0, 5]
+(Worker pid=66319) WARNING 10-19 12:48:05 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66319) WARNING 10-19 12:48:05 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66320) WARNING 10-19 12:48:05 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66319) INFO 10-19 12:48:06 [lwd_wire.py:165] [lwd-wire] duplex channels created over 2 (instance, dp) pair(s) (my_rank=7 my_dp=0, owned_records=0)
+(Worker pid=66320) WARNING 10-19 12:48:06 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66320) WARNING 10-19 12:48:06 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66320) INFO 10-19 12:48:06 [lwd_wire.py:165] [lwd-wire] duplex channels created over 2 (instance, dp) pair(s) (my_rank=8 my_dp=0, owned_records=0)
+(Worker pid=66318) WARNING 10-19 12:48:06 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66318) WARNING 10-19 12:48:06 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66318) WARNING 10-19 12:48:06 [__init__.py:204] min_p and logit_bias parameters won't work with speculative decoding.
+(Worker pid=66318) INFO 10-19 12:48:06 [lwd_wire.py:165] [lwd-wire] duplex channels created over 2 (instance, dp) pair(s) (my_rank=6 my_dp=0, owned_records=0)
+(Worker pid=66317) INFO 10-19 12:48:08 [lwd_wire.py:220] [lwd-warmup] DONE channel=LwdChannelType.UP instance=1 my_rank=5
+(Worker pid=66317) INFO 10-19 12:48:08 [lwd_wire.py:206] [lwd-warmup] SEND post channel=LwdChannelType.DOWN instance=1 my_rank=5 peer=0 group_ranks=[0, 5]
+(Worker pid=66317) INFO 10-19 12:48:09 [lwd_wire.py:220] [lwd-warmup] DONE channel=LwdChannelType.DOWN instance=1 my_rank=5
+(Worker pid=66317) INFO 10-19 12:48:09 [lwd_wire.py:225] [lwd-wire] duplex channels warmed up (UP + DOWN, 1 pair(s))
+(Worker pid=66319) INFO 10-19 12:48:09 [lwd_wire.py:225] [lwd-wire] duplex channels warmed up (UP + DOWN, 0 pair(s))
+(Worker pid=66318) INFO 10-19 12:48:09 [lwd_wire.py:225] [lwd-wire] duplex channels warmed up (UP + DOWN, 0 pair(s))
+(Worker pid=66320) INFO 10-19 12:48:09 [lwd_wire.py:225] [lwd-wire] duplex channels warmed up (UP + DOWN, 0 pair(s))
+(Worker_TP2 pid=66319) INFO 10-19 12:48:09 [model_runner_v1.py:3721] Starting to load model /weight/Qwen3.6-27B/...
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:09 [model_runner_v1.py:3721] Starting to load model /weight/Qwen3.6-27B/...
+(Worker_TP1 pid=66318) INFO 10-19 12:48:09 [model_runner_v1.py:3721] Starting to load model /weight/Qwen3.6-27B/...
+(Worker_TP3 pid=66320) INFO 10-19 12:48:09 [model_runner_v1.py:3721] Starting to load model /weight/Qwen3.6-27B/...
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:09 [interface.py:301] Using default backend AttentionBackendEnum.TORCH_SDPA for vit attention
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:09 [mm_encoder_attention.py:372] Using AttentionBackendEnum.TORCH_SDPA for MMEncoderAttention.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:10 [qwen_gdn_linear_attn.py:228] Using Triton/FLA GDN prefill kernel (requested=auto, head_k_dim=128).
+(Worker_TP2 pid=66319) INFO 10-19 12:48:10 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_TP3 pid=66320) INFO 10-19 12:48:11 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:11 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_TP1 pid=66318) INFO 10-19 12:48:11 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:11 [weight_utils.py:922] Filesystem type for checkpoints: EXT4. Checkpoint size: 51.75 GiB. Available RAM: 1959.13 GiB.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:11 [weight_utils.py:945] Auto-prefetch is disabled because the filesystem (EXT4) is not a recognized network FS (NFS/Lustre). If you want to force prefetching, start vLLM with --safetensors-load-strategy=prefetch.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [default_loader.py:397] Loading weights took 3.83 seconds
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [model_runner_v1.py:3746] Loading drafter model...
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:15 [patch_pp_mtp.py:63] Validating local Eagle/MTP drafter with pipeline_parallel_size=1 because it is loaded locally on the last pipeline stage.
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:15 [vllm.py:893] Lwd edge-cloud mode derives parallel sizes from the topology; ignoring CLI tp=4 pp=2.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [vllm.py:1055] Asynchronous scheduling is enabled.
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:15 [vllm.py:1079] Disabling cascade attention (not yet compatible with async speculative decoding).
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [kernel.py:270] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [utils.py:174] No quantization signature detected from model files for "/weight/Qwen3.6-27B/". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:15 [platform.py:1074] GPU-specific parameter is not supported on Ascend. parameter=disable_cascade_attn, value=True, action: resetting to False.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [platform.py:1284] The timeout interval of the HCCL operator is 1836s. Timeout in seconds for execute_model RPC calls in multiprocessing must be greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [ascend_config.py:874] Dynamic EPLB is False
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [ascend_config.py:875] The number of redundant experts is 0
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [platform.py:797] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [llm_base_proposer.py:331] [spec_decode/base] Loading draft model: method=mtp, load_format=None, model=/weight/Qwen3.6-27B/
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [weight_utils.py:922] Filesystem type for checkpoints: EXT4. Checkpoint size: 51.75 GiB. Available RAM: 1959.02 GiB.
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [model_runner_v1.py:3746] Loading drafter model...
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:15 [patch_pp_mtp.py:63] Validating local Eagle/MTP drafter with pipeline_parallel_size=1 because it is loaded locally on the last pipeline stage.
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:15 [vllm.py:893] Lwd edge-cloud mode derives parallel sizes from the topology; ignoring CLI tp=4 pp=2.
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [kernel.py:270] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [utils.py:174] No quantization signature detected from model files for "/weight/Qwen3.6-27B/". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:15 [platform.py:1074] GPU-specific parameter is not supported on Ascend. parameter=disable_cascade_attn, value=True, action: resetting to False.
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [platform.py:1284] The timeout interval of the HCCL operator is 1836s. Timeout in seconds for execute_model RPC calls in multiprocessing must be greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [ascend_config.py:874] Dynamic EPLB is False
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [ascend_config.py:875] The number of redundant experts is 0
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [platform.py:797] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [llm_base_proposer.py:331] [spec_decode/base] Loading draft model: method=mtp, load_format=None, model=/weight/Qwen3.6-27B/
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_TP3 pid=66320) INFO 10-19 12:48:15 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [model_runner_v1.py:3746] Loading drafter model...
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:15 [patch_pp_mtp.py:63] Validating local Eagle/MTP drafter with pipeline_parallel_size=1 because it is loaded locally on the last pipeline stage.
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:15 [vllm.py:893] Lwd edge-cloud mode derives parallel sizes from the topology; ignoring CLI tp=4 pp=2.
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [kernel.py:270] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [utils.py:174] No quantization signature detected from model files for "/weight/Qwen3.6-27B/". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:15 [platform.py:1074] GPU-specific parameter is not supported on Ascend. parameter=disable_cascade_attn, value=True, action: resetting to False.
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [platform.py:1284] The timeout interval of the HCCL operator is 1836s. Timeout in seconds for execute_model RPC calls in multiprocessing must be greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [ascend_config.py:874] Dynamic EPLB is False
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [ascend_config.py:875] The number of redundant experts is 0
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [platform.py:797] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [llm_base_proposer.py:331] [spec_decode/base] Loading draft model: method=mtp, load_format=None, model=/weight/Qwen3.6-27B/
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_TP2 pid=66319) INFO 10-19 12:48:15 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [model_runner_v1.py:3746] Loading drafter model...
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:15 [patch_pp_mtp.py:63] Validating local Eagle/MTP drafter with pipeline_parallel_size=1 because it is loaded locally on the last pipeline stage.
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:15 [vllm.py:893] Lwd edge-cloud mode derives parallel sizes from the topology; ignoring CLI tp=4 pp=2.
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [kernel.py:270] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [utils.py:174] No quantization signature detected from model files for "/weight/Qwen3.6-27B/". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:15 [platform.py:1074] GPU-specific parameter is not supported on Ascend. parameter=disable_cascade_attn, value=True, action: resetting to False.
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [platform.py:1284] The timeout interval of the HCCL operator is 1836s. Timeout in seconds for execute_model RPC calls in multiprocessing must be greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [ascend_config.py:874] Dynamic EPLB is False
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [ascend_config.py:875] The number of redundant experts is 0
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [platform.py:797] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [llm_base_proposer.py:331] [spec_decode/base] Loading draft model: method=mtp, load_format=None, model=/weight/Qwen3.6-27B/
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [default_loader.py:397] Loading weights took 0.29 seconds
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [llm_base_proposer.py:476] [spec_decode/base] PP>1: draft model loaded its own vocab embedding weights instead of sharing them with the target model.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:15 [llm_base_proposer.py:522] [spec_decode/base] Wrapping draft model with ACLGraphWrapper: runtime_mode=FULL, use_eagle=True, enable_enpu=False
+(Worker_TP1 pid=66318) INFO 10-19 12:48:15 [compilation.py:1075] Using OOT custom backend for compilation.
+(Worker_TP3 pid=66320) INFO 10-19 12:48:16 [llm_base_proposer.py:466] [spec_decode/base] Detected MTP model. Sharing target model embedding weights with the draft model.
+(Worker_TP3 pid=66320) INFO 10-19 12:48:16 [llm_base_proposer.py:522] [spec_decode/base] Wrapping draft model with ACLGraphWrapper: runtime_mode=FULL, use_eagle=True, enable_enpu=False
+(Worker_TP2 pid=66319) INFO 10-19 12:48:16 [llm_base_proposer.py:466] [spec_decode/base] Detected MTP model. Sharing target model embedding weights with the draft model.
+(Worker_TP2 pid=66319) INFO 10-19 12:48:16 [llm_base_proposer.py:522] [spec_decode/base] Wrapping draft model with ACLGraphWrapper: runtime_mode=FULL, use_eagle=True, enable_enpu=False
+(Worker_TP1 pid=66318) INFO 10-19 12:48:16 [llm_base_proposer.py:466] [spec_decode/base] Detected MTP model. Sharing target model embedding weights with the draft model.
+(Worker_TP1 pid=66318) INFO 10-19 12:48:16 [llm_base_proposer.py:522] [spec_decode/base] Wrapping draft model with ACLGraphWrapper: runtime_mode=FULL, use_eagle=True, enable_enpu=False
+(Worker_TP2 pid=66319) INFO 10-19 12:48:16 [model_runner_v1.py:3797] Loading model weights took 13.6633 GB
+(Worker_TP2 pid=66319) INFO 10-19 12:48:16 [model_runner_v1.py:3829] Model runner load_model total time: 7.55 seconds
+(Worker_TP2 pid=66319) INFO 10-19 12:48:16 [lwd_cloud_worker.py:157] [Lwd][cloud-model] loaded layers=? first=language_model.model.layers.0 last=language_model.model.layers.63 (config pp=2 tp=4, my rank=7) — 全量应覆盖 layer 0 起的全部层
+(Worker_TP3 pid=66320) INFO 10-19 12:48:16 [model_runner_v1.py:3797] Loading model weights took 13.6633 GB
+(Worker_TP3 pid=66320) INFO 10-19 12:48:16 [model_runner_v1.py:3829] Model runner load_model total time: 7.57 seconds
+(Worker_TP3 pid=66320) INFO 10-19 12:48:16 [lwd_cloud_worker.py:157] [Lwd][cloud-model] loaded layers=? first=language_model.model.layers.0 last=language_model.model.layers.63 (config pp=2 tp=4, my rank=8) — 全量应覆盖 layer 0 起的全部层
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:16 [model_runner_v1.py:3797] Loading model weights took 14.2554 GB
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:16 [model_runner_v1.py:3829] Model runner load_model total time: 7.63 seconds
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:16 [lwd_cloud_worker.py:157] [Lwd][cloud-model] loaded layers=? first=language_model.model.layers.0 last=language_model.model.layers.63 (config pp=2 tp=4, my rank=5) — 全量应覆盖 layer 0 起的全部层
+(Worker_TP1 pid=66318) INFO 10-19 12:48:17 [model_runner_v1.py:3797] Loading model weights took 13.6633 GB
+(Worker_TP1 pid=66318) INFO 10-19 12:48:17 [model_runner_v1.py:3829] Model runner load_model total time: 8.15 seconds
+(Worker_TP1 pid=66318) INFO 10-19 12:48:17 [lwd_cloud_worker.py:157] [Lwd][cloud-model] loaded layers=? first=language_model.model.layers.0 last=language_model.model.layers.63 (config pp=2 tp=4, my rank=6) — 全量应覆盖 layer 0 起的全部层
+(EngineCore pid=66220) INFO 10-19 12:48:17 [multiproc_executor.py:409] [Lwd][perf] rpc-enqueue method=get_kv_cache_spec ts=883894.035
+(EngineCore pid=66220) INFO 10-19 12:48:17 [multiproc_executor.py:420] [Lwd][perf] rpc-enqueue-done method=get_kv_cache_spec ts=883894.036
+(Worker_TP1 pid=66318) INFO 10-19 12:48:17 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=get_kv_cache_spec ts=883894.036
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:17 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=get_kv_cache_spec ts=883894.036
+(Worker_TP2 pid=66319) INFO 10-19 12:48:17 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=get_kv_cache_spec ts=883894.036
+(Worker_TP3 pid=66320) INFO 10-19 12:48:17 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=get_kv_cache_spec ts=883894.036
+(Worker_TP1 pid=66318) INFO 10-19 12:48:17 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=get_kv_cache_spec ts=883894.037
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:17 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=get_kv_cache_spec ts=883894.037
+(Worker_TP2 pid=66319) INFO 10-19 12:48:17 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=get_kv_cache_spec ts=883894.038
+(Worker_TP3 pid=66320) INFO 10-19 12:48:17 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=get_kv_cache_spec ts=883894.038
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:17 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883894.038
+(Worker_TP1 pid=66318) INFO 10-19 12:48:17 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883894.038
+(Worker_TP2 pid=66319) INFO 10-19 12:48:17 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883894.039
+(Worker_TP3 pid=66320) INFO 10-19 12:48:17 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883894.039
+(EngineCore pid=66220) INFO 10-19 12:48:17 [multiproc_executor.py:409] [Lwd][perf] rpc-enqueue method=determine_available_memory ts=883894.041
+(EngineCore pid=66220) INFO 10-19 12:48:17 [multiproc_executor.py:420] [Lwd][perf] rpc-enqueue-done method=determine_available_memory ts=883894.041
+(Worker_TP1 pid=66318) INFO 10-19 12:48:17 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=determine_available_memory ts=883894.041
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:17 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=determine_available_memory ts=883894.041
+(Worker_TP2 pid=66319) INFO 10-19 12:48:17 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=determine_available_memory ts=883894.041
+(Worker_TP3 pid=66320) INFO 10-19 12:48:17 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=determine_available_memory ts=883894.041
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:18 [gpu_model_runner.py:6395] Encoder cache will be initialized with a budget of 16384 tokens, and profiled with 1 image items of the maximum feature size.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:24 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:24 [backends.py:1089] Using cache directory: /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_5_0/backbone for vLLM's torch.compile
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:24 [backends.py:1148] Dynamo bytecode transform time: 1.98 s
+(Worker_TP2 pid=66319) INFO 10-19 12:48:24 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_TP3 pid=66320) INFO 10-19 12:48:24 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_TP1 pid=66318) INFO 10-19 12:48:24 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:24 [compiler_interface.py:310] npugraph_ex cache miss for key artifact_compile_range_1_8192_subgraph_0 (file absent or not saved), recompiling
+(Worker_TP2 pid=66319) INFO 10-19 12:48:24 [compiler_interface.py:310] npugraph_ex cache miss for key artifact_compile_range_1_8192_subgraph_0 (file absent or not saved), recompiling
+(Worker_TP3 pid=66320) INFO 10-19 12:48:24 [compiler_interface.py:310] npugraph_ex cache miss for key artifact_compile_range_1_8192_subgraph_0 (file absent or not saved), recompiling
+(Worker_TP1 pid=66318) INFO 10-19 12:48:24 [compiler_interface.py:310] npugraph_ex cache miss for key artifact_compile_range_1_8192_subgraph_0 (file absent or not saved), recompiling
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321] Compiling model again due to a load failure from /root/.cache/vllm/torch_compile_cache/torch_aot_compile/d79cc883ea8ec333a1efd4ada7f4f37ca596eded86d8d19d527911fca2b711ff/rank_5_0/model, reason: While executing %triton_kernel_wrapper_mutation : [num_users=0] = call_function[target=torch.ops.higher_order.triton_kernel_wrapper_mutation](args = (), kwargs = {kernel_idx: 0, constant_args_idx: 0, grid: [(%floordiv, 1, 1)], tma_descriptor_metadata: {}, kwargs: {X: %reshape_3, Y: %empty_like_1, W: %contiguous_2, Z: %reshape_4, Rstd: %empty, M: %mul}})
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321] Original traceback:
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm/vllm/model_executor/models/qwen3_next.py", line 528, in forward
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     hidden_states, residual = layer(
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/patch/worker/patch_qwen3_5.py", line 115, in forward
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     self.linear_attn(
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/gdn.py", line 142, in forward
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     core_attn_out = self.norm(core_attn_out, z)
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm/vllm/model_executor/custom_op.py", line 136, in forward
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     return self._forward_method(*args, **kwargs)
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/layernorm.py", line 201, in forward_oot
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/layernorm.py", line 143, in forward
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     y, mean, rstd = layer_norm_fwd_npu(
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/layernorm_gated.py", line 148, in layer_norm_fwd_npu
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     _layer_norm_fwd_1pass_kernel_npu[grid](
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/jit.py", line 333, in <lambda>
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/autotuner.py", line 386, in run
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     return self.fn.run(*args, **kwargs)
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/autotuner.py", line 386, in run
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]     return self.fn.run(*args, **kwargs)
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321]
+(Worker_PP1_TP0 pid=66317) WARNING 10-19 12:48:25 [decorators.py:321] Use tlparse to see full graph. (https://github.com/pytorch/tlparse?tab=readme-ov-file#tlparse-parse-structured-pt2-logs)
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321] Compiling model again due to a load failure from /root/.cache/vllm/torch_compile_cache/torch_aot_compile/d79cc883ea8ec333a1efd4ada7f4f37ca596eded86d8d19d527911fca2b711ff/rank_7_0/model, reason: While executing %triton_kernel_wrapper_mutation : [num_users=0] = call_function[target=torch.ops.higher_order.triton_kernel_wrapper_mutation](args = (), kwargs = {kernel_idx: 0, constant_args_idx: 0, grid: [(%floordiv, 1, 1)], tma_descriptor_metadata: {}, kwargs: {X: %reshape_3, Y: %empty_like_1, W: %contiguous_2, Z: %reshape_4, Rstd: %empty, M: %mul}})
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321] Original traceback:
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm/vllm/model_executor/models/qwen3_next.py", line 528, in forward
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     hidden_states, residual = layer(
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/patch/worker/patch_qwen3_5.py", line 115, in forward
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     self.linear_attn(
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/gdn.py", line 142, in forward
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     core_attn_out = self.norm(core_attn_out, z)
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm/vllm/model_executor/custom_op.py", line 136, in forward
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     return self._forward_method(*args, **kwargs)
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/layernorm.py", line 201, in forward_oot
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/layernorm.py", line 143, in forward
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     y, mean, rstd = layer_norm_fwd_npu(
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/layernorm_gated.py", line 148, in layer_norm_fwd_npu
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     _layer_norm_fwd_1pass_kernel_npu[grid](
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/jit.py", line 333, in <lambda>
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/autotuner.py", line 386, in run
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     return self.fn.run(*args, **kwargs)
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/autotuner.py", line 386, in run
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]     return self.fn.run(*args, **kwargs)
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321]
+(Worker_TP2 pid=66319) WARNING 10-19 12:48:25 [decorators.py:321] Use tlparse to see full graph. (https://github.com/pytorch/tlparse?tab=readme-ov-file#tlparse-parse-structured-pt2-logs)
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321] Compiling model again due to a load failure from /root/.cache/vllm/torch_compile_cache/torch_aot_compile/d79cc883ea8ec333a1efd4ada7f4f37ca596eded86d8d19d527911fca2b711ff/rank_8_0/model, reason: While executing %triton_kernel_wrapper_mutation : [num_users=0] = call_function[target=torch.ops.higher_order.triton_kernel_wrapper_mutation](args = (), kwargs = {kernel_idx: 0, constant_args_idx: 0, grid: [(%floordiv, 1, 1)], tma_descriptor_metadata: {}, kwargs: {X: %reshape_3, Y: %empty_like_1, W: %contiguous_2, Z: %reshape_4, Rstd: %empty, M: %mul}})
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321] Original traceback:
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm/vllm/model_executor/models/qwen3_next.py", line 528, in forward
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     hidden_states, residual = layer(
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/patch/worker/patch_qwen3_5.py", line 115, in forward
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     self.linear_attn(
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/gdn.py", line 142, in forward
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     core_attn_out = self.norm(core_attn_out, z)
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm/vllm/model_executor/custom_op.py", line 136, in forward
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     return self._forward_method(*args, **kwargs)
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/layernorm.py", line 201, in forward_oot
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/layernorm.py", line 143, in forward
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     y, mean, rstd = layer_norm_fwd_npu(
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/layernorm_gated.py", line 148, in layer_norm_fwd_npu
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     _layer_norm_fwd_1pass_kernel_npu[grid](
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/jit.py", line 333, in <lambda>
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/autotuner.py", line 386, in run
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     return self.fn.run(*args, **kwargs)
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/autotuner.py", line 386, in run
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]     return self.fn.run(*args, **kwargs)
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321]
+(Worker_TP3 pid=66320) WARNING 10-19 12:48:26 [decorators.py:321] Use tlparse to see full graph. (https://github.com/pytorch/tlparse?tab=readme-ov-file#tlparse-parse-structured-pt2-logs)
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321] Compiling model again due to a load failure from /root/.cache/vllm/torch_compile_cache/torch_aot_compile/d79cc883ea8ec333a1efd4ada7f4f37ca596eded86d8d19d527911fca2b711ff/rank_6_0/model, reason: While executing %triton_kernel_wrapper_mutation : [num_users=0] = call_function[target=torch.ops.higher_order.triton_kernel_wrapper_mutation](args = (), kwargs = {kernel_idx: 0, constant_args_idx: 0, grid: [(%floordiv, 1, 1)], tma_descriptor_metadata: {}, kwargs: {X: %reshape_3, Y: %empty_like_1, W: %contiguous_2, Z: %reshape_4, Rstd: %empty, M: %mul}})
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321] Original traceback:
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm/vllm/model_executor/models/qwen3_next.py", line 528, in forward
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     hidden_states, residual = layer(
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/patch/worker/patch_qwen3_5.py", line 115, in forward
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     self.linear_attn(
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/gdn.py", line 142, in forward
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     core_attn_out = self.norm(core_attn_out, z)
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm/vllm/model_executor/custom_op.py", line 136, in forward
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     return self._forward_method(*args, **kwargs)
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/layernorm.py", line 201, in forward_oot
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     return LayerNormFn.apply(x, self.weight, self.bias, z, self.eps, self.group_size, self.norm_before_gate, True)
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/layernorm.py", line 143, in forward
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     y, mean, rstd = layer_norm_fwd_npu(
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/vllm-workspace/vllm-ascend/vllm_ascend/ops/triton/layernorm_gated.py", line 148, in layer_norm_fwd_npu
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     _layer_norm_fwd_1pass_kernel_npu[grid](
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/jit.py", line 333, in <lambda>
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     return lambda *args, **kwargs: self.run(grid=grid, warmup=False, *args, **kwargs)
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/autotuner.py", line 386, in run
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     return self.fn.run(*args, **kwargs)
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]   File "/usr/local/python3.12.13/lib/python3.12/site-packages/triton/runtime/autotuner.py", line 386, in run
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]     return self.fn.run(*args, **kwargs)
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321]
+(Worker_TP1 pid=66318) WARNING 10-19 12:48:26 [decorators.py:321] Use tlparse to see full graph. (https://github.com/pytorch/tlparse?tab=readme-ov-file#tlparse-parse-structured-pt2-logs)
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:36 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:36 [backends.py:1148] Dynamo bytecode transform time: 10.95 s
+(Worker_TP3 pid=66320) INFO 10-19 12:48:36 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:48:36 [compiler_interface.py:310] npugraph_ex cache miss for key artifact_compile_range_1_8192_subgraph_0 (file absent or not saved), recompiling
+(Worker_TP3 pid=66320) INFO 10-19 12:48:36 [compiler_interface.py:310] npugraph_ex cache miss for key artifact_compile_range_1_8192_subgraph_0 (file absent or not saved), recompiling
+(Worker_TP2 pid=66319) INFO 10-19 12:48:37 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_TP1 pid=66318) INFO 10-19 12:48:37 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_TP2 pid=66319) INFO 10-19 12:48:37 [compiler_interface.py:310] npugraph_ex cache miss for key artifact_compile_range_1_8192_subgraph_0 (file absent or not saved), recompiling
+(Worker_TP1 pid=66318) INFO 10-19 12:48:37 [compiler_interface.py:310] npugraph_ex cache miss for key artifact_compile_range_1_8192_subgraph_0 (file absent or not saved), recompiling
+(Worker_TP3 pid=66320) INFO 10-19 12:49:08 [compiler_interface.py:190] Skipping npugraph_ex cache for graph containing Triton kernels (kernel_side_table indices are process-local): /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_8_0/backbone/artifact_compile_range_1_8192_subgraph_0
+(Worker_TP3 pid=66320) INFO 10-19 12:49:08 [compiler_interface.py:190] Skipping npugraph_ex cache for graph containing Triton kernels (kernel_side_table indices are process-local): /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_8_0/backbone/artifact_compile_range_1_8192_subgraph_0
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:11 [compiler_interface.py:190] Skipping npugraph_ex cache for graph containing Triton kernels (kernel_side_table indices are process-local): /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_5_0/backbone/artifact_compile_range_1_8192_subgraph_0
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:11 [compiler_interface.py:190] Skipping npugraph_ex cache for graph containing Triton kernels (kernel_side_table indices are process-local): /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_5_0/backbone/artifact_compile_range_1_8192_subgraph_0
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:11 [backends.py:292] Directly load the compiled graph(s) for compile range (1, 8192) from the cache, took 35.012 s
+(Worker_TP3 pid=66320) INFO 10-19 12:49:12 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_TP3 pid=66320) INFO 10-19 12:49:12 [compiler_interface.py:353] Loaded npugraph_ex compilation cache from /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_8_0/eagle_head/artifact_compile_range_1_8192_subgraph_0
+(Worker_TP3 pid=66320) INFO 10-19 12:49:12 [decorators.py:311] Directly load AOT compilation from path /root/.cache/vllm/torch_compile_cache/torch_aot_compile/e1f0767dae2bc87b231bb3fdf777a43932a309e88ec09817f50ca71fdbc31ba6/rank_8_0/model
+(Worker_TP1 pid=66318) INFO 10-19 12:49:12 [compiler_interface.py:190] Skipping npugraph_ex cache for graph containing Triton kernels (kernel_side_table indices are process-local): /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_6_0/backbone/artifact_compile_range_1_8192_subgraph_0
+(Worker_TP1 pid=66318) INFO 10-19 12:49:12 [compiler_interface.py:190] Skipping npugraph_ex cache for graph containing Triton kernels (kernel_side_table indices are process-local): /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_6_0/backbone/artifact_compile_range_1_8192_subgraph_0
+(Worker_TP2 pid=66319) INFO 10-19 12:49:14 [compiler_interface.py:190] Skipping npugraph_ex cache for graph containing Triton kernels (kernel_side_table indices are process-local): /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_7_0/backbone/artifact_compile_range_1_8192_subgraph_0
+(Worker_TP2 pid=66319) INFO 10-19 12:49:14 [compiler_interface.py:190] Skipping npugraph_ex cache for graph containing Triton kernels (kernel_side_table indices are process-local): /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_7_0/backbone/artifact_compile_range_1_8192_subgraph_0
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [decorators.py:708] saved AOT compiled function to /root/.cache/vllm/torch_compile_cache/torch_aot_compile/d79cc883ea8ec333a1efd4ada7f4f37ca596eded86d8d19d527911fca2b711ff/rank_5_0/model
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [monitor.py:53] torch.compile took 49.43 s in total
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [monitor.py:81] Initial profiling/warmup run took 0.34 s
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [backends.py:1089] Using cache directory: /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_5_0/eagle_head for vLLM's torch.compile
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [backends.py:1148] Dynamo bytecode transform time: 0.07 s
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [compiler_interface.py:353] Loaded npugraph_ex compilation cache from /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_5_0/eagle_head/artifact_compile_range_1_8192_subgraph_0
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [backends.py:292] Directly load the compiled graph(s) for compile range (1, 8192) from the cache, took 0.003 s
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [decorators.py:311] Directly load AOT compilation from path /root/.cache/vllm/torch_compile_cache/torch_aot_compile/e1f0767dae2bc87b231bb3fdf777a43932a309e88ec09817f50ca71fdbc31ba6/rank_5_0/model
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [monitor.py:53] torch.compile took 0.08 s in total
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:15 [monitor.py:81] Initial profiling/warmup run took 0.02 s
+(Worker_TP1 pid=66318) INFO 10-19 12:49:16 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_TP1 pid=66318) INFO 10-19 12:49:16 [compiler_interface.py:353] Loaded npugraph_ex compilation cache from /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_6_0/eagle_head/artifact_compile_range_1_8192_subgraph_0
+(Worker_TP1 pid=66318) INFO 10-19 12:49:16 [decorators.py:311] Directly load AOT compilation from path /root/.cache/vllm/torch_compile_cache/torch_aot_compile/e1f0767dae2bc87b231bb3fdf777a43932a309e88ec09817f50ca71fdbc31ba6/rank_6_0/model
+(Worker_TP2 pid=66319) INFO 10-19 12:49:17 [compiler_interface.py:248] AscendCompiler hash factors: {'torch_npu_version': '2.10.0.post2', 'enable_npugraph_ex': True, 'enable_static_kernel': False}
+(Worker_TP2 pid=66319) INFO 10-19 12:49:17 [compiler_interface.py:353] Loaded npugraph_ex compilation cache from /root/.cache/vllm/torch_compile_cache/8f0edc63d7/rank_7_0/eagle_head/artifact_compile_range_1_8192_subgraph_0
+(Worker_TP2 pid=66319) INFO 10-19 12:49:17 [decorators.py:311] Directly load AOT compilation from path /root/.cache/vllm/torch_compile_cache/torch_aot_compile/e1f0767dae2bc87b231bb3fdf777a43932a309e88ec09817f50ca71fdbc31ba6/rank_7_0/model
+(EngineCore pid=66220) INFO 10-19 12:49:18 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:19 [worker.py:597] Available KV cache memory: 40.17 GiB
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:19 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=determine_available_memory ts=883956.127
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:19 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883956.128
+(Worker_TP1 pid=66318) INFO 10-19 12:49:19 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=determine_available_memory ts=883956.337
+(Worker_TP1 pid=66318) INFO 10-19 12:49:19 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883956.338
+(Worker_TP2 pid=66319) INFO 10-19 12:49:20 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=determine_available_memory ts=883956.657
+(Worker_TP2 pid=66319) INFO 10-19 12:49:20 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883956.658
+(Worker_TP3 pid=66320) INFO 10-19 12:49:20 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=determine_available_memory ts=883956.812
+(Worker_TP3 pid=66320) INFO 10-19 12:49:20 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883956.813
+(EngineCore pid=66220) WARNING 10-19 12:49:20 [kv_cache_utils.py:1174] Add 3 padding layers, may waste at most 6.25% KV cache memory
+(EngineCore pid=66220) INFO 10-19 12:49:20 [kv_cache_utils.py:1744] GPU KV cache size: 2,266,184 tokens
+(EngineCore pid=66220) INFO 10-19 12:49:20 [kv_cache_utils.py:1745] Maximum concurrency for 262,144 tokens per request: 8.64x
+(EngineCore pid=66220) INFO 10-19 12:49:20 [multiproc_executor.py:409] [Lwd][perf] rpc-enqueue method=initialize_from_config ts=883956.817
+(EngineCore pid=66220) INFO 10-19 12:49:20 [multiproc_executor.py:420] [Lwd][perf] rpc-enqueue-done method=initialize_from_config ts=883956.818
+(Worker_TP1 pid=66318) INFO 10-19 12:49:20 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=initialize_from_config ts=883956.818
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:20 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=initialize_from_config ts=883956.818
+(Worker_TP3 pid=66320) INFO 10-19 12:49:20 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=initialize_from_config ts=883956.818
+(Worker_TP2 pid=66319) INFO 10-19 12:49:20 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=initialize_from_config ts=883956.818
+(Worker_TP1 pid=66318) INFO 10-19 12:49:24 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=initialize_from_config ts=883960.643
+(Worker_TP1 pid=66318) INFO 10-19 12:49:24 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883960.644
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:24 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=initialize_from_config ts=883960.660
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:24 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883960.661
+(Worker_TP2 pid=66319) INFO 10-19 12:49:24 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=initialize_from_config ts=883960.768
+(Worker_TP2 pid=66319) INFO 10-19 12:49:24 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883960.769
+(Worker_TP3 pid=66320) INFO 10-19 12:49:24 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=initialize_from_config ts=883960.777
+(Worker_TP3 pid=66320) INFO 10-19 12:49:24 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=883960.778
+(EngineCore pid=66220) INFO 10-19 12:49:24 [multiproc_executor.py:409] [Lwd][perf] rpc-enqueue method=compile_or_warm_up_model ts=883960.778
+(EngineCore pid=66220) INFO 10-19 12:49:24 [multiproc_executor.py:420] [Lwd][perf] rpc-enqueue-done method=compile_or_warm_up_model ts=883960.778
+(Worker_TP3 pid=66320) INFO 10-19 12:49:24 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=compile_or_warm_up_model ts=883960.778
+(Worker_TP2 pid=66319) INFO 10-19 12:49:24 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=compile_or_warm_up_model ts=883960.778
+(Worker_PP1_TP0 pid=66317) INFO 10-19 12:49:24 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=compile_or_warm_up_model ts=883960.778
+(Worker_TP1 pid=66318) INFO 10-19 12:49:24 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=compile_or_warm_up_model ts=883960.778
+[rank6]:[W1019 12:49:25.491902460 NPUGraph.cpp:223] Warning: Waiting for pending NCCL work to finish before starting graph capture. (function operator())
+[rank8]:[W1019 12:49:25.492708410 NPUGraph.cpp:223] Warning: Waiting for pending NCCL work to finish before starting graph capture. (function operator())
+[rank7]:[W1019 12:49:25.492912640 NPUGraph.cpp:223] Warning: Waiting for pending NCCL work to finish before starting graph capture. (function operator())
+[rank5]:[W1019 12:49:25.493611910 NPUGraph.cpp:223] Warning: Waiting for pending NCCL work to finish before starting graph capture. (function operator())
+(EngineCore pid=66220) INFO 10-19 12:50:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:51:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:52:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:53:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:54:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:55:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:56:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:57:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:58:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 12:59:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:00:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:01:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:02:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:03:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:04:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:05:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:06:25 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:07:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:08:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:09:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:10:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:11:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:12:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:13:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:14:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:15:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:16:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:17:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:18:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:19:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:20:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:21:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:22:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:23:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:24:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:25:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:26:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:27:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:28:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:29:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:30:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:31:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:32:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:33:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:34:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:35:26 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:36:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:37:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:38:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:39:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:40:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:41:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:42:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:43:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:44:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:45:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:46:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:47:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:48:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:49:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:50:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:51:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:52:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:53:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:54:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:55:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:56:27 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:57:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:58:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 13:59:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:00:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:01:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:02:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:03:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:04:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:05:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:06:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:07:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:08:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:09:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:10:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:11:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:12:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:13:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:14:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:15:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:16:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:17:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(EngineCore pid=66220) INFO 10-19 14:18:28 [shm_broadcast.py:705] No available shared memory broadcast block found in 60 seconds. This typically happens when some processes are hanging or doing some time-consuming work (e.g. compilation, weight/kv cache quantization).
+(Worker_TP3 pid=66320) INFO 10-19 14:18:30 [worker.py:767] Free memory on device (61.12/61.28 GiB) on startup. Desired GPU memory utilization is (0.92, 56.38 GiB). Actual usage: 13.66 GiB for weights, 1.19 GiB for peak activation, 0.59 GiB for non-torch memory, 3.58 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=39943871324` (37.2 GiB) to fit into requested memory, or `--kv-cache-memory=45039000576` (41.95 GiB) to fully utilize NPU free memory. Current KV cache memory: 40.93 GiB.
+(Worker_TP2 pid=66319) INFO 10-19 14:18:30 [worker.py:767] Free memory on device (60.89/61.27 GiB) on startup. Desired GPU memory utilization is (0.92, 56.37 GiB). Actual usage: 13.66 GiB for weights, 1.19 GiB for peak activation, 0.59 GiB for non-torch memory, 3.58 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=39935695052` (37.19 GiB) to fit into requested memory, or `--kv-cache-memory=44795673600` (41.72 GiB) to fully utilize NPU free memory. Current KV cache memory: 40.92 GiB.
+(Worker_TP1 pid=66318) INFO 10-19 14:18:30 [worker.py:767] Free memory on device (61.12/61.28 GiB) on startup. Desired GPU memory utilization is (0.92, 56.38 GiB). Actual usage: 13.66 GiB for weights, 1.19 GiB for peak activation, 0.59 GiB for non-torch memory, 3.58 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=39944858460` (37.2 GiB) to fit into requested memory, or `--kv-cache-memory=45039221760` (41.95 GiB) to fully utilize NPU free memory. Current KV cache memory: 40.93 GiB.
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:30 [gpu_model_runner.py:6780] Graph capturing finished in 5346 secs, took 3.58 GiB
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:30 [worker.py:767] Free memory on device (60.89/61.27 GiB) on startup. Desired GPU memory utilization is (0.92, 56.37 GiB). Actual usage: 14.26 GiB for weights, 1.19 GiB for peak activation, 0.75 GiB for non-torch memory, 3.58 GiB for NPU graph memory. Replace gpu_memory_utilization with `--kv-cache-memory=39131608780` (36.44 GiB) to fit into requested memory, or `--kv-cache-memory=43989600768` (40.97 GiB) to fully utilize NPU free memory. Current KV cache memory: 40.17 GiB.
+(Worker_TP3 pid=66320) INFO 10-19 14:18:33 [cpu_binding.py:542] [cpu_bind_mode] mode=global_slice rank=3 visible_npus=[12, 13, 14, 15]
+(Worker_TP3 pid=66320) INFO 10-19 14:18:33 [cpu_binding.py:626] The CPU allocation plan is as follows:
+(Worker_TP3 pid=66320) INFO 10-19 14:18:33 [cpu_binding.py:641] NPU15: main=[602 603 604 605 606 607 608 609 610 611 612 613 614 615 616 617 618 619 620 621 622 623 624 625 626 627 628 629 630 631 632 633 634 635 636 637]  acl=[638]  release=[[639]]
+(Worker_TP2 pid=66319) INFO 10-19 14:18:33 [cpu_binding.py:542] [cpu_bind_mode] mode=global_slice rank=2 visible_npus=[12, 13, 14, 15]
+(Worker_TP2 pid=66319) INFO 10-19 14:18:33 [cpu_binding.py:626] The CPU allocation plan is as follows:
+(Worker_TP2 pid=66319) INFO 10-19 14:18:33 [cpu_binding.py:641] NPU14: main=[562 563 564 565 566 567 568 569 570 571 572 573 574 575 576 577 578 579 580 581 582 583 584 585 586 587 588 589 590 591 592 593 594 595 596 597]  acl=[598]  release=[[599]]
+(Worker_TP1 pid=66318) INFO 10-19 14:18:33 [cpu_binding.py:542] [cpu_bind_mode] mode=global_slice rank=1 visible_npus=[12, 13, 14, 15]
+(Worker_TP1 pid=66318) INFO 10-19 14:18:33 [cpu_binding.py:626] The CPU allocation plan is as follows:
+(Worker_TP1 pid=66318) INFO 10-19 14:18:33 [cpu_binding.py:641] NPU13: main=[522 523 524 525 526 527 528 529 530 531 532 533 534 535 536 537 538 539 540 541 542 543 544 545 546 547 548 549 550 551 552 553 554 555 556 557]  acl=[558]  release=[[559]]
+(Worker_TP3 pid=66320) INFO 10-19 14:18:33 [cpu_binding.py:667] [migrate] NPU:15 -> NUMA [7]
+(Worker_TP2 pid=66319) INFO 10-19 14:18:33 [cpu_binding.py:667] [migrate] NPU:14 -> NUMA [7]
+(Worker_TP1 pid=66318) INFO 10-19 14:18:33 [cpu_binding.py:667] [migrate] NPU:13 -> NUMA [6]
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:34 [cpu_binding.py:542] [cpu_bind_mode] mode=global_slice rank=0 visible_npus=[12, 13, 14, 15]
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:34 [cpu_binding.py:626] The CPU allocation plan is as follows:
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:34 [cpu_binding.py:641] NPU12: main=[482 483 484 485 486 487 488 489 490 491 492 493 494 495 496 497 498 499 500 501 502 503 504 505 506 507 508 509 510 511 512 513 514 515 516 517]  acl=[518]  release=[[519]]
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:34 [cpu_binding.py:667] [migrate] NPU:12 -> NUMA [6]
+(Worker_TP1 pid=66318) INFO 10-19 14:18:42 [cpu_binding.py:778] NPU13(PCI 0000:87:00.0): sq_send_trigger_irq IRQ_ID=5390 -> CPU520, cq_update_irq IRQ_ID=5391 -> CPU521
+(Worker_TP1 pid=66318) INFO 10-19 14:18:42 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=compile_or_warm_up_model ts=889318.594
+(Worker_TP1 pid=66318) INFO 10-19 14:18:42 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889318.594
+(Worker_TP2 pid=66319) INFO 10-19 14:18:42 [cpu_binding.py:778] NPU14(PCI 0000:81:00.0): sq_send_trigger_irq IRQ_ID=5649 -> CPU560, cq_update_irq IRQ_ID=5650 -> CPU561
+(Worker_TP2 pid=66319) INFO 10-19 14:18:42 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=compile_or_warm_up_model ts=889319.148
+(Worker_TP2 pid=66319) INFO 10-19 14:18:42 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889319.148
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:42 [cpu_binding.py:778] NPU12(PCI 0000:85:00.0): sq_send_trigger_irq IRQ_ID=5129 -> CPU480, cq_update_irq IRQ_ID=5130 -> CPU481
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:42 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=compile_or_warm_up_model ts=889319.278
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:42 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889319.279
+(Worker_TP3 pid=66320) INFO 10-19 14:18:48 [cpu_binding.py:778] NPU15(PCI 0000:83:00.0): sq_send_trigger_irq IRQ_ID=5908 -> CPU600, cq_update_irq IRQ_ID=5909 -> CPU601
+(Worker_TP3 pid=66320) INFO 10-19 14:18:48 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=compile_or_warm_up_model ts=889325.223
+(Worker_TP3 pid=66320) INFO 10-19 14:18:48 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889325.223
+(EngineCore pid=66220) INFO 10-19 14:18:48 [core.py:307] init engine (profile, create kv cache, warmup model) took 5431.19 s (compilation: 51.64 s)
+(EngineCore pid=66220) WARNING 10-19 14:18:49 [scheduler.py:181] Using custom scheduler class <class 'vllm.v1.lwd_control.control_cloud_scheduler.lwd_cloud_mixed_scheduler.LwdCloudMixedScheduler'>. This scheduler interface is not public and compatibility may not be maintained.
+(EngineCore pid=66220) `Qwen2VLImageProcessorFast` is deprecated. The `Fast` suffix for image processors has been removed; use `Qwen2VLImageProcessor` instead.
+(EngineCore pid=66220) The `use_fast` parameter is deprecated and will be removed in a future version. Use `backend="torchvision"` instead of `use_fast=True`, or `backend="pil"` instead of `use_fast=False`.
+(EngineCore pid=66220) INFO 10-19 14:18:53 [lwd_cloud_mixed_scheduler.py:70] [Lwd] cloud mixed scheduler: chunked-prefill batches mixed with decode (one notify consumed per step at most, spec_factor=4)
+(EngineCore pid=66220) WARNING 10-19 14:18:54 [vllm.py:893] Lwd edge-cloud mode derives parallel sizes from the topology; ignoring CLI tp=4 pp=2.
+(EngineCore pid=66220) INFO 10-19 14:18:54 [vllm.py:1055] Asynchronous scheduling is enabled.
+(EngineCore pid=66220) WARNING 10-19 14:18:54 [vllm.py:1079] Disabling cascade attention (not yet compatible with async speculative decoding).
+(EngineCore pid=66220) INFO 10-19 14:18:54 [kernel.py:270] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+(EngineCore pid=66220) INFO 10-19 14:18:54 [utils.py:174] No quantization signature detected from model files for "/weight/Qwen3.6-27B/". The model will be loaded as float. To force a quantization method, pass "--quantization <method>" explicitly.
+(EngineCore pid=66220) WARNING 10-19 14:18:54 [platform.py:1074] GPU-specific parameter is not supported on Ascend. parameter=disable_cascade_attn, value=True, action: resetting to False.
+(EngineCore pid=66220) INFO 10-19 14:18:54 [platform.py:1284] The timeout interval of the HCCL operator is 1836s. Timeout in seconds for execute_model RPC calls in multiprocessing must be greater than 1836s, Set VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
+(EngineCore pid=66220) INFO 10-19 14:18:54 [ascend_config.py:874] Dynamic EPLB is False
+(EngineCore pid=66220) INFO 10-19 14:18:54 [ascend_config.py:875] The number of redundant experts is 0
+(EngineCore pid=66220) INFO 10-19 14:18:54 [ascend_config.py:341] AscendConfig.enable_fused_mc2 falls back to environment variable VLLM_ASCEND_ENABLE_FUSED_MC2 with value 1. Please use additional_config.enable_fused_mc2 instead, because VLLM_ASCEND_ENABLE_FUSED_MC2 will be removed in the next release.
+(EngineCore pid=66220) INFO 10-19 14:18:54 [ascend_config.py:341] AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 1. Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed in the next release.
+(EngineCore pid=66220) INFO 10-19 14:18:54 [platform.py:797] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(EngineCore pid=66220) INFO 10-19 14:18:54 [compilation.py:321] Enabled custom fusions: norm_quant, act_quant
+(EngineCore pid=66220) INFO 10-19 14:18:54 [lwd_router_dealer_channel.py:128] [Lwd][zmq] router-dealer channel[lwd-cloud-inst1] connecting to on tcp://76.76.26.18:5293 (DEALER, identity=1)
+(EngineCore pid=66220) INFO 10-19 14:18:54 [lwd_cloud_engine.py:209] [Lwd][cloud] HELLO announced: pre_out=76.76.26.234:5293
+(EngineCore pid=66220) INFO 10-19 14:18:54 [lwd_router_dealer_channel.py:290] [Lwd][zmq] router-dealer channel[lwd-cloud-inst1] HELLO handshake sent
+(EngineCore pid=66220) INFO 10-19 14:18:54 [lwd_cloud_engine.py:198] [Lwd] cloud engine assembled (full_duplex): DEALER connect -> 76.76.26.18:5293 (identity=1)
+(EngineCore pid=66220) INFO 10-19 14:18:54 [core.py:1264] [has_work] engines_running=False has_requests=False batch_queue=False
+(EngineCore pid=66220) INFO 10-19 14:18:54 [multiproc_executor.py:409] [Lwd][perf] rpc-enqueue method=reset_mm_cache ts=889330.923
+(EngineCore pid=66220) INFO 10-19 14:18:54 [multiproc_executor.py:420] [Lwd][perf] rpc-enqueue-done method=reset_mm_cache ts=889330.923
+(Worker_TP3 pid=66320) INFO 10-19 14:18:54 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=reset_mm_cache ts=889330.923
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:54 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=reset_mm_cache ts=889330.923
+(Worker_TP1 pid=66318) INFO 10-19 14:18:54 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=reset_mm_cache ts=889330.923
+(Worker_TP2 pid=66319) INFO 10-19 14:18:54 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=reset_mm_cache ts=889330.923
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:54 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=reset_mm_cache ts=889330.924
+(Worker_TP3 pid=66320) INFO 10-19 14:18:54 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=reset_mm_cache ts=889330.924
+(Worker_TP2 pid=66319) INFO 10-19 14:18:54 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=reset_mm_cache ts=889330.924
+(Worker_TP1 pid=66318) INFO 10-19 14:18:54 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=reset_mm_cache ts=889330.924
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:54 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889330.924
+(Worker_TP1 pid=66318) INFO 10-19 14:18:54 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889330.924
+(Worker_TP3 pid=66320) INFO 10-19 14:18:54 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889330.924
+(Worker_TP2 pid=66319) INFO 10-19 14:18:54 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889330.924
+(EngineCore pid=66220) INFO 10-19 14:18:54 [multiproc_executor.py:409] [Lwd][perf] rpc-enqueue method=get_supported_tasks ts=889330.925
+(EngineCore pid=66220) INFO 10-19 14:18:54 [multiproc_executor.py:420] [Lwd][perf] rpc-enqueue-done method=get_supported_tasks ts=889330.925
+(Worker_TP3 pid=66320) INFO 10-19 14:18:54 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=get_supported_tasks ts=889330.925
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:54 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=get_supported_tasks ts=889330.925
+(Worker_TP1 pid=66318) INFO 10-19 14:18:54 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=get_supported_tasks ts=889330.925
+(Worker_TP2 pid=66319) INFO 10-19 14:18:54 [multiproc_executor.py:1109] [Lwd][perf] rpc-dequeue method=get_supported_tasks ts=889330.925
+(Worker_TP3 pid=66320) INFO 10-19 14:18:54 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=get_supported_tasks ts=889330.926
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:54 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=get_supported_tasks ts=889330.926
+(Worker_TP1 pid=66318) INFO 10-19 14:18:54 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=get_supported_tasks ts=889330.926
+(Worker_TP2 pid=66319) INFO 10-19 14:18:54 [multiproc_executor.py:1124] [Lwd][perf] rpc-exec-done method=get_supported_tasks ts=889330.926
+(Worker_PP1_TP0 pid=66317) INFO 10-19 14:18:54 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889330.926
+(Worker_TP3 pid=66320) INFO 10-19 14:18:54 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889330.926
+(Worker_TP2 pid=66319) INFO 10-19 14:18:54 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889330.926
+(Worker_TP1 pid=66318) INFO 10-19 14:18:54 [multiproc_executor.py:1053] [Lwd][perf] response-enqueued ts=889330.926
+(APIServer pid=66161) INFO 10-19 14:18:54 [api_server.py:579] Supported tasks: ['generate']
+(APIServer pid=66161) WARNING 10-19 14:18:54 [model.py:1502] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 1.0, 'top_k': 20, 'top_p': 0.95}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+(APIServer pid=66161) INFO 10-19 14:18:55 [hf.py:548] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=66161) INFO 10-19 14:19:04 [base.py:227] Multi-modal warmup completed in 8.770s
+(APIServer pid=66161) INFO 10-19 14:19:05 [base.py:227] Readonly multi-modal warmup completed in 1.413s
+(APIServer pid=66161) INFO 10-19 14:19:05 [api_server.py:583] Starting vLLM server on http://0.0.0.0:8000
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:37] Available routes are:
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /openapi.json, Methods: HEAD, GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /docs, Methods: HEAD, GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /redoc, Methods: HEAD, GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /load, Methods: GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /version, Methods: GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /health, Methods: GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /metrics, Methods: GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /tokenize, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /detokenize, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/models, Methods: GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /ping, Methods: GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /ping, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /invocations, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/chat/completions/batch, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/responses, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/completions, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/messages, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /generative_scoring, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/chat/completions/render, Methods: POST
+(APIServer pid=66161) INFO 10-19 14:19:05 [launcher.py:46] Route: /v1/completions/render, Methods: POST
+(APIServer pid=66161) INFO:     Started server process [66161]
+(APIServer pid=66161) INFO:     Waiting for application startup.
+(APIServer pid=66161) INFO:     Application startup complete.
+(EngineCore pid=66220) ERROR 10-19 14:19:24 [lwd_router_dealer_channel.py:258] [Lwd][zmq] router-dealer channel[lwd-cloud-inst1] HELLO 已发送但边侧 ROUTER 未应答(30s 内无 WELCOME)。几乎可断定另一进程已先用相同 identity=1 连接:libzmq 会静默饿死后续的重复 identity 连接。本实例收不到任何消息——请检查每个云实例都传了互不相同的 --instance-parallel-start-rank。
